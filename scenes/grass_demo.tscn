@@ -1,0 +1,134 @@
+[gd_scene load_steps=9 format=3 uid="uid://grass_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/grass_controller.gd" id="1_controller"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="2_theme"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(200, 200)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.15, 0.1, 0.05, 1)
+roughness = 0.95
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_grass"]
+sky_top_color = Color(0.35, 0.55, 0.85, 1)
+sky_horizon_color = Color(0.6, 0.7, 0.85, 1)
+ground_bottom_color = Color(0.12, 0.08, 0.05, 1)
+ground_horizon_color = Color(0.3, 0.25, 0.2, 1)
+
+[sub_resource type="Sky" id="Sky_grass"]
+sky_material = SubResource("ProceduralSkyMaterial_grass")
+
+[sub_resource type="Environment" id="Environment_grass"]
+background_mode = 2
+sky = SubResource("Sky_grass")
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.6, 0.65, 1)
+ambient_light_energy = 0.5
+reflected_light_source = 2
+tonemap_mode = 2
+glow_enabled = true
+glow_intensity = 0.2
+glow_bloom = 0.03
+
+[node name="GrassDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_grass")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 10, 25, 10)
+light_color = Color(1, 0.98, 0.92, 1)
+light_energy = 1.2
+shadow_enabled = true
+shadow_bias = 0.02
+
+[node name="CameraPivot" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.906, 0.423, 0, -0.423, 0.906, 0, 1, 0)
+script = ExtResource("3_orbit_camera")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 20)
+current = true
+fov = 60.0
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
+
+[node name="GrassContainer" type="Node3D" parent="."]
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Control" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+theme = ExtResource("2_theme")
+
+[node name="BackButton" type="Button" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 150.0
+offset_bottom = 55.0
+text = "← Back"
+
+[node name="InfoPanel" type="PanelContainer" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -280.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 110.0
+grow_horizontal = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "🌿 Grass Shader (GodotGrass)"
+
+[node name="InfoLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "Drag: rotate | Scroll: zoom | WASD: move"
+
+[node name="FPSLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "FPS: 0"
+
+[node name="ControlPanel" type="PanelContainer" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 2
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = 20.0
+offset_top = -350.0
+offset_right = 320.0
+offset_bottom = -20.0
+grow_vertical = 0
+mouse_filter = 0
+
+[node name="ScrollContainer" type="ScrollContainer" parent="UI/Control/ControlPanel"]
+layout_mode = 2
+mouse_filter = 0
+horizontal_scroll_mode = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/ControlPanel/ScrollContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+mouse_filter = 2
+theme_override_constants/separation = 4

@@ -1,0 +1,568 @@
+[gd_scene load_steps=21 format=3 uid="uid://fire_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/fire_controller.gd" id="1_controller"]
+[ext_resource type="Shader" path="res://shaders/fire.gdshader" id="2_fire_shader"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="4_theme"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="5_orbit_camera"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_volume"]
+frequency = 0.08
+fractal_octaves = 3
+
+[sub_resource type="NoiseTexture3D" id="NoiseTexture3D_volume"]
+seamless = true
+width = 64
+height = 64
+depth = 64
+noise = SubResource("FastNoiseLite_volume")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_fire"]
+render_priority = 1
+shader = ExtResource("2_fire_shader")
+shader_parameter/box_size = Vector3(6.4, 9.6, 6.4)
+shader_parameter/noise_tex = SubResource("NoiseTexture3D_volume")
+
+[sub_resource type="BoxMesh" id="BoxMesh_volume"]
+size = Vector3(6.4, 9.6, 6.4)
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_sparks"]
+emission_shape = 2
+emission_sphere_radius = 0.4
+direction = Vector3(0, 1, 0)
+spread = 45.0
+initial_velocity_min = 2.0
+initial_velocity_max = 5.0
+gravity = Vector3(0, -3.0, 0)
+scale_min = 0.02
+scale_max = 0.06
+color = Color(1.0, 0.7, 0.2, 1.0)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.08, 0.065, 0.05, 1.0)
+roughness = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_logs"]
+albedo_color = Color(0.22, 0.12, 0.06, 1.0)
+roughness = 0.92
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_rock"]
+albedo_color = Color(0.13, 0.12, 0.11, 1.0)
+roughness = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_trunk"]
+albedo_color = Color(0.1, 0.07, 0.05, 1.0)
+roughness = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_foliage"]
+albedo_color = Color(0.04, 0.075, 0.045, 1.0)
+roughness = 1.0
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+size = Vector3(64, 0.5, 64)
+
+[sub_resource type="SphereMesh" id="SphereMesh_rock"]
+radius = 0.5
+height = 0.7
+radial_segments = 12
+rings = 6
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_trunk"]
+top_radius = 0.18
+bottom_radius = 0.28
+height = 2.2
+radial_segments = 8
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_cone1"]
+top_radius = 0.0
+bottom_radius = 1.5
+height = 3.4
+radial_segments = 10
+
+[sub_resource type="CylinderMesh" id="CylinderMesh_cone2"]
+top_radius = 0.0
+bottom_radius = 1.05
+height = 2.6
+radial_segments = 10
+
+[sub_resource type="Environment" id="Environment_fire"]
+background_mode = 1
+background_color = Color(0.005, 0.008, 0.016, 1.0)
+ambient_light_source = 2
+ambient_light_color = Color(0.05, 0.06, 0.09, 1.0)
+ambient_light_energy = 0.15
+tonemap_mode = 2
+tonemap_exposure = 0.9
+glow_enabled = true
+glow_intensity = 0.8
+glow_bloom = 0.15
+glow_blend_mode = 1
+volumetric_fog_enabled = true
+volumetric_fog_density = 0.0025
+volumetric_fog_albedo = Color(0.65, 0.6, 0.55, 1.0)
+volumetric_fog_emission = Color(0.0, 0.0, 0.0, 1.0)
+volumetric_fog_length = 40.0
+
+[node name="FireDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("5_orbit_camera")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+fov = 55.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_fire")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 5, 15, 5)
+light_color = Color(0.5, 0.6, 0.9, 1.0)
+light_energy = 0.3
+shadow_enabled = true
+
+[node name="FireLight" type="OmniLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.5, 0)
+light_color = Color(1.0, 0.6, 0.2, 1.0)
+light_energy = 0.0
+omni_range = 12.0
+omni_attenuation = 1.4
+shadow_enabled = true
+
+[node name="FireVolume" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.8, 0)
+cast_shadow = 0
+mesh = SubResource("BoxMesh_volume")
+material_override = SubResource("ShaderMaterial_fire")
+
+[node name="SparkParticles" type="GPUParticles3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, 0)
+emitting = false
+amount = 30
+lifetime = 1.5
+process_material = SubResource("ParticleProcessMaterial_sparks")
+visibility_aabb = AABB(-3, -1, -3, 6, 10, 6)
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.25, 0)
+mesh = SubResource("BoxMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="Log1" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0.819, -0.574, 0, 0.574, 0.819, 0, 0, 0, 1, 0.09, 0.39, 0)
+radius = 0.09
+height = 0.85
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="Log2" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0.253, -0.177, 0.951, 0.574, 0.819, 0, -0.779, 0.546, 0.309, 0.028, 0.39, -0.086)
+radius = 0.08
+height = 0.8
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="Log3" type="CSGCylinder3D" parent="."]
+transform = Transform3D(-0.663, 0.464, 0.588, 0.574, 0.819, 0, -0.482, 0.337, -0.809, -0.073, 0.39, -0.053)
+radius = 0.1
+height = 0.85
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="Log4" type="CSGCylinder3D" parent="."]
+transform = Transform3D(-0.663, 0.464, -0.588, 0.574, 0.819, 0, 0.482, -0.337, -0.809, -0.073, 0.39, 0.053)
+radius = 0.08
+height = 0.75
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="Log5" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0.253, -0.177, -0.951, 0.574, 0.819, 0, 0.779, -0.546, 0.309, 0.028, 0.39, 0.086)
+radius = 0.09
+height = 0.8
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="EmberLog1" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0, -0.7, 0, 0.7, 0, 0, 0, 0, 0.7, 0, 0.08, 0.15)
+radius = 0.11
+height = 1.0
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="EmberLog2" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0, -0.606, 0.35, 0.7, 0, 0, 0, 0.35, 0.606, -0.05, 0.08, -0.15)
+radius = 0.1
+height = 0.9
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="RingStone1" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.5, 0, 0, 0, 0.32, 0, 0, 0, 0.42, 1.2, 0.03, 0.1)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone2" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.42, 0, 0.1, 0, 0.28, 0, -0.1, 0, 0.5, 0.85, 0.03, 0.85)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone3" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.55, 0, 0, 0, 0.34, 0, 0, 0, 0.45, -0.05, 0.03, 1.2)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone4" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.4, 0, -0.08, 0, 0.26, 0, 0.08, 0, 0.44, -0.9, 0.03, 0.8)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone5" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.48, 0, 0, 0, 0.3, 0, 0, 0, 0.4, -1.25, 0.03, -0.05)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone6" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.44, 0, 0.09, 0, 0.27, 0, -0.09, 0, 0.46, -0.8, 0.03, -0.9)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone7" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.52, 0, 0, 0, 0.33, 0, 0, 0, 0.43, 0.1, 0.03, -1.2)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="RingStone8" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.41, 0, -0.1, 0, 0.29, 0, 0.1, 0, 0.47, 0.9, 0.03, -0.8)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Boulder1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1.7, 0, 0.3, 0, 1.0, 0, -0.3, 0, 1.4, -4.8, 0.1, 3.6)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Boulder2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1.3, 0, -0.2, 0, 0.8, 0, 0.2, 0, 1.1, 5.4, 0.05, -3.9)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="Boulder3" type="MeshInstance3D" parent="."]
+transform = Transform3D(0.9, 0, 0, 0, 0.55, 0, 0, 0, 0.8, 3.9, 0.02, 4.4)
+mesh = SubResource("SphereMesh_rock")
+surface_material_override/0 = SubResource("StandardMaterial3D_rock")
+
+[node name="SeatLog1" type="CSGCylinder3D" parent="."]
+transform = Transform3D(0, -1, 0, 1, 0, 0, 0, 0, 1, 0.4, 0.18, 3.1)
+radius = 0.18
+height = 2.2
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="SeatLog2" type="CSGCylinder3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0, -1, 0, 1, 0, 3.2, 0.18, -0.4)
+radius = 0.18
+height = 2.2
+material = SubResource("StandardMaterial3D_logs")
+
+[node name="Tree1" type="Node3D" parent="."]
+transform = Transform3D(1.9, 0, 0, 0, 1.9, 0, 0, 0, 1.9, -19, 0, -12)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree1"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree1"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree1"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree2" type="Node3D" parent="."]
+transform = Transform3D(1.7, 0, 0, 0, 1.7, 0, 0, 0, 1.7, 14, 0, -19)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree2"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree2"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree2"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree3" type="Node3D" parent="."]
+transform = Transform3D(2.1, 0, 0, 0, 2.1, 0, 0, 0, 2.1, 23, 0, 6)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree3"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree3"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree3"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree4" type="Node3D" parent="."]
+transform = Transform3D(1.6, 0, 0, 0, 1.6, 0, 0, 0, 1.6, -22, 0, 9)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree4"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree4"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree4"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree5" type="Node3D" parent="."]
+transform = Transform3D(1.8, 0, 0, 0, 1.8, 0, 0, 0, 1.8, -8, 0, -24)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree5"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree5"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree5"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree6" type="Node3D" parent="."]
+transform = Transform3D(1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5, 7, 0, 23)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree6"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree6"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree6"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree7" type="Node3D" parent="."]
+transform = Transform3D(1.4, 0, 0, 0, 1.4, 0, 0, 0, 1.4, 24, 0, -8)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree7"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree7"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree7"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree8" type="Node3D" parent="."]
+transform = Transform3D(1.75, 0, 0, 0, 1.75, 0, 0, 0, 1.75, -15, 0, 20)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree8"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree8"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree8"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree9" type="Node3D" parent="."]
+transform = Transform3D(2.0, 0, 0, 0, 2.0, 0, 0, 0, 2.0, 0, 0, -26)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree9"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree9"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree9"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree10" type="Node3D" parent="."]
+transform = Transform3D(1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5, -25, 0, -2)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree10"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree10"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree10"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree11" type="Node3D" parent="."]
+transform = Transform3D(1.8, 0, 0, 0, 1.8, 0, 0, 0, 1.8, 18, 0, 16)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree11"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree11"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree11"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Tree12" type="Node3D" parent="."]
+transform = Transform3D(1.6, 0, 0, 0, 1.6, 0, 0, 0, 1.6, -3, 0, 25)
+
+[node name="Trunk" type="MeshInstance3D" parent="Tree12"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.1, 0)
+mesh = SubResource("CylinderMesh_trunk")
+surface_material_override/0 = SubResource("StandardMaterial3D_trunk")
+
+[node name="Cone1" type="MeshInstance3D" parent="Tree12"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.0, 0)
+mesh = SubResource("CylinderMesh_cone1")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="Cone2" type="MeshInstance3D" parent="Tree12"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.0, 0)
+mesh = SubResource("CylinderMesh_cone2")
+surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Control" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+theme = ExtResource("4_theme")
+
+[node name="BackButton" type="Button" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 150.0
+offset_bottom = 55.0
+text = "← Back"
+
+[node name="InfoPanel" type="PanelContainer" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -310.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 580.0
+grow_horizontal = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "🔥 Fire Simulation (Fire-X)"
+
+[node name="FPSLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "FPS: 60"
+
+[node name="StatsLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "T: 293 K | Heat: 0.0"
+
+[node name="HSeparator" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+
+[node name="FuelLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "Fuel"
+
+[node name="FuelBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+max_value = 100.0
+value = 50.0
+
+[node name="OxygenLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "Oxygen"
+
+[node name="OxygenBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+max_value = 100.0
+value = 100.0
+
+[node name="TempLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "Temperature"
+
+[node name="TempBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+max_value = 100.0
+value = 0.0
+
+[node name="HSeparator2" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+
+[node name="ControlsLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "Controls:
+Esc: Back | R: Reset
+E (hold): Water | F: Add fuel
+V: Toggle wind | X: Smother
+Arrows: Orbit camera
++/-: Zoom | Scroll: Zoom"
+
+[node name="HSeparator3" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+
+[node name="SlidersContainer" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 4

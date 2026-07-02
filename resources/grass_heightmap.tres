@@ -1,0 +1,11 @@
+[gd_resource type="NoiseTexture2D" format=3 uid="uid://grass_heightmap"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_heightmap"]
+noise_type = 0
+frequency = 0.025
+offset = Vector3(-2, 0, 0)
+fractal_gain = 0.1
+
+[resource]
+noise = SubResource("FastNoiseLite_heightmap")
+seamless = true

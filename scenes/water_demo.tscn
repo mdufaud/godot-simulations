@@ -1,0 +1,139 @@
+[gd_scene load_steps=9 format=3 uid="uid://water_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/water_controller.gd" id="1_controller"]
+[ext_resource type="Shader" path="res://shaders/ocean.gdshader" id="2_ocean"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="3_theme"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="4_orbit_camera"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ocean"]
+shader = ExtResource("2_ocean")
+shader_parameter/wave_speed = 0.5
+shader_parameter/wave_a = Vector4(1.0, 1.0, 0.35, 3.0)
+shader_parameter/wave_b = Vector4(1.0, 0.6, 0.30, 1.55)
+shader_parameter/wave_c = Vector4(1.0, 1.3, 0.25, 0.9)
+shader_parameter/sampler_scale = Vector2(0.25, 0.25)
+shader_parameter/sampler_direction = Vector2(0.05, 0.04)
+shader_parameter/uv_sampler_scale = Vector2(0.25, 0.25)
+shader_parameter/uv_sampler_strength = 0.04
+shader_parameter/foam_level = 0.5
+shader_parameter/refraction = 0.075
+shader_parameter/color_deep = Color(0.1, 0.4, 0.6, 1.0)
+shader_parameter/color_shallow = Color(0.2, 0.6, 0.7, 1.0)
+shader_parameter/beers_law = 2.0
+shader_parameter/depth_offset = -0.75
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_water"]
+size = Vector2(128, 128)
+subdivide_width = 128
+subdivide_depth = 128
+
+[sub_resource type="BoxMesh" id="BoxMesh_ground"]
+size = Vector3(160, 1, 160)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.35, 0.3, 0.25, 1.0)
+
+[sub_resource type="Environment" id="Environment_water"]
+background_mode = 1
+background_color = Color(0.6, 0.75, 0.9, 1.0)
+ambient_light_source = 2
+ambient_light_color = Color(0.7, 0.8, 0.9, 1.0)
+ambient_light_energy = 0.4
+tonemap_mode = 2
+glow_enabled = true
+glow_intensity = 0.3
+glow_bloom = 0.05
+
+[node name="WaterDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("4_orbit_camera")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+fov = 60.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_water")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0.0, 0.707, 0.707, -0.5, -0.612, 0.612, 10, 25, 10)
+light_color = Color(1.0, 0.98, 0.95, 1.0)
+light_energy = 1.2
+shadow_enabled = true
+
+[node name="Water" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_water")
+surface_material_override/0 = SubResource("ShaderMaterial_ocean")
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -8, 0)
+mesh = SubResource("BoxMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="Objects" type="Node3D" parent="."]
+
+[node name="Rock1" type="CSGSphere3D" parent="Objects"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 15, -2, 10)
+radius = 4.0
+material = SubResource("StandardMaterial3D_ground")
+
+[node name="Rock2" type="CSGBox3D" parent="Objects"]
+transform = Transform3D(0.924, 0, 0.383, 0, 1, 0, -0.383, 0, 0.924, -20, -1, -15)
+size = Vector3(6, 5, 4)
+material = SubResource("StandardMaterial3D_ground")
+
+[node name="Rock3" type="CSGCylinder3D" parent="Objects"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 5, -3, -25)
+radius = 3.0
+height = 6.0
+material = SubResource("StandardMaterial3D_ground")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Control" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+theme = ExtResource("3_theme")
+
+[node name="BackButton" type="Button" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 150.0
+offset_bottom = 55.0
+text = "← Back"
+
+[node name="InfoPanel" type="PanelContainer" parent="UI/Control"]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -270.0
+offset_top = 20.0
+offset_right = -20.0
+offset_bottom = 280.0
+grow_horizontal = 0
+
+[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 20
+text = "🌊 Water Shader"
+
+[node name="FPSLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+text = "FPS: 60"
+
+[node name="HSeparator" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+
+[node name="SlidersContainer" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
+layout_mode = 2
+theme_override_constants/separation = 4
