@@ -31,7 +31,7 @@ ssr_enabled = true
 ssr_max_steps = 96
 ssr_fade_in = 0.05
 ssr_fade_out = 3.0
-ssr_depth_tolerance = 0.1
+ssr_depth_tolerance = 0.25
 ssao_enabled = true
 ssao_radius = 1.2
 ssao_intensity = 1.5
@@ -52,11 +52,11 @@ glow_levels/4 = 0.4
 glow_levels/5 = 0.1
 glow_levels/6 = 0.0
 glow_levels/7 = 0.0
-glow_intensity = 0.6
-glow_strength = 1.1
-glow_bloom = 0.15
+glow_intensity = 0.5
+glow_strength = 1.0
+glow_bloom = 0.05
 glow_blend_mode = 1
-glow_hdr_threshold = 1.0
+glow_hdr_threshold = 1.1
 glow_hdr_scale = 2.0
 volumetric_fog_enabled = false
 volumetric_fog_density = 0.002
@@ -67,10 +67,7 @@ volumetric_fog_detail_spread = 2.0
 
 [sub_resource type="CameraAttributesPractical" id="CameraAttributesPractical_main"]
 exposure_sensitivity = 100.0
-auto_exposure_enabled = true
-auto_exposure_min_sensitivity = 50.0
-auto_exposure_max_sensitivity = 800.0
-auto_exposure_speed = 2.0
+auto_exposure_enabled = false
 dof_blur_near_enabled = false
 dof_blur_near_distance = 2.0
 dof_blur_amount = 0.04
@@ -221,6 +218,12 @@ shape = SubResource("BoxShape3D_wall_side")
 mesh = SubResource("BoxMesh_wall_side")
 surface_material_override/0 = SubResource("StandardMaterial3D_wall")
 
+[node name="WallFront" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4, 15)
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="WallFront"]
+shape = SubResource("BoxShape3D_wall_back")
+
 [node name="Pedestal1" type="StaticBody3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -8, 0.5, -8)
 
@@ -370,14 +373,14 @@ value = 3.0
 [node name="SSRDepthToleranceLabel" type="Label" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 12
-text = "Depth Tolerance: 0.1"
+text = "Depth Tolerance: 0.25"
 
 [node name="SSRDepthToleranceSlider" type="HSlider" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 min_value = 0.01
 max_value = 1.0
 step = 0.01
-value = 0.1
+value = 0.25
 
 [node name="Sep1" type="HSeparator" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
@@ -460,26 +463,26 @@ text = "Glow Enabled"
 [node name="GlowIntensityLabel" type="Label" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 12
-text = "Intensity: 0.6"
+text = "Intensity: 0.5"
 
 [node name="GlowIntensitySlider" type="HSlider" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 min_value = 0.0
 max_value = 2.0
 step = 0.05
-value = 0.6
+value = 0.5
 
 [node name="GlowBloomLabel" type="Label" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 12
-text = "Bloom: 0.15"
+text = "Bloom: 0.05"
 
 [node name="GlowBloomSlider" type="HSlider" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 min_value = 0.0
 max_value = 1.0
 step = 0.01
-value = 0.15
+value = 0.05
 
 [node name="Sep4" type="HSeparator" parent="UI/Control/InfoPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2

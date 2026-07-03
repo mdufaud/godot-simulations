@@ -34,9 +34,13 @@ const _V := "UI/Control/InfoPanel/ScrollContainer/VBoxContainer/"
 # ── Constants ────────────────────────────────────────────────────────────────
 const SPAWN_HEIGHT := 12.0
 const SPAWN_RADIUS := 10.0
+const KILL_Y := -12.0
+const WALL_FADE_ALPHA := 0.12
+const WALL_FADE_DISTANCE := 2.0
 
 var max_objects: int = 200
 var spawned_objects: Array[RigidBody3D] = []
+var _wall_fades: Array[Dictionary] = []
 
 # Material override values: -1 means "use per-object random"
 var roughness_override: float = -1.0
@@ -83,15 +87,63 @@ func _ready() -> void:
 	orbit_cam.max_distance = 30.0
 
 	spawn_timer.timeout.connect(_on_spawn_timer_timeout)
-	
+
 	# Disable scroll on all sliders so scrolling scrolls the panel, not the values
 	for slider in $UI.find_children("*", "HSlider"):
 		slider.scrollable = false
+
+	# Give each wall its own material so it can fade independently when the
+	# camera moves outside the room (walls no longer block the view)
+	for info: Array in [
+		[$WallBack/MeshInstance3D, Vector3(0, 0, -1)],
+		[$WallLeft/MeshInstance3D, Vector3(-1, 0, 0)],
+		[$WallRight/MeshInstance3D, Vector3(1, 0, 0)],
+	]:
+		var mesh: MeshInstance3D = info[0]
+		var mat: StandardMaterial3D = mesh.get_surface_override_material(0).duplicate()
+		mesh.set_surface_override_material(0, mat)
+		_wall_fades.append({"mesh": mesh, "normal": info[1], "mat": mat})
 
 
 func _process(_delta: float) -> void:
 	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 	info_label.text = "Objects: %d / %d" % [spawned_objects.size(), max_objects]
+	_update_wall_fade()
+	_cleanup_fallen_objects()
+
+
+func _update_wall_fade() -> void:
+	var cam := orbit_cam.get_camera()
+	if cam == null:
+		return
+	var cam_pos := cam.global_position
+	for w in _wall_fades:
+		var mesh: MeshInstance3D = w["mesh"]
+		var outside: float = (cam_pos - mesh.global_position).dot(w["normal"])
+		var alpha := clampf(1.0 - outside / WALL_FADE_DISTANCE, WALL_FADE_ALPHA, 1.0)
+		var mat: StandardMaterial3D = w["mat"]
+		# Keep the wall opaque (so SSR reflects it) unless it actually needs to fade
+		if alpha >= 0.99:
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+			mat.albedo_color.a = 1.0
+		else:
+			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			mat.albedo_color.a = alpha
+
+
+func _cleanup_fallen_objects() -> void:
+	var removed := false
+	for i in range(spawned_objects.size() - 1, -1, -1):
+		var obj := spawned_objects[i]
+		if not is_instance_valid(obj):
+			spawned_objects.remove_at(i)
+			removed = true
+		elif obj.global_position.y < KILL_Y:
+			obj.queue_free()
+			spawned_objects.remove_at(i)
+			removed = true
+	if removed and spawn_timer.is_stopped() and spawned_objects.size() < max_objects:
+		spawn_timer.start()
 
 # ── Spawning ─────────────────────────────────────────────────────────────────
 
@@ -217,7 +269,7 @@ func _create_surface_material() -> StandardMaterial3D:
 			mat.roughness = randf_range(0.0, 0.1)
 			mat.emission_enabled = true
 			mat.emission = base_color
-			mat.emission_energy_multiplier = randf_range(1.5, 4.0)
+			mat.emission_energy_multiplier = randf_range(1.2, 2.5)
 
 	# Apply overrides if user has set them
 	if roughness_override >= 0.0:

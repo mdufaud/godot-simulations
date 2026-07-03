@@ -5,7 +5,7 @@
 // mirrored in water_buoyancy.gd for physics sync.
 
 shader_type spatial;
-render_mode cull_back, diffuse_burley, specular_schlick_ggx;
+render_mode cull_disabled, diffuse_burley, specular_schlick_ggx;
 
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_linear_mipmap;
 uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
@@ -127,7 +127,9 @@ vec2 detail_gradient(vec2 p, float t)
 void fragment()
 {
 	// --- Normal: base (Gerstner) + analytic detail + ripple gradient ---
-	vec2 det_grad = detail_gradient(world_pos.xz, wave_time) * detail_strength;
+	// Fade detail with distance to avoid specular aliasing on far water
+	float detail_fade = exp(-view_dist * 0.02);
+	vec2 det_grad = detail_gradient(world_pos.xz, wave_time) * detail_strength * detail_fade;
 
 	vec2 ripple_uv = world_pos.xz / water_area + 0.5;
 	vec2 texel = 1.0 / vec2(textureSize(ripple_texture, 0));
@@ -136,10 +138,10 @@ void fragment()
 	float rd = texture(ripple_texture, ripple_uv - vec2(0.0, texel.y)).r;
 	float ru = texture(ripple_texture, ripple_uv + vec2(0.0, texel.y)).r;
 	vec2 ripple_grad = vec2(rr - rl, ru - rd) * ripple_strength * 8.0;
-	float ripple_h = abs(texture(ripple_texture, ripple_uv).r - 0.5) * ripple_strength;
 
 	vec2 g = det_grad + ripple_grad;
 	vec3 n_world = normalize(base_normal + vec3(-g.x, 0.0, -g.y));
+	if (!FRONT_FACING) { n_world = -n_world; }
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
 	NORMAL = n_view;
 
@@ -149,42 +151,65 @@ void fragment()
 
 	// --- Screen-space refraction ---
 	vec2 ref_uv = SCREEN_UV + n_view.xy * refraction / max(view_dist * 0.2, 1.0);
-	float depth_raw = texture(DEPTH_TEXTURE, ref_uv).r;
-	float depth_lin = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
-	// Refracted sample above the surface: fall back to unrefracted
-	if (depth_lin + VERTEX.z > 0.0)
+	ref_uv = clamp(ref_uv, vec2(0.001), vec2(0.999));
+
+	if (FRONT_FACING)
 	{
-		ref_uv = SCREEN_UV;
-		depth_raw = texture(DEPTH_TEXTURE, ref_uv).r;
-		depth_lin = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
+		float depth_raw = texture(DEPTH_TEXTURE, ref_uv).r;
+		float depth_lin = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
+		// Refracted sample above the surface: fall back to unrefracted
+		if (depth_lin + VERTEX.z > 0.0)
+		{
+			ref_uv = SCREEN_UV;
+			depth_raw = texture(DEPTH_TEXTURE, ref_uv).r;
+			depth_lin = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
+		}
+		float water_depth = depth_lin + VERTEX.z;
+
+		// --- Beer's law absorption ---
+		float depth_blend = clamp(1.0 - exp((water_depth + depth_offset) * -beers_law), 0.0, 1.0);
+		float depth_blend_pow = pow(depth_blend, 2.5);
+
+		vec3 screen_color = textureLod(SCREEN_TEXTURE, ref_uv, depth_blend_pow * 2.5).rgb;
+		vec3 dye = mix(color_shallow.rgb, color_deep.rgb, depth_blend_pow);
+		vec3 color = mix(screen_color * dye, dye * 0.5, depth_blend_pow * 0.5);
+
+		// --- Procedural foam: wave crests + shoreline + ripple agitation ---
+		float foam_noise = value_noise(world_pos.xz * 2.1 + vec2(wave_time * 0.5)) * 0.6
+			+ value_noise(world_pos.xz * 5.7 - vec2(wave_time * 0.8)) * 0.4;
+		// Noise averages to ~0.5 at distance (minification); pull it below the foam
+		// thresholds so far water doesn't turn uniformly snowy
+		foam_noise = mix(foam_noise, 0.25, smoothstep(30.0, 90.0, view_dist));
+		float crest_foam = smoothstep(0.55, 0.85, wave_crest) * smoothstep(0.3, 0.7, foam_noise);
+		// Narrow band: the depth buffer sees floating objects as "shallow water",
+		// so a wide band paints a foam halo around anything near the surface
+		float shore_foam = (1.0 - smoothstep(0.0, 0.25 + foam_noise * 0.25, water_depth))
+			* smoothstep(0.35, 0.6, foam_noise);
+		float ripple_foam = smoothstep(0.35, 0.8, length(ripple_grad)) * smoothstep(0.25, 0.55, foam_noise);
+		float foam = clamp((crest_foam + shore_foam + ripple_foam) * foam_amount, 0.0, 1.0);
+		color = mix(color, vec3(0.95), foam);
+
+		// --- Fake subsurface scattering (light through crests toward camera) ---
+		vec3 sun_view = normalize((VIEW_MATRIX * vec4(normalize(sun_direction), 0.0)).xyz);
+		float sss = pow(max(dot(VIEW, sun_view), 0.0), 3.0) * wave_crest * sss_strength;
+		color += sss_color.rgb * sss * (1.0 - foam);
+
+		ALBEDO = color;
+		METALLIC = 0.0;
+		ROUGHNESS = mix(0.03, 0.3, foam);
+		SPECULAR = 0.2 + fresnel * 0.5;
 	}
-	float water_depth = depth_lin + VERTEX.z;
+	else
+	{
+		// Underside: refracted view of the air above; grazing angles fall into
+		// total internal reflection and return the deep water color
+		vec3 above = textureLod(SCREEN_TEXTURE, ref_uv, 0.0).rgb;
+		float tir = 1.0 - smoothstep(0.45, 0.7, ndv);
+		vec3 color = mix(above * color_shallow.rgb * 1.6, color_deep.rgb, tir);
 
-	// --- Beer's law absorption ---
-	float depth_blend = clamp(1.0 - exp((water_depth + depth_offset) * -beers_law), 0.0, 1.0);
-	float depth_blend_pow = pow(depth_blend, 2.5);
-
-	vec3 screen_color = textureLod(SCREEN_TEXTURE, ref_uv, depth_blend_pow * 2.5).rgb;
-	vec3 dye = mix(color_shallow.rgb, color_deep.rgb, depth_blend_pow);
-	vec3 color = mix(screen_color * dye, dye * 0.25, depth_blend_pow * 0.5);
-
-	// --- Procedural foam: wave crests + shoreline + ripple agitation ---
-	float foam_noise = value_noise(world_pos.xz * 2.1 + vec2(wave_time * 0.5)) * 0.6
-		+ value_noise(world_pos.xz * 5.7 - vec2(wave_time * 0.8)) * 0.4;
-	float crest_foam = smoothstep(0.55, 0.85, wave_crest) * smoothstep(0.3, 0.7, foam_noise);
-	float shore_foam = (1.0 - smoothstep(0.0, 0.6 + foam_noise * 0.6, water_depth))
-		* smoothstep(0.35, 0.6, foam_noise);
-	float ripple_foam = smoothstep(0.06, 0.2, ripple_h) * smoothstep(0.25, 0.55, foam_noise);
-	float foam = clamp((crest_foam + shore_foam + ripple_foam) * foam_amount, 0.0, 1.0);
-	color = mix(color, vec3(0.95), foam);
-
-	// --- Fake subsurface scattering (light through crests toward camera) ---
-	vec3 sun_view = normalize((VIEW_MATRIX * vec4(normalize(sun_direction), 0.0)).xyz);
-	float sss = pow(max(dot(VIEW, sun_view), 0.0), 3.0) * wave_crest * sss_strength;
-	color += sss_color.rgb * sss * (1.0 - foam);
-
-	ALBEDO = color;
-	METALLIC = 0.0;
-	ROUGHNESS = mix(0.03, 0.3, foam);
-	SPECULAR = 0.2 + fresnel * 0.5;
+		ALBEDO = color;
+		METALLIC = 0.0;
+		ROUGHNESS = 0.05;
+		SPECULAR = 0.3;
+	}
 }

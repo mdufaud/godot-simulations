@@ -1,4 +1,4 @@
-[gd_scene load_steps=16 format=3 uid="uid://water_demo_scene"]
+[gd_scene load_steps=18 format=3 uid="uid://water_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/water_controller.gd" id="1_controller"]
 [ext_resource type="Shader" path="res://shaders/ocean.gdshader" id="2_ocean"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="4_orbit_camera"]
 [ext_resource type="Script" path="res://scripts/demos/water_buoyancy.gd" id="5_buoyancy"]
 [ext_resource type="Shader" path="res://shaders/ripple_sim.gdshader" id="6_ripple"]
+[ext_resource type="Shader" path="res://shaders/underwater.gdshader" id="7_underwater"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_ocean"]
 shader = ExtResource("2_ocean")
@@ -30,6 +31,9 @@ shader = ExtResource("6_ripple")
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_ripple_b"]
 shader = ExtResource("6_ripple")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_underwater"]
+shader = ExtResource("7_underwater")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_water"]
 size = Vector2(128, 128)
@@ -146,6 +150,16 @@ offset_right = 256.0
 offset_bottom = 256.0
 
 [node name="Splashes" type="Node2D" parent="RippleB"]
+
+[node name="UnderwaterLayer" type="CanvasLayer" parent="."]
+
+[node name="Tint" type="ColorRect" parent="UnderwaterLayer"]
+visible = false
+material = SubResource("ShaderMaterial_underwater")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
 
 [node name="UI" type="CanvasLayer" parent="."]
 

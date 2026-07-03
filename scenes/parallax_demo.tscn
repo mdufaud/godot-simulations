@@ -129,7 +129,7 @@ text = "🪨 CRPOM Parallax"
 
 [node name="InfoLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
 layout_mode = 2
-text = "CRPOM · Drag: rotate | Scroll: zoom"
+text = "Drag: rotate | Scroll: zoom | ZQSD: move"
 
 [node name="FPSLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
 layout_mode = 2
@@ -157,6 +157,13 @@ size_flags_horizontal = 3
 mouse_filter = 2
 theme_override_constants/separation = 4
 
+[node name="RenderModeLabel" type="Label" parent="UI/Control/ControlPanel/ScrollContainer/VBoxContainer"]
+layout_mode = 2
+text = "Render Mode"
+
+[node name="RenderModeOption" type="OptionButton" parent="UI/Control/ControlPanel/ScrollContainer/VBoxContainer"]
+layout_mode = 2
+
 [node name="PresetLabel" type="Label" parent="UI/Control/ControlPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 text = "Surface Preset"
@@ -183,12 +190,12 @@ layout_mode = 2
 min_value = 0.005
 max_value = 0.4
 step = 0.005
-value = 0.08
+value = 0.04
 
 [node name="HeightValue" type="Label" parent="UI/Control/ControlPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2
 horizontal_alignment = 1
-text = "0.080"
+text = "0.040"
 
 [node name="MinLayersLabel" type="Label" parent="UI/Control/ControlPanel/ScrollContainer/VBoxContainer"]
 layout_mode = 2

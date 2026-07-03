@@ -56,7 +56,6 @@ var radiative_coeff: float = 0.0003      # Stefan-Boltzmann radiative cooling co
 var thermal_diffusion: float = 0.15      # Heat spreading rate
 var smoke_diffusion: float = 0.08        # Smoke spreading rate
 var oxygen_diffusion: float = 0.1        # Oxygen replenishment diffusion
-var velocity_diffusion: float = 0.05     # Velocity viscous diffusion (ν)
 var velocity_damping: float = 0.985       # Velocity decay per step (gentle — buoyancy needs to persist)
 
 ## Environment
@@ -65,7 +64,7 @@ var oxygen_replenish_rate: float = 0.4   # Rate O₂ flows back from boundaries
 var fuel_evaporation_rate: float = 0.0   # Solid fuel → gas phase rate
 
 ## Pressure projection
-const PRESSURE_ITERATIONS := 12          # Jacobi iterations for pressure solve (warm-started)
+const PRESSURE_ITERATIONS := 8           # Jacobi iterations for pressure solve (warm-started)
 
 # --- Output data for rendering (updated each step) ---
 var max_reaction_rate_observed: float = 0.0
@@ -162,10 +161,13 @@ func grid_to_world(gx: int, gy: int, gz: int) -> Vector3:
 #  MAIN SIMULATION STEP
 # =========================================================================
 
+var _step_count := 0
+
 ## Advance simulation by delta seconds
 func step(delta: float) -> void:
 	var dt := minf(delta, 0.05)  # Clamp timestep for stability
-	
+	_step_count += 1
+
 	# 1. Combustion reaction (stoichiometric)
 	_step_combustion(dt)
 
@@ -173,7 +175,9 @@ func step(delta: float) -> void:
 	_step_forces(dt)
 
 	# 3. Vorticity confinement — re-inject sub-grid turbulence
-	_step_vorticity_confinement(dt)
+	#    Every 2nd step at 2×dt: same net impulse, half the cost
+	if _step_count % 2 == 0:
+		_step_vorticity_confinement(dt * 2.0)
 
 	# 4. Advect ALL fields including velocity (semi-Lagrangian)
 	_step_advection(dt)
@@ -634,9 +638,9 @@ func _sample_trilinear(field: PackedFloat32Array, fx: float, fy: float, fz: floa
 #  DIFFUSION (Jacobi iteration — all 3 fields fused in one pass)
 # =========================================================================
 
-## Apply diffusion to temperature, smoke, oxygen AND velocity.
-## Velocity diffusion (viscosity ν∇²u) prevents sharp velocity gradients.
-## 2 Jacobi iterations for better convergence.
+## Apply diffusion to temperature, smoke and oxygen.
+## Velocity gets no explicit viscosity: semi-Lagrangian advection already
+## diffuses it numerically, and damping provides drag.
 func _step_diffusion(dt: float) -> void:
 	var sx := size_x
 	var sy := size_y
@@ -648,11 +652,9 @@ func _step_diffusion(dt: float) -> void:
 	var a_t := thermal_diffusion * dt_cs2
 	var a_s := smoke_diffusion * dt_cs2
 	var a_o := oxygen_diffusion * dt_cs2
-	var a_v := velocity_diffusion * dt_cs2
 	var inv_t := 1.0 / (1.0 + 6.0 * a_t)
 	var inv_s := 1.0 / (1.0 + 6.0 * a_s)
 	var inv_o := 1.0 / (1.0 + 6.0 * a_o)
-	var inv_v := 1.0 / (1.0 + 6.0 * a_v)
 	
 	for _iter in 1:
 		for z in range(1, sz - 1):
@@ -679,18 +681,6 @@ func _step_diffusion(dt: float) -> void:
 					# Oxygen
 					var n_o := oxygen[im1] + oxygen[ip1] + oxygen[imsx] + oxygen[ipsx] + oxygen[imsxy] + oxygen[ipsxy]
 					oxygen[i] = (oxygen[i] + a_o * n_o) * inv_o
-					
-					# Velocity X (viscosity)
-					var nvx := velocity_x[im1] + velocity_x[ip1] + velocity_x[imsx] + velocity_x[ipsx] + velocity_x[imsxy] + velocity_x[ipsxy]
-					velocity_x[i] = (velocity_x[i] + a_v * nvx) * inv_v
-					
-					# Velocity Y (viscosity)
-					var nvy := velocity_y[im1] + velocity_y[ip1] + velocity_y[imsx] + velocity_y[ipsx] + velocity_y[imsxy] + velocity_y[ipsxy]
-					velocity_y[i] = (velocity_y[i] + a_v * nvy) * inv_v
-					
-					# Velocity Z (viscosity)
-					var nvz := velocity_z[im1] + velocity_z[ip1] + velocity_z[imsx] + velocity_z[ipsx] + velocity_z[imsxy] + velocity_z[ipsxy]
-					velocity_z[i] = (velocity_z[i] + a_v * nvz) * inv_v
 
 
 # =========================================================================

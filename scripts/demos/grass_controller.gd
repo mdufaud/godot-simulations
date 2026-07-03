@@ -7,9 +7,10 @@ const GRASS_MESH_LOW := preload("res://resources/grass_low.obj")
 const GRASS_MAT := preload("res://resources/grass_material.tres")
 const HEIGHTMAP := preload("res://resources/grass_heightmap.tres")
 
-const TILE_SIZE := 5.0
+const TILE_SIZE := 10.0
 const MAP_RADIUS := 80.0  # Smaller for demo
 const HEIGHTMAP_SCALE := 5.0
+const SHADOW_DISTANCE := 40.0
 
 var grass_multimeshes: Array[Array] = []
 var previous_tile_id := Vector3.ZERO
@@ -47,13 +48,13 @@ func _ready() -> void:
 	
 	# Connect UI
 	back_button.pressed.connect(_on_back_pressed)
+	info_label.text = "Drag: rotate | Scroll: zoom | ZQSD/WASD: move"
 	
 	call_deferred("_setup_ui")
 
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
 	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
-	info_label.text = "Drag: rotate | Scroll: zoom | ZQSD/WASD: move"
 
 
 func _physics_process(_delta: float) -> void:
@@ -73,12 +74,12 @@ func _setup_heightmap_collision() -> void:
 	var noise: FastNoiseLite = HEIGHTMAP.noise
 	var heightmap_image := noise.get_image(512, 512)
 	var dims := Vector2i(heightmap_image.get_height(), heightmap_image.get_width())
-	var map_data: PackedFloat32Array
-	
-	for j in dims.x:
-		for i in dims.y:
-			map_data.push_back((heightmap_image.get_pixel(i, j).r - 0.5) * HEIGHTMAP_SCALE)
-	
+	heightmap_image.convert(Image.FORMAT_RF)
+	var map_data := heightmap_image.get_data().to_float32_array()
+
+	for i in map_data.size():
+		map_data[i] = (map_data[i] - 0.5) * HEIGHTMAP_SCALE
+
 	var heightmap_shape := HeightMapShape3D.new()
 	heightmap_shape.map_width = dims.x
 	heightmap_shape.map_depth = dims.y
@@ -88,13 +89,19 @@ func _setup_heightmap_collision() -> void:
 
 ## Creates initial tiled multimesh instances
 func _setup_grass_instances() -> void:
+	var half := TILE_SIZE * 0.5
+	var tile_aabb := AABB(
+		Vector3(-half - 2.0, -HEIGHTMAP_SCALE * 0.5 - 0.5, -half - 2.0),
+		Vector3(TILE_SIZE + 4.0, HEIGHTMAP_SCALE + 3.0, TILE_SIZE + 4.0)
+	)
 	for i in range(-MAP_RADIUS, MAP_RADIUS, TILE_SIZE):
 		for j in range(-MAP_RADIUS, MAP_RADIUS, TILE_SIZE):
 			var instance := MultiMeshInstance3D.new()
-			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 			instance.material_override = GRASS_MAT
 			instance.position = Vector3(i, 0.0, j)
-			instance.extra_cull_margin = 1.0
+			instance.custom_aabb = tile_aabb
+			var near := instance.position.length() < SHADOW_DISTANCE
+			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			$GrassContainer.add_child(instance)
 			grass_multimeshes.append([instance, instance.position])
 
@@ -117,10 +124,12 @@ func _generate_grass_multimeshes() -> void:
 			data[0].multimesh = multimesh_lods[0]
 		elif distance < 40.0:
 			data[0].multimesh = multimesh_lods[1]
-		elif distance < 70.0:
+		elif distance < 55.0:
 			data[0].multimesh = multimesh_lods[2]
-		else:
+		elif distance < 70.0:
 			data[0].multimesh = multimesh_lods[3]
+		else:
+			data[0].multimesh = multimesh_lods[4]
 
 
 func _create_grass_multimesh(density: float, tile_size: float, mesh: Mesh) -> MultiMesh:
@@ -255,9 +264,9 @@ func _on_shader_param_changed(param: String, value: float) -> void:
 
 
 func _on_shadows_changed(enabled: bool) -> void:
-	var setting := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if enabled else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	for data in grass_multimeshes:
-		data[0].cast_shadow = setting
+		var near: bool = data[1].length() < SHADOW_DISTANCE
+		data[0].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _on_back_pressed() -> void:

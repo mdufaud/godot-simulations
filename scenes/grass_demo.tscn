@@ -8,7 +8,7 @@
 size = Vector2(200, 200)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.15, 0.1, 0.05, 1)
+albedo_color = Color(0.04, 0.11, 0.02, 1)
 roughness = 0.95
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_grass"]
@@ -44,6 +44,8 @@ light_color = Color(1, 0.98, 0.92, 1)
 light_energy = 1.2
 shadow_enabled = true
 shadow_bias = 0.02
+directional_shadow_mode = 1
+directional_shadow_max_distance = 60.0
 
 [node name="CameraPivot" type="Node3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.906, 0.423, 0, -0.423, 0.906, 0, 1, 0)

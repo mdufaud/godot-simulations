@@ -89,9 +89,9 @@ func _apply_buoyancy(body: RigidBody3D, delta: float) -> void:
 			body_splashed.emit(body.global_position, impact)
 			_drift_cooldown[body] = 0.3
 	elif now_submerged and _drift_cooldown[body] <= 0.0 \
-			and body.linear_velocity.length_squared() > 1.0:
+			and Vector2(body.linear_velocity.x, body.linear_velocity.z).length_squared() > 2.25:
 		body_splashed.emit(body.global_position, 0.5)
-		_drift_cooldown[body] = 0.15
+		_drift_cooldown[body] = 0.25
 	_submerged[body] = now_submerged
 
 

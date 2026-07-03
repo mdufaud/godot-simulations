@@ -20,7 +20,8 @@ uniform sampler2D texture_height : hint_default_black, filter_linear_mipmap, rep
 
 // Parallax settings
 group_uniforms Parallax;
-uniform float height_scale : hint_range(0.0, 0.5, 0.005) = 0.08;
+uniform int display_mode : hint_enum("Flat", "Normal Map Only", "Parallax") = 2;
+uniform float height_scale : hint_range(0.0, 0.5, 0.005) = 0.04;
 uniform int min_layers : hint_range(4, 64) = 8;
 uniform int max_layers : hint_range(8, 128) = 32;
 
@@ -97,10 +98,13 @@ float GetParallaxShadow(vec2 texCoord, vec3 lightDir) {
 	float numLayers = float(shadow_layers);
 	vec2 currentTexCoords = texCoord;
 	float currentDepthMapValue = 1.0 - texture(texture_height, currentTexCoords).r;
-	float currentLayerDepth = currentDepthMapValue;
+	// Small bias below the surface avoids self-intersection acne at the start sample
+	float currentLayerDepth = currentDepthMapValue - 0.02;
 
 	float layerDepth = 1.0 / numLayers;
-	vec2 P = lightDir.xy / lightDir.z * height_scale;
+	// Clamp z to avoid huge UV steps (streaks) when the light grazes the surface.
+	// UV is pre-scaled by uv_scale in vertex(), so the offset scales with it too.
+	vec2 P = -lightDir.xy / max(-lightDir.z, 0.1) * height_scale * uv_scale;
 	vec2 deltaTexCoords = P / numLayers;
 
 	// March from surface toward the light, checking for intersections
@@ -118,15 +122,15 @@ float GetParallaxShadow(vec2 texCoord, vec3 lightDir) {
 
 // ─── Heightmap-derived Normal (Central Difference) ──
 vec3 compute_normal_from_height(vec2 uv, float scale) {
-	float texel = 1.0 / 1024.0;
-	float h_l = texture(texture_height, uv + vec2(-texel, 0.0)).r;
-	float h_r = texture(texture_height, uv + vec2( texel, 0.0)).r;
-	float h_d = texture(texture_height, uv + vec2(0.0, -texel)).r;
-	float h_u = texture(texture_height, uv + vec2(0.0,  texel)).r;
+	vec2 texel = 1.0 / vec2(textureSize(texture_height, 0));
+	float h_l = texture(texture_height, uv - vec2(texel.x, 0.0)).r;
+	float h_r = texture(texture_height, uv + vec2(texel.x, 0.0)).r;
+	float h_u = texture(texture_height, uv - vec2(0.0, texel.y)).r;
+	float h_d = texture(texture_height, uv + vec2(0.0, texel.y)).r;
 
 	vec3 n;
 	n.x = (h_l - h_r) * scale;
-	n.y = (h_d - h_u) * scale;
+	n.y = (h_u - h_d) * scale;
 	n.z = 1.0;
 	return normalize(n);
 }
@@ -134,81 +138,94 @@ vec3 compute_normal_from_height(vec2 uv, float scale) {
 void fragment() {
 	base_uv = UV;
 
-	// ── View direction in tangent space ──
-	// Uses Godot's canonical construction from StandardMaterial3D:
-	// - normalize(-VERTEX + EYE_OFFSET) is the camera-to-fragment direction in view space
-	// - mat3(TANGENT, -BINORMAL, NORMAL) transforms to tangent space
-	// - -BINORMAL because Godot uses mikktspace (binormal is pre-negated)
-	vec3 view_dir = normalize(normalize(-VERTEX + EYE_OFFSET) * mat3(TANGENT, -BINORMAL, NORMAL));
+	// ── Store TBN for light() ──
+	// -BINORMAL because Godot uses mikktspace (binormal is pre-negated)
+	v_tbn = mat3(TANGENT, -BINORMAL, NORMAL);
 
-	// Adaptive layer count: more layers at grazing angles for better quality
-	float num_layers_f = mix(float(max_layers), float(min_layers), abs(dot(vec3(0.0, 0.0, 1.0), view_dir)));
-	int num_layers_i = int(num_layers_f);
-	float layer_depth = 1.0 / num_layers_f;
+	if (display_mode == 2) {
+		// ── View direction in tangent space ──
+		// Uses Godot's canonical construction from StandardMaterial3D:
+		// normalize(-VERTEX + EYE_OFFSET) is the camera-to-fragment direction in view space
+		vec3 view_dir = normalize(normalize(-VERTEX + EYE_OFFSET) * v_tbn);
 
-	// UV displacement per step
-	vec2 P = view_dir.xy / view_dir.z * height_scale;
-	vec2 delta = P / num_layers_f;
+		// Adaptive layer count: more layers at grazing angles for better quality
+		float num_layers_f = mix(float(max_layers), float(min_layers), abs(dot(vec3(0.0, 0.0, 1.0), view_dir)));
+		int num_layers_i = int(num_layers_f);
+		float layer_depth = 1.0 / num_layers_f;
 
-	// ── Pass 1: Coarse Steep Parallax March ──
-	// Depth convention: 1.0-h means white(1.0) in heightmap = elevated, black(0.0) = deep
-	vec2 ofs = base_uv;
-	float depth = 1.0 - texture(texture_height, ofs).r;
-	float current_depth = 0.0;
-	float prev_depth_sample = depth;
+		// UV displacement per step. UV is pre-scaled by uv_scale in vertex(),
+		// so multiply by uv_scale to keep apparent depth constant in world space.
+		vec2 P = view_dir.xy / view_dir.z * height_scale * uv_scale;
+		vec2 delta = P / num_layers_f;
 
-	for (int i = 0; i < 128; i++) {
-		if (i >= num_layers_i || current_depth >= depth) break;
-		prev_depth_sample = depth;
-		ofs -= delta;
-		depth = 1.0 - texture(texture_height, ofs).r;
-		current_depth += layer_depth;
-	}
-
-	// ── Pass 2: Contact Refinement ──
-	// Andrea Riccardi's technique: roll back one coarse step, then subdivide
-	// that single step into N refined sub-steps -> 1/(N^2) error with 2N total steps
-	if (current_depth > 0.0) {
-		ofs += delta;
-		current_depth -= layer_depth;
-		depth = prev_depth_sample;
-
-		// Subdivide: each refined step is 1/N of the coarse step
-		vec2 refined_delta = delta / num_layers_f;
-		float refined_depth = layer_depth / num_layers_f;
+		// ── Pass 1: Coarse Steep Parallax March ──
+		// Depth convention: 1.0-h means white(1.0) in heightmap = elevated, black(0.0) = deep
+		vec2 ofs = base_uv;
+		float depth = 1.0 - texture(texture_height, ofs).r;
+		float current_depth = 0.0;
+		float prev_depth_sample = depth;
 
 		for (int i = 0; i < 128; i++) {
 			if (i >= num_layers_i || current_depth >= depth) break;
-			ofs -= refined_delta;
+			prev_depth_sample = depth;
+			ofs -= delta;
 			depth = 1.0 - texture(texture_height, ofs).r;
-			current_depth += refined_depth;
+			current_depth += layer_depth;
 		}
+
+		// ── Pass 2: Contact Refinement ──
+		// Andrea Riccardi's technique: roll back one coarse step, then subdivide
+		// that single step into N refined sub-steps -> 1/(N^2) error with 2N total steps
+		if (current_depth > 0.0) {
+			ofs += delta;
+			current_depth -= layer_depth;
+			depth = prev_depth_sample;
+
+			// Subdivide: each refined step is 1/N of the coarse step
+			vec2 refined_delta = delta / num_layers_f;
+			float refined_depth = layer_depth / num_layers_f;
+
+			for (int i = 0; i < 128; i++) {
+				if (i >= num_layers_i || current_depth >= depth) break;
+				ofs -= refined_delta;
+				depth = 1.0 - texture(texture_height, ofs).r;
+				current_depth += refined_depth;
+			}
+		}
+
+		// ── POM Interpolation ──
+		// Linear interpolation between last two samples for sub-step accuracy.
+		// Only when the ray actually hit; a miss (silhouette edge) keeps the last offset.
+		if (current_depth >= depth) {
+			vec2 refined_delta_interp = delta / num_layers_f;
+			float refined_depth_interp = layer_depth / num_layers_f;
+			vec2 prev_ofs = ofs + refined_delta_interp;
+			float after_depth = depth - current_depth;
+			float before_depth = (1.0 - texture(texture_height, prev_ofs).r) - current_depth + refined_depth_interp;
+			float denom = after_depth - before_depth;
+			if (abs(denom) > 1e-5) {
+				float weight = clamp(after_depth / denom, 0.0, 1.0);
+				ofs = mix(ofs, prev_ofs, weight);
+			}
+		}
+
+		base_uv = ofs;
 	}
-
-	// ── POM Interpolation ──
-	// Linear interpolation between last two samples for sub-step accuracy
-	vec2 refined_delta_interp = delta / num_layers_f;
-	float refined_depth_interp = layer_depth / num_layers_f;
-	vec2 prev_ofs = ofs + refined_delta_interp;
-	float after_depth = depth - current_depth;
-	float before_depth = (1.0 - texture(texture_height, prev_ofs).r) - current_depth + refined_depth_interp;
-	float weight = after_depth / (after_depth - before_depth);
-	ofs = mix(ofs, prev_ofs, weight);
-
-	base_uv = ofs;
 
 	// ── Sample textures at displaced UVs ──
 	vec4 albedo_tex = texture(texture_albedo, base_uv);
 	ALBEDO = albedo_tint.rgb * albedo_tex.rgb;
 
-	// ── Normal mapping ──
-	if (use_computed_normals) {
-		vec3 cn = compute_normal_from_height(base_uv, height_scale * normal_strength * 40.0);
-		NORMAL_MAP = cn * 0.5 + 0.5;
-		NORMAL_MAP_DEPTH = 1.0;
-	} else {
-		NORMAL_MAP = texture(texture_normal, base_uv).rgb;
-		NORMAL_MAP_DEPTH = normal_strength;
+	// ── Normal mapping (skipped in Flat mode) ──
+	if (display_mode >= 1) {
+		if (use_computed_normals) {
+			vec3 cn = compute_normal_from_height(base_uv, height_scale * normal_strength * 40.0);
+			NORMAL_MAP = cn * 0.5 + 0.5;
+			NORMAL_MAP_DEPTH = 1.0;
+		} else {
+			NORMAL_MAP = texture(texture_normal, base_uv).rgb;
+			NORMAL_MAP_DEPTH = normal_strength;
+		}
 	}
 
 	// ── Material properties ──
@@ -216,13 +233,12 @@ void fragment() {
 	SPECULAR = specular;
 	METALLIC = metallic;
 
-	// ── Height-based ambient occlusion ──
-	float h = texture(texture_height, base_uv).r;
-	AO = mix(1.0, h, ao_strength);
-	AO_LIGHT_AFFECT = 0.5;
-
-	// ── Store TBN for light() ──
-	v_tbn = mat3(TANGENT, -BINORMAL, NORMAL);
+	// ── Height-based ambient occlusion (POM mode only) ──
+	if (display_mode == 2) {
+		float h = texture(texture_height, base_uv).r;
+		AO = mix(1.0, h, ao_strength);
+		AO_LIGHT_AFFECT = 0.5;
+	}
 }
 
 void light() {
@@ -240,7 +256,7 @@ void light() {
 
 	// ── Per-light self-shadow ──
 	float shadow_factor = 1.0;
-	if (self_shadow_enabled) {
+	if (self_shadow_enabled && display_mode == 2) {
 		// Transform light direction to tangent space via stored TBN
 		// -L = direction FROM light TO surface (needed for shadow ray trace)
 		vec3 light_dir_ts = -L * v_tbn;

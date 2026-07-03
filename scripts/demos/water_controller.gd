@@ -14,6 +14,7 @@ const WAVE_SEED := 1337
 @onready var world_env: WorldEnvironment = $WorldEnvironment
 @onready var floating_objects: Node3D = $FloatingObjects
 @onready var ripple_viewports: Array[SubViewport] = [$RippleA, $RippleB]
+@onready var underwater_tint: ColorRect = $UnderwaterLayer/Tint
 
 var shader_material: ShaderMaterial
 var waves: Array[Vector4] = []
@@ -23,6 +24,7 @@ var spawned: Array[RigidBody3D] = []
 
 var _ping := 0
 var _reset_frames := 2
+var _underwater := false
 var _splash_queue: Array = []
 var _live_splashes: Array[Sprite2D] = []
 var _splash_texture: GradientTexture2D
@@ -57,6 +59,12 @@ func _ready() -> void:
 	orbit_cam.yaw = 0.0
 	orbit_cam.min_distance = 8.0
 	orbit_cam.max_distance = 40.0
+	orbit_cam.max_pitch = 60.0
+
+	var env: Environment = world_env.environment
+	env.fog_light_color = Color(0.07, 0.28, 0.35)
+	env.fog_density = 0.06
+	env.fog_sky_affect = 1.0
 
 	$UI/Control/BackButton.pressed.connect(_on_back_pressed)
 
@@ -69,6 +77,15 @@ func _process(delta: float) -> void:
 	shader_material.set_shader_parameter("wave_time", wave_time)
 	buoyancy.wave_time = wave_time
 	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+
+	var cam := orbit_cam.get_camera()
+	if cam:
+		var cam_pos := cam.global_position
+		var underwater := cam_pos.y < buoyancy.get_water_height(cam_pos)
+		if underwater != _underwater:
+			_underwater = underwater
+			underwater_tint.visible = underwater
+			world_env.environment.fog_enabled = underwater
 
 
 func _physics_process(_delta: float) -> void:
@@ -140,7 +157,7 @@ func _spawn_splash_sprites(parent: Node2D) -> void:
 		sprite.texture = _splash_texture
 		sprite.material = _splash_material
 		sprite.position = uv * float(SIM_SIZE)
-		sprite.modulate = Color(clampf(strength * 0.05, 0.02, 0.3), 0.0, 0.0, 1.0)
+		sprite.modulate = Color(clampf(strength * 0.05, 0.02, 0.15), 0.0, 0.0, 1.0)
 		var radius_px := 1.4 / WATER_AREA.x * float(SIM_SIZE)
 		sprite.scale = Vector2.ONE * (radius_px * 2.0 / float(_splash_texture.width))
 		parent.add_child(sprite)

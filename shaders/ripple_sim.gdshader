@@ -6,7 +6,7 @@ shader_type canvas_item;
 render_mode blend_disabled;
 
 uniform sampler2D prev_texture : hint_default_black;
-uniform float damping = 0.995;
+uniform float damping = 0.985;
 uniform bool reset = false;
 
 void fragment()
@@ -31,6 +31,7 @@ void fragment()
 		float edge = smoothstep(0.0, 0.02, UV.x) * smoothstep(0.0, 0.02, UV.y)
 			* smoothstep(0.0, 0.02, 1.0 - UV.x) * smoothstep(0.0, 0.02, 1.0 - UV.y);
 		next *= edge;
+		next = clamp(next, -0.45, 0.45);
 
 		COLOR = vec4(next + 0.5, c.x + 0.5, 0.0, 1.0);
 	}
