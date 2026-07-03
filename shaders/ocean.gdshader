@@ -174,19 +174,18 @@ void fragment()
 		vec3 dye = mix(color_shallow.rgb, color_deep.rgb, depth_blend_pow);
 		vec3 color = mix(screen_color * dye, dye * 0.5, depth_blend_pow * 0.5);
 
-		// --- Procedural foam: wave crests + shoreline + ripple agitation ---
-		float foam_noise = value_noise(world_pos.xz * 2.1 + vec2(wave_time * 0.5)) * 0.6
-			+ value_noise(world_pos.xz * 5.7 - vec2(wave_time * 0.8)) * 0.4;
+		// --- Procedural foam: wave crests + ripple agitation ---
+		// No shore/depth foam: the depth buffer can't tell a shallow seabed from a
+		// floating object just below the surface, which painted white caps on objects
+		float foam_noise = value_noise(world_pos.xz * 1.6 + vec2(wave_time * 0.4)) * 0.55
+			+ value_noise(world_pos.xz * 4.1 - vec2(wave_time * 0.7)) * 0.45;
 		// Noise averages to ~0.5 at distance (minification); pull it below the foam
 		// thresholds so far water doesn't turn uniformly snowy
 		foam_noise = mix(foam_noise, 0.25, smoothstep(30.0, 90.0, view_dist));
-		float crest_foam = smoothstep(0.55, 0.85, wave_crest) * smoothstep(0.3, 0.7, foam_noise);
-		// Narrow band: the depth buffer sees floating objects as "shallow water",
-		// so a wide band paints a foam halo around anything near the surface
-		float shore_foam = (1.0 - smoothstep(0.0, 0.25 + foam_noise * 0.25, water_depth))
-			* smoothstep(0.35, 0.6, foam_noise);
-		float ripple_foam = smoothstep(0.35, 0.8, length(ripple_grad)) * smoothstep(0.25, 0.55, foam_noise);
-		float foam = clamp((crest_foam + shore_foam + ripple_foam) * foam_amount, 0.0, 1.0);
+		float crest_foam = smoothstep(0.65, 0.95, wave_crest) * smoothstep(0.35, 0.8, foam_noise);
+		float ripple_foam = smoothstep(0.35, 0.8, length(ripple_grad)) * smoothstep(0.25, 0.6, foam_noise);
+		float foam = clamp((crest_foam + ripple_foam) * foam_amount, 0.0, 1.0);
+		foam = foam * foam * (3.0 - 2.0 * foam);
 		color = mix(color, vec3(0.95), foam);
 
 		// --- Fake subsurface scattering (light through crests toward camera) ---

@@ -97,13 +97,13 @@ func _generate_waves() -> void:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = WAVE_SEED
 	var wind := rng.randf_range(0.0, TAU)
-	var wavelength := 26.0
-	var steepness := 0.16
+	var wavelength := 30.0
+	var steepness := 0.13
 	for i in 6:
 		var angle := wind + rng.randf_range(-0.6, 0.6)
 		waves.append(Vector4(cos(angle), sin(angle), steepness, wavelength))
-		wavelength *= 0.62
-		steepness *= 0.92
+		wavelength *= 0.72
+		steepness *= 0.9
 
 
 func _setup_ripples() -> void:

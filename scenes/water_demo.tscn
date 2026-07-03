@@ -37,8 +37,8 @@ shader = ExtResource("7_underwater")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_water"]
 size = Vector2(128, 128)
-subdivide_width = 200
-subdivide_depth = 200
+subdivide_width = 280
+subdivide_depth = 280
 
 [sub_resource type="BoxMesh" id="BoxMesh_ground"]
 size = Vector3(160, 1, 160)
@@ -92,6 +92,7 @@ light_energy = 1.2
 shadow_enabled = true
 
 [node name="Water" type="MeshInstance3D" parent="."]
+cast_shadow = 0
 mesh = SubResource("PlaneMesh_water")
 surface_material_override/0 = SubResource("ShaderMaterial_ocean")
 
