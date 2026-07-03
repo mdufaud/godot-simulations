@@ -1,31 +1,40 @@
-[gd_scene load_steps=9 format=3 uid="uid://water_demo_scene"]
+[gd_scene load_steps=16 format=3 uid="uid://water_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/water_controller.gd" id="1_controller"]
 [ext_resource type="Shader" path="res://shaders/ocean.gdshader" id="2_ocean"]
 [ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="3_theme"]
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="4_orbit_camera"]
+[ext_resource type="Script" path="res://scripts/demos/water_buoyancy.gd" id="5_buoyancy"]
+[ext_resource type="Shader" path="res://shaders/ripple_sim.gdshader" id="6_ripple"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_ocean"]
 shader = ExtResource("2_ocean")
-shader_parameter/wave_speed = 0.5
-shader_parameter/wave_a = Vector4(1.0, 1.0, 0.35, 3.0)
-shader_parameter/wave_b = Vector4(1.0, 0.6, 0.30, 1.55)
-shader_parameter/wave_c = Vector4(1.0, 1.3, 0.25, 0.9)
-shader_parameter/sampler_scale = Vector2(0.25, 0.25)
-shader_parameter/sampler_direction = Vector2(0.05, 0.04)
-shader_parameter/uv_sampler_scale = Vector2(0.25, 0.25)
-shader_parameter/uv_sampler_strength = 0.04
-shader_parameter/foam_level = 0.5
+shader_parameter/wave_time = 0.0
+shader_parameter/wave_height = 1.0
+shader_parameter/choppiness = 1.0
+shader_parameter/detail_strength = 0.35
+shader_parameter/water_area = Vector2(128, 128)
+shader_parameter/ripple_strength = 1.0
 shader_parameter/refraction = 0.075
-shader_parameter/color_deep = Color(0.1, 0.4, 0.6, 1.0)
-shader_parameter/color_shallow = Color(0.2, 0.6, 0.7, 1.0)
+shader_parameter/color_deep = Color(0.04, 0.22, 0.32, 1.0)
+shader_parameter/color_shallow = Color(0.12, 0.5, 0.55, 1.0)
 shader_parameter/beers_law = 2.0
 shader_parameter/depth_offset = -0.75
+shader_parameter/foam_amount = 1.0
+shader_parameter/sss_strength = 1.0
+shader_parameter/sss_color = Color(0.1, 0.55, 0.45, 1.0)
+shader_parameter/sun_direction = Vector3(0.5, -0.6, -0.6)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ripple_a"]
+shader = ExtResource("6_ripple")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ripple_b"]
+shader = ExtResource("6_ripple")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_water"]
 size = Vector2(128, 128)
-subdivide_width = 128
-subdivide_depth = 128
+subdivide_width = 200
+subdivide_depth = 200
 
 [sub_resource type="BoxMesh" id="BoxMesh_ground"]
 size = Vector3(160, 1, 160)
@@ -33,13 +42,29 @@ size = Vector3(160, 1, 160)
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
 albedo_color = Color(0.35, 0.3, 0.25, 1.0)
 
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_water"]
+sky_top_color = Color(0.25, 0.45, 0.7, 1.0)
+sky_horizon_color = Color(0.75, 0.82, 0.88, 1.0)
+ground_bottom_color = Color(0.15, 0.18, 0.22, 1.0)
+ground_horizon_color = Color(0.75, 0.82, 0.88, 1.0)
+sun_angle_max = 30.0
+sun_curve = 0.15
+
+[sub_resource type="Sky" id="Sky_water"]
+sky_material = SubResource("ProceduralSkyMaterial_water")
+
 [sub_resource type="Environment" id="Environment_water"]
-background_mode = 1
-background_color = Color(0.6, 0.75, 0.9, 1.0)
-ambient_light_source = 2
-ambient_light_color = Color(0.7, 0.8, 0.9, 1.0)
-ambient_light_energy = 0.4
+background_mode = 2
+sky = SubResource("Sky_water")
+ambient_light_source = 3
+ambient_light_energy = 0.6
+reflected_light_source = 2
 tonemap_mode = 2
+ssr_enabled = true
+ssr_max_steps = 64
+ssr_fade_in = 0.15
+ssr_fade_out = 2.0
+ssr_depth_tolerance = 0.4
 glow_enabled = true
 glow_intensity = 0.3
 glow_bloom = 0.05
@@ -89,6 +114,39 @@ radius = 3.0
 height = 6.0
 material = SubResource("StandardMaterial3D_ground")
 
+[node name="FloatingObjects" type="Node3D" parent="."]
+
+[node name="WaterBuoyancy" type="Node3D" parent="."]
+script = ExtResource("5_buoyancy")
+
+[node name="RippleA" type="SubViewport" parent="."]
+disable_3d = true
+gui_disable_input = true
+use_hdr_2d = true
+size = Vector2i(256, 256)
+render_target_update_mode = 0
+
+[node name="Sim" type="ColorRect" parent="RippleA"]
+material = SubResource("ShaderMaterial_ripple_a")
+offset_right = 256.0
+offset_bottom = 256.0
+
+[node name="Splashes" type="Node2D" parent="RippleA"]
+
+[node name="RippleB" type="SubViewport" parent="."]
+disable_3d = true
+gui_disable_input = true
+use_hdr_2d = true
+size = Vector2i(256, 256)
+render_target_update_mode = 0
+
+[node name="Sim" type="ColorRect" parent="RippleB"]
+material = SubResource("ShaderMaterial_ripple_b")
+offset_right = 256.0
+offset_bottom = 256.0
+
+[node name="Splashes" type="Node2D" parent="RippleB"]
+
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="Control" type="Control" parent="UI"]
@@ -113,10 +171,10 @@ layout_mode = 1
 anchors_preset = 1
 anchor_left = 1.0
 anchor_right = 1.0
-offset_left = -270.0
+offset_left = -290.0
 offset_top = 20.0
 offset_right = -20.0
-offset_bottom = 280.0
+offset_bottom = 460.0
 grow_horizontal = 0
 
 [node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
