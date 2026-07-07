@@ -7,6 +7,7 @@ extends Control
 @onready var dice_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/DiceDemoBtn
 @onready var grass_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/GrassDemoBtn
 @onready var parallax_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/ParallaxDemoBtn
+@onready var fluid_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/FluidDemoBtn
 @onready var exit_btn: Button = $CenterContainer/VBoxContainer/BottomButtons/ExitBtn
 @onready var particles_bg: GPUParticles2D = $ParticlesBG
 
@@ -20,10 +21,11 @@ func _ready() -> void:
 	dice_btn.pressed.connect(func(): GameManager.load_demo("dice_demo"))
 	grass_btn.pressed.connect(func(): GameManager.load_demo("grass_demo"))
 	parallax_btn.pressed.connect(func(): GameManager.load_demo("parallax_demo"))
+	fluid_btn.pressed.connect(func(): GameManager.load_demo("fluid_demo"))
 	exit_btn.pressed.connect(func(): GameManager.quit_game())
-	
+
 	# Button hover animations
-	for btn in [ssr_btn, water_btn, fire_btn, dice_btn, grass_btn, parallax_btn, exit_btn]:
+	for btn in [ssr_btn, water_btn, fire_btn, dice_btn, grass_btn, parallax_btn, fluid_btn, exit_btn]:
 		btn.mouse_entered.connect(_on_button_hover.bind(btn))
 		btn.mouse_exited.connect(_on_button_exit.bind(btn))
 

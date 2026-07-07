@@ -2,8 +2,8 @@
 
 [ext_resource type="Script" path="res://scripts/demos/fire_controller.gd" id="1_controller"]
 [ext_resource type="Shader" path="res://shaders/fire.gdshader" id="2_fire_shader"]
-[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="4_theme"]
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="5_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="6_sim_menu"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_volume"]
 frequency = 0.08
@@ -474,95 +474,5 @@ surface_material_override/0 = SubResource("StandardMaterial3D_foliage")
 
 [node name="UI" type="CanvasLayer" parent="."]
 
-[node name="Control" type="Control" parent="UI"]
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-mouse_filter = 2
-theme = ExtResource("4_theme")
-
-[node name="BackButton" type="Button" parent="UI/Control"]
-layout_mode = 1
-anchors_preset = 0
-offset_left = 20.0
-offset_top = 20.0
-offset_right = 150.0
-offset_bottom = 55.0
-text = "← Back"
-
-[node name="InfoPanel" type="PanelContainer" parent="UI/Control"]
-layout_mode = 1
-anchors_preset = 1
-anchor_left = 1.0
-anchor_right = 1.0
-offset_left = -310.0
-offset_top = 20.0
-offset_right = -20.0
-offset_bottom = 580.0
-grow_horizontal = 0
-
-[node name="VBoxContainer" type="VBoxContainer" parent="UI/Control/InfoPanel"]
-layout_mode = 2
-
-[node name="TitleLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-theme_override_font_sizes/font_size = 20
-text = "🔥 Fire Simulation (Fire-X)"
-
-[node name="FPSLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "FPS: 60"
-
-[node name="StatsLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "T: 293 K | Heat: 0.0"
-
-[node name="HSeparator" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-
-[node name="FuelLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "Fuel"
-
-[node name="FuelBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-max_value = 100.0
-value = 50.0
-
-[node name="OxygenLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "Oxygen"
-
-[node name="OxygenBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-max_value = 100.0
-value = 100.0
-
-[node name="TempLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "Temperature"
-
-[node name="TempBar" type="ProgressBar" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-max_value = 100.0
-value = 0.0
-
-[node name="HSeparator2" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-
-[node name="ControlsLabel" type="Label" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-text = "Controls:
-Esc: Back | R: Reset
-E (hold): Water | F: Add fuel
-V: Toggle wind | X: Smother
-Arrows: Orbit camera
-+/-: Zoom | Scroll: Zoom"
-
-[node name="HSeparator3" type="HSeparator" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-
-[node name="SlidersContainer" type="VBoxContainer" parent="UI/Control/InfoPanel/VBoxContainer"]
-layout_mode = 2
-theme_override_constants/separation = 4
+[node name="SimMenu" parent="UI" instance=ExtResource("6_sim_menu")]
+title = "🔥 Fire Simulation (Fire-X)"

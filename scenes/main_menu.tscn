@@ -100,6 +100,11 @@ custom_minimum_size = Vector2(350, 55)
 layout_mode = 2
 text = "🪨  Parallax Mapping"
 
+[node name="FluidDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
+custom_minimum_size = Vector2(350, 55)
+layout_mode = 2
+text = "💧  Fluid Simulation (PBF)"
+
 [node name="Spacer2" type="Control" parent="CenterContainer/VBoxContainer"]
 custom_minimum_size = Vector2(0, 20)
 layout_mode = 2

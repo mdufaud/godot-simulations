@@ -20,7 +20,7 @@ uniform float choppiness = 1.0;
 uniform float detail_strength = 0.35;
 
 // Interactive ripple heightmap (ping-pong SubViewport, R = height + 0.5, G = prev)
-uniform sampler2D ripple_texture : hint_default_black;
+uniform sampler2D ripple_texture : hint_default_black, filter_linear;
 uniform vec2 water_area = vec2(128.0, 128.0);
 uniform float ripple_strength = 1.0;
 
@@ -132,7 +132,7 @@ void fragment()
 	vec2 det_grad = detail_gradient(world_pos.xz, wave_time) * detail_strength * detail_fade;
 
 	vec2 ripple_uv = world_pos.xz / water_area + 0.5;
-	vec2 texel = 1.0 / vec2(textureSize(ripple_texture, 0));
+	vec2 texel = 1.5 / vec2(textureSize(ripple_texture, 0));
 	float rl = texture(ripple_texture, ripple_uv - vec2(texel.x, 0.0)).r;
 	float rr = texture(ripple_texture, ripple_uv + vec2(texel.x, 0.0)).r;
 	float rd = texture(ripple_texture, ripple_uv - vec2(0.0, texel.y)).r;
@@ -177,13 +177,14 @@ void fragment()
 		// --- Procedural foam: wave crests + ripple agitation ---
 		// No shore/depth foam: the depth buffer can't tell a shallow seabed from a
 		// floating object just below the surface, which painted white caps on objects
-		float foam_noise = value_noise(world_pos.xz * 1.6 + vec2(wave_time * 0.4)) * 0.55
-			+ value_noise(world_pos.xz * 4.1 - vec2(wave_time * 0.7)) * 0.45;
+		float foam_noise = value_noise(world_pos.xz * 1.6 + vec2(wave_time * 0.4)) * 0.45
+			+ value_noise(world_pos.xz * 4.1 - vec2(wave_time * 0.7)) * 0.35
+			+ value_noise(world_pos.xz * 9.0 + vec2(wave_time * 1.1)) * 0.20;
 		// Noise averages to ~0.5 at distance (minification); pull it below the foam
 		// thresholds so far water doesn't turn uniformly snowy
 		foam_noise = mix(foam_noise, 0.25, smoothstep(30.0, 90.0, view_dist));
-		float crest_foam = smoothstep(0.65, 0.95, wave_crest) * smoothstep(0.35, 0.8, foam_noise);
-		float ripple_foam = smoothstep(0.35, 0.8, length(ripple_grad)) * smoothstep(0.25, 0.6, foam_noise);
+		float crest_foam = smoothstep(0.55, 1.0, wave_crest) * smoothstep(0.25, 0.85, foam_noise);
+		float ripple_foam = smoothstep(0.25, 0.9, length(ripple_grad)) * smoothstep(0.15, 0.7, foam_noise);
 		float foam = clamp((crest_foam + ripple_foam) * foam_amount, 0.0, 1.0);
 		foam = foam * foam * (3.0 - 2.0 * foam);
 		color = mix(color, vec3(0.95), foam);

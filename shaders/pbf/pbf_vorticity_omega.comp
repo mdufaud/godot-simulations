@@ -1,0 +1,16 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pi = positions.data[i].xyz;
+	vec3 vi = velocities.data[i].xyz;
+	vec3 omega = vec3(0.0);
+	FOREACH_NEIGHBOR(pi,
+		vec3 vij = velocities.data[j].xyz - vi;
+		vec3 d = pi - positions.data[j].xyz;
+		omega += cross(vij, spiky_grad(d, length(d)));
+	)
+	omega *= params.solver.w;
+	predicted.data[i] = vec4(omega, length(omega));
+}

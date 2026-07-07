@@ -1,0 +1,122 @@
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) restrict buffer Positions {
+	vec4 data[];
+}
+positions;
+
+layout(std430, set = 0, binding = 1) restrict buffer Velocities {
+	vec4 data[];
+}
+velocities;
+
+layout(std430, set = 0, binding = 2) restrict buffer Predicted {
+	vec4 data[];
+}
+predicted;
+
+layout(std430, set = 0, binding = 3) restrict buffer Lambdas {
+	float data[];
+}
+lambdas;
+
+layout(std430, set = 0, binding = 4) restrict buffer Deltas {
+	vec4 data[];
+}
+deltas;
+
+layout(std430, set = 0, binding = 5) restrict buffer CellCount {
+	uint data[];
+}
+cell_count;
+
+layout(std430, set = 0, binding = 6) restrict buffer CellStart {
+	uint data[];
+}
+cell_start;
+
+layout(std430, set = 0, binding = 7) restrict buffer BlockSums {
+	uint data[];
+}
+block_sums;
+
+layout(std430, set = 0, binding = 8) restrict buffer SortedIndices {
+	uint data[];
+}
+sorted_indices;
+
+layout(std430, set = 0, binding = 9) restrict buffer Densities {
+	float data[];
+}
+densities;
+
+layout(rgba32f, set = 0, binding = 10) uniform restrict image2D position_tex;
+
+layout(push_constant, std430) uniform Params {
+	vec4 grid_origin; // xyz = origin, w = cell_size
+	ivec4 grid_dims; // xyz = dims, w = particle_count
+	vec4 kernel; // x = h, y = h^2, z = poly6 coeff, w = spiky grad coeff
+	vec4 solver; // x = dt, y = 1/dt, z = epsilon, w = 1/rest_density
+	vec4 scorr; // x = k, y = 1/W(dq), z = unused, w = xsph_c
+	vec4 gravity; // xyz = gravity, w = mode (0 water, 1 lava)
+	ivec4 misc; // x = tex_width, y = num_blocks
+}
+params;
+
+float poly6(float r2) {
+	float h2 = params.kernel.y;
+	if (r2 >= h2) {
+		return 0.0;
+	}
+	float d = h2 - r2;
+	return params.kernel.z * d * d * d;
+}
+
+vec3 spiky_grad(vec3 r, float rlen) {
+	float h = params.kernel.x;
+	if (rlen >= h || rlen < 1e-6) {
+		return vec3(0.0);
+	}
+	float d = h - rlen;
+	return params.kernel.w * d * d * (r / rlen);
+}
+
+ivec3 cell_of(vec3 p) {
+	vec3 rel = (p - params.grid_origin.xyz) / params.grid_origin.w;
+	return clamp(ivec3(floor(rel)), ivec3(0), params.grid_dims.xyz - 1);
+}
+
+uint cell_index(ivec3 c) {
+	return uint(c.x + c.y * params.grid_dims.x + c.z * params.grid_dims.x * params.grid_dims.y);
+}
+
+vec3 clamp_domain(vec3 p) {
+	vec3 lo = params.grid_origin.xyz + vec3(0.02);
+	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	return clamp(p, lo, hi);
+}
+
+uint num_cells() {
+	return uint(params.grid_dims.x * params.grid_dims.y * params.grid_dims.z);
+}
+
+#define FOREACH_NEIGHBOR(P, BODY) { \
+	ivec3 cc_ = cell_of(P); \
+	for (int dz_ = -1; dz_ <= 1; dz_++) { \
+		for (int dy_ = -1; dy_ <= 1; dy_++) { \
+			for (int dx_ = -1; dx_ <= 1; dx_++) { \
+				ivec3 nc_ = cc_ + ivec3(dx_, dy_, dz_); \
+				if (any(lessThan(nc_, ivec3(0))) || any(greaterThanEqual(nc_, params.grid_dims.xyz))) { \
+					continue; \
+				} \
+				uint ci_ = cell_index(nc_); \
+				uint start_ = cell_start.data[ci_]; \
+				uint end_ = start_ + cell_count.data[ci_]; \
+				for (uint s_ = start_; s_ < end_; s_++) { \
+					uint j = sorted_indices.data[s_]; \
+					BODY \
+				} \
+			} \
+		} \
+	} \
+}

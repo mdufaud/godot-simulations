@@ -1,0 +1,57 @@
+[gd_scene load_steps=7 format=3 uid="uid://fluid_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/fluid_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="2_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_horizon_color = Color(0.64, 0.66, 0.68, 1)
+ground_horizon_color = Color(0.64, 0.66, 0.68, 1)
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_fluid"]
+background_mode = 2
+sky = SubResource("Sky_env")
+tonemap_mode = 3
+glow_intensity = 0.6
+glow_bloom = 0.2
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.35, 0.3, 0.25, 1)
+roughness = 1.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(16, 16)
+
+[node name="FluidDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("2_orbit_camera")
+target = Vector3(-2, 2, -2)
+distance = 22.0
+pitch = -25.0
+yaw = 35.0
+min_distance = 6.0
+max_distance = 40.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+fov = 55.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_fluid")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 10, 0)
+shadow_enabled = true
+
+[node name="Ground" type="MeshInstance3D" parent="."]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
+title = "🌊 Fluid Simulation (PBF)"

@@ -1,0 +1,6 @@
+void main() {
+	uint gid = gl_GlobalInvocationID.x;
+	if (gid < num_cells()) {
+		cell_start.data[gid] += block_sums.data[gid >> 8u];
+	}
+}

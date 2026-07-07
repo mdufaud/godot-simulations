@@ -55,6 +55,7 @@ const SCENES := {
 	"dice_demo": "res://scenes/dice_demo.tscn",
 	"grass_demo": "res://scenes/grass_demo.tscn",
 	"parallax_demo": "res://scenes/parallax_demo.tscn",
+	"fluid_demo": "res://scenes/fluid_demo.tscn",
 }
 
 

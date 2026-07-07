@@ -5,11 +5,12 @@ extends Node3D
 @onready var dice_container: Node3D = $DiceContainer
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var throw_indicator: MeshInstance3D = $ThrowIndicator
-@onready var info_label: Label = $UI/Control/InfoPanel/VBoxContainer/InfoLabel
-@onready var fps_label: Label = $UI/Control/InfoPanel/VBoxContainer/FPSLabel
-@onready var result_label: Label = $UI/Control/InfoPanel/VBoxContainer/ResultLabel
+@onready var menu: SimMenu = $UI/SimMenu
 @onready var throw_btn: Button = $UI/Control/ThrowButton
 @onready var reset_btn: Button = $UI/Control/ResetButton
+
+var info_label: Label
+var result_label: Label
 
 const DICE_SIZE := 0.5
 const THROW_HEIGHT := 2.0
@@ -53,11 +54,15 @@ func _ready() -> void:
 	
 	throw_btn.pressed.connect(_on_throw_pressed)
 	reset_btn.pressed.connect(_on_reset_pressed)
+	_setup_ui()
+
+
+func _setup_ui() -> void:
+	info_label = menu.add_label("Dice: %d" % dice_count)
+	result_label = menu.add_label("Swipe to throw!")
 
 
 func _process(delta: float) -> void:
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
-	
 	# Update throw indicator during drag
 	if is_dragging:
 		_update_throw_indicator()
@@ -414,7 +419,3 @@ func _on_reset_pressed() -> void:
 	
 	result_label.text = "Swipe to throw!"
 	info_label.text = "Dice: %d" % dice_count
-
-
-func _on_back_pressed() -> void:
-	GameManager.go_to_menu()

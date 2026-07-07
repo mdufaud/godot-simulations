@@ -1,0 +1,22 @@
+shared uint temp[256];
+
+void main() {
+	uint gid = gl_GlobalInvocationID.x;
+	uint lid = gl_LocalInvocationID.x;
+	uint cells = num_cells();
+	uint v = gid < cells ? cell_count.data[gid] : 0u;
+	temp[lid] = v;
+	barrier();
+	for (uint off = 1u; off < 256u; off <<= 1u) {
+		uint t = lid >= off ? temp[lid - off] : 0u;
+		barrier();
+		temp[lid] += t;
+		barrier();
+	}
+	if (gid < cells) {
+		cell_start.data[gid] = temp[lid] - v;
+	}
+	if (lid == 255u) {
+		block_sums.data[gl_WorkGroupID.x] = temp[255];
+	}
+}

@@ -17,10 +17,7 @@ var previous_tile_id := Vector3.ZERO
 var density_modifier := 1.0
 
 @onready var orbit_cam: OrbitCamera = $CameraPivot
-@onready var fps_label: Label = $UI/Control/InfoPanel/VBoxContainer/FPSLabel
-@onready var info_label: Label = $UI/Control/InfoPanel/VBoxContainer/InfoLabel
-@onready var control_panel: PanelContainer = $UI/Control/ControlPanel
-@onready var back_button: Button = $UI/Control/BackButton
+@onready var menu: SimMenu = $UI/SimMenu
 
 
 func _ready() -> void:
@@ -46,15 +43,7 @@ func _ready() -> void:
 	_setup_grass_instances()
 	_generate_grass_multimeshes()
 	
-	# Connect UI
-	back_button.pressed.connect(_on_back_pressed)
-	info_label.text = "Drag: rotate | Scroll: zoom | ZQSD/WASD: move"
-	
 	call_deferred("_setup_ui")
-
-
-func _process(_delta: float) -> void:
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 
 
 func _physics_process(_delta: float) -> void:
@@ -150,124 +139,33 @@ func _create_grass_multimesh(density: float, tile_size: float, mesh: Mesh) -> Mu
 
 
 func _setup_ui() -> void:
-	var sliders_vbox: VBoxContainer = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer
-	
-	for child in sliders_vbox.get_children():
-		child.queue_free()
-	await get_tree().process_frame
-	
-	# Section: Grass Properties
-	_add_section_label(sliders_vbox, "🌿 Grass Properties")
-	_add_slider(sliders_vbox, "Density", "density", 0.0, 1.0, density_modifier, _on_density_changed)
-	_add_slider(sliders_vbox, "Clumping", "clumping_factor", 0.0, 1.0, 0.5, _on_shader_param_changed)
-	_add_slider(sliders_vbox, "Wind Speed", "wind_speed", 0.0, 5.0, 1.0, _on_shader_param_changed)
-	
-	# Section: Colors
-	_add_separator(sliders_vbox)
-	_add_section_label(sliders_vbox, "🎨 Colors")
-	_add_color_picker(sliders_vbox, "Base Color", "base_color", Color(0.05, 0.2, 0.01))
-	_add_color_picker(sliders_vbox, "Tip Color", "tip_color", Color(0.5, 0.5, 0.1))
-	_add_color_picker(sliders_vbox, "SSS Color", "subsurface_scattering_color", Color(1.0, 0.75, 0.1))
-	
-	# Section: Rendering
-	_add_separator(sliders_vbox)
-	_add_section_label(sliders_vbox, "⚙️ Rendering")
-	_add_checkbox(sliders_vbox, "Cast Shadows", _on_shadows_changed, true)
+	menu.add_label("Drag: rotate | Scroll: zoom")
 
+	menu.add_separator()
+	menu.add_section("🌿 Grass Properties")
+	menu.add_slider("Density", 0.0, 1.0, density_modifier, func(v: float):
+		density_modifier = v
+		_generate_grass_multimeshes())
+	menu.add_slider("Clumping", 0.0, 1.0, 0.5, func(v: float):
+		GRASS_MAT.set_shader_parameter("clumping_factor", v))
+	menu.add_slider("Wind Speed", 0.0, 5.0, 1.0, func(v: float):
+		GRASS_MAT.set_shader_parameter("wind_speed", v))
 
-func _add_section_label(parent: Control, text: String) -> void:
-	var label := Label.new()
-	label.text = text
-	label.add_theme_font_size_override("font_size", 16)
-	parent.add_child(label)
+	menu.add_separator()
+	menu.add_section("🎨 Colors")
+	menu.add_color_picker("Base Color", Color(0.05, 0.2, 0.01), func(c: Color):
+		GRASS_MAT.set_shader_parameter("base_color", c))
+	menu.add_color_picker("Tip Color", Color(0.5, 0.5, 0.1), func(c: Color):
+		GRASS_MAT.set_shader_parameter("tip_color", c))
+	menu.add_color_picker("SSS Color", Color(1.0, 0.75, 0.1), func(c: Color):
+		GRASS_MAT.set_shader_parameter("subsurface_scattering_color", c))
 
-
-func _add_separator(parent: Control) -> void:
-	var sep := HSeparator.new()
-	sep.add_theme_constant_override("separation", 10)
-	parent.add_child(sep)
-
-
-func _add_slider(parent: Control, label_text: String, param: String, min_val: float, max_val: float, default_val: float, callback: Callable) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 10)
-	parent.add_child(hbox)
-	
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = 100
-	hbox.add_child(label)
-	
-	var slider := HSlider.new()
-	slider.min_value = min_val
-	slider.max_value = max_val
-	slider.step = (max_val - min_val) / 100.0
-	slider.value = default_val
-	slider.scrollable = false
-	slider.custom_minimum_size.x = 100
-	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hbox.add_child(slider)
-	
-	var value_label := Label.new()
-	value_label.text = "%.2f" % default_val
-	value_label.custom_minimum_size.x = 45
-	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	hbox.add_child(value_label)
-	
-	slider.value_changed.connect(func(value: float):
-		callback.call(param, value)
-		value_label.text = "%.2f" % value
-	)
-
-
-func _add_color_picker(parent: Control, label_text: String, param: String, default_val: Color) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 10)
-	parent.add_child(hbox)
-	
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = 100
-	hbox.add_child(label)
-	
-	var color_button := ColorPickerButton.new()
-	color_button.color = default_val
-	color_button.custom_minimum_size = Vector2(60, 28)
-	color_button.edit_alpha = false
-	hbox.add_child(color_button)
-	
-	color_button.color_changed.connect(func(color: Color):
-		GRASS_MAT.set_shader_parameter(param, color)
-	)
-
-
-func _add_checkbox(parent: Control, label_text: String, callback: Callable, default_val: bool) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 10)
-	parent.add_child(hbox)
-	
-	var checkbox := CheckBox.new()
-	checkbox.text = label_text
-	checkbox.button_pressed = default_val
-	hbox.add_child(checkbox)
-	
-	checkbox.toggled.connect(callback)
-
-
-func _on_density_changed(_param: String, value: float) -> void:
-	density_modifier = value
-	_generate_grass_multimeshes()
-
-
-func _on_shader_param_changed(param: String, value: float) -> void:
-	GRASS_MAT.set_shader_parameter(param, value)
+	menu.add_separator()
+	menu.add_section("⚙️ Rendering")
+	menu.add_toggle("Cast Shadows", true, _on_shadows_changed)
 
 
 func _on_shadows_changed(enabled: bool) -> void:
 	for data in grass_multimeshes:
 		var near: bool = data[1].length() < SHADOW_DISTANCE
 		data[0].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-
-func _on_back_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")

@@ -11,11 +11,12 @@ extends Node3D
 @onready var spark_particles: GPUParticles3D = $SparkParticles
 @onready var fire_light: OmniLight3D = $FireLight
 @onready var orbit_cam: OrbitCamera = $CameraPivot
-@onready var fps_label: Label = $UI/Control/InfoPanel/VBoxContainer/FPSLabel
-@onready var stats_label: Label = $UI/Control/InfoPanel/VBoxContainer/StatsLabel
-@onready var fuel_bar: ProgressBar = $UI/Control/InfoPanel/VBoxContainer/FuelBar
-@onready var oxygen_bar: ProgressBar = $UI/Control/InfoPanel/VBoxContainer/OxygenBar
-@onready var temp_bar: ProgressBar = $UI/Control/InfoPanel/VBoxContainer/TempBar
+@onready var menu: SimMenu = $UI/SimMenu
+
+var stats_label: Label
+var fuel_bar: ProgressBar
+var oxygen_bar: ProgressBar
+var temp_bar: ProgressBar
 
 # --- Simulation ---
 const GRID_X := 16
@@ -37,7 +38,7 @@ var fuel_sources: Array[Dictionary] = []
 # --- Interaction state ---
 var is_adding_water := false
 var is_smothering := false  # Smother is sustained (hold action)
-var water_position := Vector3.ZERO
+var water_position := Vector3(0, 0.5, 0)
 
 # --- Timing ---
 var sim_accumulator := 0.0
@@ -69,8 +70,6 @@ func _ready() -> void:
 	orbit_cam.min_distance = 5.0
 	orbit_cam.max_distance = 18.0
 
-	$UI/Control/BackButton.pressed.connect(_on_back_pressed)
-
 
 func _process(delta: float) -> void:
 	# --- Simulation step (fixed timestep, capped, on worker thread) ---
@@ -101,9 +100,6 @@ func _process(delta: float) -> void:
 	if spark_particles:
 		spark_particles.emitting = sim.max_reaction_rate_observed > 0.03
 
-	# FPS
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
-
 
 func _sim_steps(steps: int) -> void:
 	for _s in steps:
@@ -126,55 +122,6 @@ func _wait_for_sim() -> void:
 
 func _exit_tree() -> void:
 	_wait_for_sim()
-
-
-func _unhandled_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
-		var mouse_event := event as InputEventMouseButton
-		if mouse_event.button_index == MOUSE_BUTTON_RIGHT:
-			# Right click = add water (extinguish)
-			is_adding_water = mouse_event.pressed
-			if is_adding_water:
-				water_position = _get_mouse_world_position()
-		elif mouse_event.button_index == MOUSE_BUTTON_MIDDLE and mouse_event.pressed:
-			# Middle click = add fuel (stoke the fire)
-			var pos := _get_mouse_world_position()
-			_pending_cmds.append(func() -> void:
-				sim.add_fuel_at(pos, 1.0, 0.8)
-				sim.ignite_at(pos, 0.8, 0.5))
-
-	elif event is InputEventMouseMotion:
-		if is_adding_water:
-			water_position = _get_mouse_world_position()
-
-	elif event is InputEventKey:
-		var key_event := event as InputEventKey
-		match key_event.keycode:
-			KEY_ESCAPE:
-				if key_event.pressed:
-					_on_back_pressed()
-			KEY_R:
-				if key_event.pressed:
-					_reset_simulation()
-			KEY_V:
-				if key_event.pressed:
-					# Toggle wind (V to avoid conflict with ZQSD/WASD)
-					if sim.wind.length_squared() < 0.01:
-						sim.wind = Vector3(2.0, 0.0, 0.5)
-					else:
-						sim.wind = Vector3.ZERO
-			KEY_E:
-				# Hold E = add water at fire center
-				is_adding_water = key_event.pressed
-				water_position = Vector3(0, 0.5, 0)
-			KEY_X:
-				# Hold X = continuous smother (fire blanket)
-				is_smothering = key_event.pressed
-			KEY_F:
-				if key_event.pressed:
-					_pending_cmds.append(func() -> void:
-						sim.add_fuel_at(Vector3(0, 0.3, 0), 1.5, 0.8)
-						sim.ignite_at(Vector3(0, 0.5, 0), 1.2, 0.7))
 
 
 # =========================================================================
@@ -327,83 +274,45 @@ func _update_ui_stats() -> void:
 
 
 func _setup_ui() -> void:
-	var sliders_vbox: VBoxContainer = $UI/Control/InfoPanel/VBoxContainer/SlidersContainer
+	stats_label = menu.add_label("T: 293 K | Heat: 0.0")
+	menu.add_separator()
+	fuel_bar = menu.add_progress_bar("Fuel", 100.0)
+	oxygen_bar = menu.add_progress_bar("Oxygen", 100.0)
+	temp_bar = menu.add_progress_bar("Temperature", 100.0)
 
-	_add_slider(sliders_vbox, "Reaction Rate", "reaction_rate", 0.5, 10.0, sim.reaction_rate,
+	menu.add_separator()
+	menu.add_section("Actions")
+	menu.add_button("Reset", _reset_simulation)
+	menu.add_button("Add Fuel", func() -> void:
+		_pending_cmds.append(func() -> void:
+			sim.add_fuel_at(Vector3(0, 0.3, 0), 1.5, 0.8)
+			sim.ignite_at(Vector3(0, 0.5, 0), 1.2, 0.7)))
+	menu.add_toggle("Wind", false, func(on: bool) -> void:
+		sim.wind = Vector3(2.0, 0.0, 0.5) if on else Vector3.ZERO)
+	menu.add_toggle("Extinguish", false, func(on: bool) -> void:
+		is_adding_water = on)
+	menu.add_toggle("Smother", false, func(on: bool) -> void:
+		is_smothering = on)
+
+	menu.add_separator()
+	menu.add_section("Parameters")
+	menu.add_slider("Reaction Rate", 0.5, 10.0, sim.reaction_rate,
 		func(v: float): sim.reaction_rate = v)
-	_add_slider(sliders_vbox, "Heat Release", "heat_release", 100.0, 8000.0, sim.heat_release,
+	menu.add_slider("Heat Release", 100.0, 8000.0, sim.heat_release,
 		func(v: float): sim.heat_release = v)
-	_add_slider(sliders_vbox, "Stoichiometry", "stoich_ratio", 1.0, 8.0, sim.stoichiometric_ratio,
+	menu.add_slider("Stoichiometry", 1.0, 8.0, sim.stoichiometric_ratio,
 		func(v: float): sim.stoichiometric_ratio = v)
-	_add_slider(sliders_vbox, "Buoyancy", "buoyancy", 1.0, 15.0, sim.buoyancy_strength,
+	menu.add_slider("Buoyancy", 1.0, 15.0, sim.buoyancy_strength,
 		func(v: float): sim.buoyancy_strength = v)
-	_add_slider(sliders_vbox, "Vorticity", "vorticity", 0.0, 6.0, sim.vorticity_epsilon,
+	menu.add_slider("Vorticity", 0.0, 6.0, sim.vorticity_epsilon,
 		func(v: float): sim.vorticity_epsilon = v)
-	_add_slider(sliders_vbox, "Cooling Rate", "cooling", 0.02, 1.0, sim.cooling_rate,
+	menu.add_slider("Cooling Rate", 0.02, 1.0, sim.cooling_rate,
 		func(v: float): sim.cooling_rate = v)
-	_add_slider(sliders_vbox, "Fuel Supply", "fuel_rate", 0.0, 5.0, 2.0,
+	menu.add_slider("Fuel Supply", 0.0, 5.0, 2.0,
 		func(v: float):
 			if fuel_sources.size() > 0:
 				fuel_sources[0]["rate"] = v)
-	_add_slider(sliders_vbox, "Wind X", "wind_x", -5.0, 5.0, 0.0,
+	menu.add_slider("Wind X", -5.0, 5.0, 0.0,
 		func(v: float): sim.wind.x = v)
-	_add_slider(sliders_vbox, "Wind Z", "wind_z", -5.0, 5.0, 0.0,
+	menu.add_slider("Wind Z", -5.0, 5.0, 0.0,
 		func(v: float): sim.wind.z = v)
-
-
-func _add_slider(parent: Control, label_text: String, _param: String,
-		min_val: float, max_val: float, default_val: float,
-		callback: Callable) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 8)
-	parent.add_child(hbox)
-
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = 100
-	hbox.add_child(label)
-
-	var slider := HSlider.new()
-	slider.min_value = min_val
-	slider.max_value = max_val
-	slider.step = (max_val - min_val) / 100.0
-	slider.value = default_val
-	slider.scrollable = false
-	slider.custom_minimum_size.x = 120
-	hbox.add_child(slider)
-
-	var value_label := Label.new()
-	value_label.text = "%.2f" % default_val
-	value_label.custom_minimum_size.x = 50
-	hbox.add_child(value_label)
-
-	slider.value_changed.connect(func(value: float):
-		callback.call(value)
-		value_label.text = "%.2f" % value
-	)
-
-
-# =========================================================================
-#  HELPERS
-# =========================================================================
-
-## Approximate world position from mouse (raycast to y=1 plane)
-func _get_mouse_world_position() -> Vector3:
-	var cam := orbit_cam.get_camera()
-	if not cam:
-		return Vector3.ZERO
-	var mouse_pos := get_viewport().get_mouse_position()
-	var from := cam.project_ray_origin(mouse_pos)
-	var dir := cam.project_ray_normal(mouse_pos)
-
-	# Intersect with y=1 horizontal plane (fire zone)
-	if abs(dir.y) > 0.001:
-		var t := (1.0 - from.y) / dir.y
-		if t > 0:
-			return from + dir * t
-
-	return Vector3.ZERO
-
-
-func _on_back_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")

@@ -1,0 +1,15 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pi = positions.data[i].xyz;
+	vec3 vi = velocities.data[i].xyz;
+	vec3 acc = vec3(0.0);
+	FOREACH_NEIGHBOR(pi,
+		vec3 d = pi - positions.data[j].xyz;
+		acc += (velocities.data[j].xyz - vi) * poly6(dot(d, d));
+	)
+	vec3 v_new = vi + params.scorr.w * params.solver.w * acc;
+	deltas.data[i] = vec4(v_new, 0.0);
+}

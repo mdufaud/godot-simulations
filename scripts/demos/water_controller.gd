@@ -8,7 +8,7 @@ const WAVE_SEED := 1337
 
 @onready var water_mesh: MeshInstance3D = $Water
 @onready var orbit_cam: OrbitCamera = $CameraPivot
-@onready var fps_label: Label = $UI/Control/InfoPanel/VBoxContainer/FPSLabel
+@onready var menu: SimMenu = $UI/SimMenu
 @onready var buoyancy: WaterBuoyancy = $WaterBuoyancy
 @onready var sun: DirectionalLight3D = $DirectionalLight3D
 @onready var world_env: WorldEnvironment = $WorldEnvironment
@@ -66,8 +66,6 @@ func _ready() -> void:
 	env.fog_density = 0.06
 	env.fog_sky_affect = 1.0
 
-	$UI/Control/BackButton.pressed.connect(_on_back_pressed)
-
 	for i in 4:
 		_spawn_object()
 
@@ -76,7 +74,6 @@ func _process(delta: float) -> void:
 	wave_time += delta * wave_speed
 	shader_material.set_shader_parameter("wave_time", wave_time)
 	buoyancy.wave_time = wave_time
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
 
 	var cam := orbit_cam.get_camera()
 	if cam:
@@ -233,74 +230,24 @@ func _clear_objects() -> void:
 
 
 func _setup_ui() -> void:
-	var sliders_vbox: VBoxContainer = $UI/Control/InfoPanel/VBoxContainer/SlidersContainer
-
-	_add_slider(sliders_vbox, "Wave Height", 0.0, 2.0, 1.0, func(v: float):
+	menu.add_slider("Wave Height", 0.0, 2.0, 1.0, func(v: float):
 		shader_material.set_shader_parameter("wave_height", v)
 		buoyancy.wave_height = v)
-	_add_slider(sliders_vbox, "Choppiness", 0.0, 1.5, 1.0, func(v: float):
+	menu.add_slider("Choppiness", 0.0, 1.5, 1.0, func(v: float):
 		shader_material.set_shader_parameter("choppiness", v)
 		buoyancy.choppiness = v)
-	_add_slider(sliders_vbox, "Wave Speed", 0.0, 2.0, 1.0, func(v: float):
+	menu.add_slider("Wave Speed", 0.0, 2.0, 1.0, func(v: float):
 		wave_speed = v)
-	_add_slider(sliders_vbox, "Foam", 0.0, 2.0, 1.0, func(v: float):
+	menu.add_slider("Foam", 0.0, 2.0, 1.0, func(v: float):
 		shader_material.set_shader_parameter("foam_amount", v))
-	_add_slider(sliders_vbox, "SSS", 0.0, 2.0, 1.0, func(v: float):
+	menu.add_slider("SSS", 0.0, 2.0, 1.0, func(v: float):
 		shader_material.set_shader_parameter("sss_strength", v))
-	_add_slider(sliders_vbox, "Ripples", 0.0, 2.0, 1.0, func(v: float):
+	menu.add_slider("Ripples", 0.0, 2.0, 1.0, func(v: float):
 		shader_material.set_shader_parameter("ripple_strength", v))
 
-	var ssr_toggle := CheckButton.new()
-	ssr_toggle.text = "SSR Reflections"
-	ssr_toggle.button_pressed = true
-	ssr_toggle.toggled.connect(func(enabled: bool):
+	menu.add_toggle("SSR Reflections", true, func(enabled: bool):
 		world_env.environment.ssr_enabled = enabled)
-	sliders_vbox.add_child(ssr_toggle)
 
-	var buttons := HBoxContainer.new()
-	buttons.add_theme_constant_override("separation", 10)
-	sliders_vbox.add_child(buttons)
-
-	var spawn_button := Button.new()
-	spawn_button.text = "Spawn"
-	spawn_button.pressed.connect(_spawn_object)
-	buttons.add_child(spawn_button)
-
-	var clear_button := Button.new()
-	clear_button.text = "Clear"
-	clear_button.pressed.connect(_clear_objects)
-	buttons.add_child(clear_button)
-
-
-func _add_slider(parent: Control, label_text: String, min_val: float, max_val: float, default_val: float, on_change: Callable) -> void:
-	var hbox := HBoxContainer.new()
-	hbox.add_theme_constant_override("separation", 10)
-	parent.add_child(hbox)
-
-	var label := Label.new()
-	label.text = label_text
-	label.custom_minimum_size.x = 100
-	hbox.add_child(label)
-
-	var slider := HSlider.new()
-	slider.min_value = min_val
-	slider.max_value = max_val
-	slider.step = 0.01
-	slider.value = default_val
-	slider.scrollable = false
-	slider.custom_minimum_size.x = 120
-	hbox.add_child(slider)
-
-	var value_label := Label.new()
-	value_label.text = "%.2f" % default_val
-	value_label.custom_minimum_size.x = 50
-	hbox.add_child(value_label)
-
-	slider.value_changed.connect(func(value: float):
-		on_change.call(value)
-		value_label.text = "%.2f" % value
-	)
-
-
-func _on_back_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+	menu.add_separator()
+	menu.add_button("Spawn", _spawn_object)
+	menu.add_button("Clear", _clear_objects)
