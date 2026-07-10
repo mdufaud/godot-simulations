@@ -10,13 +10,9 @@ uniform float particle_radius = 0.12;
 uniform float proj_scale = 470.0;
 uniform float range_scale = 3.0;
 
-float depth_at(vec2 uv) {
-	vec2 rg = texture(depth_tex, uv).rg;
-	return rg.x + rg.y;
-}
-
 void fragment() {
-	float d0 = depth_at(UV);
+	vec3 c0 = texture(depth_tex, UV).rgb;
+	float d0 = c0.r + c0.g;
 	if (d0 <= 0.001) {
 		COLOR = vec4(0.0, 0.0, 0.0, 1.0);
 	} else {
@@ -29,25 +25,25 @@ void fragment() {
 		float high = d0 + delta;
 		vec2 texel = direction / vec2(textureSize(depth_tex, 0));
 		float sum = d0;
-		float asum = texture(depth_tex, UV).b;
+		float asum = c0.b;
 		float wsum = 1.0;
 		for (int i = 1; i <= 16; i++) {
 			if (float(i) > radius_px) {
 				break;
 			}
 			float w = exp(-float(i * i) / two_sigma2);
-			vec2 uva = UV + texel * float(i);
-			vec2 uvb = UV - texel * float(i);
-			float da = depth_at(uva);
-			float db = depth_at(uvb);
+			vec3 ca = texture(depth_tex, UV + texel * float(i)).rgb;
+			vec3 cb = texture(depth_tex, UV - texel * float(i)).rgb;
+			float da = ca.r + ca.g;
+			float db = cb.r + cb.g;
 			if (da > 0.001) {
 				sum += clamp(da, low, high) * w;
-				asum += texture(depth_tex, uva).b * w;
+				asum += ca.b * w;
 				wsum += w;
 			}
 			if (db > 0.001) {
 				sum += clamp(db, low, high) * w;
-				asum += texture(depth_tex, uvb).b * w;
+				asum += cb.b * w;
 				wsum += w;
 			}
 		}

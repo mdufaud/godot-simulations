@@ -1,0 +1,188 @@
+[gd_scene load_steps=24 format=3 uid="uid://tornado_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/tornado_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/free_fly_camera.gd" id="2_free_fly"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
+[ext_resource type="Script" path="res://scripts/demos/tornado_debris_pool.gd" id="4_debris_pool"]
+[ext_resource type="Shader" path="res://shaders/tornado_funnel.gdshader" id="5_funnel_shader"]
+[ext_resource type="Shader" path="res://shaders/tornado_dust.gdshader" id="6_dust_shader"]
+[ext_resource type="Shader" path="res://shaders/tornado_cloud.gdshader" id="7_cloud_shader"]
+
+[sub_resource type="FastNoiseLite" id="FastNoiseLite_funnel"]
+frequency = 0.06
+fractal_octaves = 4
+
+[sub_resource type="NoiseTexture3D" id="NoiseTexture3D_funnel"]
+seamless = true
+width = 64
+height = 64
+depth = 64
+noise = SubResource("FastNoiseLite_funnel")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_funnel"]
+render_priority = 1
+shader = ExtResource("5_funnel_shader")
+shader_parameter/noise_tex = SubResource("NoiseTexture3D_funnel")
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_dust"]
+shader = ExtResource("6_dust_shader")
+shader_parameter/skirt_mode = 0
+shader_parameter/size_min = 1.0
+shader_parameter/size_max = 3.2
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_skirt"]
+shader = ExtResource("6_dust_shader")
+shader_parameter/skirt_mode = 1
+shader_parameter/size_min = 1.5
+shader_parameter/size_max = 6.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_cloud"]
+shader = ExtResource("7_cloud_shader")
+shader_parameter/noise_tex = SubResource("NoiseTexture3D_funnel")
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_cloud"]
+size = Vector2(10000, 10000)
+subdivide_width = 48
+subdivide_depth = 48
+
+[sub_resource type="Gradient" id="Gradient_dust"]
+offsets = PackedFloat32Array(0, 0.45, 1)
+colors = PackedColorArray(1, 1, 1, 1, 1, 1, 1, 0.55, 1, 1, 1, 0)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_dust"]
+gradient = SubResource("Gradient_dust")
+width = 64
+height = 64
+fill = 1
+fill_from = Vector2(0.5, 0.5)
+fill_to = Vector2(0.5, 0)
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_dust_draw"]
+transparency = 1
+shading_mode = 0
+vertex_color_use_as_albedo = true
+albedo_texture = SubResource("GradientTexture2D_dust")
+disable_receive_shadows = true
+billboard_mode = 3
+billboard_keep_scale = true
+
+[sub_resource type="QuadMesh" id="QuadMesh_dust"]
+material = SubResource("StandardMaterial3D_dust_draw")
+
+[sub_resource type="Environment" id="Environment_tornado"]
+background_mode = 1
+background_color = Color(0.45, 0.47, 0.52, 1.0)
+ambient_light_source = 2
+ambient_light_color = Color(0.5, 0.52, 0.57, 1.0)
+ambient_light_energy = 0.9
+tonemap_mode = 3
+tonemap_exposure = 1.05
+glow_enabled = true
+glow_intensity = 0.6
+glow_bloom = 0.1
+glow_blend_mode = 1
+fog_enabled = true
+fog_light_color = Color(0.3, 0.32, 0.37, 1.0)
+fog_density = 0.0004
+fog_sky_affect = 0.45
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.3, 0.24, 0.17, 1.0)
+roughness = 1.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(9000, 9000)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(2000, 1, 2000)
+
+[sub_resource type="BoxMesh" id="BoxMesh_funnel"]
+size = Vector3(200, 550, 200)
+
+[node name="TornadoDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_tornado")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 200, 0)
+light_color = Color(0.72, 0.74, 0.8, 1.0)
+light_energy = 0.85
+shadow_enabled = true
+directional_shadow_max_distance = 120.0
+
+[node name="CameraRig" type="Node3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.8, 180)
+script = ExtResource("2_free_fly")
+move_speed = 30.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraRig"]
+fov = 70.0
+far = 7000.0
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Ground"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("BoxShape3D_ground")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="Tornado" type="Node3D" parent="."]
+
+[node name="FunnelVolume" type="MeshInstance3D" parent="Tornado"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 275, 0)
+cast_shadow = 0
+mesh = SubResource("BoxMesh_funnel")
+material_override = SubResource("ShaderMaterial_funnel")
+
+[node name="CloudDeck" type="MeshInstance3D" parent="Tornado"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 550, 0)
+cast_shadow = 0
+extra_cull_margin = 2000.0
+mesh = SubResource("PlaneMesh_cloud")
+material_override = SubResource("ShaderMaterial_cloud")
+
+[node name="DustParticles" type="GPUParticles3D" parent="Tornado"]
+amount = 14000
+lifetime = 7.0
+preprocess = 4.0
+fixed_fps = 30
+visibility_aabb = AABB(-800, -10, -800, 1600, 700, 1600)
+process_material = SubResource("ShaderMaterial_dust")
+draw_pass_1 = SubResource("QuadMesh_dust")
+
+[node name="SkirtParticles" type="GPUParticles3D" parent="Tornado"]
+amount = 3500
+lifetime = 4.0
+preprocess = 3.0
+fixed_fps = 30
+visibility_aabb = AABB(-500, -10, -500, 1000, 200, 1000)
+process_material = SubResource("ShaderMaterial_skirt")
+draw_pass_1 = SubResource("QuadMesh_dust")
+
+[node name="LightningLight" type="OmniLight3D" parent="Tornado"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 120, 0)
+light_color = Color(0.75, 0.8, 1.0, 1.0)
+light_energy = 0.0
+omni_range = 150.0
+
+[node name="DebrisPool" type="Node3D" parent="."]
+script = ExtResource("4_debris_pool")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
+title = "🌪️ Tornado Simulation"
+
+[node name="FlashRect" type="ColorRect" parent="UI"]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+color = Color(0.9, 0.93, 1.0, 0.0)
+mouse_filter = 2

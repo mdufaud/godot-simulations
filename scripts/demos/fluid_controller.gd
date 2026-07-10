@@ -31,6 +31,9 @@ var filter_h_mat: ShaderMaterial
 var filter_v_mat: ShaderMaterial
 var composite_mat: ShaderMaterial
 
+var profiler_label: Label
+var _profile_accum := 0.0
+
 
 func _ready() -> void:
 	main_cam.cull_mask = 0xFFFFF & ~(LAYER_DEPTH | LAYER_THICK)
@@ -42,6 +45,7 @@ func _ready() -> void:
 	_setup_filters(vp_size)
 	_setup_composite()
 	_setup_ui()
+	_setup_profiler()
 	_apply_env()
 	solver.set_seed_positions(_build_dam_seed())
 	RenderingServer.call_on_render_thread(solver.init_render)
@@ -140,17 +144,19 @@ func _setup_prepass(mm: MultiMesh, vp_size: Vector2i) -> void:
 	depth_vp.own_world_3d = false
 	depth_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	depth_vp.positional_shadow_atlas_size = 0
+	depth_vp.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(depth_vp)
 	depth_cam = _make_prepass_cam(LAYER_DEPTH)
 	depth_vp.add_child(depth_cam)
 	depth_cam.current = true
 
 	thick_vp = SubViewport.new()
-	thick_vp.size = scaled
+	thick_vp.size = _thick_size(scaled)
 	thick_vp.use_hdr_2d = true
 	thick_vp.own_world_3d = false
 	thick_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	thick_vp.positional_shadow_atlas_size = 0
+	thick_vp.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(thick_vp)
 	thick_cam = _make_prepass_cam(LAYER_THICK)
 	thick_vp.add_child(thick_cam)
@@ -215,6 +221,7 @@ func _setup_ui() -> void:
 		func(v): solver.solver_iterations = int(round(v)))
 	menu.add_separator()
 	menu.add_section("Performance")
+	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
 	menu.add_slider("Render scale", 0.25, 1.0, render_scale, _set_render_scale)
 	menu.add_label("Particles")
 	menu.add_button("16k", func(): _set_particle_count(16384))
@@ -222,11 +229,55 @@ func _setup_ui() -> void:
 	menu.add_button("64k", func(): _set_particle_count(65536))
 
 
+func _setup_profiler() -> void:
+	profiler_label = Label.new()
+	profiler_label.position = Vector2(8, 8)
+	var mono := SystemFont.new()
+	mono.font_names = PackedStringArray(["monospace"])
+	profiler_label.add_theme_font_override("font", mono)
+	profiler_label.add_theme_font_size_override("font_size", 13)
+	profiler_label.add_theme_color_override("font_outline_color", Color.BLACK)
+	profiler_label.add_theme_constant_override("outline_size", 4)
+	profiler_label.visible = false
+	menu.get_parent().add_child(profiler_label)
+
+
+func _on_profiler_toggled(on: bool) -> void:
+	solver.profiling = on
+	profiler_label.visible = on
+	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp, get_viewport()]:
+		RenderingServer.viewport_set_measure_render_time(vp.get_viewport_rid(), on)
+
+
+func _update_overlay() -> void:
+	var t := solver.get_timings()
+	var lines := PackedStringArray()
+	lines.append("FPS %d  frame %.2f ms" % [
+		Performance.get_monitor(Performance.TIME_FPS),
+		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+	])
+	if t.has("total"):
+		lines.append("sim GPU %.2f ms" % t["total"])
+	if t.has("grid"):
+		lines.append("  grid %.2f | lambda %.2f | delta %.2f | apply %.2f | post %.2f" % [
+			t.get("grid", 0.0), t.get("lambda", 0.0), t.get("delta", 0.0),
+			t.get("apply", 0.0), t.get("post", 0.0),
+		])
+	var vps := [["depth", depth_vp], ["thick", thick_vp], ["fH", filter_h_vp],
+		["fV", filter_v_vp], ["root", get_viewport()]]
+	var parts := PackedStringArray()
+	for entry in vps:
+		var rid: RID = entry[1].get_viewport_rid()
+		parts.append("%s %.2f" % [entry[0], RenderingServer.viewport_get_measured_render_time_gpu(rid)])
+	lines.append("viewport GPU ms: " + " | ".join(parts))
+	profiler_label.text = "\n".join(lines)
+
+
 func _set_render_scale(v: float) -> void:
 	render_scale = v
 	var scaled := _scaled_size(get_viewport().size)
 	depth_vp.size = scaled
-	thick_vp.size = scaled
+	thick_vp.size = _thick_size(scaled)
 	filter_h_vp.size = scaled
 	filter_v_vp.size = scaled
 	var proj_scale := float(scaled.y) * 0.5 / tan(deg_to_rad(main_cam.fov) * 0.5)
@@ -247,6 +298,11 @@ func _set_particle_count(n: int) -> void:
 func _scaled_size(vp_size: Vector2i) -> Vector2i:
 	var s := Vector2(vp_size) * render_scale
 	return Vector2i(maxi(int(s.x), 1), maxi(int(s.y), 1))
+
+
+# Thickness is low-frequency and sampled with filter_linear: half the prepass res
+func _thick_size(scaled: Vector2i) -> Vector2i:
+	return Vector2i(maxi(scaled.x / 2, 1), maxi(scaled.y / 2, 1))
 
 
 func _apply_env() -> void:
@@ -286,7 +342,7 @@ func _sync_cams() -> void:
 		cam.far = main_cam.far
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if not solver.initialized:
 		return
 	if not texture_bound:
@@ -298,6 +354,10 @@ func _process(_delta: float) -> void:
 		return
 	_sync_cams()
 	RenderingServer.call_on_render_thread(solver.step_render.bind(1.0 / 60.0))
+	_profile_accum += delta
+	if profiler_label.visible and _profile_accum >= 0.25:
+		_profile_accum = 0.0
+		_update_overlay()
 
 
 func _exit_tree() -> void:

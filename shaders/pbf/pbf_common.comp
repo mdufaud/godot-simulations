@@ -1,19 +1,22 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-layout(std430, set = 0, binding = 0) restrict buffer Positions {
+// Particle data is ping-ponged: *_src buffers hold last frame's cell-sorted
+// order (canonical this frame); grid_scatter re-sorts them into the dst
+// buffers (positions/predicted) that every later stage indexes by slot.
+layout(std430, set = 0, binding = 0) restrict buffer PositionsSrc {
 	vec4 data[];
 }
-positions;
+positions_src;
 
 layout(std430, set = 0, binding = 1) restrict buffer Velocities {
 	vec4 data[];
 }
 velocities;
 
-layout(std430, set = 0, binding = 2) restrict buffer Predicted {
+layout(std430, set = 0, binding = 2) restrict buffer PredictedSrc {
 	vec4 data[];
 }
-predicted;
+predicted_src;
 
 layout(std430, set = 0, binding = 3) restrict buffer Lambdas {
 	float data[];
@@ -40,10 +43,10 @@ layout(std430, set = 0, binding = 7) restrict buffer BlockSums {
 }
 block_sums;
 
-layout(std430, set = 0, binding = 8) restrict buffer SortedIndices {
-	uint data[];
+layout(std430, set = 0, binding = 8) restrict buffer Positions {
+	vec4 data[];
 }
-sorted_indices;
+positions;
 
 layout(std430, set = 0, binding = 9) restrict buffer Densities {
 	float data[];
@@ -51,6 +54,11 @@ layout(std430, set = 0, binding = 9) restrict buffer Densities {
 densities;
 
 layout(rgba32f, set = 0, binding = 10) uniform restrict image2D position_tex;
+
+layout(std430, set = 0, binding = 11) restrict buffer Predicted {
+	vec4 data[];
+}
+predicted;
 
 layout(push_constant, std430) uniform Params {
 	vec4 grid_origin; // xyz = origin, w = cell_size
@@ -81,6 +89,16 @@ vec3 spiky_grad(vec3 r, float rlen) {
 	return params.kernel.w * d * d * (r / rlen);
 }
 
+// Caller must guarantee r2 < h^2.
+vec3 spiky_grad_r2(vec3 r, float r2) {
+	if (r2 < 1e-12) {
+		return vec3(0.0);
+	}
+	float inv = inversesqrt(r2);
+	float d = params.kernel.x - r2 * inv;
+	return params.kernel.w * d * d * (r * inv);
+}
+
 ivec3 cell_of(vec3 p) {
 	vec3 rel = (p - params.grid_origin.xyz) / params.grid_origin.w;
 	return clamp(ivec3(floor(rel)), ivec3(0), params.grid_dims.xyz - 1);
@@ -100,22 +118,29 @@ uint num_cells() {
 	return uint(params.grid_dims.x * params.grid_dims.y * params.grid_dims.z);
 }
 
+// The 3 x-neighbor cells of each (y,z) row are adjacent in the flatten order
+// (x + y*dimx + z*dimx*dimy), so their particle ranges form one contiguous span.
 #define FOREACH_NEIGHBOR(P, BODY) { \
 	ivec3 cc_ = cell_of(P); \
+	int x0_ = max(cc_.x - 1, 0); \
+	int x1_ = min(cc_.x + 1, params.grid_dims.x - 1); \
 	for (int dz_ = -1; dz_ <= 1; dz_++) { \
+		int z_ = cc_.z + dz_; \
+		if (z_ < 0 || z_ >= params.grid_dims.z) { \
+			continue; \
+		} \
 		for (int dy_ = -1; dy_ <= 1; dy_++) { \
-			for (int dx_ = -1; dx_ <= 1; dx_++) { \
-				ivec3 nc_ = cc_ + ivec3(dx_, dy_, dz_); \
-				if (any(lessThan(nc_, ivec3(0))) || any(greaterThanEqual(nc_, params.grid_dims.xyz))) { \
-					continue; \
-				} \
-				uint ci_ = cell_index(nc_); \
-				uint start_ = cell_start.data[ci_]; \
-				uint end_ = start_ + cell_count.data[ci_]; \
-				for (uint s_ = start_; s_ < end_; s_++) { \
-					uint j = sorted_indices.data[s_]; \
-					BODY \
-				} \
+			int y_ = cc_.y + dy_; \
+			if (y_ < 0 || y_ >= params.grid_dims.y) { \
+				continue; \
+			} \
+			uint row0_ = cell_index(ivec3(x0_, y_, z_)); \
+			uint row1_ = cell_index(ivec3(x1_, y_, z_)); \
+			uint start_ = cell_start.data[row0_]; \
+			uint end_ = cell_start.data[row1_] + cell_count.data[row1_]; \
+			for (uint s_ = start_; s_ < end_; s_++) { \
+				uint j = s_; \
+				BODY \
 			} \
 		} \
 	} \

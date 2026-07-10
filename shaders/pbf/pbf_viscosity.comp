@@ -8,8 +8,17 @@ void main() {
 	vec3 acc = vec3(0.0);
 	FOREACH_NEIGHBOR(pi,
 		vec3 d = pi - positions.data[j].xyz;
-		acc += (velocities.data[j].xyz - vi) * poly6(dot(d, d));
+		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		acc += (velocities.data[j].xyz - vi) * poly6(r2);
 	)
 	vec3 v_new = vi + params.scorr.w * params.solver.w * acc;
 	deltas.data[i] = vec4(v_new, 0.0);
+	float temp = positions.data[i].w;
+	uint w = uint(params.misc.x);
+	ivec2 texel = ivec2(int(i % w), int(i / w));
+	// alpha: water = speed, lava = temperature
+	imageStore(position_tex, texel, vec4(pi, mix(length(v_new), temp, params.gravity.w)));
 }

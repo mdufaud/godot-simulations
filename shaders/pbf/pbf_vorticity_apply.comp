@@ -8,7 +8,11 @@ void main() {
 	vec3 grad = vec3(0.0);
 	FOREACH_NEIGHBOR(pi,
 		vec3 d = pi - positions.data[j].xyz;
-		grad += predicted.data[j].w * spiky_grad(d, length(d));
+		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		grad += predicted.data[j].w * spiky_grad_r2(d, r2);
 	)
 	grad *= params.solver.w;
 	float gl2 = dot(grad, grad);

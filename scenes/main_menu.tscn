@@ -35,86 +35,66 @@ position = Vector2(640, 360)
 amount = 100
 lifetime = 8.0
 
-[node name="CenterContainer" type="CenterContainer" parent="."]
+[node name="MarginContainer" type="MarginContainer" parent="."]
 layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+theme_override_constants/margin_left = 32
+theme_override_constants/margin_top = 32
+theme_override_constants/margin_right = 32
+theme_override_constants/margin_bottom = 32
 
-[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer"]
+[node name="VBoxContainer" type="VBoxContainer" parent="MarginContainer"]
 layout_mode = 2
 theme_override_constants/separation = 20
 
-[node name="TitlePanel" type="PanelContainer" parent="CenterContainer/VBoxContainer"]
+[node name="TitlePanel" type="PanelContainer" parent="MarginContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_title_panel")
 
-[node name="TitleLabel" type="Label" parent="CenterContainer/VBoxContainer/TitlePanel"]
+[node name="TitleLabel" type="Label" parent="MarginContainer/VBoxContainer/TitlePanel"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 48
 text = "Physics Playground"
 horizontal_alignment = 1
 
-[node name="SubtitleLabel" type="Label" parent="CenterContainer/VBoxContainer"]
+[node name="SubtitleLabel" type="Label" parent="MarginContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(0.5, 0.6, 0.7, 1)
 text = "Godot 4.6 + Jolt Physics + SSR"
 horizontal_alignment = 1
 
-[node name="Spacer" type="Control" parent="CenterContainer/VBoxContainer"]
-custom_minimum_size = Vector2(0, 30)
-layout_mode = 2
-
-[node name="ButtonsContainer" type="VBoxContainer" parent="CenterContainer/VBoxContainer"]
-layout_mode = 2
-theme_override_constants/separation = 12
-
-[node name="SSRDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🔮  SSR Physics Demo"
-
-[node name="WaterDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🌊  Water Simulation"
-
-[node name="FireDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🔥  Fire Simulation"
-
-[node name="DiceDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🎲  Dice Throw"
-
-[node name="GrassDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🌿  Grass Simulation"
-
-[node name="ParallaxDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "🪨  Parallax Mapping"
-
-[node name="FluidDemoBtn" type="Button" parent="CenterContainer/VBoxContainer/ButtonsContainer"]
-custom_minimum_size = Vector2(350, 55)
-layout_mode = 2
-text = "💧  Fluid Simulation (PBF)"
-
-[node name="Spacer2" type="Control" parent="CenterContainer/VBoxContainer"]
+[node name="Spacer" type="Control" parent="MarginContainer/VBoxContainer"]
 custom_minimum_size = Vector2(0, 20)
 layout_mode = 2
 
-[node name="BottomButtons" type="HBoxContainer" parent="CenterContainer/VBoxContainer"]
+[node name="ScrollContainer" type="ScrollContainer" parent="MarginContainer/VBoxContainer"]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 3
+horizontal_scroll_mode = 0
+
+[node name="GridContainer" type="GridContainer" parent="MarginContainer/VBoxContainer/ScrollContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+columns = 2
+theme_override_constants/h_separation = 16
+theme_override_constants/v_separation = 12
+
+[node name="Spacer2" type="Control" parent="MarginContainer/VBoxContainer"]
+custom_minimum_size = Vector2(0, 16)
+layout_mode = 2
+
+[node name="BottomButtons" type="HBoxContainer" parent="MarginContainer/VBoxContainer"]
 layout_mode = 2
 theme_override_constants/separation = 20
 alignment = 1
 
-[node name="ExitBtn" type="Button" parent="CenterContainer/VBoxContainer/BottomButtons"]
+[node name="ExitBtn" type="Button" parent="MarginContainer/VBoxContainer/BottomButtons"]
+unique_name_in_owner = true
 custom_minimum_size = Vector2(160, 45)
 layout_mode = 2
 text = "🚪  Exit"

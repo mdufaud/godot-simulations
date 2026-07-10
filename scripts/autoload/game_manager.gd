@@ -45,6 +45,13 @@ var settings: Dictionary = {
 	"parallax_computed_normals": false,
 	"parallax_preset": 0,
 	"parallax_mesh": 0,
+	
+	# Fractal demo
+	"fractal_type": 0,
+	"fractal_color_mode": 0,
+	"fractal_color_speed": 0.3,
+	"fractal_auto_zoom": true,
+	"fractal_zoom_speed": 0.15,
 }
 
 const SCENES := {
@@ -56,7 +63,25 @@ const SCENES := {
 	"grass_demo": "res://scenes/grass_demo.tscn",
 	"parallax_demo": "res://scenes/parallax_demo.tscn",
 	"fluid_demo": "res://scenes/fluid_demo.tscn",
+	"fractal_demo": "res://scenes/fractal_demo.tscn",
+	"fractal_3d_demo": "res://scenes/fractal_3d_demo.tscn",
+	"tornado_demo": "res://scenes/tornado_demo.tscn",
 }
+
+## Ordered list of demos shown on the main menu.
+## To add a new demo, just append a {key, title, icon} entry here.
+const DEMOS: Array[Dictionary] = [
+	{key = "ssr_demo",      title = "SSR Physics Demo",     icon = "🔮"},
+	{key = "water_demo",    title = "Water Simulation",     icon = "🌊"},
+	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥"},
+	{key = "dice_demo",     title = "Dice Throw",           icon = "🎲"},
+	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿"},
+	{key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨"},
+	{key = "fluid_demo",    title = "Fluid Simulation (PBF)", icon = "💧"},
+	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠"},
+	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊"},
+	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️"},
+]
 
 
 func _ready() -> void:

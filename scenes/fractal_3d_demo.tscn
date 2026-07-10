@@ -1,0 +1,82 @@
+[gd_scene load_steps=9 format=3 uid="uid://fractal_3d_demo_scene"]
+
+[ext_resource type="Shader" path="res://shaders/fractal_3d.gdshader" id="1_shader"]
+[ext_resource type="Script" path="res://scripts/demos/fractal_3d_controller.gd" id="2_controller"]
+[ext_resource type="Script" path="res://scripts/free_fly_camera.gd" id="3_free_fly_camera"]
+[ext_resource type="PackedScene" uid="uid://sim_menu_component" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
+[ext_resource type="Shader" path="res://shaders/post_process.gdshader" id="5_post_shader"]
+
+[sub_resource type="BoxMesh" id="BoxMesh_fractal"]
+size = Vector3(100, 100, 100)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_fractal_3d"]
+render_priority = 10
+shader = ExtResource("1_shader")
+shader_parameter/fractal_type = 0
+shader_parameter/iterations = 10
+shader_parameter/max_steps = 160
+shader_parameter/max_dist = 60.0
+shader_parameter/epsilon = 0.0015
+shader_parameter/kleinian_csize = Vector3(0.808, 0.808, 1.167)
+shader_parameter/kleinian_minrad2 = 0.25
+shader_parameter/apollonian_scale = 1.3
+shader_parameter/klein_r = 1.95859103011179
+shader_parameter/klein_i = 0.0112785606117658
+shader_parameter/klein_box_x = 1.0
+shader_parameter/klein_box_z = 1.0
+shader_parameter/palette = 0
+shader_parameter/color_speed = 0.3
+shader_parameter/color_offset = 0.0
+shader_parameter/glow_strength = 1.0
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_post_process"]
+shader = ExtResource("5_post_shader")
+shader_parameter/aberration_strength = 0.0015
+shader_parameter/vignette_strength = 0.35
+shader_parameter/grain_strength = 0.015
+
+[sub_resource type="Environment" id="Environment_fractal"]
+background_mode = 0
+background_color = Color(0.02, 0.01, 0.08, 1.0)
+glow_enabled = true
+glow_intensity = 0.8
+glow_bloom = 0.3
+glow_hdr_threshold = 0.9
+
+[node name="Fractal3DDemo" type="Node3D"]
+script = ExtResource("2_controller")
+
+[node name="FractalBox" type="MeshInstance3D" parent="."]
+mesh = SubResource("BoxMesh_fractal")
+material_override = SubResource("ShaderMaterial_fractal_3d")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_fractal")
+
+[node name="FreeFlyCamera" type="Node3D" parent="."]
+script = ExtResource("3_free_fly_camera")
+position = Vector3(0, 0, 3)
+
+[node name="Camera3D" type="Camera3D" parent="FreeFlyCamera"]
+
+[node name="PostProcess" type="CanvasLayer" parent="."]
+
+[node name="ColorRect" type="ColorRect" parent="PostProcess"]
+material = SubResource("ShaderMaterial_post_process")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="UI" type="Control" parent="."]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+[node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]

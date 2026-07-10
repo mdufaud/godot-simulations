@@ -3,9 +3,9 @@ extends RefCounted
 
 const SHADER_DIR := "res://shaders/pbf/"
 const STAGES: Array[String] = [
-	"predict", "grid_clear", "grid_count", "grid_scan", "grid_scan_blocks",
+	"grid_clear", "predict", "grid_scan", "grid_scan_blocks",
 	"grid_add_back", "grid_scatter", "lambda", "delta", "apply",
-	"finalize", "vorticity_omega", "vorticity_apply", "viscosity", "write_tex",
+	"vorticity_omega", "vorticity_apply", "viscosity",
 ]
 const WG := 256
 
@@ -26,6 +26,7 @@ var mode := 0.0
 
 var tex_width := 256
 var initialized := false
+var profiling := false
 
 var _rd: RenderingDevice
 var _shaders := {}
@@ -35,6 +36,9 @@ var _buffers := {}
 var _tex_rid := RID()
 var _inv_rest_density := 1.0
 var _seed_data := PackedFloat32Array()
+var _parity := 0
+var _timings := {}
+var _timings_mutex := Mutex.new()
 
 
 func get_position_tex_rid() -> RID:
@@ -80,15 +84,16 @@ func init_render() -> void:
 		push_error("PBF seed size mismatch: %d != %d" % [seed_bytes.size(), vec4_bytes])
 		return
 
-	_buffers["positions"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_buffers["positions_a"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_buffers["positions_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["velocities"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
-	_buffers["predicted"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_buffers["predicted_a"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_buffers["predicted_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["lambdas"] = _rd.storage_buffer_create(n * 4, zero_f)
 	_buffers["deltas"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["cell_count"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["cell_start"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["block_sums"] = _rd.storage_buffer_create(num_blocks * 4, zero_blocks)
-	_buffers["sorted_indices"] = _rd.storage_buffer_create(n * 4, zero_f)
 	_buffers["densities"] = _rd.storage_buffer_create(n * 4, zero_f)
 
 	var fmt := RDTextureFormat.new()
@@ -102,56 +107,126 @@ func init_render() -> void:
 	_tex_rid = _rd.texture_create(fmt, RDTextureView.new(), [])
 	_rd.texture_clear(_tex_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
 
-	var buffer_order: Array[String] = [
-		"positions", "velocities", "predicted", "lambdas", "deltas",
-		"cell_count", "cell_start", "block_sums", "sorted_indices", "densities",
+	# Bindings 0/2 = src (canonical order), 8/11 = dst (cell-sorted this frame);
+	# parity swaps src and dst each step.
+	var binding_orders := [
+		["positions_a", "velocities", "predicted_a", "lambdas", "deltas",
+			"cell_count", "cell_start", "block_sums", "positions_b", "densities",
+			"", "predicted_b"],
+		["positions_b", "velocities", "predicted_b", "lambdas", "deltas",
+			"cell_count", "cell_start", "block_sums", "positions_a", "densities",
+			"", "predicted_a"],
 	]
 	for stage in STAGES:
-		var uniforms: Array[RDUniform] = []
-		for bi in buffer_order.size():
-			var u := RDUniform.new()
-			u.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-			u.binding = bi
-			u.add_id(_buffers[buffer_order[bi]])
-			uniforms.append(u)
-		var tex_u := RDUniform.new()
-		tex_u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-		tex_u.binding = 10
-		tex_u.add_id(_tex_rid)
-		uniforms.append(tex_u)
-		_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders[stage], 0)
+		var sets := []
+		for parity in 2:
+			var uniforms: Array[RDUniform] = []
+			var order: Array = binding_orders[parity]
+			for bi in order.size():
+				var u := RDUniform.new()
+				if bi == 10:
+					u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+					u.add_id(_tex_rid)
+				else:
+					u.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+					u.add_id(_buffers[order[bi]])
+				u.binding = bi
+				uniforms.append(u)
+			sets.append(_rd.uniform_set_create(uniforms, _shaders[stage], 0))
+		_uniform_sets[stage] = sets
 
+	_parity = 0
 	initialized = true
 
 
 func step_render(dt: float) -> void:
 	if not initialized:
 		return
+	_read_timings()
 	var pc := _pack_push_constant(dt)
+	var pc_last := _pack_push_constant(dt)
+	pc_last.encode_s32(104, 1)
 	var n_groups := ceili(float(particle_count) / WG)
 	var cells := grid_dims.x * grid_dims.y * grid_dims.z
 	var cell_groups := ceili(float(cells) / WG)
 
+	_rd.capture_timestamp("pbf/start")
 	var cl := _rd.compute_list_begin()
-	_dispatch(cl, "predict", pc, n_groups)
 	_dispatch(cl, "grid_clear", pc, cell_groups)
-	_dispatch(cl, "grid_count", pc, n_groups)
+	_dispatch(cl, "predict", pc, n_groups)
 	_dispatch(cl, "grid_scan", pc, cell_groups)
 	_dispatch(cl, "grid_scan_blocks", pc, 1)
 	_dispatch(cl, "grid_add_back", pc, cell_groups)
-	_dispatch(cl, "grid_clear", pc, cell_groups)
 	_dispatch(cl, "grid_scatter", pc, n_groups)
+	cl = _mark(cl, "pbf/grid")
 	for _iter in solver_iterations:
 		_dispatch(cl, "lambda", pc, n_groups)
+		cl = _mark(cl, "pbf/lambda")
 		_dispatch(cl, "delta", pc, n_groups)
-		_dispatch(cl, "apply", pc, n_groups)
-	_dispatch(cl, "finalize", pc, n_groups)
+		cl = _mark(cl, "pbf/delta")
+		var last := _iter == solver_iterations - 1
+		_dispatch(cl, "apply", pc_last if last else pc, n_groups)
+		cl = _mark(cl, "pbf/apply")
 	if vorticity_eps > 0.0:
 		_dispatch(cl, "vorticity_omega", pc, n_groups)
 		_dispatch(cl, "vorticity_apply", pc, n_groups)
 	_dispatch(cl, "viscosity", pc, n_groups)
-	_dispatch(cl, "write_tex", pc, n_groups)
 	_rd.compute_list_end()
+	_rd.capture_timestamp("pbf/end")
+	_parity = 1 - _parity
+
+
+# Timestamps cannot be captured inside an open compute list; split the list
+# at group boundaries when profiling (the render graph re-merges adjacent lists).
+func _mark(cl: int, name: String) -> int:
+	if not profiling:
+		return cl
+	_rd.compute_list_end()
+	_rd.capture_timestamp(name)
+	return _rd.compute_list_begin()
+
+
+# Render thread. Reads last frame's timestamps: each pbf/* marker closes the
+# segment started by the previous pbf/* marker; repeated names sum across iterations.
+func _read_timings() -> void:
+	var out := {}
+	var prev_time := 0
+	var start_time := 0
+	var in_chain := false
+	for i in _rd.get_captured_timestamps_count():
+		var nm := _rd.get_captured_timestamp_name(i)
+		if not nm.begins_with("pbf/"):
+			continue
+		var t := _rd.get_captured_timestamp_gpu_time(i)
+		if nm == "pbf/start":
+			start_time = t
+			prev_time = t
+			in_chain = true
+			continue
+		if not in_chain:
+			continue
+		var seg := nm.trim_prefix("pbf/")
+		if seg == "end":
+			out["total"] = float(t - start_time) / 1e6
+			if profiling:
+				out["post"] = out.get("post", 0.0) + float(t - prev_time) / 1e6
+			in_chain = false
+		else:
+			out[seg] = out.get(seg, 0.0) + float(t - prev_time) / 1e6
+		prev_time = t
+	if out.is_empty():
+		return
+	_timings_mutex.lock()
+	_timings = out
+	_timings_mutex.unlock()
+
+
+# Main thread. GPU times in milliseconds, lagging 1-2 frames.
+func get_timings() -> Dictionary:
+	_timings_mutex.lock()
+	var copy := _timings.duplicate()
+	_timings_mutex.unlock()
+	return copy
 
 
 func free_render() -> void:
@@ -159,8 +234,9 @@ func free_render() -> void:
 	if _rd == null:
 		return
 	for stage in _uniform_sets:
-		if _uniform_sets[stage].is_valid():
-			_rd.free_rid(_uniform_sets[stage])
+		for s in _uniform_sets[stage]:
+			if s.is_valid():
+				_rd.free_rid(s)
 	for key in _buffers:
 		if _buffers[key].is_valid():
 			_rd.free_rid(_buffers[key])
@@ -181,7 +257,7 @@ func free_render() -> void:
 
 func _dispatch(cl: int, stage: String, pc: PackedByteArray, groups: int) -> void:
 	_rd.compute_list_bind_compute_pipeline(cl, _pipelines[stage])
-	_rd.compute_list_bind_uniform_set(cl, _uniform_sets[stage], 0)
+	_rd.compute_list_bind_uniform_set(cl, _uniform_sets[stage][_parity], 0)
 	_rd.compute_list_set_push_constant(cl, pc, pc.size())
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_add_barrier(cl)

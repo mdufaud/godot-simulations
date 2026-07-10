@@ -1,33 +1,38 @@
 extends Control
-## Main menu controller
+## Main menu controller — buttons generated dynamically from GameManager.DEMOS
 
-@onready var ssr_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/SSRDemoBtn
-@onready var water_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/WaterDemoBtn
-@onready var fire_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/FireDemoBtn
-@onready var dice_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/DiceDemoBtn
-@onready var grass_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/GrassDemoBtn
-@onready var parallax_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/ParallaxDemoBtn
-@onready var fluid_btn: Button = $CenterContainer/VBoxContainer/ButtonsContainer/FluidDemoBtn
-@onready var exit_btn: Button = $CenterContainer/VBoxContainer/BottomButtons/ExitBtn
+@onready var grid: GridContainer = %GridContainer
+@onready var exit_btn: Button = %ExitBtn
 @onready var particles_bg: GPUParticles2D = $ParticlesBG
 
 
 func _ready() -> void:
 	_setup_background_particles()
+	_build_demo_buttons()
 	
-	ssr_btn.pressed.connect(func(): GameManager.load_demo("ssr_demo"))
-	water_btn.pressed.connect(func(): GameManager.load_demo("water_demo"))
-	fire_btn.pressed.connect(func(): GameManager.load_demo("fire_demo"))
-	dice_btn.pressed.connect(func(): GameManager.load_demo("dice_demo"))
-	grass_btn.pressed.connect(func(): GameManager.load_demo("grass_demo"))
-	parallax_btn.pressed.connect(func(): GameManager.load_demo("parallax_demo"))
-	fluid_btn.pressed.connect(func(): GameManager.load_demo("fluid_demo"))
 	exit_btn.pressed.connect(func(): GameManager.quit_game())
+	exit_btn.mouse_entered.connect(_on_button_hover.bind(exit_btn))
+	exit_btn.mouse_exited.connect(_on_button_exit.bind(exit_btn))
 
-	# Button hover animations
-	for btn in [ssr_btn, water_btn, fire_btn, dice_btn, grass_btn, parallax_btn, fluid_btn, exit_btn]:
+
+func _build_demo_buttons() -> void:
+	for demo: Dictionary in GameManager.DEMOS:
+		var btn := Button.new()
+		btn.text = "%s  %s" % [demo.icon, demo.title]
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.custom_minimum_size = Vector2(0, 60)
+		btn.text_overrun_behavior = TextServer.OVERRUN_NO_TRIMMING
+		btn.clip_text = true
+		
+		# Connect to the right demo
+		var key: String = demo.key
+		btn.pressed.connect(func(): GameManager.load_demo(key))
+		
+		# Hover animation
 		btn.mouse_entered.connect(_on_button_hover.bind(btn))
 		btn.mouse_exited.connect(_on_button_exit.bind(btn))
+		
+		grid.add_child(btn)
 
 
 func _setup_background_particles() -> void:

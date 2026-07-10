@@ -7,9 +7,13 @@ void main() {
 	vec3 vi = velocities.data[i].xyz;
 	vec3 omega = vec3(0.0);
 	FOREACH_NEIGHBOR(pi,
-		vec3 vij = velocities.data[j].xyz - vi;
 		vec3 d = pi - positions.data[j].xyz;
-		omega += cross(vij, spiky_grad(d, length(d)));
+		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		vec3 vij = velocities.data[j].xyz - vi;
+		omega += cross(vij, spiky_grad_r2(d, r2));
 	)
 	omega *= params.solver.w;
 	predicted.data[i] = vec4(omega, length(omega));

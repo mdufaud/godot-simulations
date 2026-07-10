@@ -3,8 +3,10 @@ void main() {
 	if (i >= uint(params.grid_dims.w)) {
 		return;
 	}
-	vec3 v = velocities.data[i].xyz + params.gravity.xyz * params.solver.x;
-	vec3 p = positions.data[i].xyz + v * params.solver.x;
-	velocities.data[i] = vec4(v, 0.0);
-	predicted.data[i] = vec4(clamp_domain(p), 0.0);
+	// deltas carries last frame's post-viscosity velocity across frames
+	vec3 v = deltas.data[i].xyz + params.gravity.xyz * params.solver.x;
+	vec3 p = positions_src.data[i].xyz + v * params.solver.x;
+	vec3 p_pred = clamp_domain(p);
+	predicted_src.data[i] = vec4(p_pred, 0.0);
+	atomicAdd(cell_count.data[cell_index(cell_of(p_pred))], 1u);
 }

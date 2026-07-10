@@ -12,10 +12,13 @@ void main() {
 		}
 		vec3 d = pi - predicted.data[j].xyz;
 		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
 		float w = poly6(r2);
 		float wq = w * params.scorr.y;
 		float scorr = -params.scorr.x * wq * wq * wq * wq;
-		dp += (li + lambdas.data[j] + scorr) * spiky_grad(d, sqrt(r2));
+		dp += (li + lambdas.data[j] + scorr) * spiky_grad_r2(d, r2);
 	)
 	deltas.data[i] = vec4(dp * params.solver.w, 0.0);
 }

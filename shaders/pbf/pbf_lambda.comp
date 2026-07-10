@@ -10,8 +10,11 @@ void main() {
 	FOREACH_NEIGHBOR(pi,
 		vec3 d = pi - predicted.data[j].xyz;
 		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
 		density += poly6(r2);
-		vec3 g = spiky_grad(d, sqrt(r2)) * params.solver.w;
+		vec3 g = spiky_grad_r2(d, r2) * params.solver.w;
 		grad_i += g;
 		if (j != i) {
 			sum_grad2 += dot(g, g);

@@ -1,8 +1,0 @@
-void main() {
-	uint i = gl_GlobalInvocationID.x;
-	if (i >= uint(params.grid_dims.w)) {
-		return;
-	}
-	uint c = cell_index(cell_of(predicted.data[i].xyz));
-	atomicAdd(cell_count.data[c], 1u);
-}
