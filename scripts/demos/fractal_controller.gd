@@ -110,6 +110,10 @@ var _mouse_down := false
 var _is_dragging := false
 var _drag_start := Vector2.ZERO
 
+# --- Touch ---
+var _touch_points := {}       # index → position (Vector2)
+var _prev_pinch_distance := 0.0
+
 # --- UI ---
 var _lbl_zoom: Label
 var _lbl_iters: Label
@@ -189,6 +193,12 @@ func _iterations_full() -> int:
 # ============================================================
 
 func _gui_input(event: InputEvent) -> void:
+	# A live finger also emits emulated mouse events; without this guard a
+	# one-finger drag pans twice on mobile, and pinching pans while zooming.
+	if not _touch_points.is_empty() \
+			and (event is InputEventMouseButton or event is InputEventMouseMotion):
+		return
+
 	if event is InputEventMouseButton:
 		var btn := event as InputEventMouseButton
 		if btn.button_index == MOUSE_BUTTON_LEFT:
@@ -211,8 +221,32 @@ func _gui_input(event: InputEvent) -> void:
 			_is_dragging = true
 		_pan_by(motion.relative)
 
+	# ── Touch: one finger = pan, two fingers = pinch-to-zoom ─────────────
+	elif event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		if touch.pressed:
+			_touch_points[touch.index] = touch.position
+		else:
+			_touch_points.erase(touch.index)
+		if _touch_points.size() == 2:
+			var pts := _touch_points.values()
+			_prev_pinch_distance = (pts[0] as Vector2).distance_to(pts[1] as Vector2)
+
 	elif event is InputEventScreenDrag:
-		_pan_by((event as InputEventScreenDrag).relative)
+		var drag := event as InputEventScreenDrag
+		_touch_points[drag.index] = drag.position
+
+		if _touch_points.size() < 2:
+			_pan_by(drag.relative)
+		else:
+			var pts := _touch_points.values()
+			var a := pts[0] as Vector2
+			var b := pts[1] as Vector2
+			var cur := a.distance_to(b)
+			# Spreading the fingers by a factor f zooms in by ln(f) in log space.
+			if _prev_pinch_distance > 1.0 and cur > 1.0:
+				_zoom_at(log(cur / _prev_pinch_distance), (a + b) * 0.5)
+			_prev_pinch_distance = cur
 
 
 func _pan_by(rel: Vector2) -> void:
@@ -224,6 +258,10 @@ func _pan_by(rel: Vector2) -> void:
 
 
 func _on_wheel(dir: float, pos: Vector2) -> void:
+	_zoom_at(dir * ZOOM_STEP, pos)
+
+
+func _zoom_at(d_log: float, pos: Vector2) -> void:
 	var u := pos.x / size.x
 	var v := pos.y / size.y
 	_anchor_wx = _world_x_at(u)
@@ -231,7 +269,7 @@ func _on_wheel(dir: float, pos: Vector2) -> void:
 	_anchor_u = u
 	_anchor_v = v
 	_anchor_active = not _auto_on
-	_t_log_zoom = clampf(_t_log_zoom + dir * ZOOM_STEP, _min_log_zoom(), _max_log_zoom())
+	_t_log_zoom = clampf(_t_log_zoom + d_log, _min_log_zoom(), _max_log_zoom())
 
 
 func _update_motion(delta: float) -> void:

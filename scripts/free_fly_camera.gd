@@ -10,6 +10,7 @@ extends Node3D
 
 # --- Look ---
 @export var mouse_sensitivity := 0.15
+@export var touch_sensitivity := 0.2
 @export var min_pitch := -89.0
 @export var max_pitch := 89.0
 @export var fov := 70.0
@@ -29,6 +30,8 @@ var velocity := Vector3.ZERO
 
 var _captured := false
 var _camera: Camera3D
+var _touch_ui := false
+var _joystick: VirtualJoystick
 
 
 func _ready() -> void:
@@ -36,7 +39,12 @@ func _ready() -> void:
 	if _camera:
 		_camera.fov = fov
 	_update_transform()
-	capture_mouse()
+	# Touch devices have no mouse to capture: joystick moves, free drag looks.
+	_touch_ui = VirtualJoystick.is_touch_ui()
+	if _touch_ui:
+		_joystick = VirtualJoystick.spawn(self)
+	else:
+		capture_mouse()
 
 
 func _find_camera() -> Camera3D:
@@ -62,6 +70,8 @@ func is_captured() -> bool:
 
 
 func _input(event: InputEvent) -> void:
+	if _touch_ui:
+		return
 	if event.is_action_pressed("ui_cancel"):
 		if _captured:
 			release_mouse()
@@ -89,6 +99,16 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if _touch_ui:
+		# Any drag reaching here is a look drag: the joystick consumes its own
+		# finger through the GUI, so it never shows up as unhandled.
+		if event is InputEventScreenDrag:
+			var drag := event as InputEventScreenDrag
+			yaw -= drag.relative.x * touch_sensitivity
+			pitch = clampf(pitch - drag.relative.y * touch_sensitivity, min_pitch, max_pitch)
+			_update_transform()
+		return
+
 	# Recapture only on clicks the GUI did NOT consume — clicking the menu
 	# (dropdowns, sliders) must never steal the cursor back.
 	if not _captured and event is InputEventMouseButton and event.pressed \
@@ -112,6 +132,10 @@ func _process(delta: float) -> void:
 		if Input.is_action_pressed("move_down"):
 			input_dir.y -= 1
 
+	if _joystick != null:
+		input_dir.x += _joystick.value.x
+		input_dir.z += _joystick.value.y
+
 	# DE-proportional speed (classic fractal-explorer navigation): fast in open
 	# space, slow crawl near detail. This is what sells the sense of scale —
 	# without it the whole fractal flies past in a second and you feel giant.
@@ -124,7 +148,7 @@ func _process(delta: float) -> void:
 	var target := Vector3.ZERO
 	if input_dir != Vector3.ZERO:
 		var basis := Basis.from_euler(Vector3(deg_to_rad(pitch), deg_to_rad(yaw), 0.0))
-		target = (basis * input_dir.normalized()) * speed
+		target = (basis * input_dir.limit_length(1.0)) * speed
 
 	var rate := acceleration if target != Vector3.ZERO else damping
 	velocity = velocity.move_toward(target, rate * delta)
@@ -171,6 +195,10 @@ func set_enabled(enabled: bool) -> void:
 	set_process(enabled)
 	set_process_input(enabled)
 	set_process_unhandled_input(enabled)
+	if _joystick != null:
+		_joystick.visible = enabled
+	if _touch_ui:
+		return
 	if enabled:
 		capture_mouse()
 	else:

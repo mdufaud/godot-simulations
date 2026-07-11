@@ -363,7 +363,9 @@ func _setup_ui() -> void:
 		func(v: float) -> void:
 			_pending_cap = int(v)
 			_cap_debounce = 0.6)
-	menu.add_button("Throw object (LMB)", _throw_from_camera)
+	# On touch there is no LMB: the button is the only way to throw.
+	menu.add_button("Throw object" if VirtualJoystick.is_touch_ui() else "Throw object (LMB)",
+		_throw_from_camera)
 	menu.add_button("Rescatter props", func() -> void: debris_pool.scatter_props())
 	_debris_bar = menu.add_progress_bar("Active debris", float(debris_pool.debris_cap))
 

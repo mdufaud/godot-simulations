@@ -31,6 +31,7 @@ extends Node3D
 # --- Internal state ---
 var _is_dragging := false
 var _camera: Camera3D
+var _joystick: VirtualJoystick
 
 # --- Touch / pinch state ---
 var _touch_points := {}       # index → position (Vector2)
@@ -39,6 +40,8 @@ var _prev_pinch_distance := 0.0
 
 func _ready() -> void:
 	_camera = _find_camera()
+	if enable_movement and VirtualJoystick.is_touch_ui():
+		_joystick = VirtualJoystick.spawn(self)
 	_update_transform()
 
 
@@ -67,21 +70,26 @@ func _process(delta: float) -> void:
 		if Input.is_action_pressed("move_right"):
 			move_dir.x += 1
 
+		if _joystick != null:
+			move_dir.x += _joystick.value.x
+			move_dir.z += _joystick.value.y
+
 		if move_dir != Vector3.ZERO:
-			move_dir = move_dir.normalized()
+			move_dir = move_dir.limit_length(1.0)
 			# Rotation relative au yaw de la caméra (pas au pitch, pour rester au sol)
-			var yaw_rad := deg_to_rad(yaw)
-			var rotated := Vector3(
-				move_dir.x * cos(yaw_rad) - move_dir.z * sin(yaw_rad),
-				0,
-				move_dir.x * sin(yaw_rad) + move_dir.z * cos(yaw_rad)
-			)
+			var rotated := move_dir.rotated(Vector3.UP, deg_to_rad(yaw))
 			target += rotated * move_speed * delta
 
 	_update_transform()
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# A live finger also emits emulated mouse events; without this guard the
+	# same drag rotates the camera twice on mobile.
+	if not _touch_points.is_empty() \
+			and (event is InputEventMouseButton or event is InputEventMouseMotion):
+		return
+
 	# ── Mouse ────────────────────────────────────────────────────────────
 	if event is InputEventMouseButton:
 		var btn := event as InputEventMouseButton
