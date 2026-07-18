@@ -1,0 +1,48 @@
+// Signed-distance field of the planet: a sphere displaced by ridged FBM.
+// Port of DensityCompute.compute (CSMain kernel) from SebLague/Fluid-Planet.
+// Written twice: to a flat float buffer for marching cubes, which only ever reads
+// integer coords, and to a 3D texture for the fluid solver, which needs hardware
+// trilinear filtering to sample the field between texels.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+layout(set = 0, binding = 0, std430) restrict writeonly buffer DensityBuffer {
+	float data[];
+} density_buf;
+
+layout(r32f, set = 0, binding = 1) uniform restrict writeonly image3D density_tex;
+
+layout(push_constant, std430) uniform Params {
+	vec3 world_centre;
+	float radius;
+	vec3 world_size;
+	float noise_scale;
+	vec3 noise_pos_offset;
+	float noise_strength;
+	float lacunarity;
+	float persistence;
+	float noise_offset;
+	int num_layers;
+	uint resolution;
+	uint pad0;
+	uint pad1;
+	uint pad2;
+} pc;
+
+void main() {
+	uvec3 id = gl_GlobalInvocationID;
+	if (any(greaterThanEqual(id, uvec3(pc.resolution)))) {
+		return;
+	}
+
+	vec3 uvw = vec3(id) / float(pc.resolution - 1u);
+	vec3 pos = pc.world_centre + (uvw - 0.5) * pc.world_size;
+
+	float density = length(pos) - pc.radius;
+	density += (ridged_fbm(pc.num_layers, pc.lacunarity, pc.persistence, pc.noise_scale,
+			pos + pc.noise_pos_offset) - pc.noise_offset) * pc.noise_strength;
+
+	uint index = id.z * pc.resolution * pc.resolution + id.y * pc.resolution + id.x;
+	density_buf.data[index] = density;
+	imageStore(density_tex, ivec3(id), vec4(density));
+}

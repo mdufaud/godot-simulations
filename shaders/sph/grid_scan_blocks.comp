@@ -3,13 +3,16 @@ shared uint temp[256];
 void main() {
 	uint lid = gl_LocalInvocationID.x;
 	uint nb = uint(params.misc.y);
-	uint base = lid * 4u;
-	uint local_vals[4];
+	// One workgroup scans the whole block_sums array, so the per-thread span has to
+	// follow the block count. A fixed span of 4 caps the grid at 256 * 4 * 256 cells
+	// -- exactly 64^3 -- and silently leaves the tail unscanned beyond that, which
+	// hands every later stage garbage cell ranges.
+	uint span = (nb + 255u) / 256u;
+	uint base = lid * span;
 	uint sum = 0u;
-	for (uint k = 0u; k < 4u; k++) {
+	for (uint k = 0u; k < span; k++) {
 		uint idx = base + k;
-		local_vals[k] = idx < nb ? block_sums.data[idx] : 0u;
-		sum += local_vals[k];
+		sum += idx < nb ? block_sums.data[idx] : 0u;
 	}
 	temp[lid] = sum;
 	barrier();
@@ -19,11 +22,13 @@ void main() {
 		temp[lid] += t;
 		barrier();
 	}
+	// Spans are disjoint, so re-reading a value just before overwriting it is safe
+	// and saves caching the whole (now variable-length) span in registers.
 	uint run = temp[lid] - sum;
-	for (uint k = 0u; k < 4u; k++) {
+	for (uint k = 0u; k < span; k++) {
 		uint idx = base + k;
 		if (idx < nb) {
-			uint v = local_vals[k];
+			uint v = block_sums.data[idx];
 			block_sums.data[idx] = run;
 			run += v;
 		}

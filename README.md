@@ -1,6 +1,6 @@
 # Physics Playground
 
-A collection of 13 real-time simulation and rendering demos built in Godot 4.6
+A collection of 16 real-time simulation and rendering demos built in Godot 4.6
 (Forward+ renderer, Jolt physics). Most run their solver on the GPU through
 `RenderingDevice` compute shaders.
 
@@ -42,6 +42,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | Heightfield Sand | GPU heightfield with repose-angle flow, dig/pour/smooth brushes |
 | Cloth in the Wind | GPU XPBD cloth driven by the tornado wind field |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
+| Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |
 
 ## Layout
 

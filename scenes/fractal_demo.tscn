@@ -1,7 +1,7 @@
 [gd_scene load_steps=8 format=3 uid="uid://fractal_demo_scene"]
 
-[ext_resource type="Shader" path="res://shaders/fractal.gdshader" id="1_fractal_shader"]
-[ext_resource type="Shader" path="res://shaders/fractal_colorize.gdshader" id="2_colorize_shader"]
+[ext_resource type="Shader" path="res://shaders/fractal/fractal.gdshader" id="1_fractal_shader"]
+[ext_resource type="Shader" path="res://shaders/fractal/fractal_colorize.gdshader" id="2_colorize_shader"]
 [ext_resource type="Script" path="res://scripts/demos/fractal_controller.gd" id="3_fractal_controller"]
 [ext_resource type="PackedScene" uid="uid://sim_menu_component" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
 

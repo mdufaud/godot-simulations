@@ -19,11 +19,21 @@ uniform vec3 tint_color : source_color = vec3(0.05, 0.32, 0.42);
 uniform vec3 sky_zenith : source_color = vec3(0.16, 0.42, 0.75);
 uniform vec3 sky_horizon : source_color = vec3(0.7, 0.8, 0.92);
 uniform vec3 sun_direction = vec3(0.5, -0.45, 0.7);
+// "Up" for the sky gradient. +Y for a flat world; in planet mode the controller
+// feeds the camera's radial up each frame, which is the right up wherever the
+// camera is actually looking.
+uniform vec3 sky_up_axis = vec3(0.0, 1.0, 0.0);
 uniform float sun_sharpness = 500.0;
 uniform float sun_intensity = 12.0;
 uniform float refraction_strength = 0.35;
 uniform float ior = 1.33;
 uniform float mode = 0.0;
+// Planet mode: this quad draws after the atmosphere quad and both read the same
+// pre-transparent screen copy, so the atmosphere cannot fog the water from the
+// outside -- the water has to apply the scattering to itself.
+uniform bool atmosphere_enabled = false;
+
+#include "res://shaders/planet/atmosphere.gdshaderinc"
 
 void vertex() {
 	POSITION = vec4(VERTEX.xy, 1.0, 1.0);
@@ -76,9 +86,11 @@ vec3 snell_refract(vec3 in_dir, vec3 n, float ior_a, float ior_b) {
 	return ratio * in_dir + (ratio * cos_in - sqrt(max(1.0 - sin2_t, 0.0))) * n;
 }
 
-// world_dir sampled from an analytic sky gradient plus a sun disc.
-vec3 sample_sky(vec3 world_dir, vec3 to_sun) {
-	float t = clamp(world_dir.y * 0.5 + 0.5, 0.0, 1.0);
+// world_dir sampled from an analytic sky gradient plus a sun disc. The gradient
+// runs along up_axis, which on a planet is radial rather than +Y -- otherwise
+// water near the far side of the sphere reflects horizon colour looking "up".
+vec3 sample_sky(vec3 world_dir, vec3 to_sun, vec3 up_axis) {
+	float t = clamp(dot(world_dir, up_axis) * 0.5 + 0.5, 0.0, 1.0);
 	vec3 sky = mix(sky_horizon, sky_zenith, t);
 	float sun = pow(max(dot(world_dir, to_sun), 0.0), sun_sharpness) * sun_intensity;
 	return sky + vec3(sun);
@@ -155,7 +167,11 @@ void fragment() {
 			if (scene_eye_depth(refr_uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
 				refr_uv = SCREEN_UV;
 			}
+			// Foam is opaque white coverage (SebLague): it goes into what is seen
+			// through the water BEFORE absorption, so froth deep in the body is
+			// attenuated by the water above it instead of showing as hard beads.
 			vec3 scene_col = textureLod(SCREEN_TEXTURE, refr_uv, 0.0).rgb;
+			scene_col = scene_col * (1.0 - foam) + foam;
 			vec3 trans = exp(-absorption * thickness * absorption_scale);
 			vec3 refr_col = scene_col * trans + tint_color * (1.0 - trans);
 
@@ -163,18 +179,35 @@ void fragment() {
 			vec3 refl_view = reflect(in_view, n);
 			vec3 refl_world = normalize((INV_VIEW_MATRIX * vec4(refl_view, 0.0)).xyz);
 			vec3 to_sun = normalize(-sun_direction);
-			vec3 refl_col = sample_sky(refl_world, to_sun);
+			vec3 refl_col = sample_sky(refl_world, to_sun, normalize(sky_up_axis));
 
-			// Foam is opaque white coverage (SebLague): submerged froth tints what
-			// is seen through the water, foam in front of the surface also takes
-			// over the reflection.
-			refr_col = refr_col * (1.0 - foam) + foam;
+			// Foam in front of the surface also takes over the reflection.
 			if (foam_d < fd) {
 				refl_col = refl_col * (1.0 - foam) + foam;
 			}
 
 			ALBEDO = mix(refr_col, refl_col, reflectance);
 			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam);
+		}
+	}
+
+	if (atmosphere_enabled) {
+		// The refracted SCREEN_TEXTURE sample above is the raw, unfogged terrain,
+		// which is what made the water read as bare red rock against a pale limb.
+		// Scattering the finished colour over camera -> surface fixes both that and
+		// the missing aerial perspective. The water body itself holds no air, so
+		// the surface -> riverbed segment is correctly left out.
+		vec2 a_ndc = SCREEN_UV * 2.0 - 1.0;
+		vec4 a_far = INV_PROJECTION_MATRIX * vec4(a_ndc, 1.0, 1.0);
+		vec3 a_dir = normalize((INV_VIEW_MATRIX * vec4(a_far.xyz / a_far.w, 0.0)).xyz);
+		float surf_d = fd > 0.001 ? fd : foam_d;
+		float dist = length(eye_pos_from_depth(SCREEN_UV, surf_d, INV_PROJECTION_MATRIX));
+		vec2 hit = ray_sphere(planet_centre, atmosphere_radius, CAMERA_POSITION_WORLD, a_dir);
+		float through = min(hit.y, dist - hit.x);
+		if (through > 0.0) {
+			const float eps = 0.0001;
+			ALBEDO = calculate_light(CAMERA_POSITION_WORLD + a_dir * (hit.x + eps), a_dir,
+					through - eps * 2.0, ALBEDO, SCREEN_UV, VIEWPORT_SIZE);
 		}
 	}
 }

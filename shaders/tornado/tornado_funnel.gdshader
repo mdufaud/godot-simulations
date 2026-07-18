@@ -3,7 +3,7 @@ shader_type spatial;
 // cull_front keeps the volume visible from inside, blend_mix lets it darken the sky.
 render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabled, fog_disabled;
 
-#include "res://shaders/tornado_wind.gdshaderinc"
+#include "res://shaders/tornado/tornado_wind.gdshaderinc"
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;

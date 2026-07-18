@@ -1,7 +1,7 @@
 [gd_scene load_steps=21 format=3 uid="uid://fire_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/fire_controller.gd" id="1_controller"]
-[ext_resource type="Shader" path="res://shaders/fire.gdshader" id="2_fire_shader"]
+[ext_resource type="Shader" path="res://shaders/fire/fire.gdshader" id="2_fire_shader"]
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="5_orbit_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="6_sim_menu"]
 

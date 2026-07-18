@@ -78,7 +78,7 @@ layout(std430, set = 0, binding = 13) restrict buffer FoamVel {
 foam_vel;
 
 layout(std430, set = 0, binding = 14) restrict buffer FoamCount {
-	uint data[]; // [0] = monotonic spawn cursor (wrapped mod cap for the ring)
+	uint data[]; // [0] = live count, [1] = survivor count being built this frame
 }
 foam_count;
 
@@ -93,6 +93,42 @@ layout(std140, set = 0, binding = 16) uniform FoamParams {
 	ivec4 flags; // x = enabled, yzw = pad
 }
 foam;
+
+// Planet mode. The push constant is already at the 128-byte Vulkan minimum, so
+// these live in their own block. Disabled (flags.x == 0) leaves every call site on
+// the flat-world path: constant gravity and an axis-aligned box.
+layout(std140, set = 0, binding = 17) uniform PlanetParams {
+	vec4 centre; // xyz = planet centre, w = surface gravity magnitude
+	vec4 sdf; // x = field world size, y = collision skin, z = normal offset, w = pad
+	ivec4 flags; // x = enabled, yzw = pad
+}
+planet;
+
+// The planet's marching-cubes density field: negative inside the terrain. This is
+// the same live field the mesh is built from, so the fluid always collides with the
+// surface it can see. A 1x1x1 dummy is bound when planet mode is off.
+layout(set = 0, binding = 18) uniform sampler3D density_field;
+
+// Compaction target. foam_update appends every surviving particle here, then
+// foam_compact copies the run back over the live pool and republishes the render
+// texture. Live particles therefore always occupy slots [0, foam_count[0]) with no
+// holes, which is what lets spawning simply stop at the cap instead of overwriting
+// particles that are still alive.
+layout(std430, set = 0, binding = 19) restrict buffer FoamPosSurvivors {
+	vec4 data[];
+}
+foam_pos_c;
+
+layout(std430, set = 0, binding = 20) restrict buffer FoamVelSurvivors {
+	vec4 data[];
+}
+foam_vel_c;
+
+// Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
+// request, so it can read past the cap for the rest of the frame.
+uint foam_live() {
+	return min(uint(foam.cls.z), foam_count.data[0]);
+}
 
 layout(push_constant, std430) uniform Params {
 	vec4 grid_origin; // xyz = origin, w = cell_size
@@ -152,6 +188,61 @@ vec3 clamp_domain(vec3 p) {
 	vec3 lo = params.grid_origin.xyz + vec3(0.02);
 	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
 	return clamp(p, lo, hi);
+}
+
+bool planet_mode() {
+	return planet.flags.x == 1;
+}
+
+// SebLague pulls gravity from Newtonian point masses with no softening term, which
+// only survives because collision keeps particles off the singularity at the centre.
+// Constant magnitude is stable everywhere and indistinguishable across a thin shell.
+vec3 planet_gravity(vec3 p) {
+	vec3 to_centre = planet.centre.xyz - p;
+	float d = length(to_centre);
+	return d > 1e-5 ? to_centre / d * planet.centre.w : vec3(0.0);
+}
+
+float sample_sdf(vec3 p) {
+	vec3 uvw = (p - planet.centre.xyz) / planet.sdf.x + 0.5;
+	return texture(density_field, uvw).r;
+}
+
+// Central differences at a spacing wider than one texel: with trilinear filtering
+// that is the only smoothing in the pipeline, and it stops particles jittering on
+// texel facet boundaries. The field is a displaced sphere rather than a true SDF,
+// so the gradient is not unit length and the push-out below under-corrects deep hits.
+vec3 sdf_gradient(vec3 p) {
+	float s = planet.sdf.z;
+	vec3 d = vec3(
+		sample_sdf(p + vec3(s, 0.0, 0.0)) - sample_sdf(p - vec3(s, 0.0, 0.0)),
+		sample_sdf(p + vec3(0.0, s, 0.0)) - sample_sdf(p - vec3(0.0, s, 0.0)),
+		sample_sdf(p + vec3(0.0, 0.0, s)) - sample_sdf(p - vec3(0.0, 0.0, s))
+	);
+	return d / (2.0 * s);
+}
+
+// Zero restitution: the normal component of velocity is removed outright rather than
+// reflected, and `friction` scales what tangential motion is left. That is what makes
+// fluid sheet across the terrain instead of bouncing off it. Port of
+// ResolveCollisionsSDF in SebLague's FluidSim.compute.
+void resolve_planet_collision(inout vec3 p, inout vec3 v, float friction) {
+	float dst = sample_sdf(p) - planet.sdf.y;
+	if (dst < 0.0) {
+		vec3 grad = sdf_gradient(p);
+		float len = length(grad);
+		vec3 up = len > 1e-6 ? grad / len : normalize(p - planet.centre.xyz);
+		// SebLague pushes out by the stored value alone. That lands short here,
+		// because a sphere displaced by FBM is not a unit-gradient SDF -- the value
+		// is scaled by |grad|. Dividing it back out puts particles on the surface
+		// instead of a fraction of a cell under it. Clamped: near-flat regions of
+		// the field would otherwise fling a particle across the planet.
+		p += up * (-dst / clamp(len, 0.5, 4.0));
+		if (dot(v, up) < 0.0) {
+			v -= up * dot(up, v);
+			v *= friction;
+		}
+	}
 }
 
 float remap01(float v, float lo, float hi) {

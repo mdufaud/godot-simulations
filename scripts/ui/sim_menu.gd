@@ -19,6 +19,15 @@ extends PanelContainer
 ## Widgets are appended to _current when a group is open, else to _content.
 var _current: Control = null
 
+## Section under which widget values are stored. Defaults to the running demo key.
+@export var persist_id: String = ""
+
+## persist key -> {node, cb, kind}. Keys are "<section>/<label>", so two widgets
+## named "Enabled" under different sections stay distinct.
+var _entries: Dictionary = {}
+var _section: String = "General"
+var _restored := false
+
 
 func _host() -> Node:
 	return _current if _current != null else _content
@@ -27,6 +36,55 @@ func _host() -> Node:
 func _ready() -> void:
 	_title_label.text = title
 	_back_button.pressed.connect(_on_back_pressed)
+	if persist_id.is_empty():
+		persist_id = GameManager.current_demo
+	if persist_id.is_empty():
+		persist_id = get_tree().current_scene.scene_file_path.get_file().get_basename()
+	_restore_all.call_deferred()
+
+
+## Widgets are built from the controller's _ready(), which runs after ours, so the
+## first restore is deferred. Anything registered later restores immediately.
+func _restore_all() -> void:
+	_restored = true
+	for key in _entries:
+		_restore_one(key)
+
+
+func _restore_one(key: String) -> void:
+	if not UserSettings.has_sim_value(persist_id, key):
+		return
+	var stored: Variant = UserSettings.get_sim_value(persist_id, key, null)
+	var entry: Dictionary = _entries[key]
+	var node: Control = entry.node
+	match entry.kind:
+		"slider":
+			node.value = float(stored)  # emits value_changed -> callback + label
+		"toggle":
+			node.button_pressed = bool(stored)  # emits toggled -> callback
+		"option":
+			var index := int(stored)
+			if index >= 0 and index < node.item_count and index != node.selected:
+				node.select(index)
+				entry.cb.call(index)
+		"color":
+			var color: Color = stored
+			if color != node.color:
+				node.color = color
+				entry.cb.call(color)
+
+
+func _register(label_text: String, node: Control, cb: Callable, kind: String) -> String:
+	var base := "%s/%s" % [_section, label_text]
+	var key := base
+	var suffix := 2
+	while _entries.has(key):
+		key = "%s#%d" % [base, suffix]
+		suffix += 1
+	_entries[key] = {node = node, cb = cb, kind = kind}
+	if _restored:
+		_restore_one(key)
+	return key
 
 
 func _process(_delta: float) -> void:
@@ -38,6 +96,7 @@ func _on_back_pressed() -> void:
 
 
 func add_section(text: String) -> Label:
+	_section = text
 	var label := Label.new()
 	label.text = text
 	label.add_theme_font_size_override("font_size", 16)
@@ -88,6 +147,10 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 		cb.call(value)
 		value_label.text = "%.2f" % value
 	)
+	var key := _register(label_text, slider, cb, "slider")
+	slider.value_changed.connect(func(value: float) -> void:
+		UserSettings.set_sim_value(persist_id, key, value)
+	)
 	return slider
 
 
@@ -97,6 +160,10 @@ func add_toggle(label_text: String, default_val: bool, cb: Callable) -> CheckBut
 	toggle.button_pressed = default_val
 	toggle.toggled.connect(cb)
 	_host().add_child(toggle)
+	var key := _register(label_text, toggle, cb, "toggle")
+	toggle.toggled.connect(func(on: bool) -> void:
+		UserSettings.set_sim_value(persist_id, key, on)
+	)
 	return toggle
 
 
@@ -125,6 +192,10 @@ func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> C
 	hbox.add_child(picker)
 
 	picker.color_changed.connect(cb)
+	var key := _register(label_text, picker, cb, "color")
+	picker.color_changed.connect(func(color: Color) -> void:
+		UserSettings.set_sim_value(persist_id, key, color)
+	)
 	return picker
 
 
@@ -173,4 +244,8 @@ func add_option_button(label_text: String, items: Array, default_idx: int, cb: C
 		option.select(default_idx)
 	option.item_selected.connect(cb)
 	hbox.add_child(option)
+	var key := _register(label_text, option, cb, "option")
+	option.item_selected.connect(func(index: int) -> void:
+		UserSettings.set_sim_value(persist_id, key, index)
+	)
 	return option

@@ -1,0 +1,33 @@
+// Second half of the white-particle frame (SebLague: WhiteParticlePrepareNextFrame).
+// Copies the survivors foam_update appended back over the live pool, then adopts the
+// survivor count as the new live count. Runs over the whole pool rather than the live
+// run because the render texture has to be cleared past the survivors as well --
+// leaving those texels alone would keep drawing last frame's dead particles forever.
+void main() {
+	uint s = gl_GlobalInvocationID.x;
+	uint cap = uint(foam.cls.z);
+	if (s >= cap) {
+		return;
+	}
+	uint survivors = min(cap, foam_count.data[1]);
+	uint fw = uint(foam.cls.w);
+	ivec2 tx = ivec2(int(s % fw), int(s / fw));
+
+	if (s < survivors) {
+		vec4 fp = foam_pos_c.data[s];
+		vec4 fv = foam_vel_c.data[s];
+		foam_pos.data[s] = fp;
+		foam_vel.data[s] = fv;
+		// Fade by shrinking rather than by alpha: constant-size sprites read as
+		// beads, shrinking ones read as dissolving froth.
+		float dissolve = clamp(fp.w / max(foam.render.x, 1e-4), 0.0, 1.0);
+		float vel_scale = mix(0.6, 1.0, remap01(length(fv.xyz), 1.0, 3.0));
+		imageStore(foam_tex, tx, vec4(fp.xyz, dissolve * fv.w * vel_scale));
+	} else {
+		imageStore(foam_tex, tx, vec4(0.0));
+	}
+
+	if (s == 0u) {
+		foam_count.data[0] = survivors;
+	}
+}

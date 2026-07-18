@@ -1,0 +1,139 @@
+// Marching cubes over the density buffer. Port of MarchingCubes.compute from
+// SebLague/Fluid-Planet, with the AppendStructuredBuffer replaced by a plain
+// storage buffer plus an atomic counter (RenderingDevice has no append buffers).
+// Output is a triangle soup; positions and gradient normals both come out here so
+// the CPU only has to copy, never to derive.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+struct Vertex {
+	vec4 position;  // w unused, keeps std430 alignment simple
+	vec4 normal;
+};
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer DensityBuffer {
+	float data[];
+} density_buf;
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer TriangleBuffer {
+	Vertex verts[];
+} tri_buf;
+
+layout(set = 0, binding = 2, std430) restrict buffer CounterBuffer {
+	uint triangle_count;
+} counter;
+
+// Layout: [0,256) config -> start index, [256,512) config -> index count,
+// [512, 512+2460) flat edge-index runs. See scripts/planet/mc_tables.gd.
+layout(set = 0, binding = 3, std430) restrict readonly buffer TableBuffer {
+	int data[];
+} tables;
+
+layout(push_constant, std430) uniform Params {
+	vec3 scale;
+	float iso_level;
+	uint resolution;
+	uint max_triangles;
+	uint pad0;
+	uint pad1;
+} pc;
+
+const int TABLE_LENGTHS_BASE = 256;
+const int TABLE_TRIANGULATION_BASE = 512;
+
+const int CORNER_A_FROM_EDGE[12] = int[12](0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3);
+const int CORNER_B_FROM_EDGE[12] = int[12](1, 2, 3, 0, 5, 6, 7, 4, 4, 5, 6, 7);
+
+vec3 coord_to_world(ivec3 coord) {
+	return (vec3(coord) / float(pc.resolution - 1u)) - 0.5;
+}
+
+float sample_density(ivec3 coord) {
+	// Clamp the volume shut at the borders so the surface never leaves the box open.
+	if (any(lessThanEqual(coord, ivec3(0))) || any(greaterThanEqual(coord, ivec3(int(pc.resolution) - 1)))) {
+		return pc.iso_level;
+	}
+	int res = int(pc.resolution);
+	return density_buf.data[coord.z * res * res + coord.y * res + coord.x];
+}
+
+vec3 calculate_normal(ivec3 coord) {
+	float dx = sample_density(coord + ivec3(1, 0, 0)) - sample_density(coord - ivec3(1, 0, 0));
+	float dy = sample_density(coord + ivec3(0, 1, 0)) - sample_density(coord - ivec3(0, 1, 0));
+	float dz = sample_density(coord + ivec3(0, 0, 1)) - sample_density(coord - ivec3(0, 0, 1));
+	return normalize(vec3(dx, dy, dz));
+}
+
+// The vertex lies somewhere along the edge between the two corners; where exactly
+// is where the density crosses the iso level.
+Vertex create_vertex(ivec3 coord_a, ivec3 coord_b) {
+	vec3 pos_a = coord_to_world(coord_a);
+	vec3 pos_b = coord_to_world(coord_b);
+	float density_a = sample_density(coord_a);
+	float density_b = sample_density(coord_b);
+
+	float t = (pc.iso_level - density_a) / (density_b - density_a);
+	vec3 position = pos_a + t * (pos_b - pos_a);
+
+	vec3 normal_a = calculate_normal(coord_a);
+	vec3 normal_b = calculate_normal(coord_b);
+	vec3 normal = normalize(normal_a + t * (normal_b - normal_a));
+
+	Vertex v;
+	v.position = vec4(position * pc.scale, 0.0);
+	v.normal = vec4(normal, 0.0);
+	return v;
+}
+
+void main() {
+	int num_cubes = int(pc.resolution) - 1;
+	ivec3 coord = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThanEqual(coord, ivec3(num_cubes)))) {
+		return;
+	}
+
+	ivec3 corner_coords[8];
+	corner_coords[0] = coord + ivec3(0, 0, 0);
+	corner_coords[1] = coord + ivec3(1, 0, 0);
+	corner_coords[2] = coord + ivec3(1, 0, 1);
+	corner_coords[3] = coord + ivec3(0, 0, 1);
+	corner_coords[4] = coord + ivec3(0, 1, 0);
+	corner_coords[5] = coord + ivec3(1, 1, 0);
+	corner_coords[6] = coord + ivec3(1, 1, 1);
+	corner_coords[7] = coord + ivec3(0, 1, 1);
+
+	// One bit per corner, set when that corner is below the surface. 256 possible
+	// configurations; 0 is fully outside, 255 fully inside.
+	int config = 0;
+	for (int i = 0; i < 8; i++) {
+		if (sample_density(corner_coords[i]) < pc.iso_level) {
+			config |= (1 << i);
+		}
+	}
+
+	int num_indices = tables.data[TABLE_LENGTHS_BASE + config];
+	if (num_indices == 0) {
+		return;
+	}
+	int offset = tables.data[config];
+
+	for (int i = 0; i < num_indices; i += 3) {
+		uint tri_index = atomicAdd(counter.triangle_count, 1u);
+		if (tri_index >= pc.max_triangles) {
+			return;
+		}
+
+		int e0 = tables.data[TABLE_TRIANGULATION_BASE + offset + i];
+		int e1 = tables.data[TABLE_TRIANGULATION_BASE + offset + i + 1];
+		int e2 = tables.data[TABLE_TRIANGULATION_BASE + offset + i + 2];
+
+		Vertex a = create_vertex(corner_coords[CORNER_A_FROM_EDGE[e0]], corner_coords[CORNER_B_FROM_EDGE[e0]]);
+		Vertex b = create_vertex(corner_coords[CORNER_A_FROM_EDGE[e1]], corner_coords[CORNER_B_FROM_EDGE[e1]]);
+		Vertex c = create_vertex(corner_coords[CORNER_A_FROM_EDGE[e2]], corner_coords[CORNER_B_FROM_EDGE[e2]]);
+
+		// Reversed winding, as in the original.
+		tri_buf.verts[tri_index * 3u] = c;
+		tri_buf.verts[tri_index * 3u + 1u] = b;
+		tri_buf.verts[tri_index * 3u + 2u] = a;
+	}
+}

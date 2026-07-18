@@ -10,7 +10,7 @@ path="res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mes
 
 files=["res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh"]
 
-source_file="res://resources/grass_blade.obj"
+source_file="res://resources/grass/grass_blade.obj"
 dest_files=["res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh", "res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh"]
 
 [params]

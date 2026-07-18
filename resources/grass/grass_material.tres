@@ -1,6 +1,6 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://grass_material"]
 
-[ext_resource type="Shader" path="res://shaders/grass.gdshader" id="1_shader"]
+[ext_resource type="Shader" path="res://shaders/grass/grass.gdshader" id="1_shader"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_clump"]
 noise_type = 2

@@ -1,6 +1,6 @@
 [gd_scene load_steps=10 format=3 uid="uid://c1ssr_physics_demo"]
 
-[ext_resource type="Script" path="res://scripts/physics_spawner.gd" id="1_spawner"]
+[ext_resource type="Script" path="res://scripts/demos/physics_spawner.gd" id="1_spawner"]
 [ext_resource type="LabelSettings" path="res://resources/title_label_settings.tres" id="2_label_settings"]
 [ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
 

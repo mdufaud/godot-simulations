@@ -58,6 +58,9 @@ var settings: Dictionary = {
 	"forest_tree_density": 1.0,
 	"forest_grass_density": 0.6,
 	"forest_render_scale": 0.5,  # FSR2 upscale factor in photoreal (user's perf lever)
+
+	# Planet demo
+	"planet_resolution": 0,  # marching-cubes density grid side; 0 = pick from platform
 }
 
 const SCENES := {
@@ -77,6 +80,7 @@ const SCENES := {
 	"destruction_demo": "res://scenes/destruction_demo.tscn",
 	"non_euclidean_demo": "res://scenes/non_euclidean_demo.tscn",
 	"forest_demo": "res://scenes/forest_demo.tscn",
+	"planet_demo": "res://scenes/planet_demo.tscn",
 }
 
 ## Ordered list of categories shown on the main menu accordion.
@@ -105,6 +109,7 @@ const DEMOS: Array[Dictionary] = [
 	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid"},
 	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪", category = "other"},
 	{key = "forest_demo",   title = "Forest Walk",          icon = "🌲", category = "other"},
+	{key = "planet_demo",   title = "Procedural Planet",    icon = "🪐", category = "other"},
 ]
 
 

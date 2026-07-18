@@ -7,17 +7,15 @@
 // Publishes xyz = position, w = render size (0 = dead, the billboard collapses).
 void main() {
 	uint s = gl_GlobalInvocationID.x;
-	uint cap = uint(foam.cls.z);
-	if (s >= cap) {
+	// Only the live run is walked: dead slots were dropped by the last compaction
+	// and everything past the run is stale data nobody reads.
+	if (s >= foam_live()) {
 		return;
 	}
-	uint fw = uint(foam.cls.w);
-	ivec2 tx = ivec2(int(s % fw), int(s / fw));
 
 	vec4 fp = foam_pos.data[s];
 	float life = fp.w;
 	if (life <= 0.0) {
-		imageStore(foam_tex, tx, vec4(0.0));
 		return;
 	}
 
@@ -45,13 +43,16 @@ void main() {
 
 	bool is_spray = neighbours <= foam.cls.x;
 	bool is_bubble = neighbours >= foam.cls.y;
+	// Buoyancy is expressed as a multiple of the gravity vector, so it follows the
+	// planet's radial "up" without any further change.
+	vec3 g = planet_mode() ? planet_gravity(p) : params.gravity.xyz;
 	if (is_spray) {
 		float sp2 = dot(v, v);
 		vec3 drag = sp2 > 1e-8 ? -normalize(v) * sp2 * foam.motion.y : vec3(0.0);
-		v += (params.gravity.xyz + drag) * dt;
+		v += (g + drag) * dt;
 	} else if (is_bubble) {
 		// Buoyancy > 1 flips gravity, so bubbles rise.
-		vec3 buoyancy = params.gravity.xyz * (1.0 - foam.motion.x);
+		vec3 buoyancy = g * (1.0 - foam.motion.x);
 		v += (buoyancy + (fluid_v - v) * 3.0) * dt;
 	} else {
 		// Surface foam is carried by the fluid, not merely accelerated by it.
@@ -61,26 +62,39 @@ void main() {
 		life -= dt;
 	}
 
+	// Planet-mode addition of SebLague's own fork: spray with no neighbours at all
+	// has left the fluid for good. On a planet it would otherwise coast on a ballistic
+	// arc for its full lifetime and fill the sky, since only surface foam ages.
+	if (planet_mode() && neighbours == 0) {
+		life -= dt * 5.0;
+	}
+
 	float target_scale = is_bubble ? foam.motion.z : 1.0;
 	scale = mix(scale, target_scale, clamp(dt * foam.motion.w, 0.0, 1.0));
 	p += v * dt;
 
-	vec3 lo = params.grid_origin.xyz + vec3(0.02);
-	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	// Foam keeps almost none of its tangential speed on impact, unlike the fluid.
 	const float bounce = 0.1;
-	if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * bounce; }
-	else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * bounce; }
-	if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * bounce; }
-	else if (p.y > hi.y) { p.y = hi.y; v.y = -v.y * bounce; }
-	if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * bounce; }
-	else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * bounce; }
+	if (planet_mode()) {
+		resolve_planet_collision(p, v, bounce);
+		p = clamp_domain(p);
+	} else {
+		vec3 lo = params.grid_origin.xyz + vec3(0.02);
+		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+		if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * bounce; }
+		else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * bounce; }
+		if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * bounce; }
+		else if (p.y > hi.y) { p.y = hi.y; v.y = -v.y * bounce; }
+		if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * bounce; }
+		else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * bounce; }
+	}
 
-	foam_pos.data[s] = vec4(p, life);
-	foam_vel.data[s] = vec4(v, scale);
-
-	// Fade by shrinking rather than by alpha: constant-size sprites read as
-	// beads, shrinking ones read as dissolving froth.
-	float dissolve = clamp(life / max(foam.render.x, 1e-4), 0.0, 1.0);
-	float vel_scale = mix(0.6, 1.0, remap01(length(v), 1.0, 3.0));
-	imageStore(foam_tex, tx, vec4(p, life > 0.0 ? dissolve * scale * vel_scale : 0.0));
+	// Survivors are appended to the compaction target; the dead are simply not
+	// written, which is what removes them. foam_compact copies the run back and
+	// publishes it to the render texture.
+	if (life > 0.0) {
+		uint d = atomicAdd(foam_count.data[1], 1u);
+		foam_pos_c.data[d] = vec4(p, life);
+		foam_vel_c.data[d] = vec4(v, scale);
+	}
 }

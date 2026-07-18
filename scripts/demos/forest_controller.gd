@@ -12,9 +12,9 @@ const LEAVES_SHADER := preload("res://shaders/forest/tree_leaves.gdshader")
 const IMPOSTOR_SHADER := preload("res://shaders/forest/tree_impostor.gdshader")
 const TreeGen := preload("res://scripts/demos/forest_tree_generator.gd")
 const Lib := preload("res://scripts/demos/forest_scanned_lib.gd")
-const GRASS_MESH_HIGH := preload("res://resources/grass_high.obj")
-const GRASS_MESH_LOW := preload("res://resources/grass_low.obj")
-const GRASS_MAT := preload("res://resources/grass_material.tres")
+const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
+const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
+const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
 
 const SCANNED_CONIFERS: Array[String] = [
 	"pine_tree_01_a", "pine_tree_01_b", "pine_tree_01_c",

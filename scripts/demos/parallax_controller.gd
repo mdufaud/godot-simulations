@@ -136,7 +136,7 @@ func _load_settings() -> void:
 
 func _setup_material() -> void:
 	parallax_material = ShaderMaterial.new()
-	parallax_material.shader = preload("res://shaders/parallax.gdshader")
+	parallax_material.shader = preload("res://shaders/parallax/parallax.gdshader")
 
 
 func _setup_ui() -> void:

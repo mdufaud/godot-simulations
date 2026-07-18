@@ -2,7 +2,7 @@ shader_type particles;
 // Dust/sand advected by the analytic wind field (same math as debris and funnel).
 // skirt_mode 1 = ground debris-cloud bowl, 0 = column sheath.
 
-#include "res://shaders/tornado_wind.gdshaderinc"
+#include "res://shaders/tornado/tornado_wind.gdshaderinc"
 
 uniform int skirt_mode = 0;
 uniform vec3 particle_color : source_color = vec3(0.55, 0.42, 0.28);

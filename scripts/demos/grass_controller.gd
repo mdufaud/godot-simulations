@@ -2,10 +2,10 @@ extends Node3D
 ## Grass shader demo based on GodotGrass (2Retr0/GodotGrass)
 ## Features LOD multimesh system, wind animation, heightmap terrain
 
-const GRASS_MESH_HIGH := preload("res://resources/grass_high.obj")
-const GRASS_MESH_LOW := preload("res://resources/grass_low.obj")
-const GRASS_MAT := preload("res://resources/grass_material.tres")
-const HEIGHTMAP := preload("res://resources/grass_heightmap.tres")
+const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
+const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
+const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
+const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 
 const TILE_SIZE := 10.0
 const MAP_RADIUS := 80.0  # Smaller for demo

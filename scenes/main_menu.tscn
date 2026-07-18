@@ -97,6 +97,12 @@ layout_mode = 2
 theme_override_constants/separation = 20
 alignment = 1
 
+[node name="ClearShaderCacheBtn" type="Button" parent="MarginContainer/VBoxContainer/BottomButtons"]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(220, 45)
+layout_mode = 2
+text = "🧹  Clear Shader Cache"
+
 [node name="ExitBtn" type="Button" parent="MarginContainer/VBoxContainer/BottomButtons"]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(160, 45)

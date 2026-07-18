@@ -5,7 +5,7 @@ shader_type spatial;
 // cull_disabled. Engine fog stays ON: it blends the dipping rim into the horizon.
 render_mode unshaded, blend_mix, cull_disabled, depth_draw_never;
 
-#include "res://shaders/tornado_wind.gdshaderinc"
+#include "res://shaders/tornado/tornado_wind.gdshaderinc"
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform vec3 cloud_color : source_color = vec3(0.36, 0.38, 0.44);

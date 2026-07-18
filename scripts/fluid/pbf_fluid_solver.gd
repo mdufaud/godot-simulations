@@ -56,9 +56,7 @@ func init_render() -> void:
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "pbf_common.comp")
 	for stage in STAGES:
 		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "pbf_" + stage + ".comp")
-		var src := RDShaderSource.new()
-		src.source_compute = "#version 450\n\n" + common + "\n" + stage_src
-		var spirv := _rd.shader_compile_spirv_from_source(src)
+		var spirv := ShaderCache.compile(_rd, "pbf_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("PBF stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return

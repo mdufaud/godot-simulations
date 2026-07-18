@@ -55,9 +55,7 @@ func init_render() -> void:
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "hf_common.comp")
 	for stage in ["flow", "tool"]:
 		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "hf_" + stage + ".comp")
-		var src := RDShaderSource.new()
-		src.source_compute = "#version 450\n\n" + common + "\n" + stage_src
-		var spirv := _rd.shader_compile_spirv_from_source(src)
+		var spirv := ShaderCache.compile(_rd, "hf_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("Sand stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return

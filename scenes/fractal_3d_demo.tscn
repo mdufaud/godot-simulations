@@ -1,10 +1,10 @@
 [gd_scene load_steps=9 format=3 uid="uid://fractal_3d_demo_scene"]
 
-[ext_resource type="Shader" path="res://shaders/fractal_3d.gdshader" id="1_shader"]
+[ext_resource type="Shader" path="res://shaders/fractal_3d/fractal_3d.gdshader" id="1_shader"]
 [ext_resource type="Script" path="res://scripts/demos/fractal_3d_controller.gd" id="2_controller"]
 [ext_resource type="Script" path="res://scripts/free_fly_camera.gd" id="3_free_fly_camera"]
 [ext_resource type="PackedScene" uid="uid://sim_menu_component" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
-[ext_resource type="Shader" path="res://shaders/post_process.gdshader" id="5_post_shader"]
+[ext_resource type="Shader" path="res://shaders/fractal_3d/post_process.gdshader" id="5_post_shader"]
 
 [sub_resource type="BoxMesh" id="BoxMesh_fractal"]
 size = Vector3(100, 100, 100)

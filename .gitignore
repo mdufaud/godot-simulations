@@ -13,3 +13,4 @@ tests/
 .claude
 .reasonix/
 __pycache__/
+tmp/

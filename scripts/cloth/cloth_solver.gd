@@ -76,9 +76,7 @@ func init_render() -> void:
 	for stage in STAGES:
 		if not _spirv_cache.has(stage):
 			var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "cloth_" + stage + ".comp")
-			var src := RDShaderSource.new()
-			src.source_compute = "#version 450\n\n" + common + "\n" + stage_src
-			var spirv := _rd.shader_compile_spirv_from_source(src)
+			var spirv := ShaderCache.compile(_rd, "cloth_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 			if not spirv.compile_error_compute.is_empty():
 				push_error("Cloth stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 				return

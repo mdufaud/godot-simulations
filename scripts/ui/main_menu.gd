@@ -8,6 +8,7 @@ const HEADER_IDLE := Color(0.85, 0.9, 0.95)
 
 @onready var category_list: VBoxContainer = %CategoryList
 @onready var exit_btn: Button = %ExitBtn
+@onready var clear_cache_btn: Button = %ClearShaderCacheBtn
 @onready var particles_bg: GPUParticles2D = $ParticlesBG
 
 var _sections: Array[Dictionary] = []
@@ -24,6 +25,29 @@ func _ready() -> void:
 	exit_btn.pressed.connect(func(): GameManager.quit_game())
 	exit_btn.mouse_entered.connect(_on_button_hover.bind(exit_btn))
 	exit_btn.mouse_exited.connect(_on_button_exit.bind(exit_btn))
+
+	clear_cache_btn.pressed.connect(_on_clear_shader_cache)
+	clear_cache_btn.mouse_entered.connect(_on_button_hover.bind(clear_cache_btn))
+	clear_cache_btn.mouse_exited.connect(_on_button_exit.bind(clear_cache_btn))
+	_update_clear_cache_label()
+
+
+func _update_clear_cache_label() -> void:
+	var count := ShaderCache.file_count()
+	if count == 0:
+		clear_cache_btn.text = "🧹  Shader Cache Empty"
+		clear_cache_btn.disabled = true
+	else:
+		clear_cache_btn.text = "🧹  Clear Shader Cache (%d · %.1f MB)" % [
+			count, ShaderCache.size_bytes() / 1048576.0,
+		]
+		clear_cache_btn.disabled = false
+
+
+func _on_clear_shader_cache() -> void:
+	var removed := ShaderCache.clear()
+	print("Shader cache cleared: %d file(s) removed" % removed)
+	_update_clear_cache_label()
 
 
 func _apply_responsive_width() -> void:

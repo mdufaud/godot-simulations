@@ -8,7 +8,7 @@
 [ext_resource type="PackedScene" path="res://resources/rocks/rock_face_02/rock_face_02_2k.gltf" id="6_rockface"]
 [ext_resource type="PackedScene" path="res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf" id="7_boulder3"]
 [ext_resource type="PackedScene" path="res://resources/rocks/boulder_01/boulder_01_2k.gltf" id="8_boulder1"]
-[ext_resource type="Shader" path="res://shaders/underwater.gdshader" id="9_underwater"]
+[ext_resource type="Shader" path="res://shaders/ocean/underwater.gdshader" id="9_underwater"]
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_underwater"]
 shader = ExtResource("9_underwater")

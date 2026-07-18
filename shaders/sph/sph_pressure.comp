@@ -57,6 +57,11 @@ void main() {
 	if (foam.flags.x != 1 || params.gravity.w > 0.5) {
 		return;
 	}
+	// One thread clears the survivor counter that foam_update will fill at the end
+	// of the frame. Safe from here: foam_update runs in a later dispatch.
+	if (i == 0u) {
+		foam_count.data[1] = 0u;
+	}
 	float air_factor = foam.spawn.x * remap01(trapped_air, foam.spawn.y, foam.spawn.z);
 	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);
 	float spawn_factor = air_factor * ke_factor * params.sim.x;
@@ -69,18 +74,25 @@ void main() {
 	if (rand01(rng) < spawn_factor - float(spawn_count)) {
 		spawn_count++;
 	}
-	spawn_count = min(spawn_count, 8);
 	// A zero-length axis would produce NaN spawn positions.
 	if (spawn_count <= 0 || dot(v, v) < 1e-6) {
 		return;
 	}
+	// Reserve a contiguous run at the end of the live pool. The counter takes the
+	// full request even when the pool is full, so it can read past the cap until
+	// foam_compact resets it -- every consumer clamps with foam_live().
+	uint cap = uint(foam.cls.z);
+	uint base = atomicAdd(foam_count.data[0], uint(spawn_count));
+	if (base + 1u >= cap) {
+		return;
+	}
+	spawn_count = min(spawn_count, int(cap - base - 1u));
 	// Spawn inside a cylinder whose axis is the particle's motion this sub-step.
 	vec3 axis_a = orthonormal(v);
 	vec3 axis_b = normalize(cross(axis_a, v));
 	float radius = params.kernel.x * foam.render.y;
-	uint cap = uint(foam.cls.z);
 	for (int k = 0; k < spawn_count; k++) {
-		uint slot = atomicAdd(foam_count.data[0], 1u) % cap;
+		uint slot = base + uint(k);
 		float ang = rand01(rng) * 6.28318530718;
 		vec3 odir = cos(ang) * axis_a + sin(ang) * axis_b;
 		vec3 base_off = sqrt(rand01(rng)) * radius * odir;
