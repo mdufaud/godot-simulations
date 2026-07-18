@@ -1,0 +1,32 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid.z)) {
+		return;
+	}
+	vec4 pw = positions.data[i];
+	if (pw.w > 0.5) {
+		// Pinned vertex: kinematic, the constraint solve must not move it either.
+		predicted.data[i] = vec4(pw.xyz, 1.0);
+		velocities.data[i] = vec4(0.0);
+		return;
+	}
+	int x = int(i) % params.grid.x;
+	int y = int(i) / params.grid.x;
+
+	vec3 v = velocities.data[i].xyz;
+	vec3 n = cloth_normal(x, y);
+	vec3 v_rel = wind_at(pw.xyz) - v;
+	// Aerodynamic drag on a sheet acts along the normal and scales with the
+	// squared normal component of the relative wind, so a sail edge-on to the
+	// gust barely feels it while a face-on one is slammed.
+	float vn = dot(v_rel, n);
+	vec3 f_aero = params.gravity.w * abs(vn) * vn * n;
+	// A little tangential friction so a grazing gust can still drag the sheet
+	// instead of only pushing it around.
+	f_aero += 0.05 * params.gravity.w * (v_rel - vn * n);
+
+	v += (params.gravity.xyz + f_aero) * params.sim.x;
+	v *= params.sim.z;
+	predicted.data[i] = vec4(pw.xyz + v * params.sim.x, 0.0);
+	velocities.data[i] = vec4(v, 0.0);
+}

@@ -1,0 +1,110 @@
+[gd_scene load_steps=14 format=3 uid="uid://ocean_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/ocean_controller.gd" id="1_controller"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="2_theme"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
+[ext_resource type="PackedScene" path="res://resources/rocks/namaqualand_cliff_01/namaqualand_cliff_01_2k.gltf" id="5_cliff"]
+[ext_resource type="PackedScene" path="res://resources/rocks/rock_face_02/rock_face_02_2k.gltf" id="6_rockface"]
+[ext_resource type="PackedScene" path="res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf" id="7_boulder3"]
+[ext_resource type="PackedScene" path="res://resources/rocks/boulder_01/boulder_01_2k.gltf" id="8_boulder1"]
+[ext_resource type="Shader" path="res://shaders/underwater.gdshader" id="9_underwater"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_underwater"]
+shader = ExtResource("9_underwater")
+
+[sub_resource type="PhysicalSkyMaterial" id="PhysicalSky_ocean"]
+rayleigh_coefficient = 2.0
+mie_coefficient = 0.005
+turbidity = 4.0
+ground_color = Color(0.12, 0.16, 0.2, 1)
+
+[sub_resource type="Sky" id="Sky_ocean"]
+sky_material = SubResource("PhysicalSky_ocean")
+
+[sub_resource type="Environment" id="Environment_ocean"]
+background_mode = 2
+sky = SubResource("Sky_ocean")
+ambient_light_source = 3
+ambient_light_color = Color(0.42, 0.47, 0.55, 1)
+ambient_light_energy = 1.4
+reflected_light_source = 2
+tonemap_mode = 4
+tonemap_exposure = 1.2
+tonemap_white = 1.0
+ssr_enabled = false
+glow_enabled = true
+glow_intensity = 0.25
+glow_bloom = 0.05
+glow_hdr_threshold = 1.2
+fog_enabled = true
+fog_light_color = Color(0.62, 0.72, 0.78, 1)
+fog_density = 0.0004
+fog_aerial_perspective = 0.5
+fog_sky_affect = 0.2
+
+[node name="OceanDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_ocean")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.6
+light_angular_distance = 0.5
+shadow_enabled = true
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("3_orbit_camera")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+current = true
+fov = 65.0
+near = 0.1
+far = 8000.0
+
+[node name="Ocean" type="MeshInstance3D" parent="."]
+cast_shadow = 0
+
+[node name="Rocks" type="Node3D" parent="."]
+
+[node name="SeaStack" parent="Rocks" instance=ExtResource("5_cliff")]
+transform = Transform3D(8.776, 0, 4.794, 0, 10, 0, -4.794, 0, 8.776, -90, -16, -70)
+
+[node name="StackSide" parent="Rocks" instance=ExtResource("6_rockface")]
+transform = Transform3D(-5.826, 0, 12.73, 0, 14, 0, -12.73, 0, -5.826, -128, -12, -38)
+
+[node name="BoulderA" parent="Rocks" instance=ExtResource("7_boulder3")]
+transform = Transform3D(2.899, 0, 7.456, 0, 8, 0, -7.456, 0, 2.899, -52, -7, -38)
+
+[node name="BoulderB" parent="Rocks" instance=ExtResource("7_boulder3")]
+transform = Transform3D(-5.653, 0, 2.01, 0, 6, 0, -2.01, 0, -5.653, -72, -7, -92)
+
+[node name="LoneRock" parent="Rocks" instance=ExtResource("8_boulder1")]
+transform = Transform3D(7.459, 0, 9.4, 0, 12, 0, -9.4, 0, 7.459, 170, -7, 110)
+
+[node name="NearRock" parent="Rocks" instance=ExtResource("8_boulder1")]
+transform = Transform3D(-3.268, 0, -3.784, 0, 5, 0, 3.784, 0, -3.268, 18, -3.5, -24)
+
+[node name="UnderwaterLayer" type="CanvasLayer" parent="."]
+
+[node name="Tint" type="ColorRect" parent="UnderwaterLayer"]
+visible = false
+material = SubResource("ShaderMaterial_underwater")
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Control" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+theme = ExtResource("2_theme")
+
+[node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]
+title = "⚓ FFT Ocean"

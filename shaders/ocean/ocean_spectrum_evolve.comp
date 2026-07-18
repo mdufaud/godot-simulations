@@ -1,0 +1,40 @@
+// Modulates the initial spectrum in time via the dispersion relation and
+// packs 8 real output fields (displacement xyz + 5 derivatives) into
+// NUM_SPECTRA complex sequences — two real signals per IFFT through the
+// conjugate-symmetry trick.
+// Source: Tessendorf; Matusiak - Implementing FFT of Real-Valued Sequences.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    int cascade = params.misc.x;
+    float t = params.foam_p.w;
+
+    vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * 2.0 * PI / params.spectrum_a.x;
+    float k = length(k_vec) + 1e-6;
+    vec2 k_unit = k_vec / k;
+
+    vec4 h0 = imageLoad(spectrum_tex, ivec3(id, cascade)); // xy=h0(k), zw=conj(h0(-k))
+    vec2 modulation = exp_complex(dispersion_relation(k, params.spectrum_b.y) * t);
+    // h respects the complex conjugation property.
+    vec2 h = mul_complex(h0.xy, modulation) + mul_complex(h0.zw, conj_complex(modulation));
+    vec2 h_inv = vec2(-h.y, h.x);
+
+    // Displacement (horizontal choppy offsets + height).
+    vec2 hx = h_inv * k_unit.y;
+    vec2 hy = h;
+    vec2 hz = h_inv * k_unit.x;
+
+    // Gradients via ik products (yx access order follows the reference).
+    vec2 dhy_dx = h_inv * k_vec.y;
+    vec2 dhy_dz = h_inv * k_vec.x;
+    vec2 dhx_dx = -h * k_vec.y * k_unit.y;
+    vec2 dhz_dz = -h * k_vec.x * k_unit.x;
+    vec2 dhz_dx = -h * k_vec.y * k_unit.x;
+
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = vec2(hx.x - hy.y, hx.y + hy.x);
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vec2(hz.x - dhy_dx.y, hz.y + dhy_dx.x);
+    fft_data[FFT_IDX(id.x, id.y, 2, 0)] = vec2(dhy_dz.x - dhx_dx.y, dhy_dz.y + dhx_dx.x);
+    fft_data[FFT_IDX(id.x, id.y, 3, 0)] = vec2(dhz_dz.x - dhz_dx.y, dhz_dz.y + dhz_dx.x);
+}

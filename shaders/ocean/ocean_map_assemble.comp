@@ -1,0 +1,46 @@
+// Unpacks the IFFT outputs into the displacement + normal maps and updates
+// Jacobian-driven foam. The (-1)^(x+y) factor is an ifftshift; we skip the
+// second un-transpose (a 90° rotation of the wave field is invisible).
+// Foam is a read-modify-write on normal_map.a: one invocation owns one texel,
+// so persistent accumulation needs no ping-pong. Choppiness scales the
+// horizontal fields before the Jacobian so foam reacts to the slider.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    int cascade = params.misc.x;
+    float chop = params.spectrum_c.w;
+    float sign_shift = float(-2 * ((id.x & 1) ^ (id.y & 1)) + 1);
+
+    vec2 l0 = fft_data[FFT_IDX(id.x, id.y, 0, 1)] * sign_shift;
+    vec2 l1 = fft_data[FFT_IDX(id.x, id.y, 1, 1)] * sign_shift;
+    vec2 l2 = fft_data[FFT_IDX(id.x, id.y, 2, 1)] * sign_shift;
+    vec2 l3 = fft_data[FFT_IDX(id.x, id.y, 3, 1)] * sign_shift;
+
+    // Master height gain is applied k-weighted in spectrum_init (long swell
+    // only), so heights, derivatives, choppy fields and Jacobian foam all
+    // stay mutually consistent here with no extra scaling.
+    float hx = l0.x * chop;
+    float hy = l0.y;
+    float hz = l1.x * chop;
+    float dhy_dx = l1.y;
+    float dhy_dz = l2.x;
+    float dhx_dx = l2.y * chop;
+    float dhz_dz = l3.x * chop;
+    float dhz_dx = l3.y * chop;
+
+    // J < whitecap threshold = wave folding onto itself -> foam grows
+    // linearly there and decays exponentially everywhere.
+    float jacobian = (1.0 + dhx_dx) * (1.0 + dhz_dz) - dhz_dx * dhz_dx;
+    float folding = -min(0.0, jacobian - params.foam_p.x);
+    float foam = imageLoad(normal_map, ivec3(id, cascade)).a;
+    foam *= exp(-params.foam_p.z);
+    foam = clamp(foam + folding * params.foam_p.y, 0.0, 1.0);
+
+    // Gradient corrected for horizontal compression of the choppy waves.
+    vec2 gradient = vec2(dhy_dx, dhy_dz) / (1.0 + abs(vec2(dhx_dx, dhz_dz)));
+
+    imageStore(displacement_map, ivec3(id, cascade), vec4(hx, hy, hz, 0.0));
+    imageStore(normal_map, ivec3(id, cascade), vec4(gradient, dhx_dx, foam));
+}

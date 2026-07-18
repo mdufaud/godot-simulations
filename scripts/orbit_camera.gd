@@ -1,15 +1,15 @@
 class_name OrbitCamera
 extends Node3D
-## Caméra orbitale réutilisable avec support souris, tactile et clavier ZQSD/WASD.
-## Attacher à un Node3D avec un Camera3D enfant.
-## Utilise _unhandled_input() : les événements consommés par l'UI (sliders, boutons)
-## n'arrivent jamais ici → pas besoin de flag is_over_ui.
+## Reusable orbit camera with mouse, touch and WASD keyboard support.
+## Attach to a Node3D with a Camera3D child.
+## Uses _unhandled_input(): events consumed by the UI (sliders, buttons)
+## never reach here → no need for an is_over_ui flag.
 
 # --- Orbit parameters ---
 @export var target := Vector3.ZERO
 @export var distance := 15.0
-@export var pitch := -25.0   # degrés (négatif = vue plongeante)
-@export var yaw := 0.0       # degrés
+@export var pitch := -25.0   # degrees (negative = looking down)
+@export var yaw := 0.0       # degrees
 
 # --- Tuning ---
 @export var rotation_speed := 0.3
@@ -58,7 +58,7 @@ func _process(delta: float) -> void:
 	if auto_rotate and not _is_dragging:
 		yaw += auto_rotate_speed * delta * 60.0
 
-	# ZQSD / WASD movement (déplace le centre de l'orbite)
+	# WASD movement (moves the orbit center)
 	if enable_movement:
 		var move_dir := Vector3.ZERO
 		if Input.is_action_pressed("move_forward"):
@@ -76,7 +76,7 @@ func _process(delta: float) -> void:
 
 		if move_dir != Vector3.ZERO:
 			move_dir = move_dir.limit_length(1.0)
-			# Rotation relative au yaw de la caméra (pas au pitch, pour rester au sol)
+			# Rotation relative to the camera's yaw (not pitch, to stay grounded)
 			var rotated := move_dir.rotated(Vector3.UP, deg_to_rad(yaw))
 			target += rotated * move_speed * delta
 
@@ -153,17 +153,17 @@ func _update_transform() -> void:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-## Retourne le nœud Camera3D enfant.
+## Returns the child Camera3D node.
 func get_camera() -> Camera3D:
 	return _camera
 
 
-## Recentre l'orbite sur une position.
+## Recenters the orbit on a position.
 func set_target(pos: Vector3) -> void:
 	target = pos
 
 
-## Active/désactive tous les contrôles.
+## Enables/disables all controls.
 func set_enabled(enabled: bool) -> void:
 	set_process(enabled)
 	set_process_unhandled_input(enabled)

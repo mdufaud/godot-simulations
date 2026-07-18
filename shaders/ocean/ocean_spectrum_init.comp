@@ -1,0 +1,90 @@
+// Initial JONSWAP/TMA directional spectrum, run only when sea-state params
+// change. Writes vec4(h0(k), conj(h0(-k))) per texel so the evolve stage can
+// enforce the conjugation property (real-valued IFFT output).
+// Sources: Tessendorf - Simulating Ocean Water; Horvath - Empirical
+// Directional Wave Spectra for Computer Graphics.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+vec2 dispersion_and_derivative(float k, float depth) {
+    float a = k * depth;
+    float b = tanh(a);
+    float w = sqrt(G_GRAV * k * b);
+    float dw_dk = 0.5 * G_GRAV * (b + a * (1.0 - b * b)) / w;
+    return vec2(w, dw_dk);
+}
+
+float longuet_higgins_normalization(float s) {
+    float a = sqrt(s);
+    return (s < 0.4)
+        ? (0.5 / PI) + s * (0.220636 + s * (-0.109 + s * 0.090))
+        : inversesqrt(PI) * (a * 0.5 + (1.0 / a) * 0.0625);
+}
+
+float longuet_higgins_function(float s, float theta) {
+    return longuet_higgins_normalization(s) * pow(abs(cos(theta * 0.5)), 2.0 * s);
+}
+
+float hasselmann_directional_spread(float w, float w_p, float wind_speed, float swell, float theta) {
+    float p = w / w_p;
+    float s = (w <= w_p)
+        ? 6.97 * pow(abs(p), 4.06)
+        : 9.77 * pow(abs(p), -2.33 - 1.45 * (wind_speed * w_p / G_GRAV - 1.17));
+    float s_xi = 16.0 * tanh(w_p / w) * swell * swell;
+    return longuet_higgins_function(s + s_xi, theta);
+}
+
+// JONSWAP x Kitaigorodskii depth attenuation (TMA).
+float tma_spectrum(float w, float w_p, float alpha, float depth) {
+    const float beta = 1.25;
+    const float gamma = 3.3;
+
+    float sigma = (w <= w_p) ? 0.07 : 0.09;
+    float r = exp(-(w - w_p) * (w - w_p) / (2.0 * sigma * sigma * w_p * w_p));
+    float jonswap = (alpha * G_GRAV * G_GRAV) / pow(w, 5.0) * exp(-beta * pow(w_p / w, 4.0)) * pow(gamma, r);
+
+    float w_h = min(w * sqrt(depth / G_GRAV), 2.0);
+    float depth_attenuation = (w_h <= 1.0) ? 0.5 * w_h * w_h : 1.0 - 0.5 * (2.0 - w_h) * (2.0 - w_h);
+    return jonswap * depth_attenuation;
+}
+
+vec2 spectrum_amplitude(ivec2 id) {
+    float dk = 2.0 * PI / params.spectrum_a.x;
+    vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * dk;
+    float k = length(k_vec) + 1e-6;
+    // Band-limit each cascade so overlapping wavelengths are not double-counted.
+    if (k < params.spectrum_c.y || k >= params.spectrum_c.z) {
+        return vec2(0.0);
+    }
+    float theta = atan(k_vec.x, k_vec.y);
+
+    vec2 disp = dispersion_and_derivative(k, params.spectrum_b.y);
+    float w = disp.x;
+    float w_norm = disp.y / k * dk * dk;
+    float s = tma_spectrum(w, params.spectrum_a.z, params.spectrum_a.y, params.spectrum_b.y);
+    float detail = params.spectrum_b.w;
+    float d = mix(0.5 / PI,
+        hasselmann_directional_spread(w, params.spectrum_a.z, params.spectrum_a.w,
+            params.spectrum_b.z, theta - params.spectrum_b.x),
+        1.0 - params.spectrum_c.x) * exp(-(1.0 - detail) * (1.0 - detail) * k * k);
+    // Fixed per-cascade seed: re-generating on a slider change keeps phases
+    // stable, so parameter sweeps look like weather instead of a scene cut.
+    vec2 u = hash2(uvec2(id + ivec2(params.misc.y, params.misc.z)));
+    // Master height gain, k-weighted (e-fold at lambda = 60 m): boosting all
+    // wavelengths equally drives short waves past the breaking limit
+    // (H/lambda > 1/7) into angular micro-cliffs. Only the long swell grows,
+    // whose steepness stays physical even at gain 5. Choppy xz displacement
+    // derives from these same amplitudes, so horizontal motion scales along
+    // and the Jacobian foam reacts to the taller sea.
+    float gain = 1.0 + (params.gains.x - 1.0) * exp(-k * 9.549);
+    // 0.25 calibrates 4*sigma of the height field to the empirical JONSWAP
+    // Hs(U, F) (measured 4.1x hot without it, from the +-k pair packing).
+    return gaussian_pair(u) * sqrt(2.0 * s * d * w_norm) * 0.25 * gain;
+}
+
+void main() {
+    ivec2 id0 = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 id1 = (ivec2(MAP_SIZE_I) - id0) % ivec2(MAP_SIZE_I);
+    imageStore(spectrum_tex, ivec3(id0, params.misc.x),
+        vec4(spectrum_amplitude(id0), conj_complex(spectrum_amplitude(id1))));
+}

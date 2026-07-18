@@ -1,0 +1,25 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.counts.x)) {
+		return;
+	}
+	vec4 pw = positions.data[i];
+	vec4 vw = velocities.data[i];
+
+	// Leapfrog: the half kick closing a substep and the one opening the next use
+	// the same acceleration, so they merge into a single full kick. Same
+	// trajectory as velocity Verlet, one less pass over velocities and accels.
+	vec3 v = vw.xyz + accels.data[i].xyz * params.sim.x;
+	vec3 p = pw.xyz + v * params.sim.x;
+
+	float esc = params.field.x;
+	if (swallowed(p) || dot(p, p) > esc * esc) {
+		respawn(i, uint(params.counts.w), p, v);
+	}
+	positions.data[i] = vec4(p, pw.w);
+	velocities.data[i] = vec4(v, vw.w);
+
+	// Last stage of the step: bridge to the renderer. w = speed normalized by v_ref.
+	int w = params.counts.z;
+	imageStore(position_tex, ivec2(int(i) % w, int(i) / w), vec4(p, length(v) * params.field.y));
+}

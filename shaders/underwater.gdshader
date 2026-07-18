@@ -1,5 +1,5 @@
 // Fullscreen underwater overlay — wobbly refraction, blue-green tint, vignette.
-// Toggled by water_controller.gd when the camera goes below the water surface.
+// Toggled by ocean_controller.gd when the camera goes below the water surface.
 
 shader_type canvas_item;
 

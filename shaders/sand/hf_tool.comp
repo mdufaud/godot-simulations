@@ -1,0 +1,36 @@
+// Brush pass, run before the flow steps when a tool is active. Writes the
+// source texture in place: every thread touches only its own texel, so no
+// ping-pong is needed and the following flow step sees the edit immediately.
+
+const int TOOL_DIG = 1;
+const int TOOL_POUR = 2;
+const int TOOL_SMOOTH = 3;
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	float cell = params.flow.z;
+	vec2 world = (vec2(id) + 0.5) * cell - 0.5 * float(n) * cell;
+	vec2 d = world - params.tool.xy;
+	float r = max(params.tool.z, 1e-4);
+	float w = exp(-3.0 * dot(d, d) / (r * r));
+	if (w < 0.004) {
+		return;
+	}
+	float h = imageLoad(height_src, id).r;
+	float amount = params.tool.w * params.flow.w * w;
+	if (params.misc.y == TOOL_DIG) {
+		h = max(h - amount, 0.0);
+	} else if (params.misc.y == TOOL_POUR) {
+		h += amount;
+	} else if (params.misc.y == TOOL_SMOOTH) {
+		// Pull toward the height under the brush centre — a trowel, not a bulldozer.
+		ivec2 c = clamp(ivec2((params.tool.xy + 0.5 * float(n) * cell) / cell), ivec2(0), ivec2(n - 1));
+		float hc = imageLoad(height_src, c).r;
+		h = mix(h, hc, min(2.0 * amount, 1.0));
+	}
+	imageStore(height_src, id, vec4(h, 0.0, 0.0, 0.0));
+}

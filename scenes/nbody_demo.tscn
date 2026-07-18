@@ -1,0 +1,63 @@
+[gd_scene load_steps=8 format=3 uid="uid://nbody_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/nbody_controller.gd" id="1_controller"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="2_theme"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
+
+[sub_resource type="Environment" id="Environment_nbody"]
+background_mode = 1
+background_color = Color(0.008, 0.008, 0.016, 1)
+ambient_light_source = 1
+tonemap_mode = 3
+tonemap_exposure = 1.0
+tonemap_white = 6.0
+glow_enabled = true
+glow_intensity = 1.1
+glow_strength = 1.0
+glow_bloom = 0.25
+glow_blend_mode = 1
+glow_hdr_threshold = 0.7
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_horizon"]
+shading_mode = 0
+albedo_color = Color(0, 0, 0, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_horizon"]
+material = SubResource("StandardMaterial3D_horizon")
+radius = 1.0
+height = 2.0
+radial_segments = 32
+rings = 16
+
+[node name="NBodyDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_nbody")
+
+[node name="EventHorizon" type="MeshInstance3D" parent="."]
+mesh = SubResource("SphereMesh_horizon")
+cast_shadow = 0
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("3_orbit_camera")
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+current = true
+fov = 60.0
+near = 0.1
+far = 4000.0
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Control" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+mouse_filter = 2
+theme = ExtResource("2_theme")
+
+[node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]
+title = "🌌 N-Body Galaxy"

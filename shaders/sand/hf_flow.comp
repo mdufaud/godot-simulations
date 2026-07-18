@@ -1,0 +1,42 @@
+// One relaxation step toward the angle of repose. Each cell exchanges sand
+// with its 8 neighbours: a column taller than a neighbour by more than the
+// repose threshold sheds a fraction of the excess. Gather form over a
+// ping-pong pair, so no atomics; out-of-bounds neighbours exchange nothing,
+// which makes the domain boundary a wall the sand piles against.
+
+const ivec2 OFFS[8] = ivec2[8](
+	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+	ivec2(1, 1), ivec2(1, -1), ivec2(-1, 1), ivec2(-1, -1)
+);
+// Diagonal neighbours sit sqrt(2) cells away, so their repose threshold scales.
+const float DIST[8] = float[8](
+	1.0, 1.0, 1.0, 1.0, 1.41421356, 1.41421356, 1.41421356, 1.41421356
+);
+
+// Sand moved a -> b this step. A pure function of the two heights: both
+// endpoints compute the identical value (same operands, same order), so mass
+// is conserved bit-exact without a separate flux pass. The 1/8 cap keeps the
+// total outflow of a cell below its content whatever the neighbourhood.
+float transfer(float a, float b, float thresh) {
+	return min(params.flow.y * max(a - b - thresh, 0.0), a * 0.12);
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	float h = imageLoad(height_src, id).r;
+	float acc = h;
+	for (int k = 0; k < 8; k++) {
+		ivec2 nb = id + OFFS[k];
+		if (nb.x < 0 || nb.y < 0 || nb.x >= n || nb.y >= n) {
+			continue;
+		}
+		float hn = imageLoad(height_src, nb).r;
+		float thresh = params.flow.x * DIST[k];
+		acc += transfer(hn, h, thresh) - transfer(h, hn, thresh);
+	}
+	imageStore(height_dst, id, vec4(max(acc, 0.0), 0.0, 0.0, 0.0));
+}

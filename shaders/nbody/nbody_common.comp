@@ -1,0 +1,208 @@
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// No ping-pong: every thread owns its index, and the force stages only read
+// positions. Attractors are 2 vec4 per entry: (pos, mass), (vel, radius).
+layout(std430, set = 0, binding = 0) restrict buffer Positions {
+	vec4 data[];
+}
+positions;
+
+layout(std430, set = 0, binding = 1) restrict buffer Velocities {
+	vec4 data[];
+}
+velocities;
+
+layout(std430, set = 0, binding = 2) restrict buffer Accels {
+	vec4 data[];
+}
+accels;
+
+layout(std430, set = 0, binding = 3) restrict buffer Attractors {
+	vec4 data[];
+}
+attractors;
+
+layout(rgba32f, set = 0, binding = 4) uniform restrict image2D position_tex;
+
+layout(push_constant, std430) uniform Params {
+	vec4 sim; // x = dt, y = G, z = particle softening^2, w = attractor softening^2
+	ivec4 counts; // x = particle_count, y = attractor_count, z = tex_width, w = frame
+	vec4 field; // x = escape_radius, y = 1/v_ref, z = disk_mass, w = jet_speed
+	vec4 disk; // x = r_min, y = r_max, z = thickness, w = dispersion
+	// respawn mode: 0 = disk, 1 = jet, 2 = vortex bottom inlet.
+	// force mode (step_attractors.comp only): 0 = attractor/disk gravity,
+	// 1 = vortex funnel, 2 = analytic firework (no integration at all).
+	ivec4 misc; // x = substeps, y = respawn mode, z = force mode, w = unused
+	vec4 beam; // xyz = jet/vortex axis (unit), w = jet cone spread
+	// x = damping, w = sim time; y/z are mode-specific "A"/"B":
+	// vortex (A = updraft, B = swirl speed), firework (A = period, B = spread).
+	vec4 aux1;
+	// Mode-specific: vortex (x = turbulence), firework (x = speed_min,
+	// y = gravity, z = speed_max, w = rocket group count). For vortex the disk
+	// vec is repurposed: x = funnel bottom radius, y = top radius, z = half height.
+	vec4 aux2;
+}
+params;
+
+uint pcg(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+float rnd(inout uint s) {
+	s = pcg(s);
+	return float(s) * (1.0 / 4294967296.0);
+}
+
+// Unscaled: sum of m * r / |r|^3. Callers multiply by G once.
+vec3 attractor_pull(vec3 p) {
+	vec3 a = vec3(0.0);
+	for (int t = 0; t < params.counts.y; t++) {
+		vec4 pm = attractors.data[2 * t];
+		vec3 r = pm.xyz - p;
+		float d2 = dot(r, r) + params.sim.w;
+		float inv = inversesqrt(d2);
+		a += (pm.w * inv * inv * inv) * r;
+	}
+	return a;
+}
+
+bool swallowed(vec3 p) {
+	for (int t = 0; t < params.counts.y; t++) {
+		vec3 d = p - attractors.data[2 * t].xyz;
+		float rad = attractors.data[2 * t + 1].w;
+		if (dot(d, d) < rad * rad) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Surface density ~ 1/r, so the enclosed disk mass grows linearly between r_min
+// and r_max. Seeding (BlackHoleScene._v_circ), respawn and the smooth disk
+// potential all use this law — they must agree or the disk is not in equilibrium.
+float disk_enclosed(float r) {
+	float f = clamp((r - params.disk.x) / max(params.disk.y - params.disk.x, 1e-6), 0.0, 1.0);
+	return params.field.z * f;
+}
+
+float enclosed_mass(float r) {
+	float central = params.counts.y > 0 ? attractors.data[0].w : 0.0;
+	return central + disk_enclosed(r);
+}
+
+// The disk's own gravity as a smooth analytic potential, for the test-particle
+// path. The self-gravity path gets it from the particle masses instead — adding
+// both would count the disk twice.
+vec3 smooth_disk_pull(vec3 p) {
+	if (params.field.z <= 0.0) {
+		return vec3(0.0);
+	}
+	vec3 center = params.counts.y > 0 ? attractors.data[0].xyz : vec3(0.0);
+	vec3 rel = p - center;
+	float r2 = dot(rel, rel) + params.sim.w;
+	float inv = inversesqrt(r2);
+	return -(disk_enclosed(r2 * inv) * inv * inv * inv) * rel;
+}
+
+// Uniform direction on the sphere.
+vec3 sphere_dir(inout uint s) {
+	float z = rnd(s) * 2.0 - 1.0;
+	float ang = rnd(s) * 6.28318531;
+	float sxy = sqrt(max(1.0 - z * z, 0.0));
+	return vec3(sxy * cos(ang), z, sxy * sin(ang));
+}
+
+// Tornado funnel: velocity-servo forces toward a target flow field instead of
+// raw force sums — servos cannot run away or collapse, whatever the sliders
+// say. The target field: tangential speed `swirl` around the axis, updraft
+// inside the funnel wall / downdraft outside (recirculation), radial spring
+// toward the funnel wall radius, which widens with height (r_t = funnel cone).
+// Large-scale trig gusts on top keep the density field visibly churning — a
+// steady uniform tube of identical additive sprites reads as a frozen image
+// no matter how fast it actually rotates.
+vec3 vortex_force(vec3 p, vec3 v) {
+	float updraft = params.aux1.y;
+	float swirl = params.aux1.z;
+	float t = params.aux1.w;
+	float turb = params.aux2.x;
+	float r_bot = params.disk.x;
+	float r_top = params.disk.y;
+	float half_h = params.disk.z;
+
+	float y = p.y;
+	vec3 rp = vec3(p.x, 0.0, p.z);
+	float r = length(rp);
+	vec3 rd = r > 1e-4 ? rp / r : vec3(1.0, 0.0, 0.0);
+	vec3 td = vec3(-rd.z, 0.0, rd.x);
+
+	float ht = clamp((y + half_h) / (2.0 * half_h), 0.0, 1.0);
+	float r_t = mix(r_bot, r_top, ht * ht);
+	// Toward the ceiling the wall fans out and the updraft dies, so particles reach
+	// an apex, spill into the surrounding downdraft and recirculate into a rounded
+	// churning crown. Without this the updraft servo drives every in-funnel particle
+	// upward forever and they all pile flat against whatever ceiling exists.
+	float crown = smoothstep(0.65, 1.0, clamp(y / (half_h * 1.5), 0.0, 1.0));
+	r_t += crown * r_top * 0.6;
+	float updraft_here = mix(updraft, -0.25 * updraft, crown);
+	// The spring alone equilibrates OUTSIDE r_t (it must fight the centrifugal
+	// v_t^2/r), which used to park every orbit in the downdraft zone and drain
+	// the whole funnel to the ground within seconds. Feed the centripetal term
+	// explicitly so orbits settle exactly on the wall, and give the updraft an
+	// additive margin — a multiplicative one is worthless where r_t is small.
+	float v_t = dot(v, td);
+	float v_up_target = r < r_t + 3.0 ? updraft_here : -0.6 * updraft;
+
+	vec3 a = ((r_t - r) * 3.0 - v_t * v_t / max(r, 0.5)) * rd;
+	a += (swirl - v_t) * 2.0 * td;
+	a += (v_up_target - v.y) * 1.5 * vec3(0.0, 1.0, 0.0);
+	a += turb * vec3(
+		sin(0.35 * p.y + 0.45 * t + 1.7 * sin(0.31 * p.z + 0.29 * t)),
+		0.6 * sin(0.33 * p.z + 0.38 * t + 1.3 * sin(0.29 * p.x + 0.23 * t)),
+		sin(0.37 * p.x + 0.41 * t + 1.5 * sin(0.27 * p.y + 0.26 * t)));
+	return a;
+}
+
+// Re-seeds a swallowed or escaped particle: back on the outer disk (mode 0),
+// re-emitted from the central object's polar beams (mode 1, pulsar jets), or
+// sucked back in at the tornado's ground inlet (mode 2, vortex — the visible
+// bottom-to-top mass flux is what makes the funnel read as alive). salt varies
+// per frame (and per substep in the merged stage) so a particle never respawns
+// twice in the same spot.
+void respawn(uint i, uint salt, out vec3 p, out vec3 v) {
+	uint s = pcg(i ^ (salt * 2654435761u));
+	vec3 center = params.counts.y > 0 ? attractors.data[0].xyz : vec3(0.0);
+	vec3 base_v = params.counts.y > 0 ? attractors.data[1].xyz : vec3(0.0);
+
+	if (params.misc.y == 1) {
+		// Both magnetic poles fire; emission starts just above the star's absorb
+		// radius or the star eats its own jet.
+		float pole = rnd(s) < 0.5 ? 1.0 : -1.0;
+		vec3 jitter = vec3(rnd(s) - 0.5, rnd(s) - 0.5, rnd(s) - 0.5) * 2.0;
+		vec3 dir = normalize(params.beam.xyz * pole + jitter * params.beam.w);
+		float star_r = params.counts.y > 0 ? attractors.data[1].w : 0.0;
+		p = center + dir * (star_r + 0.2 + rnd(s) * 0.3);
+		v = base_v + dir * (params.field.w * (0.8 + 0.4 * rnd(s)));
+		return;
+	}
+
+	if (params.misc.y == 2) {
+		float r = (0.3 + rnd(s) * 0.9) * params.disk.x;
+		float ang = rnd(s) * 6.28318531;
+		vec3 rd = vec3(cos(ang), 0.0, sin(ang));
+		p = rd * r + vec3(0.0, -params.disk.z * (0.75 + 0.2 * rnd(s)), 0.0);
+		v = vec3(-rd.z, 0.0, rd.x) * params.aux1.z + vec3(0.0, params.aux1.y * 0.5, 0.0);
+		return;
+	}
+
+	float r = mix(params.disk.y * 0.75, params.disk.y, rnd(s));
+	float ang = rnd(s) * 6.28318531;
+	float t = rnd(s) * 2.0 - 1.0;
+
+	p = center + vec3(r * cos(ang), t * t * t * params.disk.z, r * sin(ang));
+	float v_circ = sqrt(params.sim.y * enclosed_mass(r) / max(r, 1e-3));
+	vec3 tangent = vec3(-sin(ang), 0.0, cos(ang));
+	vec3 jitter = vec3(rnd(s) - 0.5, (rnd(s) - 0.5) * 0.3, rnd(s) - 0.5);
+	v = base_v + tangent * v_circ + jitter * (params.disk.w * v_circ);
+}

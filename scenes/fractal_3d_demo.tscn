@@ -70,13 +70,7 @@ mouse_filter = 2
 grow_horizontal = 2
 grow_vertical = 2
 
-[node name="UI" type="Control" parent="."]
-layout_mode = 3
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-mouse_filter = 2
+[node name="UI" type="CanvasLayer" parent="."]
+layer = 2
 
 [node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]

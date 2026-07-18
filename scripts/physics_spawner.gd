@@ -1,5 +1,5 @@
 extends Node3D
-## Spawner de formes physiques avec matériaux réfléchissants pour la démo SSR
+## Spawner of physics shapes with reflective materials for the SSR demo
 
 @onready var spawn_timer: Timer = $SpawnTimer
 @onready var info_label: Label = get_node("../UI/Control/VBoxContainer/InfoLabel")
@@ -14,15 +14,15 @@ const SPAWN_RADIUS := 8.0
 
 var spawned_objects: Array[RigidBody3D] = []
 
-# Couleurs métalliques pour les réflexions SSR
+# Metallic colors for SSR reflections
 var metallic_colors := [
-	Color(1.0, 0.84, 0.0),    # Or
-	Color(0.75, 0.75, 0.8),   # Argent
+	Color(1.0, 0.84, 0.0),    # Gold
+	Color(0.75, 0.75, 0.8),   # Silver
 	Color(0.72, 0.45, 0.2),   # Bronze
-	Color(0.85, 0.1, 0.1),    # Rouge métallique
-	Color(0.1, 0.5, 0.85),    # Bleu métallique
-	Color(0.1, 0.8, 0.4),     # Vert métallique
-	Color(0.6, 0.2, 0.8),     # Violet métallique
+	Color(0.85, 0.1, 0.1),    # Metallic red
+	Color(0.1, 0.5, 0.85),    # Metallic blue
+	Color(0.1, 0.8, 0.4),     # Metallic green
+	Color(0.6, 0.2, 0.8),     # Metallic purple
 	Color(0.9, 0.9, 0.95),    # Chrome
 ]
 
@@ -35,7 +35,7 @@ func _ready() -> void:
 
 func _process(_delta: float) -> void:
 	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
-	info_label.text = "Objets: %d / %d" % [spawned_objects.size(), MAX_OBJECTS]
+	info_label.text = "Objects: %d / %d" % [spawned_objects.size(), MAX_OBJECTS]
 
 
 func _on_spawn_timer_timeout() -> void:
@@ -49,7 +49,7 @@ func _on_spawn_timer_timeout() -> void:
 func spawn_random_shape() -> void:
 	var rigid_body := RigidBody3D.new()
 	
-	# Position aléatoire
+	# Random position
 	var spawn_pos := Vector3(
 		randf_range(-SPAWN_RADIUS, SPAWN_RADIUS),
 		SPAWN_HEIGHT + randf_range(0, 3),
@@ -57,27 +57,27 @@ func spawn_random_shape() -> void:
 	)
 	rigid_body.position = spawn_pos
 	
-	# Rotation aléatoire initiale
+	# Initial random rotation
 	rigid_body.rotation = Vector3(
 		randf() * TAU,
 		randf() * TAU,
 		randf() * TAU
 	)
 	
-	# Vélocité angulaire aléatoire
+	# Random angular velocity
 	rigid_body.angular_velocity = Vector3(
 		randf_range(-3, 3),
 		randf_range(-3, 3),
 		randf_range(-3, 3)
 	)
 	
-	# Créer mesh et collision selon la forme
+	# Create mesh and collision based on shape
 	var mesh_instance := MeshInstance3D.new()
 	var collision_shape := CollisionShape3D.new()
 	
 	var shape_type := randi() % 3
 	match shape_type:
-		0: # Sphère
+		0: # Sphere
 			var sphere_mesh := SphereMesh.new()
 			sphere_mesh.radius = randf_range(0.3, 0.7)
 			sphere_mesh.height = sphere_mesh.radius * 2
@@ -97,7 +97,7 @@ func spawn_random_shape() -> void:
 			box_shape.size = box_mesh.size
 			collision_shape.shape = box_shape
 			
-		2: # Cylindre
+		2: # Cylinder
 			var cylinder_mesh := CylinderMesh.new()
 			cylinder_mesh.top_radius = randf_range(0.2, 0.5)
 			cylinder_mesh.bottom_radius = cylinder_mesh.top_radius
@@ -109,18 +109,18 @@ func spawn_random_shape() -> void:
 			cylinder_shape.height = cylinder_mesh.height
 			collision_shape.shape = cylinder_shape
 	
-	# Matériau réfléchissant pour SSR
+	# Reflective material for SSR
 	var material := StandardMaterial3D.new()
 	material.albedo_color = metallic_colors[randi() % metallic_colors.size()]
 	material.metallic = randf_range(0.7, 1.0)
 	material.roughness = randf_range(0.0, 0.3)
 	mesh_instance.material_override = material
 	
-	# Assembler et ajouter à la scène
+	# Assemble and add to scene
 	rigid_body.add_child(mesh_instance)
 	rigid_body.add_child(collision_shape)
 	
-	# Configuration physique Jolt
+	# Jolt physics configuration
 	rigid_body.mass = randf_range(0.5, 2.0)
 	rigid_body.physics_material_override = _create_physics_material()
 	

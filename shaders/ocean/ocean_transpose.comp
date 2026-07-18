@@ -1,0 +1,19 @@
+// Tiled shared-memory matrix transpose (coalesced reads and writes, +1 column
+// padding against bank conflicts). Reads the FFT output half, writes the input
+// half transposed, so the second FFT dispatch re-runs the identical row kernel.
+// Source: https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/
+
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+shared vec2 tile[32][33];
+
+void main() {
+    uvec2 lid = gl_LocalInvocationID.xy;
+    uvec2 gid = gl_GlobalInvocationID.xy;
+    uint layer = gl_GlobalInvocationID.z;
+
+    tile[lid.y][lid.x] = fft_data[FFT_IDX(gid.x, gid.y, layer, 1)];
+    barrier();
+    uvec2 out_id = gl_WorkGroupID.yx * 32u + lid;
+    fft_data[FFT_IDX(out_id.x, out_id.y, layer, 0)] = tile[lid.x][lid.y];
+}

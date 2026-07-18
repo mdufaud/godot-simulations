@@ -3,5 +3,13 @@
 android/
 bin/
 docs/
-export_presets.cfg
 .editorconfig
+TODO.md
+
+resources/
+
+tests/
+.codex
+.claude
+__pycache__/
+.reasonix/

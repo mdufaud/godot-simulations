@@ -93,7 +93,7 @@ func _ready() -> void:
 
 func _add_hint_label() -> void:
 	var hint := Label.new()
-	hint.text = "Échap : libérer/capturer souris   •   ZQSD + Espace/Shift : voler   •   Molette : vitesse"
+	hint.text = "Esc: release/capture mouse   •   WASD + Space/Shift: fly   •   Wheel: speed"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.modulate = Color(1, 1, 1, 0.55)
 	hint.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT, Control.PRESET_MODE_MINSIZE, 12)
@@ -122,35 +122,35 @@ func _evaluate_de(p: Vector3) -> float:
 # --- UI ------------------------------------------------------------------------
 
 func _setup_ui() -> void:
-	_menu.title = "Fractale 3D"
+	_menu.title = "3D Fractal"
 
-	_menu.add_section("Fractale")
+	_menu.add_section("Fractal")
 	_fractal_option = _menu.add_option_button("Type", FRACTAL_NAMES, 0, _select_fractal)
 	_preset_option = _menu.add_option_button("Preset", ["-"], 0, _on_preset_selected)
 
 	_menu.add_section("Look")
 	_palette_option = _menu.add_option_button("Palette", PALETTE_NAMES, _params["palette"], _on_palette_selected)
-	_sliders["color_speed"] = _menu.add_slider("Vitesse couleur", 0.0, 3.0, _params["color_speed"], func(v: float) -> void: _set_param("color_speed", v))
-	_sliders["color_offset"] = _menu.add_slider("Teinte", 0.0, 1.0, _params["color_offset"], func(v: float) -> void: _set_param("color_offset", v))
+	_sliders["color_speed"] = _menu.add_slider("Color speed", 0.0, 3.0, _params["color_speed"], func(v: float) -> void: _set_param("color_speed", v))
+	_sliders["color_offset"] = _menu.add_slider("Hue", 0.0, 1.0, _params["color_offset"], func(v: float) -> void: _set_param("color_offset", v))
 	_sliders["glow_strength"] = _menu.add_slider("Glow", 0.0, 3.0, _params["glow_strength"], func(v: float) -> void: _set_param("glow_strength", v))
-	_sliders["iterations"] = _menu.add_slider("Détail (iter.)", 2.0, 40.0, _params["iterations"], func(v: float) -> void: _set_param("iterations", int(round(v))))
+	_sliders["iterations"] = _menu.add_slider("Detail (iter.)", 2.0, 40.0, _params["iterations"], func(v: float) -> void: _set_param("iterations", int(round(v))))
 
-	_menu.add_section("Paramètres")
+	_menu.add_section("Parameters")
 	_build_param_groups()
 
 	_menu.add_section("Navigation")
-	_speed_slider = _menu.add_slider("Vitesse", 0.1, 15.0, _camera.move_speed, func(v: float) -> void: _camera.move_speed = v)
-	_menu.add_slider("Sensibilité", 0.02, 0.5, _camera.mouse_sensitivity, func(v: float) -> void: _camera.mouse_sensitivity = v)
+	_speed_slider = _menu.add_slider("Speed", 0.1, 15.0, _camera.move_speed, func(v: float) -> void: _camera.move_speed = v)
+	_menu.add_slider("Sensitivity", 0.02, 0.5, _camera.mouse_sensitivity, func(v: float) -> void: _camera.mouse_sensitivity = v)
 	_menu.add_slider("FOV", 50.0, 110.0, _camera.fov, func(v: float) -> void: _camera.set_fov(v))
 
-	_menu.add_section("Qualité")
-	_menu.add_toggle("Qualité adaptative", _adaptive, func(on: bool) -> void: _adaptive = on)
-	_menu.add_slider("Échelle rendu", 0.4, 1.0, _render_scale, func(v: float) -> void: _set_render_scale(v))
-	_sliders["max_steps"] = _menu.add_slider("Steps max", 30.0, 400.0, _params["max_steps"], func(v: float) -> void: _set_param("max_steps", int(round(v))))
-	_sliders["max_dist"] = _menu.add_slider("Distance max", 5.0, 200.0, _params["max_dist"], func(v: float) -> void: _set_param("max_dist", v))
-	_sliders["epsilon"] = _menu.add_slider("Précision", 0.0002, 0.01, _params["epsilon"], func(v: float) -> void: _set_param("epsilon", v))
+	_menu.add_section("Quality")
+	_menu.add_toggle("Adaptive quality", _adaptive, func(on: bool) -> void: _adaptive = on)
+	_menu.add_slider("Render scale", 0.4, 1.0, _render_scale, func(v: float) -> void: _set_render_scale(v))
+	_sliders["max_steps"] = _menu.add_slider("Max steps", 30.0, 400.0, _params["max_steps"], func(v: float) -> void: _set_param("max_steps", int(round(v))))
+	_sliders["max_dist"] = _menu.add_slider("Max distance", 5.0, 200.0, _params["max_dist"], func(v: float) -> void: _set_param("max_dist", v))
+	_sliders["epsilon"] = _menu.add_slider("Precision", 0.0002, 0.01, _params["epsilon"], func(v: float) -> void: _set_param("epsilon", v))
 
-	_menu.add_section("Effets (confort)")
+	_menu.add_section("Effects (comfort)")
 	_menu.add_toggle("Post-FX", _post_enabled, func(on: bool) -> void: _set_post_enabled(on))
 	_menu.add_slider("Aberration", 0.0, 0.02, _post["aberration_strength"], func(v: float) -> void: _set_post("aberration_strength", v))
 	_menu.add_slider("Vignette", 0.0, 2.0, _post["vignette_strength"], func(v: float) -> void: _set_post("vignette_strength", v))
@@ -169,15 +169,15 @@ func _build_param_groups() -> void:
 	_param_groups[1] = g1
 
 	var g2 := _menu.add_group()
-	_menu.add_label("Menger : ajuste le Détail.")
+	_menu.add_label("Menger: adjust Detail.")
 	_menu.end_group()
 	_param_groups[2] = g2
 
 	var g3 := _menu.add_group()
 	_sliders["klein_r"] = _menu.add_slider("Klein R", 1.8, 1.96, _params["klein_r"], func(v: float) -> void: _set_param("klein_r", v))
 	_sliders["klein_i"] = _menu.add_slider("Klein I", -0.2, 0.2, _params["klein_i"], func(v: float) -> void: _set_param("klein_i", v))
-	_sliders["klein_box_x"] = _menu.add_slider("Boîte X", 0.3, 2.0, _params["klein_box_x"], func(v: float) -> void: _set_param("klein_box_x", v))
-	_sliders["klein_box_z"] = _menu.add_slider("Boîte Z", 0.3, 2.0, _params["klein_box_z"], func(v: float) -> void: _set_param("klein_box_z", v))
+	_sliders["klein_box_x"] = _menu.add_slider("Box X", 0.3, 2.0, _params["klein_box_x"], func(v: float) -> void: _set_param("klein_box_x", v))
+	_sliders["klein_box_z"] = _menu.add_slider("Box Z", 0.3, 2.0, _params["klein_box_z"], func(v: float) -> void: _set_param("klein_box_z", v))
 	_menu.end_group()
 	_param_groups[3] = g3
 

@@ -1,0 +1,72 @@
+// Shared bindings, push constants and helpers for the FFT ocean pipeline.
+// Every stage sees the same uniform set (glslang keeps declared-but-unused
+// bindings). MAP_SIZE / MAP_SIZE_I are injected by ocean_solver.gd at compile
+// time so the FFT kernel's local_size matches the map exactly (no early-return
+// before barrier()).
+
+#define PI 3.141592653589793
+#define G_GRAV 9.81
+#define NUM_SPECTRA 4u
+
+layout(rgba32f, set = 0, binding = 0) restrict uniform image2DArray spectrum_tex;
+
+layout(std430, set = 0, binding = 1) restrict buffer ButterflyBuffer {
+    vec4 butterfly[]; // log2(MAP_SIZE) x MAP_SIZE
+};
+
+layout(std430, set = 0, binding = 2) restrict buffer FFTBuffer {
+    vec2 fft_data[]; // per cascade: 2 halves x NUM_SPECTRA x MAP_SIZE^2
+};
+
+layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray displacement_map;
+layout(rgba16f, set = 0, binding = 4) restrict uniform image2DArray normal_map;
+
+layout(push_constant, std430) uniform Params {
+    vec4 spectrum_a; //  0: tile_length, jonswap_alpha, peak_frequency, wind_speed
+    vec4 spectrum_b; // 16: wind_dir_rad, depth, swell, detail
+    vec4 spectrum_c; // 32: spread, k_min, k_max, choppiness
+    vec4 foam_p;     // 48: whitecap, grow_rate, decay_rate, time
+    ivec4 misc;      // 64: cascade_index, seed_x, seed_y, unused
+    vec4 gains;      // 80: height_gain, unused x3
+} params;
+
+// Half 0: spectrum_evolve output / FFT input; half 1: FFT output. Parameter
+// names must not collide with swizzle fields (.x/.y): the preprocessor is
+// token-based and would substitute inside params.misc.x.
+#define FFT_IDX(p_col, p_row, p_layer, p_half) \
+    ((uint(params.misc.x) * 2u + uint(p_half)) * NUM_SPECTRA * MAP_SIZE * MAP_SIZE \
+        + uint(p_layer) * MAP_SIZE * MAP_SIZE + uint(p_row) * MAP_SIZE + uint(p_col))
+
+vec2 mul_complex(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+vec2 exp_complex(float x) {
+    return vec2(cos(x), sin(x));
+}
+
+vec2 conj_complex(vec2 x) {
+    return vec2(x.x, -x.y);
+}
+
+// Source: https://www.shadertoy.com/view/Xt3cDn
+vec2 hash2(uvec2 x) {
+    uint h32 = x.y + 374761393u + x.x * 3266489917u;
+    h32 = 2246822519u * (h32 ^ (h32 >> 15));
+    h32 = 3266489917u * (h32 ^ (h32 >> 13));
+    uint n = h32 ^ (h32 >> 16);
+    uvec2 rz = uvec2(n, n * 48271u);
+    return vec2((rz.xy >> 1) & uvec2(0x7FFFFFFFu)) / float(0x7FFFFFFF);
+}
+
+// Box-Muller: two uniforms -> two independent standard normals.
+vec2 gaussian_pair(vec2 u) {
+    float r = sqrt(-2.0 * log(max(u.x, 1e-6)));
+    float theta = 2.0 * PI * u.y;
+    return vec2(r * cos(theta), r * sin(theta));
+}
+
+// Finite-depth dispersion: w(k) = sqrt(g k tanh(k d))
+float dispersion_relation(float k, float depth) {
+    return sqrt(G_GRAV * k * tanh(k * depth));
+}

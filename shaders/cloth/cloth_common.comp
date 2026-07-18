@@ -1,0 +1,106 @@
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// The cloth is a regular grid, so a vertex finds its neighbours by arithmetic:
+// no spatial hash, no ping-pong, every thread owns one vertex for the whole step.
+// positions.w carries the pin flag (1 = kinematic) through the whole sim.
+layout(std430, set = 0, binding = 0) restrict buffer Positions {
+	vec4 data[];
+}
+positions;
+
+layout(std430, set = 0, binding = 1) restrict buffer Velocities {
+	vec4 data[];
+}
+velocities;
+
+layout(std430, set = 0, binding = 2) restrict buffer Predicted {
+	vec4 data[];
+}
+predicted;
+
+// xyz = summed positional correction, w = constraint count (Jacobi averaging).
+layout(std430, set = 0, binding = 3) restrict buffer Deltas {
+	vec4 data[];
+}
+deltas;
+
+layout(rgba32f, set = 0, binding = 4) uniform restrict image2D position_tex;
+
+layout(push_constant, std430) uniform Params {
+	vec4 sim; // x = dt, y = 1/dt, z = damping, w = SOR relaxation
+	ivec4 grid; // x = width, y = height, z = vertex count, w = last_iteration
+	vec4 cloth; // x = rest spacing, y/z/w = stretch / shear / bend compliance
+	vec4 gravity; // xyz = gravity, w = aerodynamic drag
+	vec4 wind_a; // xyz = base wind vector (m/s), w = time
+	vec4 wind_b; // x = gustiness (0..1), y = turbulence spatial frequency
+	vec4 sphere; // xyz = obstacle centre, w = radius (0 = none)
+	ivec4 misc; // x = tex_width, y = wind enabled, z = unused, w = unused
+}
+params;
+
+int vindex(int x, int y) {
+	return y * params.grid.x + x;
+}
+
+bool in_grid(int x, int y) {
+	return x >= 0 && x < params.grid.x && y >= 0 && y < params.grid.y;
+}
+
+// Gusty open-air wind: the CPU animates the slow part (direction wander and the
+// big gust envelope live in the base vector); this adds the fast part — spatial
+// turbulence from a sum of sines advected downwind, so two flags a few metres
+// apart never flap in unison, plus lateral flutter and a ground boundary layer.
+vec3 wind_at(vec3 p) {
+	if (params.misc.y == 0) {
+		return vec3(0.0);
+	}
+	vec3 w = params.wind_a.xyz;
+	float speed = length(w);
+	if (speed < 1e-4) {
+		return vec3(0.0);
+	}
+	float t = params.wind_a.w;
+	float gust = params.wind_b.x;
+	vec3 q = p * params.wind_b.y - w * (t * 0.12);
+
+	float n = 0.5 * sin(q.x * 1.7 + t * 1.3)
+			+ 0.3 * sin(q.z * 2.3 - t * 1.9 + 1.3)
+			+ 0.2 * sin((q.x + q.y) * 3.1 + t * 2.7 + 4.1);
+	float f = 0.6 * sin(q.z * 2.9 + t * 2.1 + 0.7)
+			+ 0.4 * sin((q.y + q.z) * 3.7 - t * 2.9 + 2.9);
+	float u = 0.6 * sin(q.y * 2.1 + t * 1.7 + 5.1)
+			+ 0.4 * sin((q.x + q.z) * 2.7 - t * 2.3);
+
+	vec3 side = vec3(-w.z, 0.0, w.x) / speed;
+	vec3 wind = w * max(1.0 + gust * n, 0.0)
+			+ side * (speed * gust * 0.45 * f)
+			+ vec3(0.0, 1.0, 0.0) * (speed * gust * 0.25 * u);
+	// Boundary layer: the ground slows the flow, so hems near the floor go quiet.
+	return wind * mix(0.3, 1.0, smoothstep(0.0, 2.0, p.y));
+}
+
+// Face normal from the 4-neighbourhood, read off `positions`: `predicted` is
+// being written by the same dispatch, so sampling it here would be a data race.
+vec3 cloth_normal(int x, int y) {
+	int xa = max(x - 1, 0);
+	int xb = min(x + 1, params.grid.x - 1);
+	int ya = max(y - 1, 0);
+	int yb = min(y + 1, params.grid.y - 1);
+	vec3 du = positions.data[vindex(xb, y)].xyz - positions.data[vindex(xa, y)].xyz;
+	vec3 dv = positions.data[vindex(x, yb)].xyz - positions.data[vindex(x, ya)].xyz;
+	vec3 n = cross(du, dv);
+	float l = length(n);
+	return l > 1e-8 ? n / l : vec3(0.0, 1.0, 0.0);
+}
+
+vec3 collide(vec3 p) {
+	p.y = max(p.y, 0.01);
+	if (params.sphere.w > 0.0) {
+		vec3 d = p - params.sphere.xyz;
+		float dist = length(d);
+		if (dist < params.sphere.w) {
+			p = params.sphere.xyz + (dist > 1e-6 ? d / dist : vec3(0.0, 1.0, 0.0)) * params.sphere.w;
+		}
+	}
+	return p;
+}

@@ -1,0 +1,36 @@
+// Tiled O(N^2) self-gravity (GPU Gems 3, ch. 31): the workgroup stages 256
+// neighbours in LDS, then every thread walks the tile from there — 256x less
+// global traffic than a naive gather.
+shared vec4 tile[256];
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	uint lid = gl_LocalInvocationID.x;
+	uint n = uint(params.counts.x);
+
+	// barrier() must be reached by every invocation of the workgroup, so threads
+	// past particle_count keep participating and are masked at the store instead.
+	vec3 p = positions.data[min(i, n - 1u)].xyz;
+	vec3 a = vec3(0.0);
+	float soft2 = params.sim.z;
+	uint tiles = (n + 255u) / 256u;
+
+	for (uint t = 0u; t < tiles; t++) {
+		uint src = t * 256u + lid;
+		// Padding slots carry mass 0 and contribute exactly nothing, so does i == j.
+		tile[lid] = src < n ? positions.data[src] : vec4(0.0);
+		barrier();
+		for (uint k = 0u; k < 256u; k++) {
+			vec4 q = tile[k];
+			vec3 r = q.xyz - p;
+			float d2 = dot(r, r) + soft2;
+			float inv = inversesqrt(d2);
+			a += (q.w * inv * inv * inv) * r;
+		}
+		barrier();
+	}
+
+	if (i < n) {
+		accels.data[i] = vec4(params.sim.y * (a + attractor_pull(p)), 0.0);
+	}
+}

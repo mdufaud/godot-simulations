@@ -1,0 +1,111 @@
+// Merged force + integrate for all non-pairwise force laws. Forces here depend
+// only on the attractor list or an analytic field, never on other particles, so
+// the whole frame's substep loop runs in registers: no accels buffer
+// round-trip, one dispatch per frame instead of 2 * substeps, and the position
+// texture is written once.
+
+// Analytic firework: no integration at all. Every star's position is a pure
+// function of (index, sim time), so a whole shell bursts in perfect sync,
+// decelerates under linear air drag, droops, fades and relaunches — the same
+// state machine per particle can never smear into a steady-state fountain.
+// Linear-drag ballistics: v(t) = v0*e^-kt + (g/k)(1-e^-kt),
+// p(t) = p0 + v0*(1-e^-kt)/k + (g/k)(t - (1-e^-kt)/k).
+void firework(uint i, float mass, float color_seed) {
+	float t = params.aux1.w;
+	float period = max(params.aux1.y, 0.5);
+	float spread = params.aux1.z;
+	float speed_min = params.aux2.x;
+	float grav = params.aux2.y;
+	float speed_max = params.aux2.z;
+	uint groups = uint(max(params.aux2.w, 1.0));
+
+	// Desynchronize the rockets: each group gets its own period AND phase, so
+	// the show never settles into a metronome beat.
+	uint gi = i % groups;
+	uint hs = pcg(gi + 1u);
+	float g_period = period * (0.55 + 0.9 * rnd(hs));
+	float local_t = t + rnd(hs) * g_period;
+	uint cycle = uint(local_t / g_period);
+	float phase = local_t - float(cycle) * g_period;
+
+	// Per-burst group values, re-rolled each cycle. Shell size is heavily skewed:
+	// pow(u, 2.4) makes most bursts small crackles and the occasional one huge.
+	uint sg = pcg(gi ^ pcg(cycle * 2654435761u));
+	vec3 launch = vec3(
+		(rnd(sg) - 0.5) * 2.0 * spread,
+		mix(spread * 0.3, spread * 1.1, rnd(sg)),
+		(rnd(sg) - 0.5) * 2.0 * spread);
+	float size_roll = pow(rnd(sg), 2.4);
+	float shell_speed = mix(speed_min, speed_max, size_roll);
+	// Small shells also light fewer of their stars — a firecracker is sparse,
+	// a king shell is dense, even though the group sizes are fixed.
+	float visible_frac = mix(0.15, 1.0, size_roll);
+
+	// Per-star direction on the shell, re-rolled each cycle.
+	uint sp = pcg(i ^ pcg(cycle * 747796405u) ^ 0xA5A5u);
+	vec3 dir = sphere_dir(sp);
+	float speed = shell_speed * (0.92 + 0.16 * rnd(sp));
+	float vis = rnd(sp) < visible_frac ? 1.0 : 0.0;
+
+	const float DRAG = 1.1;
+	float e = 1.0 - exp(-DRAG * phase);
+	vec3 g = vec3(0.0, -grav, 0.0);
+	vec3 p = launch + dir * (speed * e / DRAG) + g * ((phase - e / DRAG) / DRAG);
+	vec3 v = dir * (speed * (1.0 - e)) + g * (e / DRAG);
+
+	// Quadratic die-off plus per-frame flicker: burst opens blue-white (ramp top),
+	// cools through orange, sparkles, and goes fully dark before the next shot.
+	float life = clamp(1.0 - phase / g_period, 0.0, 1.0);
+	uint sf = pcg(i ^ (uint(params.counts.w) * 1013904223u));
+	float glow = life * life * (0.6 + 0.8 * rnd(sf)) * 1.4 * vis;
+
+	positions.data[i] = vec4(p, mass);
+	velocities.data[i] = vec4(v, color_seed);
+	int w = params.counts.z;
+	imageStore(position_tex, ivec2(int(i) % w, int(i) / w), vec4(p, glow));
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.counts.x)) {
+		return;
+	}
+	vec4 pw = positions.data[i];
+	vec4 vw = velocities.data[i];
+
+	if (params.misc.z == 2) {
+		firework(i, pw.w, vw.w);
+		return;
+	}
+
+	vec3 p = pw.xyz;
+	vec3 v = vw.xyz;
+	float esc2 = params.field.x * params.field.x;
+	uint frame = uint(params.counts.w);
+	bool vortex = params.misc.z == 1;
+
+	for (int s = 0; s < params.misc.x; s++) {
+		vec3 a;
+		if (vortex) {
+			a = vortex_force(p, v);
+		} else {
+			a = params.sim.y * (attractor_pull(p) + smooth_disk_pull(p));
+		}
+		v += a * params.sim.x;
+		p += v * params.sim.x;
+
+		// Vortex loses particles out the top and the sides; everything else to
+		// the attractors or past the escape radius.
+		bool out_of_field = vortex
+			? (abs(p.y) > params.disk.z * 1.5 || dot(p.xz, p.xz) > esc2)
+			: (swallowed(p) || dot(p, p) > esc2);
+		if (out_of_field) {
+			respawn(i, frame * 4u + uint(s), p, v);
+		}
+	}
+	positions.data[i] = vec4(p, pw.w);
+	velocities.data[i] = vec4(v, vw.w);
+
+	int w = params.counts.z;
+	imageStore(position_tex, ivec2(int(i) % w, int(i) / w), vec4(p, length(v) * params.field.y));
+}

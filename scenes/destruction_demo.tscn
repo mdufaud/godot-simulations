@@ -1,0 +1,75 @@
+[gd_scene load_steps=9 format=3 uid="uid://destruction_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/destruction_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="2_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.33, 0.4, 0.5, 1)
+sky_horizon_color = Color(0.66, 0.67, 0.66, 1)
+ground_bottom_color = Color(0.2, 0.2, 0.19, 1)
+ground_horizon_color = Color(0.66, 0.67, 0.66, 1)
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_destruction"]
+background_mode = 2
+sky = SubResource("Sky_env")
+ambient_light_source = 3
+tonemap_mode = 3
+ssao_enabled = true
+ssao_intensity = 2.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.33, 0.32, 0.3, 1)
+roughness = 1.0
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(60, 60)
+
+[sub_resource type="WorldBoundaryShape3D" id="WorldBoundaryShape3D_ground"]
+
+[node name="DestructionDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_destruction")
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866025, 0.25, -0.433013, 0, 0.866025, 0.5, 0.5, -0.433013, 0.75, 0, 12, 0)
+light_energy = 1.3
+shadow_enabled = true
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="GroundMesh" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="GroundShape" type="CollisionShape3D" parent="Ground"]
+shape = SubResource("WorldBoundaryShape3D_ground")
+
+[node name="Wall" type="Node3D" parent="."]
+
+[node name="Projectiles" type="Node3D" parent="."]
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("2_orbit_camera")
+target = Vector3(0, 1.8, 0)
+distance = 12.0
+pitch = -12.0
+yaw = 18.0
+min_distance = 4.0
+max_distance = 40.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+current = true
+fov = 60.0
+near = 0.05
+far = 300.0
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
+title = "🧱 Voronoi Destruction (Jolt)"

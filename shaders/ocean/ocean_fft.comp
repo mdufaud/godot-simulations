@@ -1,0 +1,29 @@
+// Coalesced decimation-in-time Stockham row IFFT. One workgroup per row,
+// z = packed spectrum layer. local_size_x equals MAP_SIZE exactly (injected
+// define), so every invocation reaches barrier() — no early-return UB.
+// Dispatched twice per cascade: rows, then rows-of-transposed (= columns).
+// Source: http://wwwa.pikara.ne.jp/okojisan/otfft-en/stockham3.html
+
+layout(local_size_x = MAP_SIZE_I, local_size_y = 1, local_size_z = 1) in;
+
+shared vec2 row_shared[2u * MAP_SIZE]; // ping-pong halves for one row
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.y;
+    uint layer = gl_WorkGroupID.z;
+    uint num_stages = uint(findMSB(MAP_SIZE));
+
+    row_shared[col] = fft_data[FFT_IDX(col, row, layer, 0)];
+    for (uint stage = 0u; stage < num_stages; ++stage) {
+        barrier();
+        uint rp = stage % 2u;        // read half
+        uint wp = (stage + 1u) % 2u; // write half
+        vec4 bf = butterfly[stage * MAP_SIZE + col];
+        uvec2 read_indices = floatBitsToUint(bf.xy);
+        vec2 upper = row_shared[rp * MAP_SIZE + read_indices.x];
+        vec2 lower = row_shared[rp * MAP_SIZE + read_indices.y];
+        row_shared[wp * MAP_SIZE + col] = upper + mul_complex(lower, bf.zw);
+    }
+    fft_data[FFT_IDX(col, row, layer, 1)] = row_shared[(num_stages % 2u) * MAP_SIZE + col];
+}

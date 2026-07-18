@@ -2,7 +2,7 @@ class_name TornadoDebrisPool
 extends Node3D
 
 ## RigidBody3D pool driven by an analytic tornado wind field.
-## One manager loop applies quadratic drag to every body (water_buoyancy.gd pattern).
+## One manager loop applies quadratic drag to every body.
 
 const RHO_AIR := 1.21
 const WAKE_SPEED := 4.0

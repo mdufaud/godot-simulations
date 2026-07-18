@@ -1,0 +1,24 @@
+// Precomputes the butterfly read-indices + twiddle factors for the Stockham
+// FFT kernel (no bit reversal). Dispatched once per resolution.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint col = gl_GlobalInvocationID.x;   // 0 .. MAP_SIZE/2 - 1
+    uint stage = gl_GlobalInvocationID.y; // 0 .. log2(MAP_SIZE) - 1
+
+    uint stride = 1u << stage;
+    uint mid = MAP_SIZE >> (stage + 1u);
+    uint i = col >> stage;
+    uint j = col % stride;
+
+    vec2 twiddle = exp_complex(PI / float(stride) * float(j));
+    uint r0 = stride * (i + 0u) + j;
+    uint r1 = stride * (i + mid) + j;
+    uint w0 = stride * (2u * i + 0u) + j;
+    uint w1 = stride * (2u * i + 1u) + j;
+
+    vec2 read_indices = vec2(uintBitsToFloat(r0), uintBitsToFloat(r1));
+    butterfly[stage * MAP_SIZE + w0] = vec4(read_indices, twiddle);
+    butterfly[stage * MAP_SIZE + w1] = vec4(read_indices, -twiddle);
+}
