@@ -1,0 +1,86 @@
+// One invocation per white-particle slot, once per frame. Gathers the
+// surrounding fluid through the solver's grid, classifies the particle by how
+// many fluid neighbours it has, and moves it accordingly (SebLague):
+//   spray  (airborne, few neighbours) - ballistic, quadratic air drag
+//   bubble (submerged, many neighbours) - buoyant, dragged toward fluid velocity
+//   foam   (on the surface, in between) - carried by the fluid, dissolves
+// Publishes xyz = position, w = render size (0 = dead, the billboard collapses).
+void main() {
+	uint s = gl_GlobalInvocationID.x;
+	uint cap = uint(foam.cls.z);
+	if (s >= cap) {
+		return;
+	}
+	uint fw = uint(foam.cls.w);
+	ivec2 tx = ivec2(int(s % fw), int(s / fw));
+
+	vec4 fp = foam_pos.data[s];
+	float life = fp.w;
+	if (life <= 0.0) {
+		imageStore(foam_tex, tx, vec4(0.0));
+		return;
+	}
+
+	float dt = foam.spawn2.w;
+	vec3 p = fp.xyz;
+	vec4 fv = foam_vel.data[s];
+	vec3 v = fv.xyz;
+	float scale = fv.w;
+
+	int neighbours = 0;
+	vec3 vel_sum = vec3(0.0);
+	float weight_sum = 0.0;
+	FOREACH_NEIGHBOR(p,
+		vec3 off = predicted.data[j].xyz - p;
+		float r2 = dot(off, off);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		float w = sph_poly6(r2);
+		vel_sum += velocities.data[j].xyz * w;
+		weight_sum += w;
+		neighbours++;
+	)
+	vec3 fluid_v = weight_sum > 1e-8 ? vel_sum / weight_sum : v;
+
+	bool is_spray = neighbours <= foam.cls.x;
+	bool is_bubble = neighbours >= foam.cls.y;
+	if (is_spray) {
+		float sp2 = dot(v, v);
+		vec3 drag = sp2 > 1e-8 ? -normalize(v) * sp2 * foam.motion.y : vec3(0.0);
+		v += (params.gravity.xyz + drag) * dt;
+	} else if (is_bubble) {
+		// Buoyancy > 1 flips gravity, so bubbles rise.
+		vec3 buoyancy = params.gravity.xyz * (1.0 - foam.motion.x);
+		v += (buoyancy + (fluid_v - v) * 3.0) * dt;
+	} else {
+		// Surface foam is carried by the fluid, not merely accelerated by it.
+		v = fluid_v;
+		// Only surface foam ages: airborne spray and submerged bubbles are
+		// consumed by reclassifying into foam once they reach the surface.
+		life -= dt;
+	}
+
+	float target_scale = is_bubble ? foam.motion.z : 1.0;
+	scale = mix(scale, target_scale, clamp(dt * foam.motion.w, 0.0, 1.0));
+	p += v * dt;
+
+	vec3 lo = params.grid_origin.xyz + vec3(0.02);
+	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	const float bounce = 0.1;
+	if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * bounce; }
+	else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * bounce; }
+	if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * bounce; }
+	else if (p.y > hi.y) { p.y = hi.y; v.y = -v.y * bounce; }
+	if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * bounce; }
+	else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * bounce; }
+
+	foam_pos.data[s] = vec4(p, life);
+	foam_vel.data[s] = vec4(v, scale);
+
+	// Fade by shrinking rather than by alpha: constant-size sprites read as
+	// beads, shrinking ones read as dissolving froth.
+	float dissolve = clamp(life / max(foam.render.x, 1e-4), 0.0, 1.0);
+	float vel_scale = mix(0.6, 1.0, remap01(length(v), 1.0, 3.0));
+	imageStore(foam_tex, tx, vec4(p, life > 0.0 ? dissolve * scale * vel_scale : 0.0));
+}

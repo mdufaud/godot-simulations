@@ -11,5 +11,5 @@ resources/
 tests/
 .codex
 .claude
-__pycache__/
 .reasonix/
+__pycache__/

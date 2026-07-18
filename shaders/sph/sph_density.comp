@@ -1,0 +1,22 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pos = predicted.data[i].xyz;
+	float density = 0.0;
+	float near = 0.0;
+	// Self included (dst = 0) so density is never zero -> no div-by-zero later.
+	FOREACH_NEIGHBOR(pos,
+		vec3 d = predicted.data[j].xyz - pos;
+		float r2 = dot(d, d);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		float dst = sqrt(r2);
+		density += sph_density_k(dst);
+		near += sph_near_density_k(dst);
+	)
+	densities.data[i] = density;
+	near_densities.data[i] = near;
+}

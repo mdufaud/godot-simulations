@@ -76,13 +76,17 @@ size_flags_horizontal = 3
 size_flags_vertical = 3
 horizontal_scroll_mode = 0
 
-[node name="GridContainer" type="GridContainer" parent="MarginContainer/VBoxContainer/ScrollContainer"]
-unique_name_in_owner = true
+[node name="CenterRow" type="HBoxContainer" parent="MarginContainer/VBoxContainer/ScrollContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
-columns = 2
-theme_override_constants/h_separation = 16
-theme_override_constants/v_separation = 12
+size_flags_vertical = 3
+alignment = 1
+
+[node name="CategoryList" type="VBoxContainer" parent="MarginContainer/VBoxContainer/ScrollContainer/CenterRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 0
+theme_override_constants/separation = 14
 
 [node name="Spacer2" type="Control" parent="MarginContainer/VBoxContainer"]
 custom_minimum_size = Vector2(0, 16)

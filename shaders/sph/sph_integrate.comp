@@ -1,0 +1,33 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 v = velocities.data[i].xyz;
+	vec3 p = positions.data[i].xyz + v * params.sim.x;
+	// Box collision: clamp to domain and reflect with restitution.
+	vec3 lo = params.grid_origin.xyz + vec3(0.02);
+	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	float damp = params.sim2.y;
+	if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * damp; }
+	else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * damp; }
+	if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * damp; }
+	else if (p.y > hi.y) { p.y = hi.y; v.y = -v.y * damp; }
+	if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * damp; }
+	else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * damp; }
+	float temp = positions.data[i].w;
+	if (params.gravity.w > 0.5) {
+		// Lava cooling: surface particles (low density) lose heat faster.
+		float surf = clamp(1.0 - densities.data[i] / params.sim.y, 0.0, 1.0);
+		temp = max(temp - params.sim.x * (0.05 + 0.45 * surf), 0.0);
+	}
+	positions.data[i] = vec4(p, temp);
+	velocities.data[i] = vec4(v, 0.0);
+	// Only the last sub-step publishes the render texture (xyz = pos,
+	// w = speed for water / temperature for lava).
+	if (params.misc.z == 1) {
+		uint w = uint(params.misc.x);
+		ivec2 texel = ivec2(int(i % w), int(i / w));
+		imageStore(position_tex, texel, vec4(p, mix(length(v), temp, params.gravity.w)));
+	}
+}

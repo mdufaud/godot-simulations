@@ -79,24 +79,32 @@ const SCENES := {
 	"forest_demo": "res://scenes/forest_demo.tscn",
 }
 
+## Ordered list of categories shown on the main menu accordion.
+const CATEGORIES: Array[Dictionary] = [
+	{key = "fluids",    title = "Fluids",           icon = "💧"},
+	{key = "rigid",     title = "Rigid Bodies",     icon = "🪨"},
+	{key = "particles", title = "Particles & Fields", icon = "🌪️"},
+	{key = "other",     title = "Others",           icon = "🎨"},
+]
+
 ## Ordered list of demos shown on the main menu.
-## To add a new demo, just append a {key, title, icon} entry here.
+## To add a new demo, just append a {key, title, icon, category} entry here.
 const DEMOS: Array[Dictionary] = [
-	{key = "ssr_demo",      title = "SSR Physics Demo",     icon = "🔮"},
-	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓"},
-	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥"},
-	{key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌"},
-	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿"},
-	{key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨"},
-	{key = "fluid_demo",    title = "Fluid Simulation (PBF)", icon = "💧"},
-	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠"},
-	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊"},
-	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️"},
-	{key = "sand_demo",     title = "Heightfield Sand", icon = "🏖️"},
-	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️"},
-	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱"},
-	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪"},
-	{key = "forest_demo",   title = "Forest Walk",          icon = "🌲"},
+	{key = "ssr_demo",      title = "SSR Physics Demo",     icon = "🔮", category = "rigid"},
+	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓", category = "fluids"},
+	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles"},
+	{key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌", category = "particles"},
+	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿", category = "other"},
+	{key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨", category = "other"},
+	{key = "fluid_demo",    title = "Fluid Simulation",      icon = "💧", category = "fluids"},
+	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠", category = "other"},
+	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊", category = "other"},
+	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️", category = "particles"},
+	{key = "sand_demo",     title = "Heightfield Sand", icon = "🏖️", category = "particles"},
+	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid"},
+	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid"},
+	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪", category = "other"},
+	{key = "forest_demo",   title = "Forest Walk",          icon = "🌲", category = "other"},
 ]
 
 

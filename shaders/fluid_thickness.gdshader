@@ -1,5 +1,5 @@
-// Thickness prepass: additive accumulation of per-particle optical thickness,
-// no depth test so all particles along the ray contribute.
+// Thickness prepass: additive accumulation of per-particle optical
+// thickness, no depth test so all particles along the ray contribute.
 shader_type spatial;
 render_mode unshaded, blend_add, depth_draw_never, depth_test_disabled, cull_disabled;
 

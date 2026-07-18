@@ -1,5 +1,5 @@
 // Depth prepass for screen-space fluid: billboards sphere impostors from the
-// PBF position texture, outputs linear eye depth to color (R) and analytic
+// solver position texture, outputs linear eye depth to color (R) and analytic
 // sphere depth to the depth buffer so overlaps resolve to the nearest surface.
 shader_type spatial;
 render_mode unshaded, cull_disabled;
@@ -33,8 +33,8 @@ void fragment() {
 	vec4 clip = PROJECTION_MATRIX * vec4(sphere_view, 1.0);
 	DEPTH = clip.z / clip.w;
 	// Split eye depth into integer + fraction: 16F render target quantizes a
-	// raw depth to ~1.6cm at 20m, destroying reconstructed normals
-	// B = front-surface attribute (lava: temperature) — depth test keeps nearest
+	// raw depth to ~1.6cm at 20m, destroying reconstructed normals.
+	// B = front-surface attribute (lava: temperature) — depth test keeps nearest.
 	float eye_depth = -sphere_view.z;
 	ALBEDO = vec3(floor(eye_depth), eye_depth - floor(eye_depth), attrib);
 }

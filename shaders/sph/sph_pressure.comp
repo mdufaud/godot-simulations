@@ -1,0 +1,92 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pos = predicted.data[i].xyz;
+	float density = densities.data[i];
+	float near_density = near_densities.data[i];
+	float pressure = (density - params.sim.y) * params.sim.z;
+	float near_pressure = near_density * params.sim.w;
+	vec3 vel_i = velocities.data[i].xyz;
+	vec3 force = vec3(0.0);
+	int neighbours = 0;
+	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
+	// converges with its neighbours. High only where fluid slams into itself,
+	// which is exactly where air is entrained and foam is born.
+	float trapped_air = 0.0;
+	FOREACH_NEIGHBOR(pos,
+		if (j == i) {
+			continue;
+		}
+		vec3 off = predicted.data[j].xyz - pos;
+		float r2 = dot(off, off);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		neighbours++;
+		float dst = sqrt(r2);
+		vec3 dir = dst > 1e-6 ? off / dst : vec3(0.0, 1.0, 0.0);
+		float dj = densities.data[j];
+		float nj = near_densities.data[j];
+		float pj = (dj - params.sim.y) * params.sim.z;
+		float npj = nj * params.sim.w;
+		float shared_p = (pressure + pj) * 0.5;
+		float shared_np = (near_pressure + npj) * 0.5;
+		force += dir * sph_density_deriv(dst) * shared_p / dj;
+		force += dir * sph_near_density_deriv(dst) * shared_np / nj;
+
+		vec3 rel_v = vel_i - velocities.data[j].xyz;
+		float rel_mag = length(rel_v);
+		vec3 rel_dir = rel_v / max(rel_mag, 1e-6);
+		// 0 when moving apart, up to 2 when moving straight at each other.
+		float converge = 1.0 - dot(rel_dir, -dir);
+		float influence = 1.0 - min(1.0, dst / params.kernel.x);
+		trapped_air += rel_mag * converge * influence;
+	)
+	vec3 accel = force / max(density, 1e-6);
+	vec3 v = vel_i + accel * params.sim.x;
+	// Airborne particles (few neighbors) get drag so spray doesn't fling away.
+	if (neighbours < 8) {
+		v -= v * params.sim.x * 0.75;
+	}
+	velocities.data[i] = vec4(v, 0.0);
+
+	// --- Spawn white particles from this fluid particle ---
+	// Water only: in lava the white-particle look makes no sense.
+	if (foam.flags.x != 1 || params.gravity.w > 0.5) {
+		return;
+	}
+	float air_factor = foam.spawn.x * remap01(trapped_air, foam.spawn.y, foam.spawn.z);
+	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);
+	float spawn_factor = air_factor * ke_factor * params.sim.x;
+	if (spawn_factor <= 0.0) {
+		return;
+	}
+	uint rng = pcg_hash(i * 747796405u + uint(params.misc.w) * 2246822519u);
+	// Fractional part is the probability of one extra particle.
+	int spawn_count = int(floor(spawn_factor));
+	if (rand01(rng) < spawn_factor - float(spawn_count)) {
+		spawn_count++;
+	}
+	spawn_count = min(spawn_count, 8);
+	// A zero-length axis would produce NaN spawn positions.
+	if (spawn_count <= 0 || dot(v, v) < 1e-6) {
+		return;
+	}
+	// Spawn inside a cylinder whose axis is the particle's motion this sub-step.
+	vec3 axis_a = orthonormal(v);
+	vec3 axis_b = normalize(cross(axis_a, v));
+	float radius = params.kernel.x * foam.render.y;
+	uint cap = uint(foam.cls.z);
+	for (int k = 0; k < spawn_count; k++) {
+		uint slot = atomicAdd(foam_count.data[0], 1u) % cap;
+		float ang = rand01(rng) * 6.28318530718;
+		vec3 odir = cos(ang) * axis_a + sin(ang) * axis_b;
+		vec3 base_off = sqrt(rand01(rng)) * radius * odir;
+		vec3 spawn_pos = pos + base_off + v * params.sim.x * rand01(rng);
+		float life = mix(foam.spawn2.y, foam.spawn2.z, rand01(rng));
+		foam_pos.data[slot] = vec4(spawn_pos, life);
+		foam_vel.data[slot] = vec4(v + base_off, (foam.motion.z + 1.0) * 0.5);
+	}
+}

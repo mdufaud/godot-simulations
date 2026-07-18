@@ -1,0 +1,22 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pos = predicted.data[i].xyz;
+	vec3 vi = velocities.data[i].xyz;
+	vec3 visc = vec3(0.0);
+	// XSPH velocity smoothing with the Poly6 kernel.
+	FOREACH_NEIGHBOR(pos,
+		if (j == i) {
+			continue;
+		}
+		vec3 off = predicted.data[j].xyz - pos;
+		float r2 = dot(off, off);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		visc += (velocities.data[j].xyz - vi) * sph_poly6(r2);
+	)
+	velocities.data[i] = vec4(vi + visc * params.sim2.x * params.sim.x, 0.0);
+}

@@ -1,0 +1,206 @@
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+// Dual-density SPH (SebLague / Clavet). Particle data is ping-ponged: *_src
+// buffers hold last sub-step's cell-sorted order (canonical this sub-step);
+// grid_scatter re-sorts positions/predicted/velocities into the dst buffers that
+// every later stage indexes by slot. Velocity IS reordered (unlike the PBF
+// solver, which derives velocity from position change) because SPH reads the
+// old velocity after the sort.
+layout(std430, set = 0, binding = 0) restrict buffer PositionsSrc {
+	vec4 data[];
+}
+positions_src;
+
+layout(std430, set = 0, binding = 1) restrict buffer VelocitiesSrc {
+	vec4 data[];
+}
+velocities_src;
+
+layout(std430, set = 0, binding = 2) restrict buffer PredictedSrc {
+	vec4 data[];
+}
+predicted_src;
+
+layout(std430, set = 0, binding = 3) restrict buffer Densities {
+	float data[];
+}
+densities;
+
+layout(std430, set = 0, binding = 4) restrict buffer NearDensities {
+	float data[];
+}
+near_densities;
+
+layout(std430, set = 0, binding = 5) restrict buffer CellCount {
+	uint data[];
+}
+cell_count;
+
+layout(std430, set = 0, binding = 6) restrict buffer CellStart {
+	uint data[];
+}
+cell_start;
+
+layout(std430, set = 0, binding = 7) restrict buffer BlockSums {
+	uint data[];
+}
+block_sums;
+
+layout(std430, set = 0, binding = 8) restrict buffer Positions {
+	vec4 data[];
+}
+positions;
+
+layout(std430, set = 0, binding = 9) restrict buffer Velocities {
+	vec4 data[];
+}
+velocities;
+
+layout(rgba32f, set = 0, binding = 10) uniform restrict image2D position_tex;
+
+layout(std430, set = 0, binding = 11) restrict buffer Predicted {
+	vec4 data[];
+}
+predicted;
+
+// --- White particles (foam / spray / bubbles), coupled to the fluid ---
+// Spawning needs the per-neighbour relative velocities of the pressure pass
+// (trapped-air metric) and updating needs the fluid grid, so the pool lives in
+// the solver's binding layout rather than in a standalone pass.
+layout(std430, set = 0, binding = 12) restrict buffer FoamPos {
+	vec4 data[]; // xyz = position, w = remaining lifetime (<= 0 is dead)
+}
+foam_pos;
+
+layout(std430, set = 0, binding = 13) restrict buffer FoamVel {
+	vec4 data[]; // xyz = velocity, w = per-particle scale
+}
+foam_vel;
+
+layout(std430, set = 0, binding = 14) restrict buffer FoamCount {
+	uint data[]; // [0] = monotonic spawn cursor (wrapped mod cap for the ring)
+}
+foam_count;
+
+layout(rgba32f, set = 0, binding = 15) uniform restrict writeonly image2D foam_tex;
+
+layout(std140, set = 0, binding = 16) uniform FoamParams {
+	vec4 spawn; // x = trapped_air_rate, y = trapped_min, z = trapped_max, w = ke_min
+	vec4 spawn2; // x = ke_max, y = life_min, z = life_max, w = frame_dt
+	vec4 motion; // x = bubble_buoyancy, y = spray_drag, z = bubble_scale, w = scale_speed
+	vec4 render; // x = dissolve_time, y = spawn_radius_scale, zw = pad
+	ivec4 cls; // x = spray_max_neighbours, y = bubble_min_neighbours, z = cap, w = tex_width
+	ivec4 flags; // x = enabled, yzw = pad
+}
+foam;
+
+layout(push_constant, std430) uniform Params {
+	vec4 grid_origin; // xyz = origin, w = cell_size
+	ivec4 grid_dims; // xyz = dims, w = particle_count
+	vec4 kernel; // x = h, y = h^2, z = K_SpikyPow2, w = K_SpikyPow3
+	vec4 kernel2; // x = K_SpikyPow2Grad, y = K_SpikyPow3Grad, z = K_Poly6, w = pad
+	vec4 sim; // x = dt, y = target_density, z = pressure_mult, w = near_pressure_mult
+	vec4 sim2; // x = viscosity_strength, y = collision_damping, zw = pad
+	vec4 gravity; // xyz = gravity, w = mode (0 water, 1 lava)
+	ivec4 misc; // x = tex_width, y = num_blocks, z = last_substep flag, w = pad
+}
+params;
+
+// Smoothing kernels (dst = distance, caller guarantees dst < h). SpikyPow2 for
+// density, SpikyPow3 for near-density; their gradients drive pressure; Poly6 for
+// viscosity. Normalization constants baked CPU-side.
+float sph_density_k(float dst) {
+	float v = params.kernel.x - dst;
+	return v * v * params.kernel.z;
+}
+
+float sph_near_density_k(float dst) {
+	float v = params.kernel.x - dst;
+	return v * v * v * params.kernel.w;
+}
+
+float sph_density_deriv(float dst) {
+	float v = params.kernel.x - dst;
+	return -v * params.kernel2.x;
+}
+
+float sph_near_density_deriv(float dst) {
+	float v = params.kernel.x - dst;
+	return -v * v * params.kernel2.y;
+}
+
+// Caller guarantees r2 < h^2.
+float sph_poly6(float r2) {
+	float v = params.kernel.y - r2;
+	return v * v * v * params.kernel2.z;
+}
+
+ivec3 cell_of(vec3 p) {
+	vec3 rel = (p - params.grid_origin.xyz) / params.grid_origin.w;
+	return clamp(ivec3(floor(rel)), ivec3(0), params.grid_dims.xyz - 1);
+}
+
+uint cell_index(ivec3 c) {
+	return uint(c.x + c.y * params.grid_dims.x + c.z * params.grid_dims.x * params.grid_dims.y);
+}
+
+uint num_cells() {
+	return uint(params.grid_dims.x * params.grid_dims.y * params.grid_dims.z);
+}
+
+vec3 clamp_domain(vec3 p) {
+	vec3 lo = params.grid_origin.xyz + vec3(0.02);
+	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	return clamp(p, lo, hi);
+}
+
+float remap01(float v, float lo, float hi) {
+	return clamp((v - lo) / max(hi - lo, 1e-6), 0.0, 1.0);
+}
+
+// PCG hash -> uint, then to [0,1). Seed is salted per (frame, sub-step) so the
+// spawn pattern does not repeat.
+uint pcg_hash(uint v) {
+	uint state = v * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return (word >> 22u) ^ word;
+}
+
+float rand01(inout uint rng) {
+	rng = pcg_hash(rng);
+	return float(rng) / 4294967296.0;
+}
+
+// Any unit vector perpendicular to v (v need not be normalized).
+vec3 orthonormal(vec3 v) {
+	vec3 a = abs(v.x) > 0.9 * length(v) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+	return normalize(cross(v, a));
+}
+
+// The 3 x-neighbor cells of each (y,z) row are adjacent in the flatten order
+// (x + y*dimx + z*dimx*dimy), so their particle ranges form one contiguous span.
+#define FOREACH_NEIGHBOR(P, BODY) { \
+	ivec3 cc_ = cell_of(P); \
+	int x0_ = max(cc_.x - 1, 0); \
+	int x1_ = min(cc_.x + 1, params.grid_dims.x - 1); \
+	for (int dz_ = -1; dz_ <= 1; dz_++) { \
+		int z_ = cc_.z + dz_; \
+		if (z_ < 0 || z_ >= params.grid_dims.z) { \
+			continue; \
+		} \
+		for (int dy_ = -1; dy_ <= 1; dy_++) { \
+			int y_ = cc_.y + dy_; \
+			if (y_ < 0 || y_ >= params.grid_dims.y) { \
+				continue; \
+			} \
+			uint row0_ = cell_index(ivec3(x0_, y_, z_)); \
+			uint row1_ = cell_index(ivec3(x1_, y_, z_)); \
+			uint start_ = cell_start.data[row0_]; \
+			uint end_ = cell_start.data[row1_] + cell_count.data[row1_]; \
+			for (uint s_ = start_; s_ < end_; s_++) { \
+				uint j = s_; \
+				BODY \
+			} \
+		} \
+	} \
+}

@@ -1,0 +1,31 @@
+shared uint temp[256];
+
+void main() {
+	uint lid = gl_LocalInvocationID.x;
+	uint nb = uint(params.misc.y);
+	uint base = lid * 4u;
+	uint local_vals[4];
+	uint sum = 0u;
+	for (uint k = 0u; k < 4u; k++) {
+		uint idx = base + k;
+		local_vals[k] = idx < nb ? block_sums.data[idx] : 0u;
+		sum += local_vals[k];
+	}
+	temp[lid] = sum;
+	barrier();
+	for (uint off = 1u; off < 256u; off <<= 1u) {
+		uint t = lid >= off ? temp[lid - off] : 0u;
+		barrier();
+		temp[lid] += t;
+		barrier();
+	}
+	uint run = temp[lid] - sum;
+	for (uint k = 0u; k < 4u; k++) {
+		uint idx = base + k;
+		if (idx < nb) {
+			uint v = local_vals[k];
+			block_sums.data[idx] = run;
+			run += v;
+		}
+	}
+}
