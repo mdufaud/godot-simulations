@@ -6,7 +6,10 @@ docs/
 .editorconfig
 TODO.md
 
-resources/
+# Third-party binary assets (Poly Haven downloads), fetched separately
+resources/forest/
+resources/materials/
+resources/rocks/
 
 tests/
 .codex

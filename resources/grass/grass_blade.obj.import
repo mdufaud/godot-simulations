@@ -4,14 +4,14 @@ importer="wavefront_obj"
 importer_version=1
 type="Mesh"
 uid="uid://dat2xlnemc2fm"
-path="res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh"
+path="res://.godot/imported/grass_blade.obj-cc840dc2ac8191728b78a7f54d8029b0.mesh"
 
 [deps]
 
-files=["res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh"]
+files=["res://.godot/imported/grass_blade.obj-cc840dc2ac8191728b78a7f54d8029b0.mesh"]
 
 source_file="res://resources/grass/grass_blade.obj"
-dest_files=["res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh", "res://.godot/imported/grass_blade.obj-c252ffac75d62ce6cfe90f7c90f0c526.mesh"]
+dest_files=["res://.godot/imported/grass_blade.obj-cc840dc2ac8191728b78a7f54d8029b0.mesh", "res://.godot/imported/grass_blade.obj-cc840dc2ac8191728b78a7f54d8029b0.mesh"]
 
 [params]
 
