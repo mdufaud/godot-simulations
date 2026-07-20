@@ -8,7 +8,7 @@ render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabl
 // Fire volume shader — raymarched emission/absorption
 // Inspired by Fire-X (Wrede et al., SIGGRAPH Asia 2025)
 // Volume channels: R = normalized temperature, G = smoke/soot,
-//                  B = reaction intensity, A = fuel
+//                  B = reaction intensity, A = water vapour
 // ============================================================
 
 uniform sampler3D volume_tex : filter_linear, repeat_disable;
@@ -23,6 +23,8 @@ uniform float display_temperature = 2600.0;
 uniform float emission_strength : hint_range(0.5, 12.0) = 3.0;
 uniform float flame_absorption : hint_range(0.0, 10.0) = 2.5;
 uniform float smoke_absorption : hint_range(0.0, 20.0) = 9.0;
+uniform float steam_strength : hint_range(0.0, 20.0) = 6.0;
+uniform float steam_absorption : hint_range(0.0, 20.0) = 4.0;
 uniform float blue_strength : hint_range(0.0, 3.0) = 0.7;
 uniform float noise_scale : hint_range(0.05, 1.0) = 0.35;
 uniform float scroll_speed : hint_range(0.0, 3.0) = 1.2;
@@ -99,6 +101,17 @@ void fragment() {
 			debug_max = max(debug_max, s.r);
 			t += ds;
 			continue;
+		}
+
+		// Steam. Only the cool part of the vapour field is drawn: water made by
+		// combustion itself is superheated and optically nothing, while vapour
+		// that has drifted out of the flame is the white cloud a hose produces.
+		// Bright, forward-scattering and non-emissive, so it reads as steam
+		// rather than as more smoke.
+		float steam = s.a * (1.0 - smoothstep(0.05, 0.35, s.r)) * steam_strength;
+		if (steam > 0.001) {
+			col += trans * vec3(0.85, 0.88, 0.92) * steam * ds;
+			trans *= exp(-steam * steam_absorption * ds);
 		}
 
 		if (s.r + s.g > 0.01) {

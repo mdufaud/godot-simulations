@@ -30,8 +30,12 @@ void main() {
 		min(float(c.z), float(gmax.z - c.z)));
 	float fade = clamp(min(edge, float(gmax.y - c.y)) / FADE, 0.0, 1.0);
 
+	// A carries the steam marker (vapour of evaporation origin, fire_evaporate),
+	// not Y_H2O: Fire-X Sec. 5.6 samples "vapor" as its own field, and combustion
+	// water alone would paint a permanent white cloud over a methane flame. The
+	// channel used to hold the fuel fraction, which no shader ever read.
 	imageStore(display_tex, c,
-		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s.y));
+		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s2.w * fade));
 
 	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
 

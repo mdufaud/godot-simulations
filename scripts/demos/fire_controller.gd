@@ -19,6 +19,7 @@ const FireWater = preload("res://scripts/fire/fire_water.gd")
 var stats_label: Label
 var probe_label: Label
 var timing_label: Label
+var debug_info := false
 var fuel_bar: ProgressBar
 var oxygen_bar: ProgressBar
 var temp_bar: ProgressBar
@@ -28,6 +29,10 @@ var water: FireWater
 var volume_material: ShaderMaterial
 var volume_texture: Texture3DRD
 var texture_bound := false
+
+var droplet_mesh: MultiMesh
+var droplet_material: ShaderMaterial
+var droplet_texture: Texture2DRD
 
 # --- Quality presets ---
 ## Physical extent of the simulated box, held constant across presets so the
@@ -61,10 +66,31 @@ var emitter_radius := 0.8
 ## divergence. Retune after the MAC rewrite, not before.
 var emitter_rate := 0.2
 
+# --- Water nozzle (Fire-X Fig. 8) ---
+## The paper finds the spray aimed at the flame base is what stops the fire, so all
+## three intensity presets aim there and vary how much water arrives per second.
+## Each level sets the SPH emitter's frequency, velocity and spray cone; more water
+## means a wider, faster, denser stream.
+var jet_enabled := false
+const JET_NOZZLE_POS := Vector3(4.5, 5.0, 0.0)
+const JET_AIM_BASE := Vector3(0.0, 0.35, 0.0)
+# Frequency is particles/second, so it doubles as how dense the stream looks; the
+# heavier presets run past Tab. 3's 100 Hz cap (game feel over the paper's nozzle)
+# to build a visible torrent rather than a dotted line.
+const WATER_PRESETS := {
+	1: {"freq": 30.0, "vel": 3.5, "spray": 8.0},    # Light  — trickle, hisses, survives
+	2: {"freq": 90.0, "vel": 6.0, "spray": 25.0},   # Medium — big steam, strong knockdown
+	3: {"freq": 170.0, "vel": 8.5, "spray": 40.0},  # Heavy  — torrent
+}
+var _water_level := 0
+var _water_buttons := {}
+
 # --- Interaction state ---
-var is_adding_water := false
+## A human click is far shorter than the flame's fuel residence time, so a
+## one-shot ignite burns out before it is seen. The toggle keeps depositing fuel
+## and pilot heat every frame while it is on.
+var is_igniting := false
 var is_smothering := false
-var water_position := Vector3(0, 0.5, 0)
 
 ## The toggle gates the sliders rather than writing the wind itself, so turning
 ## it off stays off no matter where the sliders sit.
@@ -89,10 +115,15 @@ func _ready() -> void:
 
 	RenderingServer.call_on_render_thread(solver.init_render)
 
-	# P3: water droplets (stub for now)
+	# P3/P4: SPH water droplets and their coupling to the grid. More particles than
+	# the coupling strictly needs, so a held jet builds a connected sheet of water
+	# rather than a scatter of beads once the blob shader merges them.
 	water = FireWater.new()
+	water.particle_count = 4096
+	water.evaporation_active = solver.evaporation_enabled
 	RenderingServer.call_on_render_thread(water.init_render.bind(solver.grid_dims, solver.cell_size))
 
+	_setup_droplet_render()
 	_light_fire()
 	_setup_ui()
 
@@ -121,8 +152,9 @@ func _process(delta: float) -> void:
 	var sim_dt := solver.sim_delta(delta)
 	solver.push_event(FireGpuSolver.EVENT_FUEL, emitter_position,
 		emitter_radius, emitter_rate * sim_dt)
-	if is_adding_water:
-		solver.push_event(FireGpuSolver.EVENT_WATER, water_position, 1.5, 2.0 * sim_dt)
+	if is_igniting:
+		solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0, 0.5, 0),
+			1.0, 2.0 * sim_dt)
 	if is_smothering:
 		solver.push_event(FireGpuSolver.EVENT_SMOTHER, Vector3.ZERO, 2.0, 20.0 * sim_dt)
 
@@ -130,6 +162,11 @@ func _process(delta: float) -> void:
 	# both ahead of the grid loop (lines 13-14) so the solver reads the liquid field
 	# built this frame, and the return after it (lines 23-24).
 	if water.initialized:
+		if jet_enabled:
+			# Simulated time, not frame time: emitting per wall-clock second makes
+			# the droplet count a function of the frame rate, and two runs of the
+			# same nozzle then disagree by a couple of hundred kelvin.
+			RenderingServer.call_on_render_thread(water.emit_jet.bind(sim_dt))
 		RenderingServer.call_on_render_thread(water.step_droplets.bind(delta))
 		RenderingServer.call_on_render_thread(water.scatter_render)
 		RenderingServer.call_on_render_thread(water.gather_render.bind(
@@ -140,6 +177,13 @@ func _process(delta: float) -> void:
 
 	if water.initialized:
 		RenderingServer.call_on_render_thread(water.return_render)
+
+	if water.initialized:
+		if droplet_texture == null:
+			droplet_texture = Texture2DRD.new()
+			droplet_texture.texture_rd_rid = water.sph_position_tex_rid()
+			droplet_material.set_shader_parameter("position_tex", droplet_texture)
+		droplet_mesh.visible_instance_count = water.particles_active
 
 	var stats := solver.get_stats()
 	_update_light(stats)
@@ -152,21 +196,105 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
-	RenderingServer.call_on_render_thread(solver.free_render)
+	# Same reason: free_render drops the SPH position texture, and a material left
+	# pointing at it makes the renderer build a uniform set around a dead RID.
+	if droplet_texture != null:
+		droplet_texture.texture_rd_rid = RID()
+	# Water first: its uniform sets bind the solver's liquid textures, and freeing
+	# those first makes Godot drop the dependent sets on its own — FireWater then
+	# frees RIDs that are already gone ("Attempted to free invalid ID").
 	RenderingServer.call_on_render_thread(water.free_render)
+	RenderingServer.call_on_render_thread(solver.free_render)
 
 
 # =========================================================================
 #  SCENE SETUP
 # =========================================================================
 
+## Sphere impostors over the SPH position texture, one instance per particle.
+##
+## The texture RID only exists once the queued init_render has run on the render
+## thread, so the binding is deferred to _process like the fire volume's is.
+## visible_instance_count follows the pour: the solver only writes the active
+## slots, and the rest of the texture is whatever was in it before.
+func _setup_droplet_render() -> void:
+	droplet_material = ShaderMaterial.new()
+	droplet_material.shader = load("res://shaders/fire/water_droplet.gdshader")
+	droplet_material.set_shader_parameter("tex_width", water.sph_tex_width())
+	# Larger than the SPH spacing so neighbouring droplets overlap and the blob
+	# shader reads them as one body of water instead of separate spheres.
+	droplet_material.set_shader_parameter("particle_radius", 0.13)
+
+	var quad := QuadMesh.new()
+	quad.size = Vector2(2.0, 2.0)
+	droplet_mesh = MultiMesh.new()
+	droplet_mesh.transform_format = MultiMesh.TRANSFORM_3D
+	droplet_mesh.mesh = quad
+	droplet_mesh.instance_count = water.particle_count
+	droplet_mesh.visible_instance_count = 0
+	# The vertex shader takes the position straight from the texture and ignores
+	# the instance transform, so every instance carries the same identity matrix.
+	var buf := PackedFloat32Array()
+	buf.resize(water.particle_count * 12)
+	for i in water.particle_count:
+		buf[i * 12] = 1.0
+		buf[i * 12 + 5] = 1.0
+		buf[i * 12 + 10] = 1.0
+	droplet_mesh.buffer = buf
+
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = droplet_mesh
+	mmi.material_override = droplet_material
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Instances sit at the origin as far as the culler is concerned, since the
+	# real positions only exist on the GPU.
+	mmi.custom_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * DOMAIN_SIZE, DOMAIN_SIZE)
+	add_child(mmi)
+
+
+## The three water buttons are a radio group: turning one on selects that intensity
+## and clears the others; turning the active one off stops the jet.
+func _set_water_level(level: int, on: bool) -> void:
+	if not on:
+		if _water_level == level:
+			jet_enabled = false
+			_water_level = 0
+		return
+	_water_level = level
+	jet_enabled = true
+	var p: Dictionary = WATER_PRESETS[level]
+	water.jet_frequency = p.freq
+	water.jet_velocity = p.vel
+	water.jet_spray_angle = p.spray
+	water.jet_position = JET_NOZZLE_POS
+	water.jet_direction = JET_AIM_BASE - JET_NOZZLE_POS
+	for lv in _water_buttons:
+		if lv != level:
+			_water_buttons[lv].set_pressed_no_signal(false)
+
+
 func _light_fire() -> void:
 	solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0, 0.5, 0), 1.0, 0.4)
-	# P3: spawn test droplets above the fire. Queued rather than called, because
-	# init_render is itself queued — calling directly would run against a
-	# FireWater that has not allocated its buffers yet and spawn nothing.
-	RenderingServer.call_on_render_thread(
-		water.spawn_droplets.bind(100, Vector3(0, 2.0, 0), 0.5))
+
+
+## The P4 qualitative test: a packet of droplets thrown down onto the flame. The
+## whole particle budget goes at once — the SPH solver has no streaming emitter,
+## so a second pour replaces the first rather than adding to it.
+##
+## Queued rather than called, because init_render is itself queued: calling
+## directly would run against a FireWater that has not allocated its buffers yet
+## and spawn nothing.
+func _pour_water() -> void:
+	# A bucket of water lobbed onto the fire, not a packed ball dropped straight
+	# down: the old version put the whole budget in a 0.4 m sphere, whose SPH
+	# pressure detonated it into an explosion. The water now starts off to the side
+	# and above, spread over a wide loose volume so the solver does not blow it
+	# apart, and is thrown in an arc at the flame base.
+	var origin := Vector3(-4.5, 4.5, 0.0)
+	var target := Vector3(0.0, 0.5, 0.0)
+	var throw := (target - origin).normalized() * 8.0
+	RenderingServer.call_on_render_thread(water.spawn_droplets.bind(
+		mini(water.particle_count, 1800), origin, 0.9, throw))
 
 
 ## Swap the field resolution without moving the domain walls.
@@ -243,21 +371,25 @@ func _update_ui_stats(stats: Dictionary) -> void:
 	var temp_norm := (max_temp - solver.ambient_temperature) \
 		/ (solver.display_temperature - solver.ambient_temperature)
 
-	stats_label.text = "T max: %d K | reaction %.2f mol/(m³·s)" % [
-		int(max_temp), stats["total_reaction"]]
+	if debug_info:
+		stats_label.text = "T max: %d K | reaction %.2f mol/(m³·s)" % [
+			int(max_temp), stats["total_reaction"]]
 
-	# Mass-fraction closure: a running check that species transport conserves
-	# mass. Drifts away from 1.0 only if a product coefficient is off default.
-	# Timings are empty unless profiling is on, so the readout disappears with the
-	# toggle instead of freezing on the last profiled frame.
-	var timings := solver.get_timings()
-	var probe_text := "ΣY = %.4f" % stats["mass_fraction_sum"]
-	if water.mass_measured_once:
-		probe_text += " | Σm_p err %.5f%%" % (water.mass_error * 100.0)
-	if timings.has("total"):
-		probe_text += " | GPU %.2f ms" % timings["total"]
-	probe_label.text = probe_text
-	timing_label.text = _format_timings(timings)
+		# Mass-fraction closure: a running check that species transport conserves
+		# mass. Drifts away from 1.0 only if a product coefficient is off default.
+		var timings := solver.get_timings()
+		var probe_text := "ΣY = %.4f" % stats["mass_fraction_sum"]
+		if water.mass_measured_once:
+			probe_text += " | Σm_p %.3f kg" % water.measured_mass
+		# The P4 criterion: the energy the gas loses has to be the latent plus
+		# sensible heat the liquid gave up, to 1 %. Only shown once there is liquid
+		# on the grid, since the ratio is 0/0 in a dry domain.
+		if stats["energy_budget"] > 0.0:
+			probe_text += " | ΔE err %.3f%%" % (stats["energy_residual"] * 100.0)
+		if timings.has("total"):
+			probe_text += " | GPU %.2f ms" % timings["total"]
+		probe_label.text = probe_text
+		timing_label.text = _format_timings(timings)
 
 	fuel_bar.value = stats["avg_fuel"] * 100.0
 	oxygen_bar.value = stats["avg_oxygen"] * 100.0
@@ -287,7 +419,13 @@ func _setup_ui() -> void:
 	timing_label = menu.add_label("")
 	# Without this a Label reports its whole line as its minimum width, which
 	# widens the panel past its anchored 300 px for as long as the text is set.
+	stats_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	probe_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	timing_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	# Debug readout is hidden until the Debug info toggle turns it on.
+	stats_label.visible = false
+	probe_label.visible = false
+	timing_label.visible = false
 	menu.add_separator()
 	fuel_bar = menu.add_progress_bar("Fuel", 100.0)
 	oxygen_bar = menu.add_progress_bar("Oxygen", 100.0)
@@ -312,17 +450,24 @@ func _setup_ui() -> void:
 	menu.add_separator()
 	menu.add_section("Actions")
 	menu.add_button("Reset", _reset_simulation)
-	menu.add_button("Ignite", func() -> void:
-		solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0, 0.5, 0), 1.0, 0.4))
+	menu.add_toggle("Ignite", false, func(on: bool) -> void:
+		is_igniting = on)
+	for level in [1, 2, 3]:
+		var level_name: String = ["Light", "Medium", "Heavy"][level - 1]
+		_water_buttons[level] = menu.add_toggle("Water: " + level_name, false,
+			func(on: bool) -> void: _set_water_level(level, on))
+	menu.add_button("Pour water", _pour_water)
 	menu.add_toggle("Wind", false, func(on: bool) -> void:
 		_wind_enabled = on
 		_apply_wind())
-	menu.add_toggle("Extinguish", false, func(on: bool) -> void:
-		is_adding_water = on)
 	menu.add_toggle("Smother", false, func(on: bool) -> void:
 		is_smothering = on)
-	menu.add_toggle("GPU profiling", false, func(on: bool) -> void:
-		solver.profiling = on)
+	menu.add_toggle("Debug info", false, func(on: bool) -> void:
+		debug_info = on
+		solver.profiling = on
+		stats_label.visible = on
+		probe_label.visible = on
+		timing_label.visible = on)
 
 	# Ranges below are the paper's own (Fire-X Tab. 3) wherever it gives one.
 	menu.add_separator()
@@ -341,6 +486,31 @@ func _setup_ui() -> void:
 		func(v: float): solver.emitter_temperature = v)
 	menu.add_slider("Fuel supply", 0.0, 5.0, emitter_rate,
 		func(v: float): emitter_rate = v)
+
+	menu.add_separator()
+	menu.add_section("Evaporation")
+	menu.add_toggle("Evaporation", solver.evaporation_enabled, func(on: bool) -> void:
+		solver.evaporation_enabled = on
+		water.evaporation_active = on)
+	menu.add_slider("Droplet diameter (mm)", 0.5, 5.0,
+		solver.droplet_diameter * 1000.0,
+		func(v: float): solver.droplet_diameter = v * 0.001)
+	# UNDEFINED IN PAPER: Eq. 10's k, read as a heat transfer coefficient.
+	menu.add_slider("Droplet heat transfer", 0.0, 500.0, solver.droplet_heat_transfer,
+		func(v: float): solver.droplet_heat_transfer = v)
+	# NON-PAPER: wet-cell combustion suppression. Below ~20 water makes the fire
+	# spread instead of die; see FireGpuSolver.water_suppression.
+	menu.add_slider("Water suppression", 0.0, 100.0, solver.water_suppression,
+		func(v: float): solver.water_suppression = v)
+	# NON-PAPER: how fast a cold puddle drains away so the fire can recover; 0 keeps
+	# the old behaviour where water pooled forever and half-smothered the flame.
+	menu.add_slider("Water drain (1/s)", 0.0, 1.0, solver.liquid_drain_rate,
+		func(v: float): solver.liquid_drain_rate = v)
+	# Both ranges are Tab. 3's own for the particle emitter.
+	menu.add_slider("Jet velocity (m/s)", 0.0, 10.0, water.jet_velocity,
+		func(v: float): water.jet_velocity = v)
+	menu.add_slider("Jet frequency (Hz)", 10.0, 100.0, water.jet_frequency,
+		func(v: float): water.jet_frequency = v)
 
 	menu.add_separator()
 	menu.add_section("Flow")

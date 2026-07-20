@@ -1,0 +1,41 @@
+// Eq. 32, the velocity half of the evaporation mix:
+//
+//   u' = (1 - rho').u_l + rho'.u
+//
+// Split out of fire_evaporate because it is a face quantity and that stage is
+// cell local. Evaluating it in the same dispatch would mean reading rho' from
+// the two cells adjacent to a face while other invocations are still writing
+// them, which is exactly the neighbour read the `restrict` on these images
+// forbids for an in-place stage.
+//
+// rho' rides in liquid_scal.a, written by fire_evaporate and 1.0 wherever there
+// is no liquid, so a dry face keeps its velocity untouched.
+//
+// Dispatched over the face grid; each write is guarded by its own extent.
+
+// Cell indices either side of face f along axis p_axis, clamped to the grid: a
+// boundary face has only one real neighbour and reuses it for both.
+#define FACE_MIX(p_axis, p_face, p_img) { \
+	ivec3 lo_ = p_face; \
+	ivec3 hi_ = p_face; \
+	lo_[p_axis] = max(p_face[p_axis] - 1, 0); \
+	hi_[p_axis] = min(p_face[p_axis], params.dims[p_axis] - 1); \
+	float mix_ = 0.5 * (imageLoad(liquid_scal, lo_).a + imageLoad(liquid_scal, hi_).a); \
+	float ul_ = 0.5 * (imageLoad(liquid_vel, lo_)[p_axis] + imageLoad(liquid_vel, hi_)[p_axis]); \
+	float u_ = imageLoad(p_img, p_face).r; \
+	imageStore(p_img, p_face, vec4(mix(ul_, u_, mix_), 0.0, 0.0, 0.0)); \
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+
+	if (in_u(c)) {
+		FACE_MIX(0, c, u_src);
+	}
+	if (in_v(c)) {
+		FACE_MIX(1, c, v_src);
+	}
+	if (in_w(c)) {
+		FACE_MIX(2, c, w_src);
+	}
+}

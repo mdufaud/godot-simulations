@@ -15,18 +15,19 @@ extends RefCounted
 const SHADER_DIR := "res://shaders/fire/"
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
-	"combustion", "diffusion", "divergence", "pressure", "project", "display",
+	"combustion", "diffusion", "evaporate", "evapapply", "divergence", "pressure",
+	"project", "display",
 ]
 ## Stages that touch the staggered velocity faces, and so must be dispatched
 ## over the face grid (dims + 1 on every axis) rather than the cell grid. Each
 ## one guards its own writes, since the three face textures have different
 ## extents and none of them fills the dispatch.
 const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
-	"diffusion", "project"]
+	"diffusion", "evapapply", "project"]
 ## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
 const WG := Vector3i(8, 8, 4)
-const STATS_WORDS := 9
-const CONFIG_VEC4S := 10
+const STATS_WORDS := 11
+const CONFIG_VEC4S := 12
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4 }
 
@@ -127,6 +128,38 @@ var kinematic_viscosity := 1.5e-5 ## NON-PAPER: air at ambient, Eq. 1 nu
 var drag := 0.0 ## NON-PAPER: stability aid, 0 = disabled
 var oxygen_replenish := 6.0 ## NON-PAPER: open-boundary inflow rate [1/s]
 var residual_dissipation := 0.03 ## NON-PAPER: soot settling in cold cells
+## Evaporation (Eq. 9-11, 26-32). Water at 1 atm, from the NIST Chemistry
+## WebBook [Linstrom & Mallard], which is the source Fire-X Tab. 4 names for the
+## liquid properties ("Water or Ethanol").
+var boiling_temperature := 373.15 ## T_B [K]
+var latent_heat := 2.257e6 ## Delta_vH0 [J/kg]
+var liquid_heat_capacity := 4182.0 ## Cp,l [J/(kg.K)]
+## INFERRED: the paper defines rho_d as "the amount of liquid in the form of
+## droplets", which is circular with Eq. 28. Read as the bulk liquid density, so
+## rho_l/rho_d is the liquid volume fraction of the cell.
+var droplet_density := 998.0
+var droplet_diameter := 0.001 ## d_d, Fire-X Tab. 3 range 0.0005-0.005 m
+## UNDEFINED IN PAPER: Eq. 10 writes this as a conductivity k in W/(m.K), which
+## does not balance dimensionally. Taken as a convective heat transfer
+## coefficient against the droplet surface; 50 W/(m^2.K) is Nu = 2 conduction on
+## a 1 mm droplet. See the header of fire_evaporate.comp.
+var droplet_heat_transfer := 50.0
+## NON-PAPER: how strongly liquid in a cell suppresses combustion there, as
+## v_c /= (1 + k.rho_l). The paper's spray extinguishes a flame by disrupting the
+## flow and cutting the oxygen supply (Sec. 6.1.3); this grid's pinned emitter and
+## steady oxygen inflow give it no way to blow out, so cooling alone makes a wet
+## flame spread rather than die. This restores the sign. See fire_combustion.comp.
+## At the default, spray on the flame base drops the reaction below its dry level
+## (measured); below ~20 the density boost wins and water makes the fire worse.
+var water_suppression := 40.0
+## NON-PAPER: slow loss of pooled liquid to the ground per second, as
+## rho_l *= (1 - rate.dt), applied on top of Eq. 26-28 evaporation. A cold puddle
+## cannot heat itself back to its boiling point, so real evaporation stalls and the
+## grid stays wet and suppressed forever; this drains it (runs off / soaks in) so a
+## rekindled fire can recover. water_return then shrinks the particles to match.
+var liquid_drain_rate := 0.2
+var evaporation_enabled := true
+
 var display_temperature := 2600.0 ## Renderer normalisation only
 var reaction_reference := 50.0 ## Renderer normalisation only [mol/(m^3.s)]
 
@@ -226,6 +259,13 @@ func get_stats() -> Dictionary:
 		# so it must fall when pressure_iterations rises. A collocated grid leaves
 		# a checkerboard the projection cannot see, and the value stalls instead.
 		"max_divergence": float(s[8]) * 0.001,
+		# The P4 criterion: |dE_gas + dE_liq + latent| summed over the wet cells,
+		# against the sum of the three magnitudes. Zero by construction of the
+		# evaporation update, so what it actually reports is what breaks that —
+		# the temperature clamp above all. Per-cell magnitudes are summed, so
+		# opposite-signed errors in different cells cannot cancel into a pass.
+		"energy_residual": float(s[9]) / maxf(float(s[10]), 1.0),
+		"energy_budget": float(s[10]) * 0.001, # millijoules -> J
 	}
 
 
@@ -411,6 +451,7 @@ func _build_uniform_sets() -> void:
 		2: "scal_a", 3: "scal_b", 5: "scal_fwd",
 		12: "scal2_a", 13: "scal2_b", 14: "scal2_fwd",
 		6: "curl", 7: "press_a", 8: "press_b", 9: "diverg", 10: "display",
+		22: "liquid_scal", 23: "liquid_vel",
 	}
 	var fields_flipped := fields.duplicate()
 	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
@@ -513,7 +554,14 @@ func _substep(cl: int) -> void:
 	_dispatch(cl, "diffusion", p, pc)
 	p = 1 - p
 
-	# 21 is evaporation (not implemented: needs the SPH liquid phase).
+	# 21. Evaporation of the liquid sampled onto the grid by FireWater. Split in
+	# two: the scalar budget in place on the cells, then Eq. 32 on the faces,
+	# which has to be its own dispatch because it reads the mixing factor from
+	# both cells either side of a face.
+	if evaporation_enabled:
+		_dispatch(cl, "evaporate", p, pc)
+		_dispatch(cl, "evapapply", p, pc)
+
 	# 22. Pressure projection.
 	_dispatch(cl, "divergence", p, pc)
 	var iters := pressure_iterations + (pressure_iterations & 1)
@@ -623,6 +671,16 @@ func _upload_config() -> void:
 	v[37] = display_temperature
 	v[38] = reaction_reference
 	v[39] = emitter_temperature
+	# liquid: T_B, latent heat, Cp_l, rho_d
+	v[40] = boiling_temperature
+	v[41] = latent_heat
+	v[42] = liquid_heat_capacity
+	v[43] = droplet_density
+	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, drain
+	v[44] = droplet_diameter
+	v[45] = droplet_heat_transfer
+	v[46] = water_suppression
+	v[47] = liquid_drain_rate
 
 	_rd.buffer_update(_config_buf, 0, v.size() * 4, v.to_byte_array())
 

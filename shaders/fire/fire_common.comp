@@ -45,6 +45,15 @@ layout(rgba32f, set = 0, binding = 12) uniform restrict image3D scal2_src;
 layout(rgba32f, set = 0, binding = 13) uniform restrict image3D scal2_dst;
 layout(rgba32f, set = 0, binding = 14) uniform restrict image3D scal2_fwd;
 
+// Liquid phase sampled from the SPH droplets (Eq. 19-25), filled by
+// water_gather.comp before the grid loop runs.
+//   liquid_scal = (rho_l [kg/m^3], T_l [K], omega_j, rho' mixing factor)
+//   liquid_vel  = (u_l.xyz, unused)
+// The fourth lane of liquid_scal is written by fire_evaporate and read by
+// fire_evapapply; water_gather resets it to zero every frame.
+layout(rgba32f, set = 0, binding = 22) uniform restrict image3D liquid_scal;
+layout(rgba32f, set = 0, binding = 23) uniform restrict image3D liquid_vel;
+
 // Physical constants, uploaded once per frame. Kept out of the push constant
 // block because the fuel table alone exceeds the 128-byte guaranteed limit.
 layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
@@ -58,6 +67,8 @@ layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
 	vec4 wind; // wind.xyz, residual_dissipation
 	vec4 molar; // M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
 	vec4 misc; // o2_replenish, display_temperature, reaction_reference, emitter_T
+	vec4 liquid; // T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
+	vec4 liquid2; // d_d [m], h_conv [W/(m^2.K)], wet_suppression, unused  Tab. 3 / INFERRED
 }
 cfg;
 

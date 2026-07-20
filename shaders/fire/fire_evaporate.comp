@@ -1,0 +1,163 @@
+// Droplet evaporation, Fire-X Eq. 9-11 and 26-32 (Algorithm 1 line 21).
+//
+// Cell local, in place: the liquid field this reads was built by water_gather
+// from the SPH droplets before the grid loop, and the mass this takes out of it
+// is handed back to the particles by water_return after the loop. That is what
+// makes the droplets actually shrink instead of the grid inventing water.
+//
+//   Eq. 10  T_dc = rho_l.A_d/(rho_d.d_d).(T_l - T)    droplet-gas conduction
+//   Eq. 26  E_l  = (T_l - T_amb).Cp.rho_l.V_c         energy available
+//   Eq. 27  E_d  = (Cp(T_B - T_amb) + dvH).rho_d.V_d  energy per droplet
+//   Eq. 28  n_e  = E_l/E_d  ->  rho_e = n_e.rho_d.V_d/V_c
+//   Eq. 11  dY_i/dt = Gamma_i.rho_l                   vapour source
+//   Eq. 29  rho' = rho/(rho + drho_l)
+//   Eq. 30  T'   = (1 - rho').T_B + rho'.T
+//   Eq. 31  Y'_i = rho'.Y_i
+//
+// Eq. 32 (the velocity mix) is a face quantity and lives in fire_evapapply; the
+// rho' this stage computes is left in liquid_scal.a for it to read.
+//
+// Eq. 9 is the rate form of Eq. 26-28 — divide E_l by E_d and the droplet
+// geometry cancels, leaving drho_l = rho_l.Cp(T_l - T_amb)/(Cp(T_B - T_amb) + dvH).
+// The budget form is used here, so a substep consumes all the sensible heat the
+// liquid holds above ambient and no dt appears; the dt dependence enters through
+// the conduction that puts that heat there in the first place.
+//
+// ============================ gaps in the paper =============================
+// INFERRED  Gamma_i (Eq. 11): "evaporation coefficient for a specific species",
+//   given no value and no reference anywhere in the paper. Taken as Gamma_H2O = 1
+//   and 0 for every other species — all evaporated mass becomes water vapour,
+//   which mass conservation forces once the liquid is water.
+// UNDEFINED IN PAPER  k (Eq. 10): written as a conductivity in W/(m.K), which
+//   makes dT/dt = k.T_dc/(rho.Cp) dimensionally inconsistent. Read here as a
+//   convective heat transfer coefficient h [W/(m^2.K)] against the droplets'
+//   specific surface a = 6.rho_l/(rho_d.d_d) [m^2/m^3], which is the standard
+//   form and the only reading that gives Eq. 10 the units of a heating rate.
+//   Exposed as a slider; ~50 W/(m^2.K) is Nu = 2 conduction on a 1 mm droplet.
+// INFERRED  rho_d: the paper says it is "the amount of liquid in the form of
+//   droplets", which is circular with Eq. 28 (rho_l = rho_d.n_d). Taken as the
+//   bulk density of the liquid, 998 kg/m^3, so that rho_l/rho_d is the volume
+//   fraction of the cell occupied by liquid and V_d = pi.d_d^3/6 is one droplet.
+// INFERRED  the Cp of Eq. 27: the paper does not say which phase it belongs to.
+//   Taken as the gas mixture Cp, because the vapour released is charged against
+//   the gas at that same Cp by Eq. 30. Using Cp_l here instead would leave a
+//   (Cp_l - Cp_g).(T_B - T_amb) hole per kilogram in the energy budget below.
+// ============================================================================
+//
+// The energy ledger (stats 9 and 10) is the P4 criterion. Per cell, relative to
+// ambient and per unit volume:
+//   dE_gas = Cp_g.[(rho + drho).(T' - T_amb) - rho.(T_0 - T_amb)]
+//   dE_liq = Cp_l.[(rho_l - drho).(T_l' - T_amb) - rho_l.(T_l0 - T_amb)]
+//   latent = drho.dvH
+// The three sum to zero by construction, so what the readout measures is what
+// breaks that: float cancellation, the temperature clamp, and the simplex
+// projection downstream. Absolute values are summed rather than signed ones, so
+// two cells cannot cancel each other's error into a clean number.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 liq = imageLoad(liquid_scal, c);
+	float rho_l = liq.x;
+	float T_l = liq.y;
+
+	// rho' = 1 in a dry cell, which makes fire_evapapply a no-op there.
+	if (rho_l < 1e-9) {
+		imageStore(liquid_scal, c, vec4(liq.xyz, 1.0));
+		return;
+	}
+
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+
+	float dt = params.cell.y;
+	float t_amb = cfg.thermo.x;
+	float T_B = cfg.liquid.x;
+	float dvH = cfg.liquid.y;
+	float cp_l = cfg.liquid.z;
+	float rho_d = cfg.liquid.w;
+	float d_d = max(cfg.liquid2.x, 1e-6);
+	float h_conv = cfg.liquid2.y;
+
+	float T0 = s.x;
+	float T_l0 = T_l;
+	float rho_l0 = rho_l;
+
+	float rho = gas_density(s, s2);
+	float cp_g = mixture_cp(s, s2);
+	float heat_gas = max(rho * cp_g, 1e-6); // J/(m^3.K)
+	float heat_liq = max(rho_l * cp_l, 1e-12);
+
+	// Eq. 10. Specific droplet surface per unit cell volume: the liquid volume
+	// fraction rho_l/rho_d divided by the volume of one droplet, times its area.
+	float area = 6.0 * rho_l / (rho_d * d_d);
+	float q = h_conv * area * (T0 - T_l) * dt; // J/m^3, gas -> liquid
+	// Neither phase may overshoot the temperature the two would equilibrate at,
+	// which is also what keeps the explicit exchange stable at large h_conv.
+	float q_eq = (T0 - T_l) / (1.0 / heat_gas + 1.0 / heat_liq);
+	q = (q_eq >= 0.0) ? clamp(q, 0.0, q_eq) : clamp(q, q_eq, 0.0);
+
+	float T = T0 - q / heat_gas;
+	T_l = T_l + q / heat_liq;
+
+	// Eq. 26-28. Everything the liquid holds above ambient is spent boiling off
+	// whatever mass that energy covers, capped by the mass actually present.
+	float e_per_kg = cp_g * (T_B - t_amb) + dvH; // Eq. 27 / (rho_d.V_d)
+	float available = heat_liq * (T_l - t_amb); // Eq. 26 / V_c
+	float d_rho = clamp(available / e_per_kg, 0.0, rho_l);
+	float remaining = rho_l - d_rho;
+	float sensible = available - d_rho * e_per_kg;
+	T_l = t_amb + ((remaining > 1e-12) ? sensible / (remaining * cp_l) : 0.0);
+
+	// Eq. 29-31. The vapour joins the mixture at its boiling point, and every
+	// mass fraction is diluted by the added mass; Gamma_H2O = 1 puts all of it in
+	// the water channel, which is what keeps sum Y at 1 (rho'.sum Y + (1 - rho')).
+	// Named rho_prime rather than mix: a variable may legally shadow a GLSL
+	// built-in, but not in a file anyone has to read.
+	float rho_prime = rho / (rho + d_rho); // Eq. 29
+	float T_new = clamp((1.0 - rho_prime) * T_B + rho_prime * T, t_amb, cfg.thermo.w); // Eq. 30
+	s.yzw *= rho_prime; // Eq. 31: fuel, O2, CO2
+	s2.x = rho_prime * s2.x + (1.0 - rho_prime); // Eq. 11 + 31: H2O
+	s2.y *= rho_prime; // residuals
+	s.x = T_new;
+	// Steam marker: the share of the vapour that came from evaporation rather than
+	// from combustion. Not a species — the mass is already in Y_H2O — but the two
+	// are not the same thing on screen. A methane flame makes two H2O per CH4, so
+	// rendering Y_H2O directly wraps the fire in a white cloud with no water in
+	// sight. scal2.w is advected with the other scalars and written by nothing
+	// else, which is exactly the transport this needs.
+	s2.w = min(s2.w + (1.0 - rho_prime), 1.0);
+
+	imageStore(scal_src, c, s);
+	imageStore(scal2_src, c, s2);
+
+	// NON-PAPER drainage. A cold puddle can never reach T_B on its own, so the
+	// Eq. 26-28 evaporation above stalls at d_rho = 0 and the cell stays wet and
+	// suppressed for good. This bleeds liquid off to the ground (run-off / soak-in)
+	// so a rekindled fire recovers; it adds no vapour and takes no gas heat, so it
+	// is applied after the energy ledger and left out of it. water_return reads the
+	// reduced remaining and shrinks the particles to match.
+	float drain = cfg.liquid2.w;
+	remaining *= max(0.0, 1.0 - drain * dt);
+
+	// omega_j (b) is left alone: water_return needs the same value the gather
+	// wrote, or the mass it hands back stops matching the mass the grid holds.
+	imageStore(liquid_scal, c, vec4(remaining, T_l, liq.z, rho_prime));
+
+	float volume = params.cell.x * params.cell.x * params.cell.x;
+	float dE_gas = cp_g * ((rho + d_rho) * (T_new - t_amb) - rho * (T0 - t_amb)) * volume;
+	float dE_liq = cp_l * (remaining * (T_l - t_amb) - rho_l0 * (T_l0 - t_amb)) * volume;
+	float latent = d_rho * dvH * volume;
+	// Millijoules. Unscaled joules quantise the residual away: a wet domain runs a
+	// budget of ~1e3 J in total, so the per-cell residual is far below the 1 J of
+	// an integer step and every measurement read as a clean zero. 1e3 J at this
+	// scale is 1e6 fixed, three orders below the 4.29e9 an atomic uint holds.
+	const float SCALE_E = 1000.0;
+	atomicAdd(stats.data[9],
+		uint(clamp(abs(dE_gas + dE_liq + latent) * SCALE_E, 0.0, 4.2e9)));
+	atomicAdd(stats.data[10],
+		uint(clamp((abs(dE_gas) + abs(dE_liq) + latent) * SCALE_E, 0.0, 4.2e9)));
+}

@@ -46,6 +46,19 @@ void main() {
 		float max_by_fuel = c_f / (abs(cfg.stoich.x) * dt);
 		float max_by_o2 = c_o / (abs(cfg.stoich.y) * dt);
 		v_c = min(v_c, min(max_by_fuel, max_by_o2));
+
+		// Liquid water blankets the reaction: it wets the fuel and, as it flashes
+		// to steam, drives the surrounding air out of the cell. Fire-X does not
+		// give this as a rate term — in the paper it emerges from the flow
+		// disruption of a real spray (Sec. 6.1.3: "the fire is effectively
+		// suppressed as ... oxygen supply is reduced"). This grid, with a pinned
+		// fuel emitter and a steady open-boundary oxygen inflow, cannot blow its
+		// flame out that way: cooling alone only densifies the gas and raises the
+		// molar oxygen concentration, so a wet flame burns *wider* instead of
+		// dying (measured). The explicit suppression restores the right sign.
+		// NON-PAPER, exposed as a coefficient.
+		float rho_l = imageLoad(liquid_scal, c).x;
+		v_c *= 1.0 / (1.0 + cfg.liquid2.z * rho_l);
 	}
 
 	if (v_c > 0.0) {
@@ -98,7 +111,13 @@ void main() {
 		s.w = mix(s.w, 0.0, rate);
 		s2.x = mix(s2.x, 0.0, rate);
 		s2.y = mix(s2.y, 0.0, rate);
+		s2.w = mix(s2.w, 0.0, rate);
 	}
+
+	// NON-PAPER: the steam marker fades on the same timescale a visible plume
+	// disperses. Without it the marker only ever grows, since nothing consumes it,
+	// and the domain ends up uniformly white after a long pour.
+	s2.w = max(s2.w * exp(-0.6 * dt), 0.0);
 
 	// Soot only settles out where the gas has cooled; hot soot keeps glowing.
 	if (s.x < 500.0) {

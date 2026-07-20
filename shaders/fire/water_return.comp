@@ -114,6 +114,17 @@ void main() {
 		}
 	}
 
+	// A droplet whose mass has drained to almost nothing (see the drainage term in
+	// fire_evaporate.comp) has effectively soaked away: banish it below the world so
+	// it stops rendering as a stray blob and drops out of the domain the next scatter
+	// skips. The SPH integrator then just lets it fall further, never to return.
+	const float DRAIN_CUTOFF = 0.004; // kg, 4% of a fresh droplet
+	if (m_new < DRAIN_CUTOFF) {
+		part.positions[pidx].y = -1000.0;
+		vel.velocities[pidx].w = 0.0;
+		return;
+	}
+
 	vel.velocities[pidx].w = m_new;
 	part.positions[pidx].w = T_new;
 }

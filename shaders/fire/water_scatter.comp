@@ -9,8 +9,6 @@
 // accumulators live in an SSBO scaled by the constants below. Scales differ per
 // channel to keep the worst-case sum inside uint32 (see SCALE_* comments).
 //
-// P3: velocity accumulation skipped (droplets at rest). P4 will add Eq. 24-25.
-//
 // Dispatch: one thread per active particle.
 
 #version 460
@@ -32,6 +30,13 @@ layout(std430, set = 0, binding = 1) readonly buffer VelBuf {
 layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
 	uvec4 accum[];  // x=m_w, y=w, z=T_m_w, w=unused
 } scatter;
+
+// Velocity is signed, so it needs a separate signed buffer rather than a lane of
+// the one above: a uint accumulator would have to carry a bias per add, and the
+// number of adds a cell receives is not known in advance.
+layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
+	ivec4 accum[];  // xyz = Sum u*w [m/s], w unused
+} vscatter;
 
 // Scalars rather than a vec3 for the origin: std430 aligns a vec3 to 16 bytes,
 // which silently shifts every field after it.
@@ -58,11 +63,18 @@ const float SCALE_M = 10000000.0;
 const float SCALE_W = 2000000.0;
 // T*m*w_hat <= 300*0.1 = 30 -> 3e6 fixed; 1024 particles -> 3.1e9. Fits.
 const float SCALE_T = 100000.0;
+// |u*w_hat| <= 20 m/s -> 2e6 fixed; 1024 particles -> 2.0e9 < int32 max 2.15e9.
+const float SCALE_V = 100000.0;
 
 // Truncation biases every add the same way, which shows up as a steady mass drain
 // over a long run. Rounding makes the error zero-mean instead.
 uint fixed_point(float value, float scale) {
 	return uint(value * scale + 0.5);
+}
+
+int fixed_point_signed(float value, float scale) {
+	float scaled = value * scale;
+	return int(scaled + ((scaled >= 0.0) ? 0.5 : -0.5));
 }
 
 void main() {
@@ -78,6 +90,7 @@ void main() {
 	vec3 p_local = part.positions[pidx].xyz - origin;
 	float T_l = part.positions[pidx].w;
 	float m_p = vel.velocities[pidx].w;
+	vec3 u_p = vel.velocities[pidx].xyz;
 
 	// Bounds check: ignore particles outside the domain.
 	if (any(lessThan(p_local, vec3(0.0))) ||
@@ -128,6 +141,13 @@ void main() {
 
 				atomicAdd(scatter.accum[cidx].y, fixed_point(w, SCALE_W));
 				atomicAdd(scatter.accum[cidx].z, fixed_point(T_l * m_p * w, SCALE_T));
+
+				// Eq. 25: the cell's liquid velocity is the weighted mean of the
+				// droplets covering it, so the weights alone are accumulated here
+				// and the gather divides by omega_j.
+				atomicAdd(vscatter.accum[cidx].x, fixed_point_signed(u_p.x * w, SCALE_V));
+				atomicAdd(vscatter.accum[cidx].y, fixed_point_signed(u_p.y * w, SCALE_V));
+				atomicAdd(vscatter.accum[cidx].z, fixed_point_signed(u_p.z * w, SCALE_V));
 			}
 		}
 	}

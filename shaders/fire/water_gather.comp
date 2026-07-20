@@ -22,6 +22,10 @@ layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
 	uvec4 accum[];
 } scatter;
 
+layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
+	ivec4 accum[];  // xyz = Sum u*w
+} vscatter;
+
 layout(push_constant, std430) uniform Params {
 	int grid_dim_x;
 	int grid_dim_y;
@@ -33,6 +37,7 @@ layout(push_constant, std430) uniform Params {
 const float SCALE_M = 10000000.0;
 const float SCALE_W = 2000000.0;
 const float SCALE_T = 100000.0;
+const float SCALE_V = 100000.0;
 
 const float AMBIENT_T = 300.0;
 
@@ -56,11 +61,20 @@ void main() {
 	// back to ambient rather than dividing by zero.
 	float T_l = (m_w > 1e-12) ? (T_m_w / m_w) : AMBIENT_T;
 
+	// Eq. 25: weighted mean droplet velocity. The same omega_j divides it, since
+	// the scattered weights are the normalised ones.
+	vec3 u_l = (omega > 1e-9)
+		? vec3(vscatter.accum[cidx].xyz) / (SCALE_V * omega)
+		: vec3(0.0);
+
 	// omega_j rides in B: water_return divides by it to hand each cell's mass
 	// back out without creating or destroying any (see that shader's header).
-	// P3 stub: droplets are at rest. P4 adds Eq. 24-25.
+	// A is the evaporation mixing factor rho', written later by fire_evaporate;
+	// zero here is only a placeholder, and a cell that never reaches that stage
+	// is never read for it either.
 	imageStore(liquid_scal, c, vec4(rho_l, T_l, omega, 0.0));
-	imageStore(liquid_vel, c, vec4(0.0));
+	imageStore(liquid_vel, c, vec4(u_l, 0.0));
 
 	scatter.accum[cidx] = uvec4(0u);
+	vscatter.accum[cidx] = ivec4(0);
 }

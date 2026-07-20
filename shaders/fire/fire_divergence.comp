@@ -7,20 +7,14 @@
 // remove. That is gone: this operator's exact adjoint is what fire_project
 // applies.
 //
-// The per-frame stats reset is folded in here: this stage heads the barrier
-// chain that ends in fire_display, so a single invocation can zero the counters
-// without racing the accumulation.
+// The stats reset used to live here; it moved to fire_advect, which is the first
+// stage of a substep and therefore the only safe place for it now that
+// fire_evaporate writes its energy ledger before the projection.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
 	if (out_of_grid(c)) {
 		return;
-	}
-
-	if (gl_GlobalInvocationID == uvec3(0)) {
-		for (int i = 0; i < 9; i++) {
-			stats.data[i] = 0u;
-		}
 	}
 
 	imageStore(diverg, c, vec4(divergence_at(c), 0.0, 0.0, 0.0));
