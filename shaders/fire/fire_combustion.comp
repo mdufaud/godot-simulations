@@ -1,0 +1,106 @@
+// Global one-step combustion, Fire-X Sec. 4.2 (Algorithm 1, line 18).
+//
+//   rho  = p_amb/(R.T) . (sum Y_i/M_i)^-1                            Eq. 8
+//   c_i  = rho.Y_i/M_i                                       [mol/m^3]
+//   v_c  = A.T^n.exp(-Ea/(R.T)).c_f^a.c_o^b            [mol/(m^3.s)]  Eq. 5
+//   J_c  = -phi.v_c.dcH                                     [W/m^3]   Eq. 6
+//   dT   = J_c/(rho.Cp).dt                                            Eq. 2
+//   dY_i = v_c.q_i.M_i/rho.dt                                         Eq. 7
+//
+// n = 0 for every fuel (Fire-X Tab. 4, after Westbrook & Dryer 1981), so the
+// T^n factor is omitted. There is no ignition threshold: the exponential is
+// the switch. With Ea = 30 kcal/mol (Ea/R = 15097 K) the rate spans nine
+// decades between 500 K and flame temperature, which is what makes the front
+// sharp.
+//
+// Everything here is cell-local, so reading and writing in place cannot race.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+	float dt = params.cell.y;
+	float temp = max(s.x, 1.0);
+
+	float rho = gas_density(s, s2);
+	float v_c = 0.0;
+
+	// Molar concentrations. The fuel exponent is negative for methane (-0.3)
+	// and cyclopropane (-0.1), so an empty cell would raise 0 to a negative
+	// power; the guard keeps the rate expression bounded, as Westbrook & Dryer
+	// note for the same reason.
+	float c_f = rho * s.y / cfg.fuel.y;
+	float c_o = rho * s.z / cfg.molar.x;
+
+	if (c_f > 1e-6 && c_o > 1e-6) {
+		v_c = cfg.kinetics.x * exp(-cfg.kinetics.y / temp)
+			* pow(c_f, cfg.kinetics.z) * pow(c_o, cfg.kinetics.w);
+
+		// Neither reactant can go past depletion within one step. This is the
+		// limiting-reactant behaviour of the stoichiometry, applied to the rate
+		// rather than bolted on afterwards.
+		float max_by_fuel = c_f / (abs(cfg.stoich.x) * dt);
+		float max_by_o2 = c_o / (abs(cfg.stoich.y) * dt);
+		v_c = min(v_c, min(max_by_fuel, max_by_o2));
+	}
+
+	if (v_c > 0.0) {
+		float inv_rho = 1.0 / rho;
+		float scale = v_c * dt * inv_rho;
+
+		s.y += cfg.stoich.x * cfg.fuel.y * scale; // fuel   (q_f < 0)
+		s.z += cfg.stoich.y * cfg.molar.x * scale; // O2     (q_o < 0)
+		// Product coefficients modulate the visible combustion products without
+		// feeding back into the reaction (Fire-X Sec. 6.1). At the default of
+		// 1.0 the species balance is exactly stoichiometric.
+		s.w += cfg.coeffs.w * cfg.stoich.z * cfg.molar.y * scale; // CO2
+		s2.x += cfg.vort.w * cfg.stoich.w * cfg.molar.z * scale; // H2O
+
+		// Soot has no stoichiometric coefficient in Tab. 1; the paper exposes it
+		// only as an appearance coefficient. Modelled as a fraction of the
+		// carbon flux, i.e. proportional to the fuel consumed.
+		s2.y = min(s2.y + cfg.coeffs.z * abs(cfg.stoich.x) * cfg.fuel.y * scale, 1.0);
+
+		// Eq. 6 + Eq. 2. dcH is negative (exothermic) and phi is the heat
+		// efficiency, so J_c is positive and heats the cell.
+		float j_c = -cfg.coeffs.y * v_c * cfg.fuel.x;
+		temp += j_c * inv_rho / mixture_cp(s, s2) * dt;
+	}
+
+	s.x = clamp(temp, cfg.thermo.x, cfg.thermo.w);
+	s.y = clamp(s.y, 0.0, 1.0);
+	s.z = clamp(s.z, 0.0, 1.0);
+	s.w = clamp(s.w, 0.0, 1.0);
+	s2.x = clamp(s2.x, 0.0, 1.0);
+
+	// Open boundaries relax towards ambient air, which supplies the oxygen the
+	// plume entrains. The floor is solid and supplies nothing.
+	ivec3 gmax = grid_max();
+	bool open_side = (c.x == 0 || c.x == gmax.x || c.z == 0 || c.z == gmax.z);
+	bool open_top = (c.y == gmax.y);
+	if (open_side || open_top) {
+		float rate = clamp(cfg.misc.x * dt * (open_top ? 0.5 : 1.0), 0.0, 1.0);
+		s.x = mix(s.x, cfg.thermo.x, rate);
+		s.y = mix(s.y, 0.0, rate);
+		s.z = mix(s.z, 0.233, rate); // 21 % O2 by volume -> 23.3 % by mass
+		s.w = mix(s.w, 0.0, rate);
+		s2.x = mix(s2.x, 0.0, rate);
+		s2.y = mix(s2.y, 0.0, rate);
+	}
+
+	// Soot only settles out where the gas has cooled; hot soot keeps glowing.
+	if (s.x < 500.0) {
+		s2.y = max(s2.y - cfg.wind.w * dt, 0.0);
+	}
+
+	// Reaction intensity for the renderer: a decaying trace of recent activity,
+	// advected with the other scalars.
+	s2.z = max(s2.z * exp(-3.25 * dt), v_c);
+
+	imageStore(scal_src, c, s);
+	imageStore(scal2_src, c, s2);
+}

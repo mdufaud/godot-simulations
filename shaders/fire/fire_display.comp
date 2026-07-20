@@ -1,0 +1,40 @@
+// Packs the state into the RGBA8 volume the fire shader raymarches, and reduces
+// the handful of scalars the controller needs for the dynamic light and the UI.
+// Keeping the reduction on the GPU avoids reading a 6 MB field back per frame.
+// R = normalised temperature, G = residuals (soot), B = reaction, A = fuel.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+	float t_amb = cfg.thermo.x;
+	float t_norm = (s.x - t_amb) / max(cfg.misc.y - t_amb, 1.0);
+	float reaction = clamp(s2.z / max(cfg.misc.z, 1e-6), 0.0, 1.0);
+
+	imageStore(display_tex, c, vec4(clamp(t_norm, 0.0, 1.0), s2.y, reaction, s.y));
+
+	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
+	atomicAdd(stats.data[1], uint(reaction * 1000.0));
+	atomicMax(stats.data[2], uint(reaction * 1000.0));
+
+	// Fuel and oxygen are only meaningful over the burner region: averaged over
+	// the whole domain they would read as "no fuel, plain air" forever.
+	ivec3 centre = params.dims.xyz / 2;
+	if (abs(c.x - centre.x) < 8 && abs(c.z - centre.z) < 8 && c.y < 24) {
+		atomicAdd(stats.data[3], uint(s.y * 1000.0));
+		atomicAdd(stats.data[4], uint(s.z * 1000.0));
+		atomicAdd(stats.data[5], 1u);
+	}
+
+	// Mass-fraction closure probe: sum over the burner column, read back as a
+	// conservation check (should hold at 1.0 with default product coefficients).
+	if (c.x == centre.x && c.z == centre.z) {
+		float total = s.y + s.z + s.w + s2.x + nitrogen_fraction(s, s2);
+		atomicAdd(stats.data[6], uint(total * 1000.0));
+		atomicAdd(stats.data[7], 1u);
+	}
+}

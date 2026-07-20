@@ -16,7 +16,11 @@ uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
 
 uniform vec3 box_size = vec3(6.4, 9.6, 6.4);
-uniform float emission_strength : hint_range(0.5, 12.0) = 6.5;
+// Temperature the volume's red channel is normalised against, so the blackbody
+// ramp reconstructs kelvins rather than assuming a range.
+uniform float ambient_temperature = 300.0;
+uniform float display_temperature = 2600.0;
+uniform float emission_strength : hint_range(0.5, 12.0) = 3.0;
 uniform float flame_absorption : hint_range(0.0, 10.0) = 2.5;
 uniform float smoke_absorption : hint_range(0.0, 20.0) = 9.0;
 uniform float blue_strength : hint_range(0.0, 3.0) = 0.7;
@@ -30,10 +34,12 @@ varying vec3 pos_obj;
 // Fire color ramp, approximate blackbody (Fire-X Fig. 4/5)
 vec3 fire_ramp(float T_kelvin) {
 	vec3 c = vec3(0.0);
-	c = mix(c, vec3(0.85, 0.04, 0.0), smoothstep(600.0, 900.0, T_kelvin));
-	c = mix(c, vec3(1.0, 0.35, 0.02), smoothstep(900.0, 1150.0, T_kelvin));
-	c = mix(c, vec3(1.0, 0.75, 0.12), smoothstep(1150.0, 1450.0, T_kelvin));
-	c = mix(c, vec3(1.0, 0.96, 0.85), smoothstep(1450.0, 1800.0, T_kelvin));
+	// Stops span the range the solver actually reaches now that it runs in real
+	// kelvins: embers near 800 K through to a near-white 2800 K flame core.
+	c = mix(c, vec3(0.85, 0.04, 0.0), smoothstep(700.0, 1100.0, T_kelvin));
+	c = mix(c, vec3(1.0, 0.35, 0.02), smoothstep(1100.0, 1600.0, T_kelvin));
+	c = mix(c, vec3(1.0, 0.75, 0.12), smoothstep(1600.0, 2200.0, T_kelvin));
+	c = mix(c, vec3(1.0, 0.96, 0.85), smoothstep(2200.0, 2800.0, T_kelvin));
 	return c;
 }
 
@@ -72,7 +78,9 @@ void fragment() {
 	}
 
 	// ---- Raymarch, front to back ----
-	const int STEPS = 48;
+	// The volume now carries real structure at 0.1 m per cell; undersampling it
+	// aliases the flame front into banding the jitter cannot hide.
+	const int STEPS = 80;
 	float ds = (t1 - t0) / float(STEPS);
 	// Interleaved gradient noise jitter breaks banding; TIME term animates it
 	float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))) + TIME * 0.61);
@@ -94,16 +102,19 @@ void fragment() {
 		}
 
 		if (s.r + s.g > 0.01) {
-			// Detail noise: density modulation + edge erosion of temperature
+			// Detail noise: density modulation + edge erosion of temperature.
+			// Kept subtle — the simulation resolves the turbulence itself now,
+			// and heavy erosion would only smear the structure it produces.
 			vec3 np = p * noise_scale - vec3(0.0, TIME * scroll_speed, 0.0);
 			float n = texture(noise_tex, np).r;
 			float n2 = texture(noise_tex, np * 2.1 + vec3(0.37, 0.11, 0.73)).r;
-			float density_mod = 0.6 + 0.8 * n;
-			float t_eff = s.r * (0.75 + 0.5 * n2);
+			float density_mod = 0.85 + 0.3 * n;
+			float t_eff = s.r * (0.9 + 0.2 * n2);
 
 			// Emission: blackbody ramp. Hot thin gas (cubic core bloom) plus
 			// glowing soot — incandescent smoke IS the visible orange flame
-			float T_kelvin = 293.0 + t_eff * 1507.0;
+			float T_kelvin = ambient_temperature
+				+ t_eff * (display_temperature - ambient_temperature);
 			vec3 bb = fire_ramp(T_kelvin);
 			float emit_density = pow(t_eff, 3.0) + s.g * t_eff * 0.8;
 			vec3 emit = bb * emit_density * emission_strength;

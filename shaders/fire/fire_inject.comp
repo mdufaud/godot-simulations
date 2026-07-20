@@ -1,0 +1,72 @@
+// Scene interaction with the grid: one dispatch per queued event, the kind
+// arriving in params.dims.w.
+//   1 = fuel emitter, 2 = ignition source, 3 = water spray, 4 = smother
+//
+// Fire-X drives its scenes with grid emitters carrying fuel/oxygen/nitrogen
+// mass fractions and a temperature in the 300-1500 K band (Tab. 3, "Grid
+// Emitter Parameter"), which is what modes 1 and 2 reproduce. There is no
+// ignition temperature in the model: a source simply has to be hot enough that
+// the Arrhenius rate outruns the radiative loss.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	float radius = params.event.w;
+	float dist = distance(cell_to_world(c), params.event.xyz);
+	if (dist > radius) {
+		return;
+	}
+	float falloff = 1.0 - dist / radius;
+	float amount = params.event2.x;
+	int mode = params.dims.w;
+
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+	float t_amb = cfg.thermo.x;
+	float t_emit = cfg.misc.w; // emitter temperature, Tab. 3 range 300-1500 K
+
+	if (mode == 1) {
+		// Fuel emitter. Injected fuel displaces the local mixture rather than
+		// being added on top of it, so the mass fractions stay normalised.
+		float add = min(amount * falloff, 1.0 - s.y);
+		s.y += add;
+		float shrink = 1.0 - add;
+		s.z *= shrink;
+		s.w *= shrink;
+		s2.x *= shrink;
+		// Pilot: the emitter core stays hot enough to keep the bed alight.
+		if (falloff > 0.8 && s.y > 0.05) {
+			s.x = max(s.x, t_emit);
+		}
+	} else if (mode == 2) {
+		float add = min(amount * falloff, 1.0 - s.y);
+		s.y += add;
+		float shrink = 1.0 - add;
+		s.z *= shrink;
+		s.w *= shrink;
+		s2.x *= shrink;
+		s.x = max(s.x, mix(t_amb, t_emit, falloff));
+	} else if (mode == 3) {
+		// Water. Grid-side stand-in for the paper's SPH droplets: the latent
+		// heat sink, the steam it produces, and the oxygen that steam displaces.
+		float f = falloff * amount;
+		float steam = f * clamp((s.x - t_amb) / 1000.0, 0.0, 1.0);
+		s2.x = min(s2.x + steam, 1.0);
+		s.x = max(s.x - f * 500.0, t_amb);
+		s.y = max(s.y - f * 0.15, 0.0);
+		s.z = max(s.z - f * 0.3, 0.0);
+		vec4 v = imageLoad(vel_src, c);
+		v.y += f * 3.0;
+		imageStore(vel_src, c, v);
+	} else if (mode == 4) {
+		float f = falloff * amount;
+		s.z = max(s.z - f * 0.6, 0.0);
+		s.y = max(s.y - f * 0.08, 0.0);
+	}
+
+	imageStore(scal_src, c, s);
+	imageStore(scal2_src, c, s2);
+}

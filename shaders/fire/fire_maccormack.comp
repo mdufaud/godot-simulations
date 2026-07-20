@@ -1,0 +1,41 @@
+// MacCormack correction, the second half of Algorithm 1 line 16.
+//   phi_hat = A(phi_n)              (backtrace, already in *_fwd)
+//   phi_tld = A_reverse(phi_hat)    (forward trace through *_fwd)
+//   phi_new = phi_hat + (phi_n - phi_tld)/2
+// Second order but not monotone, so the correction is limited to the range
+// spanned by the eight source taps the backtrace interpolated — without that
+// clamp the scheme overshoots and rings around the flame front.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec3 v = imageLoad(vel_src, c).xyz;
+	vec3 step_uv = v * params.cell.y * params.cell.z;
+	vec3 back = vec3(c) - step_uv;
+	vec3 fwd = vec3(c) + step_uv;
+
+	vec4 hat, lo, hi, tld, ignore_lo, ignore_hi;
+
+	SAMPLE_TRI(vel_src, back, hat, lo, hi);
+	SAMPLE_TRI(vel_fwd, fwd, tld, ignore_lo, ignore_hi);
+	vec4 vel_new = clamp(hat + 0.5 * (imageLoad(vel_src, c) - tld), lo, hi);
+
+	SAMPLE_TRI(scal_src, back, hat, lo, hi);
+	SAMPLE_TRI(scal_fwd, fwd, tld, ignore_lo, ignore_hi);
+	vec4 scal_new = clamp(hat + 0.5 * (imageLoad(scal_src, c) - tld), lo, hi);
+
+	SAMPLE_TRI(scal2_src, back, hat, lo, hi);
+	SAMPLE_TRI(scal2_fwd, fwd, tld, ignore_lo, ignore_hi);
+	vec4 scal2_new = clamp(hat + 0.5 * (imageLoad(scal2_src, c) - tld), lo, hi);
+
+	imageStore(vel_dst, c, vel_new);
+	imageStore(scal_dst, c, vec4(
+			clamp(scal_new.x, cfg.thermo.x, cfg.thermo.w),
+			clamp(scal_new.yzw, vec3(0.0), vec3(1.0))));
+	imageStore(scal2_dst, c, vec4(
+			clamp(scal2_new.xy, vec2(0.0), vec2(1.0)),
+			max(scal2_new.z, 0.0), scal2_new.w));
+}

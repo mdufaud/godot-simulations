@@ -1,0 +1,172 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+// Field textures ping-pong: *_src is the current state, *_dst receives the
+// advected result, after which the solver flips parity.
+//   vel   = (u.xyz, unused)
+//   scal  = (T [K], Y_fuel, Y_O2, Y_CO2)          mass fractions, Fire-X Eq. 3
+//   scal2 = (Y_H2O, Y_residual, reaction, unused)
+// Y_N2 is not transported: nitrogen is inert (Fire-X Tab. 4 gives its reaction
+// coefficient as 0), so it is recovered as 1 - sum of the other gas species.
+layout(rgba32f, set = 0, binding = 0) uniform restrict image3D vel_src;
+layout(rgba32f, set = 0, binding = 1) uniform restrict image3D vel_dst;
+layout(rgba32f, set = 0, binding = 2) uniform restrict image3D scal_src;
+layout(rgba32f, set = 0, binding = 3) uniform restrict image3D scal_dst;
+layout(rgba32f, set = 0, binding = 4) uniform restrict image3D vel_fwd;
+layout(rgba32f, set = 0, binding = 5) uniform restrict image3D scal_fwd;
+layout(rgba32f, set = 0, binding = 6) uniform restrict image3D curl_tex;
+layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
+layout(r32f, set = 0, binding = 8) uniform restrict image3D press_dst;
+layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
+layout(rgba8, set = 0, binding = 10) uniform restrict image3D display_tex;
+
+layout(std430, set = 0, binding = 11) restrict buffer Stats {
+	uint data[];
+}
+stats;
+
+layout(rgba32f, set = 0, binding = 12) uniform restrict image3D scal2_src;
+layout(rgba32f, set = 0, binding = 13) uniform restrict image3D scal2_dst;
+layout(rgba32f, set = 0, binding = 14) uniform restrict image3D scal2_fwd;
+
+// Physical constants, uploaded once per frame. Kept out of the push constant
+// block because the fuel table alone exceeds the 128-byte guaranteed limit.
+layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
+	vec4 kinetics; // A (SI), Ea/R [K], a, b            Fire-X Eq. 5 / WD Tab. I
+	vec4 fuel; // dcH [J/mol], M_f [kg/mol], Cp, k      Fire-X Tab. 1
+	vec4 stoich; // q_f, q_o, q_CO2, q_H2O              Fire-X Tab. 1
+	vec4 coeffs; // D_f, phi, residual_coeff, co2_coeff Fire-X Tab. 1 / Tab. 3
+	vec4 thermo; // T_amb, radiation_coeff, p_amb, T_clamp
+	vec4 transport; // buoyancy, vorticity_eps, drag, nu
+	vec4 vort; // vel_lo, vel_hi, temp_lo, h2o_coeff    Fire-X Tab. 3
+	vec4 wind; // wind.xyz, residual_dissipation
+	vec4 molar; // M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
+	vec4 misc; // o2_replenish, display_temperature, reaction_reference, emitter_T
+}
+cfg;
+
+layout(push_constant, std430) uniform Params {
+	ivec4 dims; // xyz = grid dims, w = event mode
+	vec4 cell; // cell size, dt, 1/cell size, unused
+	vec4 event; // xyz = world position, w = radius
+	vec4 event2; // x = amount, yzw unused
+}
+params;
+
+const float R_GAS = 8.314; // J/(mol.K)   Fire-X nomenclature
+const float SIGMA_SB = 5.67e-8; // W/(m^2.K^4)
+
+ivec3 grid_max() {
+	return params.dims.xyz - ivec3(1);
+}
+
+bool out_of_grid(ivec3 c) {
+	return any(greaterThanEqual(c, params.dims.xyz));
+}
+
+// Interior cells only: anything reading a one-cell neighbourhood.
+bool is_interior(ivec3 c) {
+	return all(greaterThan(c, ivec3(0))) && all(lessThan(c, grid_max()));
+}
+
+// Cell centre in world space: x/z centred on the origin, y up from the ground.
+vec3 cell_to_world(ivec3 c) {
+	vec3 half_xz = vec3(params.dims.x, 0.0, params.dims.z) * params.cell.x * 0.5;
+	return (vec3(c) + vec3(0.5)) * params.cell.x - half_xz;
+}
+
+// Nitrogen closes the mixture. Residuals are condensed-phase soot, so they are
+// excluded from the gas-phase molar balance.
+float nitrogen_fraction(vec4 s, vec4 s2) {
+	return clamp(1.0 - (s.y + s.z + s.w + s2.x), 0.0, 1.0);
+}
+
+// Fire-X Eq. 8: rho = p_amb / (R.T) . (sum_i Y_i/M_i)^-1
+float gas_density(vec4 s, vec4 s2) {
+	float inv_m = s.y / cfg.fuel.y // fuel
+		+ s.z / cfg.molar.x // O2
+		+ s.w / cfg.molar.y // CO2
+		+ s2.x / cfg.molar.z // H2O
+		+ nitrogen_fraction(s, s2) / cfg.molar.w; // N2
+	return cfg.thermo.z / (R_GAS * max(s.x, 1.0) * max(inv_m, 1e-6));
+}
+
+// Specific heats: NIST-JANAF Shomate coefficients (Chase 1998) from the NIST
+// Chemistry WebBook [Linstrom & Mallard], which is the source Fire-X Tab. 4
+// cites. Fire-X specifies a *temperature averaged* mixture heat capacity, and
+// it matters: N2 alone rises from 1040 to 1285 J/(kg.K) between 300 K and
+// 2000 K, and holding Cp at its ambient value inflates the flame temperature
+// by several hundred kelvin.
+//
+//   Cp_molar = A + B.t + C.t^2 + D.t^3 + E/t^2,  t = T/1000  [J/(mol.K)]
+float shomate(float t, float p_a, float p_b, float p_c, float p_d, float p_e) {
+	return p_a + p_b * t + p_c * t * t + p_d * t * t * t + p_e / (t * t);
+}
+
+float cp_n2(float t) {
+	if (t < 0.5) {
+		return shomate(max(t, 0.1), 28.98641, 1.853978, -9.647459, 16.63537, 0.000117);
+	}
+	if (t < 2.0) {
+		return shomate(t, 19.50583, 19.88705, -8.598535, 1.369784, 0.527601);
+	}
+	return shomate(min(t, 6.0), 35.51872, 1.128728, -0.196103, 0.014662, -4.553760);
+}
+
+float cp_o2(float t) {
+	if (t < 0.7) {
+		return shomate(max(t, 0.1), 31.32234, -20.23531, 57.86644, -36.50624, -0.007374);
+	}
+	if (t < 2.0) {
+		return shomate(t, 30.03235, 8.772972, -3.988133, 0.788313, -0.741599);
+	}
+	return shomate(min(t, 6.0), 20.91111, 10.72071, -2.020498, 0.146449, 9.245722);
+}
+
+float cp_co2(float t) {
+	if (t < 1.2) {
+		return shomate(max(t, 0.298), 24.99735, 55.18696, -33.69137, 7.948387, -0.136638);
+	}
+	return shomate(min(t, 6.0), 58.16639, 2.720074, -0.492289, 0.038844, -6.447293);
+}
+
+float cp_h2o(float t) {
+	if (t < 1.7) {
+		return shomate(max(t, 0.5), 30.09200, 6.832514, 6.793435, -2.534480, 0.082139);
+	}
+	return shomate(min(t, 6.0), 41.96426, 8.622053, -1.499780, 0.098119, -11.15764);
+}
+
+// Mass-weighted mixture heat capacity [J/(kg.K)]. The fuel keeps the single
+// constant Cp that Fire-X Tab. 1 gives it.
+float mixture_cp(vec4 s, vec4 s2) {
+	float t = clamp(s.x, 100.0, 6000.0) * 0.001;
+	return max(s.y * cfg.fuel.z
+			+ s.z * cp_o2(t) / cfg.molar.x
+			+ s.w * cp_co2(t) / cfg.molar.y
+			+ s2.x * cp_h2o(t) / cfg.molar.z
+			+ nitrogen_fraction(s, s2) * cp_n2(t) / cfg.molar.w,
+		1.0);
+}
+
+// Trilinear fetch plus the bounds of the eight taps, which the MacCormack
+// limiter needs to reject overshoot. A macro because GLSL cannot portably take
+// an image binding as a function parameter. Parameter names are prefixed: a
+// bare `p` would be substituted inside swizzles.
+#define SAMPLE_TRI(p_img, p_pos, p_out, p_min, p_max) { \
+	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(grid_max())); \
+	ivec3 i0_ = ivec3(floor(pc_)); \
+	ivec3 i1_ = min(i0_ + ivec3(1), grid_max()); \
+	vec3 fr_ = pc_ - vec3(i0_); \
+	vec4 s000_ = imageLoad(p_img, ivec3(i0_.x, i0_.y, i0_.z)); \
+	vec4 s100_ = imageLoad(p_img, ivec3(i1_.x, i0_.y, i0_.z)); \
+	vec4 s010_ = imageLoad(p_img, ivec3(i0_.x, i1_.y, i0_.z)); \
+	vec4 s110_ = imageLoad(p_img, ivec3(i1_.x, i1_.y, i0_.z)); \
+	vec4 s001_ = imageLoad(p_img, ivec3(i0_.x, i0_.y, i1_.z)); \
+	vec4 s101_ = imageLoad(p_img, ivec3(i1_.x, i0_.y, i1_.z)); \
+	vec4 s011_ = imageLoad(p_img, ivec3(i0_.x, i1_.y, i1_.z)); \
+	vec4 s111_ = imageLoad(p_img, ivec3(i1_.x, i1_.y, i1_.z)); \
+	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
+	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
+	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \
+		mix(mix(s001_, s101_, fr_.x), mix(s011_, s111_, fr_.x), fr_.y), fr_.z); \
+}

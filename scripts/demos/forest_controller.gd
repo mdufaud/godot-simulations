@@ -76,6 +76,7 @@ var _scanned_missing := false
 var _cards_baked := false
 var _tree_body: RID
 var _tree_shapes: Array[RID] = []
+var _shape_pool := {}  # quantized radius -> shared cylinder shape RID
 var _tree_density := 1.0
 var _tree_total := 0
 var _bucket_counts := [0, 0, 0, 0]
@@ -167,10 +168,13 @@ func _stream_content() -> void:
 
 	await get_tree().process_frame
 	_apply_mode(GameManager.get_setting("forest_quality_mode", 0))
-	await _build_tree_collision_async()
 	_loaded = true
 	_setup_ui()
 	_hide_loading_banner()
+	# Trunk collision last, after the world is handed over: ~0.7 s of
+	# body_add_shape that nobody has to wait behind (walking into a tree during
+	# the first second is the only cost).
+	await _build_tree_collision_async()
 
 
 ## Every plant/tree resource the setup steps will need, loaded in parallel on
@@ -193,6 +197,10 @@ func _preload_all() -> void:
 	]
 	for job: Array in plant_jobs:
 		_work_list.append({kind = "P", asset = job[0], tris = job[1], follow = job[2]})
+	# Longest job first: with a shared queue the wall time is set by whatever
+	# starts last, and the 4-5k-tri plants take ~4x the smallest ones.
+	_work_list.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("tris", 2500)) > int(b.get("tris", 2500)))
 	_work_results.resize(_work_list.size())
 	_next_job = 0
 	_threads_done = 0
@@ -201,7 +209,7 @@ func _preload_all() -> void:
 	# meshopt concurrent with the live renderer; verified). Each thread pulls
 	# jobs from a mutex-guarded index and writes its own result slot. LOW
 	# priority + leaving cores free keeps the render thread smooth during load.
-	var n_threads := clampi(OS.get_processor_count() - 3, 2, 4)
+	var n_threads := clampi(OS.get_processor_count() - 2, 2, 8)
 	for t in n_threads:
 		var th := Thread.new()
 		th.start(_load_worker, Thread.PRIORITY_LOW)
@@ -459,10 +467,20 @@ func _setup_terrain() -> void:
 	shape.map_depth = points
 	var map_data := PackedFloat32Array()
 	map_data.resize(points * points)
-	var half := (points - 1) / 2.0
+	# Every sample sits at a texel corner (fx = fz = 0.5), so the bilinear tap of
+	# _terrain_height collapses to the average of the 4 neighbours — inlined here
+	# because 263k GDScript calls cost ~0.3 s on the pre-first-frame path.
+	var half := (points - 1) / 2
 	for j in points:
+		var j0 := posmod(j - half - 1, MAP_TEXELS) * MAP_TEXELS
+		var j1 := posmod(j - half, MAP_TEXELS) * MAP_TEXELS
+		var row := j * points
 		for i in points:
-			map_data[j * points + i] = _terrain_height(i - half, j - half)
+			var i0 := posmod(i - half - 1, MAP_TEXELS)
+			var i1 := posmod(i - half, MAP_TEXELS)
+			var h := (_height_data[j0 + i0] + _height_data[j0 + i1]
+					+ _height_data[j1 + i0] + _height_data[j1 + i1]) * 0.25
+			map_data[row + i] = (h - 0.5) * HEIGHT_SCALE
 	shape.map_data = map_data
 	$Terrain/CollisionShape3D.shape = shape
 
@@ -939,6 +957,7 @@ func _rebuild_tree_collision() -> void:
 	for shape in _tree_shapes:
 		PhysicsServer3D.free_rid(shape)
 	_tree_shapes.clear()
+	_shape_pool.clear()
 	PhysicsServer3D.body_clear_shapes(_tree_body)
 	for variant in _tree_variants:
 		var radius: float = variant.collision_radius
@@ -952,6 +971,7 @@ func _build_tree_collision_async() -> void:
 	for shape in _tree_shapes:
 		PhysicsServer3D.free_rid(shape)
 	_tree_shapes.clear()
+	_shape_pool.clear()
 	PhysicsServer3D.body_clear_shapes(_tree_body)
 	var n := 0
 	for variant in _tree_variants:
@@ -963,13 +983,19 @@ func _build_tree_collision_async() -> void:
 				await get_tree().process_frame
 
 
+## Trunk radii are quantized to 2 cm and the matching shape RID is reused across
+## every trunk that lands in the same bucket: ~20 shapes instead of one per tree
+## (3000 shape_create calls cost ~0.7 s of the load).
 func _add_trunk_shape(radius: float, t: Transform3D) -> void:
-	var shape := PhysicsServer3D.cylinder_shape_create()
-	var s := t.basis.x.length()
-	PhysicsServer3D.shape_set_data(shape, {radius = radius * s, height = 5.0})
+	var key := int(radius * t.basis.x.length() * 50.0)
+	var shape: RID = _shape_pool.get(key, RID())
+	if not shape.is_valid():
+		shape = PhysicsServer3D.cylinder_shape_create()
+		PhysicsServer3D.shape_set_data(shape, {radius = maxf(key, 1) / 50.0, height = 5.0})
+		_shape_pool[key] = shape
+		_tree_shapes.append(shape)
 	PhysicsServer3D.body_add_shape(_tree_body, shape,
 			Transform3D(Basis(), t.origin + Vector3(0, 2.5, 0)))
-	_tree_shapes.append(shape)
 
 
 ## Re-partitions every variant's transforms into the distance buckets

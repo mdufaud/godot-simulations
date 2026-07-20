@@ -1,0 +1,46 @@
+// Boussinesq buoyancy (Algorithm 1 line 17), plus wind as an inflow boundary
+// condition and a velocity drag.
+//
+//   Fire-X Eq. 1: -g.(1 - T_amb/T)
+//
+// Purely vertical: the lateral entrainment that narrows the plume is not forced
+// here, it emerges from the pressure projection. The viscous term nu.lap(u) of
+// Eq. 1 is applied in the diffusion stage, which is the pass that already has a
+// neighbourhood stencil.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 v = imageLoad(vel_src, c);
+	float dt = params.cell.y;
+	float t_amb = cfg.thermo.x;
+	float temp = imageLoad(scal_src, c).x;
+
+	if (temp > t_amb + 1.0) {
+		v.y += cfg.transport.x * (1.0 - t_amb / temp) * dt;
+	}
+
+	// Drag expressed per second so the result does not depend on the frame rate.
+	v.xyz *= exp(-cfg.transport.z * dt);
+
+	// Wind enters at the upwind faces; the interior picks it up by advection
+	// rather than being pushed as a body force.
+	ivec3 gmax = grid_max();
+	vec3 w = cfg.wind.xyz;
+	if (w.x > 0.0 && c.x == 0) {
+		v.x = w.x;
+	} else if (w.x < 0.0 && c.x == gmax.x) {
+		v.x = w.x;
+	}
+	if (w.z > 0.0 && c.z == 0) {
+		v.z = w.z;
+	} else if (w.z < 0.0 && c.z == gmax.z) {
+		v.z = w.z;
+	}
+
+	v.xyz = clamp(v.xyz, vec3(-50.0), vec3(50.0));
+	imageStore(vel_src, c, v);
+}

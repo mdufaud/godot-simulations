@@ -1,0 +1,88 @@
+// Algorithm 1 lines 19-20: the Laplacian diffusion of temperature and species,
+// followed by radiative exchange.
+//
+//   dT/dt   = (k/(rho.Cp)).lap(T)                                     Eq. 2
+//   dY_i/dt = D_i.lap(Y_i)                                            Eq. 3
+//   du/dt   = nu.lap(u)                                    Eq. 1 viscous term
+//   dT/dt  += (eps.sigma/Cp).(T_amb^4 - T^4)                          Eq. 2
+//
+// Written exactly as Eq. 2 has it: the radiative term is divided by Cp alone,
+// not by rho.Cp like the conduction term. That leaves it dimensionally loose,
+// which the dimensionless "radiation coefficient" eps (Tab. 3, range 0-6)
+// absorbs; at eps = 1 the resulting cooling is ~820 K/s at 2000 K, which is the
+// right order for an optically thin flame.
+//
+// Reads *_src and writes *_dst because the Laplacian needs a neighbourhood: the
+// solver flips parity again after this stage.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 v = imageLoad(vel_src, c);
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+	float dt = params.cell.y;
+
+	if (is_interior(c)) {
+		float inv_h2 = params.cell.z * params.cell.z;
+
+		vec4 sum_s = imageLoad(scal_src, c + ivec3(1, 0, 0)) + imageLoad(scal_src, c - ivec3(1, 0, 0)) +
+			imageLoad(scal_src, c + ivec3(0, 1, 0)) + imageLoad(scal_src, c - ivec3(0, 1, 0)) +
+			imageLoad(scal_src, c + ivec3(0, 0, 1)) + imageLoad(scal_src, c - ivec3(0, 0, 1));
+		vec4 sum_s2 = imageLoad(scal2_src, c + ivec3(1, 0, 0)) + imageLoad(scal2_src, c - ivec3(1, 0, 0)) +
+			imageLoad(scal2_src, c + ivec3(0, 1, 0)) + imageLoad(scal2_src, c - ivec3(0, 1, 0)) +
+			imageLoad(scal2_src, c + ivec3(0, 0, 1)) + imageLoad(scal2_src, c - ivec3(0, 0, 1));
+
+		vec4 lap_s = sum_s - 6.0 * s;
+		vec4 lap_s2 = sum_s2 - 6.0 * s2;
+
+		// Explicit Laplacians are stable up to 1/6 in 3D. At 0.1 m cells these
+		// physical coefficients land around 2e-5, i.e. thousands of times below
+		// the limit — real flames at this scale are advection dominated — but
+		// the clamp keeps a user-supplied value from detonating the field.
+		float rho = gas_density(s, s2);
+		float alpha_t = min(cfg.fuel.w / (rho * mixture_cp(s, s2)) * dt * inv_h2, 0.16);
+		float alpha_y = min(cfg.coeffs.x * dt * inv_h2, 0.16);
+
+		s.x += alpha_t * lap_s.x;
+		s.yzw += alpha_y * lap_s.yzw;
+		s2.xy += alpha_y * lap_s2.xy;
+
+		float nu = min(cfg.transport.w * dt * inv_h2, 0.16);
+		if (nu > 0.0) {
+			vec4 sum_v = imageLoad(vel_src, c + ivec3(1, 0, 0)) + imageLoad(vel_src, c - ivec3(1, 0, 0)) +
+				imageLoad(vel_src, c + ivec3(0, 1, 0)) + imageLoad(vel_src, c - ivec3(0, 1, 0)) +
+				imageLoad(vel_src, c + ivec3(0, 0, 1)) + imageLoad(vel_src, c - ivec3(0, 0, 1));
+			v.xyz += nu * (sum_v.xyz - 6.0 * v.xyz);
+		}
+	}
+
+	// Radiative exchange (Algorithm 1 line 20).
+	float t_amb = cfg.thermo.x;
+	float t2 = s.x * s.x;
+	float amb2 = t_amb * t_amb;
+	float radiation = cfg.thermo.y * SIGMA_SB * (amb2 * amb2 - t2 * t2) / mixture_cp(s, s2);
+	s.x = clamp(s.x + radiation * dt, t_amb, cfg.thermo.w);
+
+	// Project the mass fractions back onto the simplex. The MacCormack limiter
+	// clamps each component against its own eight-tap bounds, which is not a
+	// conservative operation on their sum, so the composition slowly drifts
+	// (measured: sum reaching 1.21 after 600 frames without this). Nitrogen is
+	// the remainder, so the constraint is simply that the stored species cannot
+	// sum past unity.
+	s.yzw = clamp(s.yzw, vec3(0.0), vec3(1.0));
+	s2.x = clamp(s2.x, 0.0, 1.0);
+	float total = s.y + s.z + s.w + s2.x;
+	if (total > 1.0) {
+		float inv = 1.0 / total;
+		s.yzw *= inv;
+		s2.x *= inv;
+	}
+
+	imageStore(vel_dst, c, v);
+	imageStore(scal_dst, c, vec4(s.x, s.yzw));
+	imageStore(scal2_dst, c, vec4(s2.x, clamp(s2.y, 0.0, 1.0), max(s2.z, 0.0), s2.w));
+}

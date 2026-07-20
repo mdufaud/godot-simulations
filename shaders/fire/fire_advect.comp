@@ -1,0 +1,22 @@
+// First half of MacCormack advection (Algorithm 1 line 16): the plain
+// semi-Lagrangian backtrace (Stam 1999). Its result lands in the *_fwd
+// textures, which the correction pass advects forward again to estimate — and
+// cancel — the first-order error.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec3 v = imageLoad(vel_src, c).xyz;
+	vec3 back = vec3(c) - v * params.cell.y * params.cell.z;
+
+	vec4 val, lo, hi;
+	SAMPLE_TRI(vel_src, back, val, lo, hi);
+	imageStore(vel_fwd, c, val);
+	SAMPLE_TRI(scal_src, back, val, lo, hi);
+	imageStore(scal_fwd, c, val);
+	SAMPLE_TRI(scal2_src, back, val, lo, hi);
+	imageStore(scal2_fwd, c, val);
+}

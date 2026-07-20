@@ -39,7 +39,20 @@ static func set_wind(strength: float) -> void:
 		mat.set_shader_parameter("wind_strength", strength)
 
 
-static func load_texture(abs_path: String, max_dim: int = 2048) -> Texture2D:
+# Block compression format for the target GPU, or -1 when none is available
+# (then textures stay RGBA8). Desktop reports s3tc, Android etc2/astc.
+static func _compress_mode() -> int:
+	if RenderingServer.has_os_feature("s3tc"):
+		return Image.COMPRESS_S3TC
+	if RenderingServer.has_os_feature("astc"):
+		return Image.COMPRESS_ASTC
+	if RenderingServer.has_os_feature("etc2"):
+		return Image.COMPRESS_ETC2
+	return -1
+
+
+static func load_texture(abs_path: String, max_dim: int = 2048,
+		source: int = Image.COMPRESS_SOURCE_SRGB) -> Texture2D:
 	var key := "%s@%d" % [abs_path, max_dim]
 	_mutex.lock()
 	var cached: bool = _tex_cache.has(key)
@@ -53,9 +66,14 @@ static func load_texture(abs_path: String, max_dim: int = 2048) -> Texture2D:
 		if img != null:
 			if maxi(img.get_width(), img.get_height()) > max_dim:
 				var scale := float(max_dim) / float(maxi(img.get_width(), img.get_height()))
-				img.resize(int(img.get_width() * scale), int(img.get_height() * scale),
+				# Block compression works on 4x4 tiles, so keep both sides aligned.
+				img.resize(maxi(4, int(img.get_width() * scale) / 4 * 4),
+						maxi(4, int(img.get_height() * scale) / 4 * 4),
 						Image.INTERPOLATE_BILINEAR)
 			img.generate_mipmaps()
+			var mode := _compress_mode()
+			if mode != -1:
+				img.compress(mode, source)
 			tex = ImageTexture.create_from_image(img)
 	_mutex.lock()
 	_tex_cache[key] = tex
@@ -78,9 +96,13 @@ static func make_material(asset: String, uris: Dictionary, foliage: bool, height
 	mat.set_shader_parameter("albedo_tex",
 			load_texture("%s/%s" % [dir, uris.get("diff", "")], 2048))
 	mat.set_shader_parameter("normal_tex",
-			load_texture("%s/%s" % [dir, uris.get("nor", "")], 1024))
+			# GENERIC, not NORMAL: the normal hint selects BC5 (two channels) and
+			# the shader samples normal_tex.rgb, so blue must survive.
+			load_texture("%s/%s" % [dir, uris.get("nor", "")], 1024,
+					Image.COMPRESS_SOURCE_GENERIC))
 	mat.set_shader_parameter("arm_tex",
-			load_texture("%s/%s" % [dir, uris.get("arm", "")], 1024))
+			load_texture("%s/%s" % [dir, uris.get("arm", "")], 1024,
+					Image.COMPRESS_SOURCE_GENERIC))
 	mat.set_shader_parameter("sway_amount", 1.0 if foliage else 0.12)
 	mat.set_shader_parameter("height_ref", height_ref)
 	mat.set_shader_parameter("follow_terrain", follow_terrain)

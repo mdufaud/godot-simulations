@@ -1,0 +1,44 @@
+// Vorticity confinement (Fire-X Tab. 3 "Vorticity confinement"; Fedkiw et al.
+// 2001): puts back the small-scale rotation the grid and the semi-Lagrangian
+// step damp away.
+//   N = grad|omega| / ||grad|omega|||,  f = strength.h.(N x omega)
+//
+// The paper gates it with a velocity band and a lower temperature threshold
+// (301 K), so it only acts inside the moving hot gas and leaves the still
+// ambient air alone.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c) || !is_interior(c)) {
+		return;
+	}
+
+	vec4 v = imageLoad(vel_src, c);
+	float speed = length(v.xyz);
+	if (speed < cfg.vort.x || speed > cfg.vort.y) {
+		return;
+	}
+	if (imageLoad(scal_src, c).x < cfg.vort.z) {
+		return;
+	}
+
+	float inv_2h = 0.5 * params.cell.z;
+	float gx = (imageLoad(curl_tex, c + ivec3(1, 0, 0)).w - imageLoad(curl_tex, c - ivec3(1, 0, 0)).w) * inv_2h;
+	float gy = (imageLoad(curl_tex, c + ivec3(0, 1, 0)).w - imageLoad(curl_tex, c - ivec3(0, 1, 0)).w) * inv_2h;
+	float gz = (imageLoad(curl_tex, c + ivec3(0, 0, 1)).w - imageLoad(curl_tex, c - ivec3(0, 0, 1)).w) * inv_2h;
+
+	vec3 grad = vec3(gx, gy, gz);
+	vec3 n = grad / (length(grad) + 1e-5);
+	vec3 omega = imageLoad(curl_tex, c).xyz;
+	vec3 f = cfg.transport.y * params.cell.x * cross(n, omega);
+
+	// The normalised gradient is meaningless where |omega| is flat, so a single
+	// noisy cell can produce a spike; clamp guards against blow-up.
+	float mag = length(f);
+	if (mag > 50.0) {
+		f *= 50.0 / mag;
+	}
+
+	v.xyz += f * params.cell.y;
+	imageStore(vel_src, c, v);
+}

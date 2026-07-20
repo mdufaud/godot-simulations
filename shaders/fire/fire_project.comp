@@ -1,0 +1,41 @@
+// Projection step (Algorithm 1 line 22): u -= grad(p), making the field
+// divergence free. This is what turns a vertical buoyancy force into a plume
+// that pinches at the waist and drags fresh air in from the sides.
+//
+// The gradient is taken with clamped neighbours so boundary cells get a
+// one-sided difference instead of being skipped. Skipping them leaves the
+// entire boundary layer unprojected, which blocks inflow: the plume then rises
+// without entraining, and the fire suffocates in its own domain.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	ivec3 gmax = grid_max();
+	vec4 v = imageLoad(vel_src, c);
+
+	// Unrolled per axis: Godot's SPIR-V path rejects dynamic vector component
+	// indexing ("OpVectorExtractDynamic is not supported yet").
+	ivec3 hx = min(c + ivec3(1, 0, 0), gmax);
+	ivec3 lx = max(c - ivec3(1, 0, 0), ivec3(0));
+	ivec3 hy = min(c + ivec3(0, 1, 0), gmax);
+	ivec3 ly = max(c - ivec3(0, 1, 0), ivec3(0));
+	ivec3 hz = min(c + ivec3(0, 0, 1), gmax);
+	ivec3 lz = max(c - ivec3(0, 0, 1), ivec3(0));
+
+	vec3 span = vec3(hx.x - lx.x, hy.y - ly.y, hz.z - lz.z) * params.cell.x;
+	vec3 grad = vec3(
+		imageLoad(press_src, hx).r - imageLoad(press_src, lx).r,
+		imageLoad(press_src, hy).r - imageLoad(press_src, ly).r,
+		imageLoad(press_src, hz).r - imageLoad(press_src, lz).r);
+	v.xyz -= grad / max(span, vec3(1e-6));
+
+	// Solid ground: no flow through the floor.
+	if (c.y == 0) {
+		v.y = 0.0;
+	}
+
+	imageStore(vel_src, c, v);
+}

@@ -1,0 +1,30 @@
+// Vorticity field omega = curl(u), central differences. Stored as xyz with the
+// magnitude in w so the confinement pass can take its gradient with one fetch
+// per neighbour instead of three.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+	if (!is_interior(c)) {
+		imageStore(curl_tex, c, vec4(0.0));
+		return;
+	}
+
+	float inv_2h = 0.5 * params.cell.z;
+	vec3 px = imageLoad(vel_src, c + ivec3(1, 0, 0)).xyz;
+	vec3 nx = imageLoad(vel_src, c - ivec3(1, 0, 0)).xyz;
+	vec3 py = imageLoad(vel_src, c + ivec3(0, 1, 0)).xyz;
+	vec3 ny = imageLoad(vel_src, c - ivec3(0, 1, 0)).xyz;
+	vec3 pz = imageLoad(vel_src, c + ivec3(0, 0, 1)).xyz;
+	vec3 nz = imageLoad(vel_src, c - ivec3(0, 0, 1)).xyz;
+
+	vec3 omega = vec3(
+			(py.z - ny.z) - (pz.y - nz.y),
+			(pz.x - nz.x) - (px.z - nx.z),
+			(px.y - nx.y) - (py.x - ny.x)) *
+		inv_2h;
+
+	imageStore(curl_tex, c, vec4(omega, length(omega)));
+}
