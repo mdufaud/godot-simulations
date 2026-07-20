@@ -18,5 +18,5 @@ void main() {
 		}
 		visc += (velocities.data[j].xyz - vi) * sph_poly6(r2);
 	)
-	velocities.data[i] = vec4(vi + visc * params.sim2.x * params.sim.x, 0.0);
+	velocities.data[i] = vec4(vi + visc * params.sim2.x * params.sim.x, velocities.data[i].w);
 }

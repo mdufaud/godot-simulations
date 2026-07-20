@@ -50,7 +50,7 @@ void main() {
 	if (neighbours < 8) {
 		v -= v * params.sim.x * 0.75;
 	}
-	velocities.data[i] = vec4(v, 0.0);
+	velocities.data[i] = vec4(v, velocities.data[i].w);
 
 	// --- Spawn white particles from this fluid particle ---
 	// Water only: in lava the white-particle look makes no sense.

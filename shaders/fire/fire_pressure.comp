@@ -1,7 +1,15 @@
 // One Jacobi sweep of the pressure Poisson solve: laplacian(p) = div(u).
-//   p(i) = (sum of the six neighbours - h^2.div(i)) / 6
-// Boundaries: the ground is solid, so dp/dn = 0 there (mirror the row above);
-// the sides and the top are open, so p = 0 lets the plume vent freely.
+//
+// Weighted stencil rather than a flat divide by six. A face's contribution and
+// its share of the divisor go together:
+//   open side or top - Dirichlet p = 0 outside, so the ghost adds nothing to the
+//                      sum but still counts in the divisor;
+//   solid floor      - Neumann dp/dn = 0, so the ghost equals p(c) itself. Moved
+//                      to the left-hand side that removes one from the divisor,
+//                      which is the correct no-flux condition. The old code
+//                      instead copied the row above into row 0, which imposes
+//                      the condition on the wrong side of the face and leaks.
+//
 // The solver never clears the pressure field, warm-starting each frame from the
 // previous solution — the plume is quasi-steady, so it starts close.
 
@@ -11,20 +19,22 @@ void main() {
 		return;
 	}
 
-	if (c.y == 0) {
-		imageStore(press_dst, c, vec4(imageLoad(press_src, c + ivec3(0, 1, 0)).r, 0.0, 0.0, 0.0));
-		return;
-	}
-	if (!is_interior(c)) {
-		imageStore(press_dst, c, vec4(0.0));
-		return;
-	}
+	ivec3 gmax = grid_max();
+	float sum = 0.0;
+	float divisor = 5.0; // the five faces that are always open or interior
 
-	float sum = imageLoad(press_src, c + ivec3(1, 0, 0)).r + imageLoad(press_src, c - ivec3(1, 0, 0)).r +
-		imageLoad(press_src, c + ivec3(0, 1, 0)).r + imageLoad(press_src, c - ivec3(0, 1, 0)).r +
-		imageLoad(press_src, c + ivec3(0, 0, 1)).r + imageLoad(press_src, c - ivec3(0, 0, 1)).r;
+	sum += (c.x < gmax.x) ? imageLoad(press_src, c + ivec3(1, 0, 0)).r : 0.0;
+	sum += (c.x > 0) ? imageLoad(press_src, c - ivec3(1, 0, 0)).r : 0.0;
+	sum += (c.y < gmax.y) ? imageLoad(press_src, c + ivec3(0, 1, 0)).r : 0.0;
+	sum += (c.z < gmax.z) ? imageLoad(press_src, c + ivec3(0, 0, 1)).r : 0.0;
+	sum += (c.z > 0) ? imageLoad(press_src, c - ivec3(0, 0, 1)).r : 0.0;
+
+	// Downward face: interior below row 0, solid at it.
+	if (c.y > 0) {
+		sum += imageLoad(press_src, c - ivec3(0, 1, 0)).r;
+		divisor += 1.0;
+	}
 
 	float h = params.cell.x;
-	float p = (sum - h * h * imageLoad(diverg, c).r) / 6.0;
-	imageStore(press_dst, c, vec4(p, 0.0, 0.0, 0.0));
+	imageStore(press_dst, c, vec4((sum - h * h * imageLoad(diverg, c).r) / divisor, 0.0, 0.0, 0.0));
 }

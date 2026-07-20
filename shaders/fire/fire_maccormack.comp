@@ -5,33 +5,59 @@
 // Second order but not monotone, so the correction is limited to the range
 // spanned by the eight source taps the backtrace interpolated — without that
 // clamp the scheme overshoots and rings around the flame front.
+//
+// Staggered: the limiter runs per component, against the bounds of the face
+// texture that component lives in. Sharing one vec4 limiter across all three
+// would clamp each component to the others' range.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
+	float scale = params.cell.y * params.cell.z;
+
+	float hat, lo, hi, tld, ignore_lo, ignore_hi;
+
+	if (in_u(c)) {
+		vec3 step_uv = vel_at_u_face(c) * scale;
+		ivec3 dmax = u_dims() - ivec3(1);
+		SAMPLE_TRI_R(u_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(u_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		float nv = clamp(hat + 0.5 * (imageLoad(u_src, c).r - tld), lo, hi);
+		imageStore(u_dst, c, vec4(nv, 0.0, 0.0, 0.0));
+	}
+	if (in_v(c)) {
+		vec3 step_uv = vel_at_v_face(c) * scale;
+		ivec3 dmax = v_dims() - ivec3(1);
+		SAMPLE_TRI_R(v_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(v_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		float nv = clamp(hat + 0.5 * (imageLoad(v_src, c).r - tld), lo, hi);
+		imageStore(v_dst, c, vec4(nv, 0.0, 0.0, 0.0));
+	}
+	if (in_w(c)) {
+		vec3 step_uv = vel_at_w_face(c) * scale;
+		ivec3 dmax = w_dims() - ivec3(1);
+		SAMPLE_TRI_R(w_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(w_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		float nv = clamp(hat + 0.5 * (imageLoad(w_src, c).r - tld), lo, hi);
+		imageStore(w_dst, c, vec4(nv, 0.0, 0.0, 0.0));
+	}
+
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec3 v = imageLoad(vel_src, c).xyz;
-	vec3 step_uv = v * params.cell.y * params.cell.z;
-	vec3 back = vec3(c) - step_uv;
-	vec3 fwd = vec3(c) + step_uv;
+	vec3 step_c = vel_at_cell(c) * scale;
+	vec3 back = vec3(c) - step_c;
+	vec3 fwd = vec3(c) + step_c;
+	vec4 vhat, vlo, vhi, vtld, vign_lo, vign_hi;
 
-	vec4 hat, lo, hi, tld, ignore_lo, ignore_hi;
+	SAMPLE_TRI(scal_src, back, vhat, vlo, vhi);
+	SAMPLE_TRI(scal_fwd, fwd, vtld, vign_lo, vign_hi);
+	vec4 scal_new = clamp(vhat + 0.5 * (imageLoad(scal_src, c) - vtld), vlo, vhi);
 
-	SAMPLE_TRI(vel_src, back, hat, lo, hi);
-	SAMPLE_TRI(vel_fwd, fwd, tld, ignore_lo, ignore_hi);
-	vec4 vel_new = clamp(hat + 0.5 * (imageLoad(vel_src, c) - tld), lo, hi);
+	SAMPLE_TRI(scal2_src, back, vhat, vlo, vhi);
+	SAMPLE_TRI(scal2_fwd, fwd, vtld, vign_lo, vign_hi);
+	vec4 scal2_new = clamp(vhat + 0.5 * (imageLoad(scal2_src, c) - vtld), vlo, vhi);
 
-	SAMPLE_TRI(scal_src, back, hat, lo, hi);
-	SAMPLE_TRI(scal_fwd, fwd, tld, ignore_lo, ignore_hi);
-	vec4 scal_new = clamp(hat + 0.5 * (imageLoad(scal_src, c) - tld), lo, hi);
-
-	SAMPLE_TRI(scal2_src, back, hat, lo, hi);
-	SAMPLE_TRI(scal2_fwd, fwd, tld, ignore_lo, ignore_hi);
-	vec4 scal2_new = clamp(hat + 0.5 * (imageLoad(scal2_src, c) - tld), lo, hi);
-
-	imageStore(vel_dst, c, vel_new);
 	imageStore(scal_dst, c, vec4(
 			clamp(scal_new.x, cfg.thermo.x, cfg.thermo.w),
 			clamp(scal_new.yzw, vec3(0.0), vec3(1.0))));

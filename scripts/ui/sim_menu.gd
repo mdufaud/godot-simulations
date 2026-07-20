@@ -39,7 +39,9 @@ func _ready() -> void:
 	if persist_id.is_empty():
 		persist_id = GameManager.current_demo
 	if persist_id.is_empty():
-		persist_id = get_tree().current_scene.scene_file_path.get_file().get_basename()
+		var current_scene := get_tree().current_scene
+		if current_scene != null:
+			persist_id = current_scene.scene_file_path.get_file().get_basename()
 	_restore_all.call_deferred()
 
 

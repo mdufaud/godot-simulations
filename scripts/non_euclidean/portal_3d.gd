@@ -5,7 +5,6 @@ signal teleported(body: Node3D, destination: Portal3D)
 
 const WORLD_LAYER := 1
 const MAIN_PORTAL_LAYER := 2
-const RECURSION_LAYER := 4
 const PROXY_LAYER := 8
 const SCREEN_OFFSET := -0.03
 const SCREEN_OVERSCAN := Vector2(0.06, 0.06)

@@ -6,31 +6,38 @@
 // The paper gates it with a velocity band and a lower temperature threshold
 // (301 K), so it only acts inside the moving hot gas and leaves the still
 // ambient air alone.
+//
+// First of two passes. The force is a cell-centred quantity but the velocity it
+// corrects lives on faces, so it is written to the scal_fwd scratch here and
+// scattered onto the faces by fire_vortapply. scal_fwd is free between the
+// MacCormack correction that consumed it and next frame's advection.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
-	if (out_of_grid(c) || !is_interior(c)) {
+	if (out_of_grid(c)) {
+		return;
+	}
+	if (!is_interior(c)) {
+		imageStore(scal_fwd, c, vec4(0.0));
 		return;
 	}
 
-	vec4 v = imageLoad(vel_src, c);
-	float speed = length(v.xyz);
-	if (speed < cfg.vort.x || speed > cfg.vort.y) {
-		return;
-	}
-	if (imageLoad(scal_src, c).x < cfg.vort.z) {
+	vec3 vel = vel_at_cell(c);
+	float speed = length(vel);
+	if (speed < cfg.vort.x || speed > cfg.vort.y
+			|| imageLoad(scal_src, c).x < cfg.vort.z) {
+		imageStore(scal_fwd, c, vec4(0.0));
 		return;
 	}
 
 	float inv_2h = 0.5 * params.cell.z;
-	float gx = (imageLoad(curl_tex, c + ivec3(1, 0, 0)).w - imageLoad(curl_tex, c - ivec3(1, 0, 0)).w) * inv_2h;
-	float gy = (imageLoad(curl_tex, c + ivec3(0, 1, 0)).w - imageLoad(curl_tex, c - ivec3(0, 1, 0)).w) * inv_2h;
-	float gz = (imageLoad(curl_tex, c + ivec3(0, 0, 1)).w - imageLoad(curl_tex, c - ivec3(0, 0, 1)).w) * inv_2h;
+	vec3 grad = vec3(
+		imageLoad(curl_tex, c + ivec3(1, 0, 0)).w - imageLoad(curl_tex, c - ivec3(1, 0, 0)).w,
+		imageLoad(curl_tex, c + ivec3(0, 1, 0)).w - imageLoad(curl_tex, c - ivec3(0, 1, 0)).w,
+		imageLoad(curl_tex, c + ivec3(0, 0, 1)).w - imageLoad(curl_tex, c - ivec3(0, 0, 1)).w) * inv_2h;
 
-	vec3 grad = vec3(gx, gy, gz);
 	vec3 n = grad / (length(grad) + 1e-5);
-	vec3 omega = imageLoad(curl_tex, c).xyz;
-	vec3 f = cfg.transport.y * params.cell.x * cross(n, omega);
+	vec3 f = cfg.transport.y * params.cell.x * cross(n, imageLoad(curl_tex, c).xyz);
 
 	// The normalised gradient is meaningless where |omega| is flat, so a single
 	// noisy cell can produce a spike; clamp guards against blow-up.
@@ -39,6 +46,5 @@ void main() {
 		f *= 50.0 / mag;
 	}
 
-	v.xyz += f * params.cell.y;
-	imageStore(vel_src, c, v);
+	imageStore(scal_fwd, c, vec4(f, 0.0));
 }

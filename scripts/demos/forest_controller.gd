@@ -12,6 +12,8 @@ const LEAVES_SHADER := preload("res://shaders/forest/tree_leaves.gdshader")
 const IMPOSTOR_SHADER := preload("res://shaders/forest/tree_impostor.gdshader")
 const TreeGen := preload("res://scripts/demos/forest_tree_generator.gd")
 const Lib := preload("res://scripts/demos/forest_scanned_lib.gd")
+const GrassMultimeshBuilder := preload("res://scripts/grass_multimesh_builder.gd")
+const CloudDeckBuilder := preload("res://scripts/cloud_deck_builder.gd")
 const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
 const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
 const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
@@ -553,11 +555,11 @@ func _setup_grass_instances() -> void:
 func _generate_grass_multimeshes() -> void:
 	var density := _grass_density * (0.7 if _mode == 1 else 1.0)
 	var multimesh_lods: Array[MultiMesh] = [
-		_create_grass_multimesh(1.0 * density, GRASS_MESH_HIGH),
-		_create_grass_multimesh(0.5 * density, GRASS_MESH_HIGH),
-		_create_grass_multimesh(0.25 * density, GRASS_MESH_LOW),
-		_create_grass_multimesh(0.1 * density, GRASS_MESH_LOW),
-		_create_grass_multimesh(0.02 * (1.0 if density != 0.0 else 0.0), GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(1.0 * density, TILE_SIZE, GRASS_MESH_HIGH),
+		GrassMultimeshBuilder.build(0.5 * density, TILE_SIZE, GRASS_MESH_HIGH),
+		GrassMultimeshBuilder.build(0.25 * density, TILE_SIZE, GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(0.1 * density, TILE_SIZE, GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(0.02 * (1.0 if density != 0.0 else 0.0), TILE_SIZE, GRASS_MESH_LOW),
 	]
 	for data in _grass_tiles:
 		var distance: float = data[1].length()
@@ -577,22 +579,6 @@ func _generate_grass_multimeshes() -> void:
 	for data in _grass_tiles:
 		if data[0].multimesh != null:
 			_grass_instances += data[0].multimesh.instance_count
-
-
-func _create_grass_multimesh(density: float, mesh: Mesh) -> MultiMesh:
-	var row_size := int(ceil(TILE_SIZE * lerpf(0.0, 10.0, density)))
-	var multimesh := MultiMesh.new()
-	multimesh.mesh = mesh
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.instance_count = row_size * row_size
-	var jitter := TILE_SIZE / float(row_size) * 0.5 * 0.9 if row_size > 0 else 0.0
-	for i in row_size:
-		for j in row_size:
-			var pos := Vector3(i / float(row_size) - 0.5, 0, j / float(row_size) - 0.5) * TILE_SIZE
-			var offset := Vector3(randf_range(-jitter, jitter), 0, randf_range(-jitter, jitter))
-			multimesh.set_instance_transform(i + j * row_size, Transform3D(Basis(), pos + offset))
-	return multimesh
-
 
 # ── Photoreal clump grass (scanned patches on the textured ground) ──────────
 
@@ -705,31 +691,9 @@ func _setup_environment() -> void:
 	_sky_lowpoly = Sky.new()
 	_sky_lowpoly.sky_material = lmat
 
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise.frequency = 0.02
-	var ntex := NoiseTexture3D.new()
-	ntex.noise = noise
-	ntex.width = 128
-	ntex.height = 128
-	ntex.depth = 32
-	ntex.seamless = true
-	_cloud_mat = ShaderMaterial.new()
-	_cloud_mat.shader = load("res://shaders/ocean/ocean_clouds.gdshader")
-	_cloud_mat.set_shader_parameter("noise_tex", ntex)
-	_cloud_mat.set_shader_parameter("cover", 0.3)
-	_cloud_mat.set_shader_parameter("cloud_color", Color(0.94, 0.95, 0.99))
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(10000, 10000)
-	plane.subdivide_width = 48
-	plane.subdivide_depth = 48
-	_cloud_deck = MeshInstance3D.new()
-	_cloud_deck.mesh = plane
-	_cloud_deck.material_override = _cloud_mat
-	_cloud_deck.position = Vector3(0, 460, 0)
-	_cloud_deck.extra_cull_margin = 2000.0
-	_cloud_deck.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(_cloud_deck)
+	var cloud := CloudDeckBuilder.build(self, 460.0, 0.3, Color(0.94, 0.95, 0.99), true)
+	_cloud_mat = cloud[0]
+	_cloud_deck = cloud[1]
 
 	var env := world_env.environment
 	env.sky = _sky_photoreal

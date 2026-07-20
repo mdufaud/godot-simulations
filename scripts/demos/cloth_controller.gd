@@ -273,7 +273,17 @@ func _setup_ui() -> void:
 		_set_all_int.bind("substeps"))
 	menu.add_slider("Relaxation", 1.0, 1.9, solvers[0].relaxation, _set_all.bind("relaxation"))
 	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_separator()
+
+	menu.add_section("Performance")
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
 	_update_status()
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 func _on_wind_toggled(on: bool) -> void:

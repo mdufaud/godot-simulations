@@ -7,11 +7,28 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
 //   scal2 = (Y_H2O, Y_residual, reaction, unused)
 // Y_N2 is not transported: nitrogen is inert (Fire-X Tab. 4 gives its reaction
 // coefficient as 0), so it is recovered as 1 - sum of the other gas species.
-layout(rgba32f, set = 0, binding = 0) uniform restrict image3D vel_src;
-layout(rgba32f, set = 0, binding = 1) uniform restrict image3D vel_dst;
+// Velocity is staggered on a marker-and-cell grid (Fire-X Sec. 5.1: "velocity u
+// is represented in a staggered marker-and-cell (MAC) grid layout with
+// components stored at face centers [Bridson 2015]"). Each component is a
+// separate scalar texture sized dims + 1 on its own axis: u-face (i,j,k) sits on
+// the boundary between cells i-1 and i, at world x = i.h, y = (j+0.5).h.
+//
+// This is what makes the discrete gradient the exact adjoint of the discrete
+// divergence: both are one-cell differences across the same face, so the
+// projection actually removes the divergence instead of leaving a checkerboard
+// mode that a 2h-wide central difference cannot see.
+layout(r32f, set = 0, binding = 0) uniform restrict image3D u_src;
+layout(r32f, set = 0, binding = 1) uniform restrict image3D u_dst;
+layout(r32f, set = 0, binding = 4) uniform restrict image3D u_fwd;
+layout(r32f, set = 0, binding = 16) uniform restrict image3D v_src;
+layout(r32f, set = 0, binding = 17) uniform restrict image3D v_dst;
+layout(r32f, set = 0, binding = 18) uniform restrict image3D v_fwd;
+layout(r32f, set = 0, binding = 19) uniform restrict image3D w_src;
+layout(r32f, set = 0, binding = 20) uniform restrict image3D w_dst;
+layout(r32f, set = 0, binding = 21) uniform restrict image3D w_fwd;
+
 layout(rgba32f, set = 0, binding = 2) uniform restrict image3D scal_src;
 layout(rgba32f, set = 0, binding = 3) uniform restrict image3D scal_dst;
-layout(rgba32f, set = 0, binding = 4) uniform restrict image3D vel_fwd;
 layout(rgba32f, set = 0, binding = 5) uniform restrict image3D scal_fwd;
 layout(rgba32f, set = 0, binding = 6) uniform restrict image3D curl_tex;
 layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
@@ -72,6 +89,90 @@ bool is_interior(ivec3 c) {
 vec3 cell_to_world(ivec3 c) {
 	vec3 half_xz = vec3(params.dims.x, 0.0, params.dims.z) * params.cell.x * 0.5;
 	return (vec3(c) + vec3(0.5)) * params.cell.x - half_xz;
+}
+
+// =========================================================================
+//  STAGGERED VELOCITY
+// =========================================================================
+
+// Extents of the three face grids. Each is one longer than the cell grid on the
+// axis its component is normal to.
+ivec3 u_dims() { return params.dims.xyz + ivec3(1, 0, 0); }
+ivec3 v_dims() { return params.dims.xyz + ivec3(0, 1, 0); }
+ivec3 w_dims() { return params.dims.xyz + ivec3(0, 0, 1); }
+
+bool in_u(ivec3 f) { return all(lessThan(f, u_dims())); }
+bool in_v(ivec3 f) { return all(lessThan(f, v_dims())); }
+bool in_w(ivec3 f) { return all(lessThan(f, w_dims())); }
+
+// A face centre in world space. Offset is +0.0 along the normal axis (the face
+// sits on the cell boundary) and +0.5 along the other two.
+vec3 u_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.5, 0.0, 0.0) * params.cell.x; }
+vec3 v_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.5, 0.0) * params.cell.x; }
+vec3 w_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.0, 0.5) * params.cell.x; }
+
+// Velocity reconstructed at a cell centre: the mean of the two opposing faces.
+vec3 vel_at_cell(ivec3 c) {
+	return vec3(
+		0.5 * (imageLoad(u_src, c).r + imageLoad(u_src, c + ivec3(1, 0, 0)).r),
+		0.5 * (imageLoad(v_src, c).r + imageLoad(v_src, c + ivec3(0, 1, 0)).r),
+		0.5 * (imageLoad(w_src, c).r + imageLoad(w_src, c + ivec3(0, 0, 1)).r));
+}
+
+// The full velocity vector at a face centre. The normal component is stored
+// there; the two tangential ones are averaged from the four nearest faces of
+// their own kind (Bridson 2015 Sec. 2.2). Cell indices are clamped so the
+// boundary faces reuse the nearest interior column rather than reading out of
+// bounds.
+vec3 vel_at_u_face(ivec3 f) {
+	int lo = max(f.x - 1, 0);
+	int hi = min(f.x, params.dims.x - 1);
+	float vv = 0.25 * (imageLoad(v_src, ivec3(lo, f.y, f.z)).r
+		+ imageLoad(v_src, ivec3(hi, f.y, f.z)).r
+		+ imageLoad(v_src, ivec3(lo, f.y + 1, f.z)).r
+		+ imageLoad(v_src, ivec3(hi, f.y + 1, f.z)).r);
+	float ww = 0.25 * (imageLoad(w_src, ivec3(lo, f.y, f.z)).r
+		+ imageLoad(w_src, ivec3(hi, f.y, f.z)).r
+		+ imageLoad(w_src, ivec3(lo, f.y, f.z + 1)).r
+		+ imageLoad(w_src, ivec3(hi, f.y, f.z + 1)).r);
+	return vec3(imageLoad(u_src, f).r, vv, ww);
+}
+
+vec3 vel_at_v_face(ivec3 f) {
+	int lo = max(f.y - 1, 0);
+	int hi = min(f.y, params.dims.y - 1);
+	float uu = 0.25 * (imageLoad(u_src, ivec3(f.x, lo, f.z)).r
+		+ imageLoad(u_src, ivec3(f.x, hi, f.z)).r
+		+ imageLoad(u_src, ivec3(f.x + 1, lo, f.z)).r
+		+ imageLoad(u_src, ivec3(f.x + 1, hi, f.z)).r);
+	float ww = 0.25 * (imageLoad(w_src, ivec3(f.x, lo, f.z)).r
+		+ imageLoad(w_src, ivec3(f.x, hi, f.z)).r
+		+ imageLoad(w_src, ivec3(f.x, lo, f.z + 1)).r
+		+ imageLoad(w_src, ivec3(f.x, hi, f.z + 1)).r);
+	return vec3(uu, imageLoad(v_src, f).r, ww);
+}
+
+vec3 vel_at_w_face(ivec3 f) {
+	int lo = max(f.z - 1, 0);
+	int hi = min(f.z, params.dims.z - 1);
+	float uu = 0.25 * (imageLoad(u_src, ivec3(f.x, f.y, lo)).r
+		+ imageLoad(u_src, ivec3(f.x, f.y, hi)).r
+		+ imageLoad(u_src, ivec3(f.x + 1, f.y, lo)).r
+		+ imageLoad(u_src, ivec3(f.x + 1, f.y, hi)).r);
+	float vv = 0.25 * (imageLoad(v_src, ivec3(f.x, f.y, lo)).r
+		+ imageLoad(v_src, ivec3(f.x, f.y, hi)).r
+		+ imageLoad(v_src, ivec3(f.x, f.y + 1, lo)).r
+		+ imageLoad(v_src, ivec3(f.x, f.y + 1, hi)).r);
+	return vec3(uu, vv, imageLoad(w_src, f).r);
+}
+
+// Divergence of the staggered field at a cell centre. One compact difference per
+// axis across the cell's own two faces — no 2h stencil, no boundary clamping,
+// and exactly the operator fire_project inverts.
+float divergence_at(ivec3 c) {
+	return (imageLoad(u_src, c + ivec3(1, 0, 0)).r - imageLoad(u_src, c).r
+		+ imageLoad(v_src, c + ivec3(0, 1, 0)).r - imageLoad(v_src, c).r
+		+ imageLoad(w_src, c + ivec3(0, 0, 1)).r - imageLoad(w_src, c).r) * params.cell.z;
 }
 
 // Nitrogen closes the mixture. Residuals are condensed-phase soot, so they are
@@ -146,6 +247,27 @@ float mixture_cp(vec4 s, vec4 s2) {
 			+ s2.x * cp_h2o(t) / cfg.molar.z
 			+ nitrogen_fraction(s, s2) * cp_n2(t) / cfg.molar.w,
 		1.0);
+}
+
+// Scalar variant of SAMPLE_TRI for the face textures. They each have their own
+// extent, so the clamp bound is passed in rather than taken from grid_max().
+#define SAMPLE_TRI_R(p_img, p_pos, p_dmax, p_out, p_min, p_max) { \
+	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(p_dmax)); \
+	ivec3 i0_ = ivec3(floor(pc_)); \
+	ivec3 i1_ = min(i0_ + ivec3(1), p_dmax); \
+	vec3 fr_ = pc_ - vec3(i0_); \
+	float s000_ = imageLoad(p_img, ivec3(i0_.x, i0_.y, i0_.z)).r; \
+	float s100_ = imageLoad(p_img, ivec3(i1_.x, i0_.y, i0_.z)).r; \
+	float s010_ = imageLoad(p_img, ivec3(i0_.x, i1_.y, i0_.z)).r; \
+	float s110_ = imageLoad(p_img, ivec3(i1_.x, i1_.y, i0_.z)).r; \
+	float s001_ = imageLoad(p_img, ivec3(i0_.x, i0_.y, i1_.z)).r; \
+	float s101_ = imageLoad(p_img, ivec3(i1_.x, i0_.y, i1_.z)).r; \
+	float s011_ = imageLoad(p_img, ivec3(i0_.x, i1_.y, i1_.z)).r; \
+	float s111_ = imageLoad(p_img, ivec3(i1_.x, i1_.y, i1_.z)).r; \
+	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
+	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
+	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \
+		mix(mix(s001_, s101_, fr_.x), mix(s011_, s111_, fr_.x), fr_.y), fr_.z); \
 }
 
 // Trilinear fetch plus the bounds of the eight taps, which the MacCormack

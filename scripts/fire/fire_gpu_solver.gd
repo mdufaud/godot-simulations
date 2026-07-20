@@ -14,12 +14,18 @@ extends RefCounted
 
 const SHADER_DIR := "res://shaders/fire/"
 const STAGES: Array[String] = [
-	"inject", "advect", "maccormack", "forces", "curl", "vorticity",
+	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
 	"combustion", "diffusion", "divergence", "pressure", "project", "display",
 ]
+## Stages that touch the staggered velocity faces, and so must be dispatched
+## over the face grid (dims + 1 on every axis) rather than the cell grid. Each
+## one guards its own writes, since the three face textures have different
+## extents and none of them fills the dispatch.
+const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
+	"diffusion", "project"]
 ## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
 const WG := Vector3i(8, 8, 4)
-const STATS_WORDS := 8
+const STATS_WORDS := 9
 const CONFIG_VEC4S := 10
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4 }
@@ -86,8 +92,13 @@ const Y_O2_AIR := 0.233
 # =========================================================================
 
 ## 64x96x64. Fire-X Tab. 3 runs 64^3 up to 200x300x400.
+##
+## The domain is 12.8 x 19.2 x 12.8 m either way; this is the middle of the three
+## quality presets in the demo controller. 128x192x128 at 0.1 m is the same box at
+## the paper's cell size and works, but costs 86 ms a frame on a Radeon 760M
+## against 10 ms here, so it is the High preset rather than the default.
 var grid_dims := Vector3i(64, 96, 64)
-var cell_size := 0.1 ## Grid length 6.4 x 9.6 x 6.4 m; Tab. 3 allows 0.1-10.0 m
+var cell_size := 0.2 ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
 
 var fuel_index := 0
 var units_convention := UNITS_CGS
@@ -131,6 +142,7 @@ var _stats_buf := RID()
 var _config_buf := RID()
 var _parity := 0
 var _groups := Vector3i.ZERO
+var _groups_face := Vector3i.ZERO
 
 var _events: Array[Dictionary] = []
 var _events_mutex := Mutex.new()
@@ -149,6 +161,12 @@ func get_display_tex_rid() -> RID:
 	return _tex.get("display", RID())
 
 
+## Field texture by name, for the stages that live outside this class (the liquid
+## coupling in FireWater). Invalid until init_render has run on the render thread.
+func get_texture_rid(key: String) -> RID:
+	return _tex.get(key, RID())
+
+
 func current_fuel() -> Dictionary:
 	return FUELS[clampi(fuel_index, 0, FUELS.size() - 1)]
 
@@ -164,6 +182,17 @@ func effective_pre_exponential() -> float:
 	if units_convention == UNITS_SI_AS_PRINTED:
 		return f["a_factor"]
 	return f["a_factor"] * pow(10.0, 6.0 * (1.0 - f["a"] - f["b"]))
+
+
+## Simulated time a frame of length [param delta] will advance.
+##
+## The solver runs whole steps of [member timestep] rather than stretching dt, so
+## simulated time and wall-clock time diverge whenever the frame rate is not
+## 120 Hz. Emitters must scale their rate by this, not by the frame delta: doing
+## otherwise injects more fuel per simulated second the slower the frame rate
+## gets, which floods the burner and starves it of oxygen.
+func sim_delta(delta: float) -> float:
+	return float(clampi(int(delta / timestep), 1, substeps)) * timestep
 
 
 ## Queue a grid interaction; consumed by the next [method step_render].
@@ -191,6 +220,12 @@ func get_stats() -> Dictionary:
 		"avg_fuel": float(s[3]) * 0.001 / region,
 		"avg_oxygen": float(s[4]) * 0.001 / region,
 		"mass_fraction_sum": float(s[6]) * 0.001 / column,
+		# Peak |div u| left over after the projection, in 1/s. The falsifiable
+		# check on the staggered discretisation: with the gradient the exact
+		# adjoint of the divergence this is the Jacobi residual and nothing else,
+		# so it must fall when pressure_iterations rises. A collocated grid leaves
+		# a checkerboard the projection cannot see, and the value stalls instead.
+		"max_divergence": float(s[8]) * 0.001,
 	}
 
 
@@ -233,13 +268,56 @@ func init_render() -> void:
 	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
 
 	_build_uniform_sets()
+	_update_groups()
+	_parity = 0
+	initialized = true
 
+
+## Rebuild every field at a new resolution. Rendering thread only.
+##
+## The domain is [member grid_dims] * [member cell_size], so a caller that wants
+## to keep the same box must change both. Shaders, pipelines and the stats/config
+## buffers are resolution independent and survive; the fields are cleared, since
+## resampling a reacting mixture onto a different grid has no meaning that would
+## survive the mass-fraction closure check.
+##
+## Callers must clear their own references to [method get_display_tex_rid] and
+## stop stepping before queueing this — the old textures are freed here.
+func set_resolution(dims: Vector3i, cell: float) -> void:
+	if _rd == null:
+		return
+	initialized = false
+	for stage in _sets:
+		for set_rid in _sets[stage]:
+			if set_rid.is_valid():
+				_rd.free_rid(set_rid)
+	_sets.clear()
+	for key in _tex:
+		if _tex[key].is_valid():
+			_rd.free_rid(_tex[key])
+	_tex.clear()
+
+	grid_dims = dims
+	cell_size = cell
+	_create_textures()
+	_build_uniform_sets()
+	_update_groups()
+	_parity = 0
+	initialized = true
+
+
+## Cell dims are multiples of the workgroup, face dims (dims + 1) never are, so
+## the face dispatch always overshoots and every face stage bounds-checks its
+## own writes.
+func _update_groups() -> void:
 	_groups = Vector3i(
 		ceili(float(grid_dims.x) / WG.x),
 		ceili(float(grid_dims.y) / WG.y),
 		ceili(float(grid_dims.z) / WG.z))
-	_parity = 0
-	initialized = true
+	_groups_face = Vector3i(
+		ceili(float(grid_dims.x + 1) / WG.x),
+		ceili(float(grid_dims.y + 1) / WG.y),
+		ceili(float(grid_dims.z + 1) / WG.z))
 
 
 func _create_textures() -> void:
@@ -249,31 +327,48 @@ func _create_textures() -> void:
 		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
 		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 
-	var keys_rgba := ["vel_a", "vel_b", "scal_a", "scal_b", "scal2_a", "scal2_b",
-		"vel_fwd", "scal_fwd", "scal2_fwd", "curl"]
+	var keys_rgba := ["scal_a", "scal_b", "scal2_a", "scal2_b",
+		"scal_fwd", "scal2_fwd", "curl"]
 	for key in keys_rgba:
 		_tex[key] = _rd.texture_create(
-			_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage),
+			_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage, grid_dims),
 			RDTextureView.new(), [])
+
+	# Staggered MAC velocity (Fire-X Sec. 5.1, Bridson 2015): one scalar per face
+	# centre instead of a vector per cell centre. A u-face sits between cells i-1
+	# and i on x, so there is one more of them than there are cells on that axis.
+	var face_offsets: Array[Vector3i] = [Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1)]
+	for axis in 3:
+		var face_dims: Vector3i = grid_dims + face_offsets[axis]
+		for suffix in ["_a", "_b", "_fwd"]:
+			_tex["uvw"[axis] + suffix] = _rd.texture_create(
+				_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, face_dims),
+				RDTextureView.new(), [])
 
 	for key in ["press_a", "press_b", "diverg"]:
 		_tex[key] = _rd.texture_create(
-			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage),
+			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, grid_dims),
+			RDTextureView.new(), [])
+
+	# P3: Liquid phase coupling (SPH ↔ fire grid). Eq. 18-25.
+	for key in ["liquid_scal", "liquid_vel"]:
+		_tex[key] = _rd.texture_create(
+			_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage, grid_dims),
 			RDTextureView.new(), [])
 
 	_tex["display"] = _rd.texture_create(
-		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage),
+		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, grid_dims),
 		RDTextureView.new(), [])
 
 	clear_fields()
 
 
-func _make_format(format: int, usage: int) -> RDTextureFormat:
+func _make_format(format: int, usage: int, dims: Vector3i) -> RDTextureFormat:
 	var fmt := RDTextureFormat.new()
 	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_3D
-	fmt.width = grid_dims.x
-	fmt.height = grid_dims.y
-	fmt.depth = grid_dims.z
+	fmt.width = dims.x
+	fmt.height = dims.y
+	fmt.depth = dims.z
 	fmt.format = format
 	fmt.usage_bits = usage
 	return fmt
@@ -286,29 +381,19 @@ func clear_fields() -> void:
 	var air := Color(ambient_temperature, 0.0, Y_O2_AIR, 0.0)
 	for key in ["scal_a", "scal_b"]:
 		_rd.texture_clear(_tex[key], air, 0, 1, 0, 1)
-	for key in ["vel_a", "vel_b", "scal2_a", "scal2_b", "vel_fwd", "scal_fwd",
-			"scal2_fwd", "curl", "press_a", "press_b", "diverg", "display"]:
+	for key in _zeroed_keys():
 		_rd.texture_clear(_tex[key], Color(0, 0, 0, 0), 0, 1, 0, 1)
 	_parity = 0
 
 
-## Fill the domain with a premixed fuel/air charge at [param equivalence_ratio]
-## (1.0 = stoichiometric), as in the mixture study of Fire-X Fig. 9.
-## Rendering thread only.
-func seed_premixed(equivalence_ratio: float, temperature: float) -> void:
-	var f := current_fuel()
-	# Mass of O2 required per unit mass of fuel, from the reaction coefficients.
-	var o2_per_fuel: float = absf(f["q"][1]) * M_O2 / (absf(f["q"][0]) * f["m_f"])
-	var air_per_fuel := o2_per_fuel / Y_O2_AIR / maxf(equivalence_ratio, 1e-3)
-	var y_fuel := 1.0 / (1.0 + air_per_fuel)
-	var y_o2 := y_fuel * air_per_fuel * Y_O2_AIR
-
-	for key in ["scal_a", "scal_b"]:
-		_rd.texture_clear(_tex[key], Color(temperature, y_fuel, y_o2, 0.0), 0, 1, 0, 1)
-	for key in ["vel_a", "vel_b", "scal2_a", "scal2_b", "vel_fwd", "scal_fwd",
-			"scal2_fwd", "curl", "press_a", "press_b", "diverg", "display"]:
-		_rd.texture_clear(_tex[key], Color(0, 0, 0, 0), 0, 1, 0, 1)
-	_parity = 0
+## Every field that starts at zero: still air, no pressure, nothing rendered.
+func _zeroed_keys() -> Array:
+	var keys := ["scal2_a", "scal2_b", "scal_fwd", "scal2_fwd", "curl",
+		"press_a", "press_b", "diverg", "display", "liquid_scal", "liquid_vel"]
+	for axis in "uvw":
+		for suffix in ["_a", "_b", "_fwd"]:
+			keys.append(axis + suffix)
+	return keys
 
 
 func _build_uniform_sets() -> void:
@@ -316,20 +401,23 @@ func _build_uniform_sets() -> void:
 	# resources, so the shared header can declare them all). Variant 0/1 swaps
 	# whichever pair the stage ping-pongs: the field textures for most stages,
 	# the pressure pair for the Jacobi sweep.
-	var fields := ["vel_a", "vel_b", "scal_a", "scal_b", "vel_fwd", "scal_fwd",
-		"curl", "press_a", "press_b", "diverg", "display", "",
-		"scal2_a", "scal2_b", "scal2_fwd"]
+	# Keyed by binding rather than by position: bindings 11 and 15 are the storage
+	# buffers, so the image bindings are not contiguous and a positional array
+	# needs a hole in it.
+	var fields := {
+		0: "u_a", 1: "u_b", 4: "u_fwd",
+		16: "v_a", 17: "v_b", 18: "v_fwd",
+		19: "w_a", 20: "w_b", 21: "w_fwd",
+		2: "scal_a", 3: "scal_b", 5: "scal_fwd",
+		12: "scal2_a", 13: "scal2_b", 14: "scal2_fwd",
+		6: "curl", 7: "press_a", 8: "press_b", 9: "diverg", 10: "display",
+	}
 	var fields_flipped := fields.duplicate()
-	fields_flipped[0] = "vel_b"
-	fields_flipped[1] = "vel_a"
-	fields_flipped[2] = "scal_b"
-	fields_flipped[3] = "scal_a"
-	fields_flipped[12] = "scal2_b"
-	fields_flipped[13] = "scal2_a"
+	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
+		_swap_binding(fields_flipped, pair[0], pair[1])
 
 	var pressure_flipped := fields.duplicate()
-	pressure_flipped[7] = "press_b"
-	pressure_flipped[8] = "press_a"
+	_swap_binding(pressure_flipped, 7, 8)
 
 	for stage in STAGES:
 		var variants := [fields, pressure_flipped] if stage == "pressure" \
@@ -337,14 +425,12 @@ func _build_uniform_sets() -> void:
 		var sets := []
 		for variant in 2:
 			var uniforms: Array[RDUniform] = []
-			var order: Array = variants[variant]
-			for bi in order.size():
-				if bi == 11:
-					continue # stats buffer, added below
+			var order: Dictionary = variants[variant]
+			for binding in order:
 				var u := RDUniform.new()
 				u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-				u.binding = bi
-				u.add_id(_tex[order[bi]])
+				u.binding = binding
+				u.add_id(_tex[order[binding]])
 				uniforms.append(u)
 			for pair in [[11, _stats_buf], [15, _config_buf]]:
 				var b := RDUniform.new()
@@ -354,6 +440,12 @@ func _build_uniform_sets() -> void:
 				uniforms.append(b)
 			sets.append(_rd.uniform_set_create(uniforms, _shaders[stage], 0))
 		_sets[stage] = sets
+
+
+static func _swap_binding(table: Dictionary, a: int, b: int) -> void:
+	var tmp: String = table[a]
+	table[a] = table[b]
+	table[b] = tmp
 
 
 # =========================================================================
@@ -406,8 +498,13 @@ func _substep(cl: int) -> void:
 	# 17. Buoyancy (+ vorticity confinement, Tab. 3).
 	_dispatch(cl, "forces", p, pc)
 	if vorticity_strength > 0.0:
+		# Three passes now: the confinement force is a cell-centred quantity but
+		# the velocity it corrects lives on faces. Computing it once per cell into
+		# a scratch buffer and scattering costs one dispatch; evaluating it again
+		# per face would repeat the curl-gradient stencil six times per cell.
 		_dispatch(cl, "curl", p, pc)
 		_dispatch(cl, "vorticity", p, pc)
+		_dispatch(cl, "vortapply", p, pc)
 
 	# 18. Combustion, in place.
 	_dispatch(cl, "combustion", p, pc)
@@ -421,18 +518,30 @@ func _substep(cl: int) -> void:
 	_dispatch(cl, "divergence", p, pc)
 	var iters := pressure_iterations + (pressure_iterations & 1)
 	for i in iters:
-		_dispatch(cl, "pressure", i & 1, pc)
+		_dispatch(cl, "pressure", i & 1, pc, i == 0)
 	_dispatch(cl, "project", p, pc)
 	_dispatch(cl, "display", p, pc)
 
 	_parity = p
 
 
-func _dispatch(cl: int, stage: String, variant: int, pc: PackedByteArray) -> void:
+## Timestamps bracket stages: each mark closes the previous stage's interval, so
+## a stage's cost is the gap to the next mark. The Jacobi sweep is marked only on
+## its first iteration, which makes the whole loop one interval — 64 separate
+## marks would blow past the driver's timestamp query pool.
+func _mark(stage: String) -> void:
+	if profiling:
+		_rd.capture_timestamp("fire/" + stage)
+
+
+func _dispatch(cl: int, stage: String, variant: int, pc: PackedByteArray, mark := true) -> void:
+	if mark:
+		_mark(stage)
+	var g := _groups_face if stage in FACE_STAGES else _groups
 	_rd.compute_list_bind_compute_pipeline(cl, _pipelines[stage])
 	_rd.compute_list_bind_uniform_set(cl, _sets[stage][variant], 0)
 	_rd.compute_list_set_push_constant(cl, pc, pc.size())
-	_rd.compute_list_dispatch(cl, _groups.x, _groups.y, _groups.z)
+	_rd.compute_list_dispatch(cl, g.x, g.y, g.z)
 	_rd.compute_list_add_barrier(cl)
 
 
@@ -543,16 +652,39 @@ func _on_stats_ready(bytes: PackedByteArray) -> void:
 
 func _read_timings() -> void:
 	if not profiling:
-		return
-	var start_time := 0
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if nm == "fire/start":
-			start_time = _rd.get_captured_timestamp_gpu_time(i)
-		elif nm == "fire/end":
+		# Stale numbers outlive the toggle otherwise: nothing else ever writes
+		# _timings, so the last profiled frame would stay on screen forever.
+		if not _timings.is_empty():
 			_timings_mutex.lock()
-			_timings["total"] = float(_rd.get_captured_timestamp_gpu_time(i) - start_time) / 1e6
+			_timings.clear()
 			_timings_mutex.unlock()
+		return
+	var count := _rd.get_captured_timestamps_count()
+	if count < 2:
+		return
+
+	var acc := {}
+	var start_time := 0
+	var prev_name := ""
+	var prev_time := 0
+	for i in count:
+		var nm := _rd.get_captured_timestamp_name(i)
+		var t := _rd.get_captured_timestamp_gpu_time(i)
+		# A mark closes the interval opened by the previous one. "start" and "end"
+		# only bracket the total, so they open no stage of their own.
+		if prev_name.begins_with("fire/") and prev_name != "fire/start":
+			var key: String = prev_name.substr(5)
+			acc[key] = float(acc.get(key, 0.0)) + float(t - prev_time) / 1e6
+		if nm == "fire/start":
+			start_time = t
+		elif nm == "fire/end":
+			acc["total"] = float(t - start_time) / 1e6
+		prev_name = nm
+		prev_time = t
+
+	_timings_mutex.lock()
+	_timings = acc
+	_timings_mutex.unlock()
 
 
 func free_render() -> void:

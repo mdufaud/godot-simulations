@@ -1,0 +1,134 @@
+// Scatter SPH particle properties onto the fire grid (Eq. 18-20, Algorithm 1 line 13).
+//
+// The kernel weight is w_ij = 1 - r_ij/h (Eq. 18). Taken raw, Sum_j w_ij is not 1 — it
+// depends on where the particle sits inside its cell — so a raw scatter does not
+// conserve mass. Each particle therefore sums its own weights first and scatters
+// the normalised w_ij / Sum_j w_ij, which makes Sum_j Sum_p m_p*w = Sum_p m_p exactly.
+//
+// Fixed-point uint accumulation: imageAtomicAdd needs an integer format, so the
+// accumulators live in an SSBO scaled by the constants below. Scales differ per
+// channel to keep the worst-case sum inside uint32 (see SCALE_* comments).
+//
+// P3: velocity accumulation skipped (droplets at rest). P4 will add Eq. 24-25.
+//
+// Dispatch: one thread per active particle.
+
+#version 460
+
+layout(local_size_x = 256) in;
+
+// These are the SPH solver's own particle buffers, bound at whichever parity is
+// canonical this frame. The droplet attributes ride in the spare w lanes so the
+// cell sort carries them along with their particle (grid_scatter copies whole
+// vec4s); a side buffer indexed by slot would be scrambled by the first sort.
+layout(std430, set = 0, binding = 0) readonly buffer PartBuf {
+	vec4 positions[];  // xyz = position [m], w = temperature [K]
+} part;
+
+layout(std430, set = 0, binding = 1) readonly buffer VelBuf {
+	vec4 velocities[];  // xyz = velocity [m/s], w = mass [kg]
+} vel;
+
+layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
+	uvec4 accum[];  // x=m_w, y=w, z=T_m_w, w=unused
+} scatter;
+
+// Scalars rather than a vec3 for the origin: std430 aligns a vec3 to 16 bytes,
+// which silently shifts every field after it.
+layout(push_constant, std430) uniform Params {
+	int active_count;
+	int grid_dim_x;
+	int grid_dim_y;
+	int grid_dim_z;
+	float cell_size;
+	float h_liquid;
+	// World position of the grid's (0,0,0) corner. The fire domain is centred on
+	// the origin in x/z (fire_common.comp cell_to_world), so particle positions
+	// arrive in world space and have to be shifted before they are binned.
+	float origin_x;
+	float origin_y;
+	float origin_z;
+} params;
+
+// Scales are set as large as the worst-case sum allows, because the round trip runs
+// every frame and any quantisation error accumulates over the run.
+// m*w_hat <= 0.1/particle -> 1e6 fixed; 1024 particles -> 1.0e9 < uint32 max 4.29e9.
+const float SCALE_M = 10000000.0;
+// w_hat <= 1/particle/cell -> 2e6 fixed; 1024 particles -> 2.0e9. Fits.
+const float SCALE_W = 2000000.0;
+// T*m*w_hat <= 300*0.1 = 30 -> 3e6 fixed; 1024 particles -> 3.1e9. Fits.
+const float SCALE_T = 100000.0;
+
+// Truncation biases every add the same way, which shows up as a steady mass drain
+// over a long run. Rounding makes the error zero-mean instead.
+uint fixed_point(float value, float scale) {
+	return uint(value * scale + 0.5);
+}
+
+void main() {
+	uint pidx = gl_GlobalInvocationID.x;
+	if (pidx >= uint(params.active_count)) {
+		return;
+	}
+
+	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
+	vec3 origin = vec3(params.origin_x, params.origin_y, params.origin_z);
+	// Grid-local from here on: the kernel is evaluated against cell centres, which
+	// are cheaper to express in local space than to shift back out to world.
+	vec3 p_local = part.positions[pidx].xyz - origin;
+	float T_l = part.positions[pidx].w;
+	float m_p = vel.velocities[pidx].w;
+
+	// Bounds check: ignore particles outside the domain.
+	if (any(lessThan(p_local, vec3(0.0))) ||
+	    any(greaterThanEqual(p_local, vec3(dims) * params.cell_size))) {
+		return;
+	}
+
+	ivec3 c_base = clamp(ivec3(p_local / params.cell_size), ivec3(0), dims - 1);
+	int search_rad = int(ceil(params.h_liquid / params.cell_size));
+
+	// Pass 1: this particle's own weight sum, for the normalisation.
+	float w_sum = 0.0;
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+					continue;
+				}
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				w_sum += max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid);
+			}
+		}
+	}
+	// A particle whose support falls entirely outside the grid would divide by zero.
+	if (w_sum < 1e-9) {
+		return;
+	}
+
+	// Pass 2: scatter the normalised weights.
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+					continue;
+				}
+
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				float w = max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid) / w_sum;
+				if (w < 1e-9) {
+					continue;
+				}
+
+				uint cidx = uint(c.x + c.y * dims.x + c.z * dims.x * dims.y);
+
+				atomicAdd(scatter.accum[cidx].x, fixed_point(m_p * w, SCALE_M));
+
+				atomicAdd(scatter.accum[cidx].y, fixed_point(w, SCALE_W));
+				atomicAdd(scatter.accum[cidx].z, fixed_point(T_l * m_p * w, SCALE_T));
+			}
+		}
+	}
+}

@@ -332,7 +332,14 @@ func _setup_ui() -> void:
 	menu.add_button("256²", func(): _set_grid_n(256))
 	menu.add_button("512²", func(): _set_grid_n(512))
 	menu.add_button("1024²", func(): _set_grid_n(1024))
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
 	_update_status()
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 func _setup_profiler() -> void:

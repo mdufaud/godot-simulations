@@ -134,7 +134,7 @@ void fragment() {
 			ddy_v = pc - eye_pos_from_depth(SCREEN_UV - vec2(0.0, ts.y), dd, INV_PROJECTION_MATRIX);
 		}
 		vec3 n = normalize(cross(ddy_v, ddx_v));
-		if (n.z < 0.0) {
+		if (dot(n, pc) > 0.0) {
 			n = -n;
 		}
 

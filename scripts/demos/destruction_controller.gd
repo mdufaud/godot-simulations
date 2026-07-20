@@ -408,6 +408,16 @@ func _setup_ui() -> void:
 
 	menu.add_section("Scene")
 	menu.add_button("🧹 Clear rubble", _clear_projectiles)
+	menu.add_separator()
+
+	menu.add_section("Performance")
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 # Rebuilding the walls on every slider tick would refracture 500 hulls per frame,

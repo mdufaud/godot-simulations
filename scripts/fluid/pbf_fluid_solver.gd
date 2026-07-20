@@ -2,6 +2,8 @@ class_name PbfFluidSolver
 extends RefCounted
 
 const SHADER_DIR := "res://shaders/pbf/"
+const SHARED_GRID_DIR := "res://shaders/fluid/"
+const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back"]
 const STAGES: Array[String] = [
 	"grid_clear", "predict", "grid_scan", "grid_scan_blocks",
 	"grid_add_back", "grid_scatter", "lambda", "delta", "apply",
@@ -55,7 +57,9 @@ func init_render() -> void:
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "pbf_common.comp")
 	for stage in STAGES:
-		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "pbf_" + stage + ".comp")
+		var stage_dir := SHARED_GRID_DIR if GRID_STAGES.has(stage) else SHADER_DIR
+		var stage_name := stage if GRID_STAGES.has(stage) else "pbf_" + stage
+		var stage_src := FileAccess.get_file_as_string(stage_dir + stage_name + ".comp")
 		var spirv := ShaderCache.compile(_rd, "pbf_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("PBF stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])

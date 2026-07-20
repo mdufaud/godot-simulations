@@ -187,7 +187,14 @@ func _setup_ui() -> void:
 	menu.add_button("65k", func(): _set_particle_count(65536))
 	menu.add_button("262k", func(): _set_particle_count(262144))
 	menu.add_button("1M", func(): _set_particle_count(1048576))
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
 	_update_status()
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 func _setup_profiler() -> void:

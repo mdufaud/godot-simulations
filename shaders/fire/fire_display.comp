@@ -15,9 +15,33 @@ void main() {
 	float t_norm = (s.x - t_amb) / max(cfg.misc.y - t_amb, 1.0);
 	float reaction = clamp(s2.z / max(cfg.misc.z, 1e-6), 0.0, 1.0);
 
-	imageStore(display_tex, c, vec4(clamp(t_norm, 0.0, 1.0), s2.y, reaction, s.y));
+	// Render-side fade over the outermost cells of the open faces. The sponge in
+	// fire_combustion already pulls the fields towards ambient there, but the
+	// raymarch still stops dead at the AABB plane, so whatever is left of the
+	// plume reads as a straight cut across the volume. Fading what is displayed
+	// rather than what is simulated keeps the physics and the stats untouched:
+	// everything below this line reads the fields, not display_tex.
+	//
+	// Sides and top only. The floor is a solid wall the smoke never crosses, and
+	// fading it would eat the base of the flame.
+	ivec3 gmax = grid_max();
+	const float FADE = 4.0;
+	float edge = min(min(float(c.x), float(gmax.x - c.x)),
+		min(float(c.z), float(gmax.z - c.z)));
+	float fade = clamp(min(edge, float(gmax.y - c.y)) / FADE, 0.0, 1.0);
+
+	imageStore(display_tex, c,
+		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s.y));
 
 	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
+
+	// Peak |div u| surviving the projection, in milli-1/s so it fits an atomic
+	// uint. This stage runs after fire_project, so it measures what the solve
+	// actually left behind. With the staggered discretisation this is the Jacobi
+	// residual and nothing else, and it must therefore fall as pressure_iterations
+	// rises — that is the check that the gradient really is the adjoint of the
+	// divergence, rather than merely compiling and looking like fire.
+	atomicMax(stats.data[8], uint(clamp(abs(divergence_at(c)) * 1000.0, 0.0, 4.2e9)));
 	atomicAdd(stats.data[1], uint(reaction * 1000.0));
 	atomicMax(stats.data[2], uint(reaction * 1000.0));
 

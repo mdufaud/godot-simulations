@@ -10,6 +10,20 @@
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
+	int mode_v = params.dims.w;
+
+	// The steam updraft of mode 3 is a velocity source, so it is applied on the
+	// v-faces directly, with the falloff evaluated at the face rather than at the
+	// cell centre. Writing it from the cell would have two neighbouring cells
+	// read-modify-write the face they share.
+	if (mode_v == 3 && in_v(c)) {
+		float d = distance(v_face_to_world(c), params.event.xyz);
+		if (d <= params.event.w && c.y > 0) {
+			float f = (1.0 - d / params.event.w) * params.event2.x;
+			imageStore(v_src, c, vec4(imageLoad(v_src, c).r + f * 3.0, 0.0, 0.0, 0.0));
+		}
+	}
+
 	if (out_of_grid(c)) {
 		return;
 	}
@@ -58,9 +72,6 @@ void main() {
 		s.x = max(s.x - f * 500.0, t_amb);
 		s.y = max(s.y - f * 0.15, 0.0);
 		s.z = max(s.z - f * 0.3, 0.0);
-		vec4 v = imageLoad(vel_src, c);
-		v.y += f * 3.0;
-		imageStore(vel_src, c, v);
 	} else if (mode == 4) {
 		float f = falloff * amount;
 		s.z = max(s.z - f * 0.6, 0.0);

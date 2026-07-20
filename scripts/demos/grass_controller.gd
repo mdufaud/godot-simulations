@@ -6,6 +6,7 @@ const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
 const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
 const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
+const GrassMultimeshBuilder := preload("res://scripts/grass_multimesh_builder.gd")
 
 const TILE_SIZE := 10.0
 const MAP_RADIUS := 80.0  # Smaller for demo
@@ -98,11 +99,11 @@ func _setup_grass_instances() -> void:
 ## Generates multimeshes with LOD based on distance to origin
 func _generate_grass_multimeshes() -> void:
 	var multimesh_lods: Array[MultiMesh] = [
-		_create_grass_multimesh(1.0 * density_modifier, TILE_SIZE, GRASS_MESH_HIGH),
-		_create_grass_multimesh(0.5 * density_modifier, TILE_SIZE, GRASS_MESH_HIGH),
-		_create_grass_multimesh(0.25 * density_modifier, TILE_SIZE, GRASS_MESH_LOW),
-		_create_grass_multimesh(0.1 * density_modifier, TILE_SIZE, GRASS_MESH_LOW),
-		_create_grass_multimesh(0.02 * (1.0 if density_modifier != 0.0 else 0.0), TILE_SIZE, GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(1.0 * density_modifier, TILE_SIZE, GRASS_MESH_HIGH),
+		GrassMultimeshBuilder.build(0.5 * density_modifier, TILE_SIZE, GRASS_MESH_HIGH),
+		GrassMultimeshBuilder.build(0.25 * density_modifier, TILE_SIZE, GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(0.1 * density_modifier, TILE_SIZE, GRASS_MESH_LOW),
+		GrassMultimeshBuilder.build(0.02 * (1.0 if density_modifier != 0.0 else 0.0), TILE_SIZE, GRASS_MESH_LOW),
 	]
 	
 	for data in grass_multimeshes:
@@ -119,24 +120,6 @@ func _generate_grass_multimeshes() -> void:
 			data[0].multimesh = multimesh_lods[3]
 		else:
 			data[0].multimesh = multimesh_lods[4]
-
-
-func _create_grass_multimesh(density: float, tile_size: float, mesh: Mesh) -> MultiMesh:
-	var row_size := int(ceil(tile_size * lerpf(0.0, 10.0, density)))
-	var multimesh := MultiMesh.new()
-	multimesh.mesh = mesh
-	multimesh.transform_format = MultiMesh.TRANSFORM_3D
-	multimesh.instance_count = row_size * row_size
-	
-	var jitter_offset := tile_size / float(row_size) * 0.5 * 0.9 if row_size > 0 else 0.0
-	for i in row_size:
-		for j in row_size:
-			var grass_position := Vector3(i / float(row_size) - 0.5, 0, j / float(row_size) - 0.5) * tile_size
-			var grass_offset := Vector3(randf_range(-jitter_offset, jitter_offset), 0, randf_range(-jitter_offset, jitter_offset))
-			multimesh.set_instance_transform(i + j * row_size, Transform3D(Basis(), grass_position + grass_offset))
-	
-	return multimesh
-
 
 func _setup_ui() -> void:
 	menu.add_label("Drag: rotate | Scroll: zoom")
@@ -163,6 +146,13 @@ func _setup_ui() -> void:
 	menu.add_separator()
 	menu.add_section("⚙️ Rendering")
 	menu.add_toggle("Cast Shadows", true, _on_shadows_changed)
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 func _on_shadows_changed(enabled: bool) -> void:

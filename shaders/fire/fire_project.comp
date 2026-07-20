@@ -2,40 +2,50 @@
 // divergence free. This is what turns a vertical buoyancy force into a plume
 // that pinches at the waist and drags fresh air in from the sides.
 //
-// The gradient is taken with clamped neighbours so boundary cells get a
-// one-sided difference instead of being skipped. Skipping them leaves the
-// entire boundary layer unprojected, which blocks inflow: the plume then rises
-// without entraining, and the fire suffocates in its own domain.
+// THE POINT OF THE STAGGERED GRID. Each face subtracts the difference of the two
+// pressures it separates, over one cell width:
+//
+//     u[i] -= (p[i] - p[i-1]) / h
+//
+// which is the exact transpose of the divergence fire_divergence takes. Because
+// the two operators are adjoint, the projection removes precisely the divergence
+// the solve measured, and what is left is the Jacobi residual and nothing else.
+// The previous collocated form differenced pressure over 2h while differencing
+// velocity over 2h as well, leaving the odd-even mode invisible to both: the
+// projection could not remove a divergence it could not see, so buoyancy piled
+// up into the field instead of being converted into lateral entrainment.
+//
+// Boundaries follow the same convention as the Poisson stencil: sides and top
+// carry a Dirichlet ghost of p = 0 and are projected against it (outflow), the
+// floor is solid and is pinned to zero instead.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
-	if (out_of_grid(c)) {
-		return;
-	}
-
 	ivec3 gmax = grid_max();
-	vec4 v = imageLoad(vel_src, c);
+	float inv_h = params.cell.z;
 
-	// Unrolled per axis: Godot's SPIR-V path rejects dynamic vector component
-	// indexing ("OpVectorExtractDynamic is not supported yet").
-	ivec3 hx = min(c + ivec3(1, 0, 0), gmax);
-	ivec3 lx = max(c - ivec3(1, 0, 0), ivec3(0));
-	ivec3 hy = min(c + ivec3(0, 1, 0), gmax);
-	ivec3 ly = max(c - ivec3(0, 1, 0), ivec3(0));
-	ivec3 hz = min(c + ivec3(0, 0, 1), gmax);
-	ivec3 lz = max(c - ivec3(0, 0, 1), ivec3(0));
-
-	vec3 span = vec3(hx.x - lx.x, hy.y - ly.y, hz.z - lz.z) * params.cell.x;
-	vec3 grad = vec3(
-		imageLoad(press_src, hx).r - imageLoad(press_src, lx).r,
-		imageLoad(press_src, hy).r - imageLoad(press_src, ly).r,
-		imageLoad(press_src, hz).r - imageLoad(press_src, lz).r);
-	v.xyz -= grad / max(span, vec3(1e-6));
-
-	// Solid ground: no flow through the floor.
-	if (c.y == 0) {
-		v.y = 0.0;
+	if (in_u(c)) {
+		// Ghost pressure outside the domain is zero on both open x faces.
+		float p_hi = (c.x <= gmax.x) ? imageLoad(press_src, c).r : 0.0;
+		float p_lo = (c.x > 0) ? imageLoad(press_src, c - ivec3(1, 0, 0)).r : 0.0;
+		imageStore(u_src, c, vec4(imageLoad(u_src, c).r - (p_hi - p_lo) * inv_h, 0.0, 0.0, 0.0));
 	}
 
-	imageStore(vel_src, c, v);
+	if (in_v(c)) {
+		float v = 0.0;
+		if (c.y > 0) {
+			float p_hi = (c.y <= gmax.y) ? imageLoad(press_src, c).r : 0.0;
+			float p_lo = imageLoad(press_src, c - ivec3(0, 1, 0)).r;
+			v = imageLoad(v_src, c).r - (p_hi - p_lo) * inv_h;
+		}
+		// c.y == 0 is the solid floor: no flow through it, and no projection
+		// either — the Neumann condition is already in the Poisson stencil.
+		imageStore(v_src, c, vec4(v, 0.0, 0.0, 0.0));
+	}
+
+	if (in_w(c)) {
+		float p_hi = (c.z <= gmax.z) ? imageLoad(press_src, c).r : 0.0;
+		float p_lo = (c.z > 0) ? imageLoad(press_src, c - ivec3(0, 0, 1)).r : 0.0;
+		imageStore(w_src, c, vec4(imageLoad(w_src, c).r - (p_hi - p_lo) * inv_h, 0.0, 0.0, 0.0));
+	}
 }

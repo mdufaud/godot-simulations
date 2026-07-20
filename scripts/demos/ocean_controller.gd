@@ -34,6 +34,7 @@ const PRESETS := {
 const SPECTRUM_KEYS := [
 	"wind_speed", "wind_direction", "fetch_km", "swell", "spread", "detail", "height_gain",
 ]
+const CloudDeckBuilder := preload("res://scripts/cloud_deck_builder.gd")
 
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var orbit_cam: OrbitCamera = $CameraPivot
@@ -165,6 +166,13 @@ func _setup_ui() -> void:
 	menu.add_button("128", func(): _set_map_size(128))
 	menu.add_button("256", func(): _set_map_size(256))
 	menu.add_button("512", func(): _set_map_size(512))
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 ## Spectrum-shaping sliders flip the dirty flag: regeneration is one cheap
@@ -301,32 +309,7 @@ func _process(delta: float) -> void:
 ## the tornado demo) + camera-facing lightning bolt, fullscreen flash and
 ## point light, all gated by the 0-1 mood that presets drive.
 func _setup_storm_sky() -> void:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	noise.frequency = 0.02
-	var ntex := NoiseTexture3D.new()
-	ntex.noise = noise
-	ntex.width = 128
-	ntex.height = 128
-	ntex.depth = 32
-	ntex.seamless = true
-
-	_cloud_mat = ShaderMaterial.new()
-	_cloud_mat.shader = load("res://shaders/ocean/ocean_clouds.gdshader")
-	_cloud_mat.set_shader_parameter("noise_tex", ntex)
-	_cloud_mat.set_shader_parameter("cover", 0.0)
-
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(10000, 10000)
-	plane.subdivide_width = 48
-	plane.subdivide_depth = 48
-	var deck := MeshInstance3D.new()
-	deck.mesh = plane
-	deck.material_override = _cloud_mat
-	deck.position = Vector3(0, 420, 0)
-	deck.extra_cull_margin = 2000.0
-	deck.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	add_child(deck)
+	_cloud_mat = CloudDeckBuilder.build(self, 420.0, 0.0, Color(0, 0, 0, 0), false)[0]
 
 	_lightning_light = OmniLight3D.new()
 	_lightning_light.light_energy = 0.0

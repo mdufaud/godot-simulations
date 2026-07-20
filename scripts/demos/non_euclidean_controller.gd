@@ -432,6 +432,9 @@ func _setup_ui() -> void:
 			render_manager.set_debug_enabled(enabled)
 			_debug_label.visible = enabled
 	)
+	menu.add_separator()
+	menu.add_section("Performance")
+	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
 
 	var panel := PanelContainer.new()
 	panel.position = Vector2(18.0, 18.0)
@@ -465,6 +468,12 @@ func _setup_ui() -> void:
 	_debug_label.modulate = Color(0.55, 0.9, 1.0)
 	_debug_label.visible = false
 	ui_layer.add_child(_debug_label)
+
+
+func _set_render_scale(v: float) -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
+	vp.scaling_3d_scale = v
 
 
 func _setup_touch_controls() -> void:

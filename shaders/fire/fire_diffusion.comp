@@ -15,13 +15,40 @@
 // Reads *_src and writes *_dst because the Laplacian needs a neighbourhood: the
 // solver flips parity again after this stage.
 
+// Staggered: the viscous Laplacian runs independently on each face texture,
+// with its own extent, and boundary faces are copied through rather than left
+// undefined — the solver flips parity after this stage, so anything not written
+// here becomes garbage next substep.
+#define DIFFUSE_FACE(p_src, p_dst, p_dims, p_nu) { \
+	ivec3 dm_ = p_dims - ivec3(1); \
+	float cur_ = imageLoad(p_src, c).r; \
+	if (p_nu > 0.0 && all(greaterThan(c, ivec3(0))) && all(lessThan(c, dm_))) { \
+		float sum_ = imageLoad(p_src, c + ivec3(1, 0, 0)).r + imageLoad(p_src, c - ivec3(1, 0, 0)).r \
+			+ imageLoad(p_src, c + ivec3(0, 1, 0)).r + imageLoad(p_src, c - ivec3(0, 1, 0)).r \
+			+ imageLoad(p_src, c + ivec3(0, 0, 1)).r + imageLoad(p_src, c - ivec3(0, 0, 1)).r; \
+		cur_ += p_nu * (sum_ - 6.0 * cur_); \
+	} \
+	imageStore(p_dst, c, vec4(cur_, 0.0, 0.0, 0.0)); \
+}
+
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
+
+	float nu = min(cfg.transport.w * params.cell.y * params.cell.z * params.cell.z, 0.16);
+	if (in_u(c)) {
+		DIFFUSE_FACE(u_src, u_dst, u_dims(), nu);
+	}
+	if (in_v(c)) {
+		DIFFUSE_FACE(v_src, v_dst, v_dims(), nu);
+	}
+	if (in_w(c)) {
+		DIFFUSE_FACE(w_src, w_dst, w_dims(), nu);
+	}
+
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec4 v = imageLoad(vel_src, c);
 	vec4 s = imageLoad(scal_src, c);
 	vec4 s2 = imageLoad(scal2_src, c);
 	float dt = params.cell.y;
@@ -50,14 +77,6 @@ void main() {
 		s.x += alpha_t * lap_s.x;
 		s.yzw += alpha_y * lap_s.yzw;
 		s2.xy += alpha_y * lap_s2.xy;
-
-		float nu = min(cfg.transport.w * dt * inv_h2, 0.16);
-		if (nu > 0.0) {
-			vec4 sum_v = imageLoad(vel_src, c + ivec3(1, 0, 0)) + imageLoad(vel_src, c - ivec3(1, 0, 0)) +
-				imageLoad(vel_src, c + ivec3(0, 1, 0)) + imageLoad(vel_src, c - ivec3(0, 1, 0)) +
-				imageLoad(vel_src, c + ivec3(0, 0, 1)) + imageLoad(vel_src, c - ivec3(0, 0, 1));
-			v.xyz += nu * (sum_v.xyz - 6.0 * v.xyz);
-		}
 	}
 
 	// Radiative exchange (Algorithm 1 line 20).
@@ -82,7 +101,6 @@ void main() {
 		s2.x *= inv;
 	}
 
-	imageStore(vel_dst, c, v);
 	imageStore(scal_dst, c, vec4(s.x, s.yzw));
 	imageStore(scal2_dst, c, vec4(s2.x, clamp(s2.y, 0.0, 1.0), max(s2.z, 0.0), s2.w));
 }

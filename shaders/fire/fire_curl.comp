@@ -1,6 +1,14 @@
 // Vorticity field omega = curl(u), central differences. Stored as xyz with the
 // magnitude in w so the confinement pass can take its gradient with one fetch
 // per neighbour instead of three.
+//
+// DELIBERATE SIMPLIFICATION: on a MAC grid the curl components live on cell
+// edges, not at centres. They are kept at cell centres here, reconstructed from
+// the face-averaged velocity, so that the solver has three geometries (centres,
+// faces, and nothing else) rather than four. Vorticity confinement is an
+// appearance heuristic (Fire-X Tab. 3), not a conservation law, so the half-cell
+// offset this introduces costs nothing that can be measured against the paper.
+// It is a choice, not an equivalence.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
@@ -13,12 +21,12 @@ void main() {
 	}
 
 	float inv_2h = 0.5 * params.cell.z;
-	vec3 px = imageLoad(vel_src, c + ivec3(1, 0, 0)).xyz;
-	vec3 nx = imageLoad(vel_src, c - ivec3(1, 0, 0)).xyz;
-	vec3 py = imageLoad(vel_src, c + ivec3(0, 1, 0)).xyz;
-	vec3 ny = imageLoad(vel_src, c - ivec3(0, 1, 0)).xyz;
-	vec3 pz = imageLoad(vel_src, c + ivec3(0, 0, 1)).xyz;
-	vec3 nz = imageLoad(vel_src, c - ivec3(0, 0, 1)).xyz;
+	vec3 px = vel_at_cell(c + ivec3(1, 0, 0));
+	vec3 nx = vel_at_cell(c - ivec3(1, 0, 0));
+	vec3 py = vel_at_cell(c + ivec3(0, 1, 0));
+	vec3 ny = vel_at_cell(c - ivec3(0, 1, 0));
+	vec3 pz = vel_at_cell(c + ivec3(0, 0, 1));
+	vec3 nz = vel_at_cell(c - ivec3(0, 0, 1));
 
 	vec3 omega = vec3(
 			(py.z - ny.z) - (pz.y - nz.y),

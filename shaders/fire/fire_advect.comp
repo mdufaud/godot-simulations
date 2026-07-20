@@ -2,21 +2,44 @@
 // semi-Lagrangian backtrace (Stam 1999). Its result lands in the *_fwd
 // textures, which the correction pass advects forward again to estimate — and
 // cancel — the first-order error.
+//
+// Staggered, so there are four backtraces rather than one: each velocity
+// component is transported by the velocity interpolated at its own face, and
+// the scalars by the velocity reconstructed at the cell centre. Doing all four
+// from a single cell-centred sample is what smears a MAC field back into a
+// collocated one.
+//
+// Dispatched over the face grid, which overshoots the cell grid by one on every
+// axis, so every write is guarded by the extent of the texture it targets.
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
-	if (out_of_grid(c)) {
-		return;
+	float scale = params.cell.y * params.cell.z; // dt / h, world units -> index
+
+	float val, lo, hi;
+
+	if (in_u(c)) {
+		SAMPLE_TRI_R(u_src, vec3(c) - vel_at_u_face(c) * scale,
+			u_dims() - ivec3(1), val, lo, hi);
+		imageStore(u_fwd, c, vec4(val, 0.0, 0.0, 0.0));
+	}
+	if (in_v(c)) {
+		SAMPLE_TRI_R(v_src, vec3(c) - vel_at_v_face(c) * scale,
+			v_dims() - ivec3(1), val, lo, hi);
+		imageStore(v_fwd, c, vec4(val, 0.0, 0.0, 0.0));
+	}
+	if (in_w(c)) {
+		SAMPLE_TRI_R(w_src, vec3(c) - vel_at_w_face(c) * scale,
+			w_dims() - ivec3(1), val, lo, hi);
+		imageStore(w_fwd, c, vec4(val, 0.0, 0.0, 0.0));
 	}
 
-	vec3 v = imageLoad(vel_src, c).xyz;
-	vec3 back = vec3(c) - v * params.cell.y * params.cell.z;
-
-	vec4 val, lo, hi;
-	SAMPLE_TRI(vel_src, back, val, lo, hi);
-	imageStore(vel_fwd, c, val);
-	SAMPLE_TRI(scal_src, back, val, lo, hi);
-	imageStore(scal_fwd, c, val);
-	SAMPLE_TRI(scal2_src, back, val, lo, hi);
-	imageStore(scal2_fwd, c, val);
+	if (!out_of_grid(c)) {
+		vec3 back = vec3(c) - vel_at_cell(c) * scale;
+		vec4 sval, slo, shi;
+		SAMPLE_TRI(scal_src, back, sval, slo, shi);
+		imageStore(scal_fwd, c, sval);
+		SAMPLE_TRI(scal2_src, back, sval, slo, shi);
+		imageStore(scal2_fwd, c, sval);
+	}
 }

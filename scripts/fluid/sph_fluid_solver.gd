@@ -7,6 +7,8 @@ extends RefCounted
 ## velocity after the sort), so velocities are ping-ponged too.
 
 const SHADER_DIR := "res://shaders/sph/"
+const SHARED_GRID_DIR := "res://shaders/fluid/"
+const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back"]
 const STAGES: Array[String] = [
 	"grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back", "grid_scatter",
 	"sph_external", "sph_density", "sph_pressure", "sph_viscosity", "sph_integrate",
@@ -123,6 +125,26 @@ func foam_cap() -> int:
 	return mini(foam_tex_width * foam_tex_width, int(float(particle_count) * foam_budget_ratio))
 
 
+## The particle buffers for a given parity, for callers that cache one uniform set
+## per parity rather than rebuilding one every frame.
+##
+## The sort ping-pongs: each sub-step reads the src pair and writes the cell-sorted
+## dst pair, then flips, so the freshly written data is the src of the new parity
+## (see the binding orders in _build_uniform_sets). A reader that binds the wrong
+## one gets last sub-step's positions in a different slot order. Pair these with
+## [method current_parity], sampled after [method step_render].
+func parity_positions_rid(parity: int) -> RID:
+	return _buffers.get("positions_a" if parity == 0 else "positions_b", RID())
+
+
+func parity_velocities_rid(parity: int) -> RID:
+	return _buffers.get("velocities_a" if parity == 0 else "velocities_b", RID())
+
+
+func current_parity() -> int:
+	return _parity
+
+
 func set_seed_positions(seed: PackedFloat32Array) -> void:
 	_seed_data = seed
 
@@ -156,7 +178,8 @@ func init_render() -> void:
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
-		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + stage + ".comp")
+		var stage_dir := SHARED_GRID_DIR if GRID_STAGES.has(stage) else SHADER_DIR
+		var stage_src := FileAccess.get_file_as_string(stage_dir + stage + ".comp")
 		var spirv := ShaderCache.compile(_rd, "sph_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("SPH stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])

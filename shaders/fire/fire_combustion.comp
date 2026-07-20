@@ -78,12 +78,20 @@ void main() {
 	s2.x = clamp(s2.x, 0.0, 1.0);
 
 	// Open boundaries relax towards ambient air, which supplies the oxygen the
-	// plume entrains. The floor is solid and supplies nothing.
+	// plume entrains. A sponge band rather than the single outermost shell: with
+	// one cell, a plume leaning on a side face was still burning its own products
+	// two cells in, and the reset was sharp enough to be visible. The rate ramps
+	// linearly to zero at the inner edge of the band.
+	//
+	// The floor is solid and supplies nothing, so it has no band.
 	ivec3 gmax = grid_max();
-	bool open_side = (c.x == 0 || c.x == gmax.x || c.z == 0 || c.z == gmax.z);
-	bool open_top = (c.y == gmax.y);
-	if (open_side || open_top) {
-		float rate = clamp(cfg.misc.x * dt * (open_top ? 0.5 : 1.0), 0.0, 1.0);
+	const int BAND = 4;
+	int d_side = min(min(c.x, gmax.x - c.x), min(c.z, gmax.z - c.z));
+	float depth = max(
+		1.0 - float(min(d_side, BAND)) / float(BAND),
+		0.5 * (1.0 - float(min(gmax.y - c.y, BAND)) / float(BAND)));
+	if (depth > 0.0) {
+		float rate = clamp(cfg.misc.x * dt * depth, 0.0, 1.0);
 		s.x = mix(s.x, cfg.thermo.x, rate);
 		s.y = mix(s.y, 0.0, rate);
 		s.z = mix(s.z, 0.233, rate); // 21 % O2 by volume -> 23.3 % by mass

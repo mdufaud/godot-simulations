@@ -1,0 +1,119 @@
+// Return grid liquid properties to the particles (Eq. 21, 24, Algorithm 1 lines 23-24).
+//
+// Mass conservation over the round trip is the whole point of the P3 criterion, so
+// the two directions use different normalisations and neither is arbitrary:
+//
+//   scatter  w_hat_pj = w_pj / Sum_j w_pj      -> Sum_j w_hat_pj = 1
+//            M_j = Sum_p m_p * w_hat_pj        -> Sum_j M_j = Sum_p m_p
+//   return   m_p' = Sum_j M_j * w_hat_pj / omega_j,  omega_j = Sum_p w_hat_pj (Eq. 20)
+//            Sum_p m_p' = Sum_j M_j * (omega_j / omega_j) = Sum_j M_j = Sum_p m_p
+//
+// Dividing by omega_j is what makes each cell hand out exactly the mass it holds.
+// Without it a cell shared by n particles would emit n times its own mass.
+//
+// Temperature (Eq. 24) needs no omega: Sum_j w_hat_pj is already 1, so the
+// weighted sum of T_lj is a plain average over the support.
+//
+// Dispatch: one thread per active particle.
+
+#version 460
+
+layout(local_size_x = 256) in;
+
+// The SPH solver's own buffers; see water_scatter.comp for why the droplet
+// attributes live in the w lanes. Position xyz is read only — the SPH integrator
+// owns it — while the w lanes are written back.
+layout(std430, set = 0, binding = 0) buffer PartBuf {
+	vec4 positions[];  // xyz = position [m], w = temperature [K]
+} part;
+
+layout(std430, set = 0, binding = 1) buffer VelBuf {
+	vec4 velocities[];  // xyz = velocity [m/s], w = mass [kg]
+} vel;
+
+layout(rgba32f, set = 0, binding = 2) uniform restrict readonly image3D liquid_scal;
+
+// Must match water_scatter.comp exactly: the two passes have to agree on which
+// cells a particle touches and with what weight, or the round trip leaks mass.
+layout(push_constant, std430) uniform Params {
+	int active_count;
+	int grid_dim_x;
+	int grid_dim_y;
+	int grid_dim_z;
+	float cell_size;
+	float h_liquid;
+	float origin_x;
+	float origin_y;
+	float origin_z;
+} params;
+
+void main() {
+	uint pidx = gl_GlobalInvocationID.x;
+	if (pidx >= uint(params.active_count)) {
+		return;
+	}
+
+	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
+	vec3 p_local = part.positions[pidx].xyz
+		- vec3(params.origin_x, params.origin_y, params.origin_z);
+
+	if (any(lessThan(p_local, vec3(0.0))) ||
+	    any(greaterThanEqual(p_local, vec3(dims) * params.cell_size))) {
+		return;
+	}
+
+	ivec3 c_base = clamp(ivec3(p_local / params.cell_size), ivec3(0), dims - 1);
+	int search_rad = int(ceil(params.h_liquid / params.cell_size));
+	float cell_volume = params.cell_size * params.cell_size * params.cell_size;
+
+	// Pass 1: the same per-particle weight sum the scatter used.
+	float w_sum = 0.0;
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+					continue;
+				}
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				w_sum += max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid);
+			}
+		}
+	}
+	if (w_sum < 1e-9) {
+		return;
+	}
+
+	// Pass 2: pull mass and temperature back out of the grid.
+	float m_new = 0.0;
+	float T_new = 0.0;
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+					continue;
+				}
+
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				float w = max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid) / w_sum;
+				if (w < 1e-9) {
+					continue;
+				}
+
+				vec4 liq = imageLoad(liquid_scal, c);
+				float M_j = liq.r * cell_volume;  // Eq. 19 back to a mass
+				float T_lj = liq.g;
+				float omega_j = liq.b;            // Eq. 20
+
+				if (omega_j > 1e-9) {
+					m_new += M_j * w / omega_j;   // Eq. 21
+				}
+				T_new += T_lj * w;                // Eq. 24
+			}
+		}
+	}
+
+	vel.velocities[pidx].w = m_new;
+	part.positions[pidx].w = T_new;
+}

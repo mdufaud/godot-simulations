@@ -11,13 +11,6 @@ var settings: Dictionary = {
 	# Graphics
 	"ssr_enabled": true,
 	"ssr_max_steps": 96,
-	"particle_quality": 1.0,  # Multiplier for particle counts
-	"shadow_quality": 2,  # 0=off, 1=low, 2=high
-	
-	# Fire demo
-	"fire_particle_count": 500,
-	"fire_smoke_enabled": true,
-	"fire_sparks_enabled": true,
 	
 	# N-body demo
 	"nbody_particle_count": 262144,
@@ -46,13 +39,6 @@ var settings: Dictionary = {
 	"parallax_preset": 0,
 	"parallax_mesh": 0,
 	
-	# Fractal demo
-	"fractal_type": 0,
-	"fractal_color_mode": 0,
-	"fractal_color_speed": 0.3,
-	"fractal_auto_zoom": true,
-	"fractal_zoom_speed": 0.15,
-
 	# Forest demo
 	"forest_quality_mode": 0,  # 0=photoreal, 1=low-poly
 	"forest_tree_density": 1.0,

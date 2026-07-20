@@ -1,0 +1,32 @@
+// Second half of vorticity confinement: scatter the cell-centred force written
+// into scal_fwd by fire_vorticity onto the velocity faces.
+//
+// Each face takes the mean of the force in the two cells it separates, which is
+// the transpose of the face-to-centre averaging vel_at_cell does — so the
+// operation neither creates nor destroys momentum at the half-cell level. Cell
+// indices are clamped, leaving the boundary faces with the single interior cell
+// they touch.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	float dt = params.cell.y;
+	ivec3 gmax = grid_max();
+
+	if (in_u(c)) {
+		float f = 0.5 * (imageLoad(scal_fwd, ivec3(max(c.x - 1, 0), c.y, c.z)).x
+			+ imageLoad(scal_fwd, ivec3(min(c.x, gmax.x), c.y, c.z)).x);
+		imageStore(u_src, c, vec4(imageLoad(u_src, c).r + f * dt, 0.0, 0.0, 0.0));
+	}
+	if (in_v(c)) {
+		float f = 0.5 * (imageLoad(scal_fwd, ivec3(c.x, max(c.y - 1, 0), c.z)).y
+			+ imageLoad(scal_fwd, ivec3(c.x, min(c.y, gmax.y), c.z)).y);
+		// Solid ground: the confinement force cannot push flow through the floor.
+		float v = (c.y == 0) ? 0.0 : imageLoad(v_src, c).r + f * dt;
+		imageStore(v_src, c, vec4(v, 0.0, 0.0, 0.0));
+	}
+	if (in_w(c)) {
+		float f = 0.5 * (imageLoad(scal_fwd, ivec3(c.x, c.y, max(c.z - 1, 0))).z
+			+ imageLoad(scal_fwd, ivec3(c.x, c.y, min(c.z, gmax.z))).z);
+		imageStore(w_src, c, vec4(imageLoad(w_src, c).r + f * dt, 0.0, 0.0, 0.0));
+	}
+}

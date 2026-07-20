@@ -158,11 +158,6 @@ func get_camera() -> Camera3D:
 	return _camera
 
 
-## Recenters the orbit on a position.
-func set_target(pos: Vector3) -> void:
-	target = pos
-
-
 ## Enables/disables all controls.
 func set_enabled(enabled: bool) -> void:
 	set_process(enabled)

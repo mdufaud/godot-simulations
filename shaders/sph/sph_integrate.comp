@@ -29,7 +29,12 @@ void main() {
 		temp = max(temp - params.sim.x * (0.05 + 0.45 * surf), 0.0);
 	}
 	positions.data[i] = vec4(p, temp);
-	velocities.data[i] = vec4(v, 0.0);
+	// The w lanes are per-particle payload that the sort carries along for free
+	// (grid_scatter copies whole vec4s): positions.w is the temperature above, and
+	// velocities.w is spare for a coupling to hang an attribute on — the fire
+	// demo's droplet mass. Both have to be preserved here or they reset every
+	// sub-step. Unused by the fluid demos, where it stays at its seeded 0.
+	velocities.data[i] = vec4(v, velocities.data[i].w);
 	// Only the last sub-step publishes the render texture (xyz = pos,
 	// w = speed for water / temperature for lava).
 	if (params.misc.z == 1) {

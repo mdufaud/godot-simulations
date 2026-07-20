@@ -27,7 +27,6 @@ extends Node3D
 @onready var shadow_strength_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/ShadowStrengthValue
 @onready var self_shadow_check: CheckButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/SelfShadowCheck
 @onready var computed_normals_check: CheckButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/ComputedNormalsCheck
-@onready var control_panel: PanelContainer = $UI/Control/ControlPanel
 
 var parallax_material: ShaderMaterial
 var _tex_cache := {}
