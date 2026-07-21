@@ -221,8 +221,22 @@ func _init_sph(domain: Vector3) -> void:
 	# existing puddle turns that stiffness into an impact explosion — measured
 	# droplets thrown 4 m ABOVE the nozzle — and every airborne fragment renders as
 	# its own glassy ball.
-	sph.pressure_mult = 60.0
-	sph.near_pressure_mult = 140.0
+	# Halving the smoothing length (SPH_H 0.2 -> 0.1) shortened the stable time step
+	# with it, and the solver's default 3 sub-steps did not follow: droplets landing
+	# at ~10 m/s overlapped inside one step, and the pressure force answering that
+	# overlap threw them off at 100-500 m/s, all the way to the domain ceiling. This
+	# is where the "droplets bouncing everywhere in the box" came from — not from the
+	# emitter, which explodes the same way at 100 Hz with 300 particles alive.
+	# Measured at the medium preset: 3 sub-steps -> vmax 120-490 m/s and y_max pinned
+	# at the 19.2 m ceiling; 16 -> vmax < 19 m/s and y_max at the 5 m nozzle, over
+	# 30 s at the full 16384-particle budget. Costs ~8 fps on a 760M.
+	sph.substeps = 16
+	# Softened alongside the sub-step count: at 60/140 the same 16 sub-steps still let
+	# the occasional droplet leave the puddle at 20+ m/s. Halving both keeps the
+	# near-dominant ratio (short-range incompressibility over far-field pressure) that
+	# holds the puddle together while dropping the stiff-force spike at impact.
+	sph.pressure_mult = 30.0
+	sph.near_pressure_mult = 70.0
 	# Clavet's viscosity is a linear/quadratic impulse (Eq. 17, Tab. 3: Linear 0.0,
 	# Quadratic 0.4); this solver's is XSPH velocity smoothing, a different model,
 	# so the number is not the paper's 0.4 either. Raised from the demo's 0.14 for
