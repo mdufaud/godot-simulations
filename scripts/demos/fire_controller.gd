@@ -30,9 +30,7 @@ var volume_material: ShaderMaterial
 var volume_texture: Texture3DRD
 var texture_bound := false
 
-var droplet_mesh: MultiMesh
-var droplet_material: ShaderMaterial
-var droplet_texture: Texture2DRD
+var fluid_renderer: ScreenSpaceFluidRenderer
 
 # --- Quality presets ---
 ## Physical extent of the simulated box, held constant across presets so the
@@ -74,13 +72,26 @@ var emitter_rate := 0.2
 var jet_enabled := false
 const JET_NOZZLE_POS := Vector3(4.5, 5.0, 0.0)
 const JET_AIM_BASE := Vector3(0.0, 0.35, 0.0)
-# Frequency is particles/second, so it doubles as how dense the stream looks; the
-# heavier presets run past Tab. 3's 100 Hz cap (game feel over the paper's nozzle)
-# to build a visible torrent rather than a dotted line.
+# Frequency is particles/second, so it doubles as how dense the stream looks; all
+# presets run well past Tab. 3's 100 Hz cap (game feel over the paper's nozzle) so
+# the screen-space surface keeps enough neighbours in flight to fuse the stream
+# into a continuous column rather than a dotted line. Gravity also nearly doubles
+# the speed over the drop, stretching the spacing on the way down, so the rate has
+# margin built in.
+#
+# Spray angle is 0: these are laminar jets, Fig. 8's other nozzle. A cone spreads
+# the stream as it flies (5 deg over the ~6.7 m throw fans it from 0.12 m to ~0.4 m
+# radius, an ~11x density drop), which pulls the droplets past the render radius
+# and reads as golf balls flung in every direction. The paper prefers the spray for
+# extinguishing, but the laminar stream is the one that looks like water.
+#
+# Rates are 4x what they were when a parcel weighed 0.1 kg; FireWater.DROPLET_MASS
+# is now 0.025 kg, so the delivered kg/s per preset is unchanged and only the
+# rendered density went up.
 const WATER_PRESETS := {
-	1: {"freq": 30.0, "vel": 3.5, "spray": 8.0},    # Light  — trickle, hisses, survives
-	2: {"freq": 90.0, "vel": 6.0, "spray": 25.0},   # Medium — big steam, strong knockdown
-	3: {"freq": 170.0, "vel": 8.5, "spray": 40.0},  # Heavy  — torrent
+	1: {"freq": 880.0, "vel": 4.0, "spray": 0.0},   # Light  — thin steady stream, hisses, survives
+	2: {"freq": 1680.0, "vel": 6.0, "spray": 0.0},  # Medium — solid column, big steam, strong knockdown
+	3: {"freq": 2800.0, "vel": 8.0, "spray": 0.0},  # Heavy  — torrent
 }
 var _water_level := 0
 var _water_buttons := {}
@@ -115,15 +126,16 @@ func _ready() -> void:
 
 	RenderingServer.call_on_render_thread(solver.init_render)
 
-	# P3/P4: SPH water droplets and their coupling to the grid. More particles than
-	# the coupling strictly needs, so a held jet builds a connected sheet of water
-	# rather than a scatter of beads once the blob shader merges them.
+	# P3/P4: SPH water droplets and their coupling to the grid. The screen-space
+	# surface only reconstructs where droplets pack tight, so the budget is large
+	# enough to keep both a dense in-flight column and a connected floor puddle
+	# alive at once — a smaller budget starves the stream into falling beads.
 	water = FireWater.new()
-	water.particle_count = 4096
+	water.particle_count = 16384
 	water.evaporation_active = solver.evaporation_enabled
 	RenderingServer.call_on_render_thread(water.init_render.bind(solver.grid_dims, solver.cell_size))
 
-	_setup_droplet_render()
+	_setup_fluid_renderer()
 	_light_fire()
 	_setup_ui()
 
@@ -162,11 +174,15 @@ func _process(delta: float) -> void:
 	# both ahead of the grid loop (lines 13-14) so the solver reads the liquid field
 	# built this frame, and the return after it (lines 23-24).
 	if water.initialized:
+		# The drain lives on the particles now (water_return.comp), so it needs the
+		# solver's rate and the same simulated clock the grid stage runs on.
+		water.drain_rate = solver.liquid_drain_rate
+		water.step_dt = sim_dt
 		if jet_enabled:
 			# Simulated time, not frame time: emitting per wall-clock second makes
 			# the droplet count a function of the frame rate, and two runs of the
 			# same nozzle then disagree by a couple of hundred kelvin.
-			RenderingServer.call_on_render_thread(water.emit_jet.bind(sim_dt))
+			RenderingServer.call_on_render_thread(water.emit_jet.bind(sim_dt, delta))
 		RenderingServer.call_on_render_thread(water.step_droplets.bind(delta))
 		RenderingServer.call_on_render_thread(water.scatter_render)
 		RenderingServer.call_on_render_thread(water.gather_render.bind(
@@ -177,13 +193,7 @@ func _process(delta: float) -> void:
 
 	if water.initialized:
 		RenderingServer.call_on_render_thread(water.return_render)
-
-	if water.initialized:
-		if droplet_texture == null:
-			droplet_texture = Texture2DRD.new()
-			droplet_texture.texture_rd_rid = water.sph_position_tex_rid()
-			droplet_material.set_shader_parameter("position_tex", droplet_texture)
-		droplet_mesh.visible_instance_count = water.particles_active
+		fluid_renderer.update(water.sph_position_tex_rid(), water.particles_active)
 
 	var stats := solver.get_stats()
 	_update_light(stats)
@@ -196,10 +206,6 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
-	# Same reason: free_render drops the SPH position texture, and a material left
-	# pointing at it makes the renderer build a uniform set around a dead RID.
-	if droplet_texture != null:
-		droplet_texture.texture_rd_rid = RID()
 	# Water first: its uniform sets bind the solver's liquid textures, and freeing
 	# those first makes Godot drop the dependent sets on its own — FireWater then
 	# frees RIDs that are already gone ("Attempted to free invalid ID").
@@ -211,45 +217,49 @@ func _exit_tree() -> void:
 #  SCENE SETUP
 # =========================================================================
 
-## Sphere impostors over the SPH position texture, one instance per particle.
-##
-## The texture RID only exists once the queued init_render has run on the render
-## thread, so the binding is deferred to _process like the fire volume's is.
-## visible_instance_count follows the pour: the solver only writes the active
-## slots, and the rest of the texture is whatever was in it before.
-func _setup_droplet_render() -> void:
-	droplet_material = ShaderMaterial.new()
-	droplet_material.shader = load("res://shaders/fire/water_droplet.gdshader")
-	droplet_material.set_shader_parameter("tex_width", water.sph_tex_width())
-	# Larger than the SPH spacing so neighbouring droplets overlap and the blob
-	# shader reads them as one body of water instead of separate spheres.
-	droplet_material.set_shader_parameter("particle_radius", 0.13)
+## Screen-space fluid surface over the SPH position texture, reusing the fluid
+## demo's render chain (ScreenSpaceFluidRenderer) instead of per-particle sphere
+## impostors, so the droplets read as one connected body of water and a clean
+## puddle rather than colored balls. The renderer binds the position texture
+## lazily once the queued init_render has produced the RID (see its update()).
+func _setup_fluid_renderer() -> void:
+	fluid_renderer = ScreenSpaceFluidRenderer.new()
+	fluid_renderer.camera = orbit_cam.get_camera()
+	fluid_renderer.particle_count = water.particle_count
+	fluid_renderer.tex_width = water.sph_tex_width()
+	# The SPH rest spacing is ~0.05 m (FireWater.SPH_H / 2) and only a sparse
+	# monolayer of droplets ever lands, so the impostor radius has to be well above
+	# the spacing for lone droplets to fuse into one sheet instead of reconstructing
+	# as separate beads. What fuses is the RATIO, ~2.4x spacing: barely above it
+	# (1.4x) read as beads at the old smoothing length too.
+	fluid_renderer.radius = 0.12
+	fluid_renderer.mode = 0.0
+	fluid_renderer.render_scale = 1.0
+	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
+	fluid_renderer.domain_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * DOMAIN_SIZE, DOMAIN_SIZE)
+	# Foam deferred: land the clean surface + puddle first.
+	fluid_renderer.build_foam = false
+	add_child(fluid_renderer)
+	fluid_renderer.start()
 
-	var quad := QuadMesh.new()
-	quad.size = Vector2(2.0, 2.0)
-	droplet_mesh = MultiMesh.new()
-	droplet_mesh.transform_format = MultiMesh.TRANSFORM_3D
-	droplet_mesh.mesh = quad
-	droplet_mesh.instance_count = water.particle_count
-	droplet_mesh.visible_instance_count = 0
-	# The vertex shader takes the position straight from the texture and ignores
-	# the instance transform, so every instance carries the same identity matrix.
-	var buf := PackedFloat32Array()
-	buf.resize(water.particle_count * 12)
-	for i in water.particle_count:
-		buf[i * 12] = 1.0
-		buf[i * 12 + 5] = 1.0
-		buf[i * 12 + 10] = 1.0
-	droplet_mesh.buffer = buf
-
-	var mmi := MultiMeshInstance3D.new()
-	mmi.multimesh = droplet_mesh
-	mmi.material_override = droplet_material
-	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	# Instances sit at the origin as far as the culler is concerned, since the
-	# real positions only exist on the GPU.
-	mmi.custom_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * DOMAIN_SIZE, DOMAIN_SIZE)
-	add_child(mmi)
+	# The fire volume draws at render_priority 1; keep the water composite below it
+	# so the flame column reads in front of the water at the base. Neither writes
+	# depth, so this priority is what orders the two transparent layers.
+	var cm := fluid_renderer.composite_material()
+	cm.render_priority = 0
+	# Dark night campfire: the default daytime sky reflection would light the water
+	# bright blue. Near-black sky and no sun disc leave refraction + Fresnel rim as
+	# the visible cues.
+	cm.set_shader_parameter("sky_zenith", Color(0.02, 0.03, 0.05))
+	cm.set_shader_parameter("sky_horizon", Color(0.04, 0.05, 0.06))
+	cm.set_shader_parameter("sun_intensity", 0.0)
+	# The composite is unshaded, so where the body is optically thick it outputs
+	# tint_color directly; the demo default (teal 0.05,0.32,0.42) glows like
+	# antifreeze against the black scene. A shallow campfire puddle should read as
+	# clear water over wet ground, so the tint goes near-black and absorption drops
+	# to keep the thin sheet refractive rather than filling with colour.
+	cm.set_shader_parameter("tint_color", Color(0.015, 0.03, 0.04))
+	cm.set_shader_parameter("absorption_scale", 0.15)
 
 
 ## The three water buttons are a radio group: turning one on selects that intensity
@@ -294,7 +304,7 @@ func _pour_water() -> void:
 	var target := Vector3(0.0, 0.5, 0.0)
 	var throw := (target - origin).normalized() * 8.0
 	RenderingServer.call_on_render_thread(water.spawn_droplets.bind(
-		mini(water.particle_count, 1800), origin, 0.9, throw))
+		mini(water.particle_count, 4000), origin, 0.9, throw))
 
 
 ## Swap the field resolution without moving the domain walls.
@@ -319,6 +329,10 @@ func _set_quality(index: int) -> void:
 
 func _reset_simulation() -> void:
 	RenderingServer.call_on_render_thread(solver.clear_fields)
+	# The droplets are state of their own: clear_fields wipes liquid_scal, but
+	# water_gather rebuilds it from the particles on the very next frame, so a reset
+	# that skips this leaves the puddle exactly where it was.
+	RenderingServer.call_on_render_thread(water.clear_droplets)
 	_smooth_light_energy = 0.0
 	_smooth_light_range = 8.0
 	_light_fire()
@@ -447,22 +461,23 @@ func _setup_ui() -> void:
 		solver.units_convention,
 		func(idx: int) -> void: solver.units_convention = idx)
 
-	menu.add_separator()
-	menu.add_section("Actions")
-	menu.add_button("Reset", _reset_simulation)
-	menu.add_toggle("Ignite", false, func(on: bool) -> void:
+	menu.add_action("↺", "Reset", _reset_simulation)
+	menu.add_action_toggle("🔥", "Ignite", false, func(on: bool) -> void:
 		is_igniting = on)
+	var water_icons := ["💧", "💦", "🌊"]
 	for level in [1, 2, 3]:
-		var level_name: String = ["Light", "Medium", "Heavy"][level - 1]
-		_water_buttons[level] = menu.add_toggle("Water: " + level_name, false,
+		var level_name: String = ["Light", "Med", "Heavy"][level - 1]
+		var water_button: Button = menu.add_action_toggle(water_icons[level - 1], level_name, false,
 			func(on: bool) -> void: _set_water_level(level, on))
-	menu.add_button("Pour water", _pour_water)
-	menu.add_toggle("Wind", false, func(on: bool) -> void:
+		water_button.tooltip_text = "Water jet: " + level_name
+		_water_buttons[level] = water_button
+	menu.add_action("🪣", "Pour", _pour_water)
+	menu.add_action_toggle("🌬", "Wind", false, func(on: bool) -> void:
 		_wind_enabled = on
 		_apply_wind())
-	menu.add_toggle("Smother", false, func(on: bool) -> void:
+	menu.add_action_toggle("🧯", "Smother", false, func(on: bool) -> void:
 		is_smothering = on)
-	menu.add_toggle("Debug info", false, func(on: bool) -> void:
+	menu.add_debug_toggle("🐛", "Debug info", false, func(on: bool) -> void:
 		debug_info = on
 		solver.profiling = on
 		stats_label.visible = on

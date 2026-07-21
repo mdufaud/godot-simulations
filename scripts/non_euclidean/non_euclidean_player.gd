@@ -48,6 +48,7 @@ func _ready() -> void:
 	_touch_ui = VirtualJoystick.is_touch_ui()
 	if _touch_ui:
 		_joystick = VirtualJoystick.spawn(self)
+		(_joystick.get_parent() as CanvasLayer).layer = 3
 	elif DisplayServer.get_name() != "headless":
 		call_deferred("_capture_if_focused")
 

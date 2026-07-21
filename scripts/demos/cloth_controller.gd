@@ -245,7 +245,7 @@ func _add_boulder(center: Vector3, radius: float) -> void:
 
 func _setup_ui() -> void:
 	menu.add_section("Scene")
-	menu.add_button("↺ Reset", _restart)
+	menu.add_action("↺", "Reset", _restart)
 	status_label = menu.add_label("")
 	menu.add_separator()
 
@@ -272,7 +272,7 @@ func _setup_ui() -> void:
 	menu.add_slider("Substeps", 1.0, 6.0, float(solvers[0].substeps),
 		_set_all_int.bind("substeps"))
 	menu.add_slider("Relaxation", 1.0, 1.9, solvers[0].relaxation, _set_all.bind("relaxation"))
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_separator()
 
 	menu.add_section("Performance")

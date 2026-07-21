@@ -134,14 +134,11 @@ void main() {
 	imageStore(scal_src, c, s);
 	imageStore(scal2_src, c, s2);
 
-	// NON-PAPER drainage. A cold puddle can never reach T_B on its own, so the
-	// Eq. 26-28 evaporation above stalls at d_rho = 0 and the cell stays wet and
-	// suppressed for good. This bleeds liquid off to the ground (run-off / soak-in)
-	// so a rekindled fire recovers; it adds no vapour and takes no gas heat, so it
-	// is applied after the energy ledger and left out of it. water_return reads the
-	// reduced remaining and shrinks the particles to match.
-	float drain = cfg.liquid2.w;
-	remaining *= max(0.0, 1.0 - drain * dt);
+	// The NON-PAPER drainage that used to sit here now lives in water_return.comp,
+	// on the particle mass itself. It is the only way a droplet ever leaves the
+	// simulation, and this stage is skipped entirely when evaporation is toggled
+	// off — which made the puddle immortal in exactly the mode where it is the only
+	// cleanup left.
 
 	// omega_j (b) is left alone: water_return needs the same value the gather
 	// wrote, or the mass it hands back stops matching the mass the grid holds.

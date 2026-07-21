@@ -305,7 +305,7 @@ func _setup_ui() -> void:
 
 	menu.add_section("Scene")
 	menu.add_option_button("Preset", titles, scene_idx, _on_scene_selected)
-	menu.add_button("↺ Reset", _restart)
+	menu.add_action("↺", "Reset", _restart)
 	status_label = menu.add_label("")
 	menu.add_separator()
 
@@ -327,7 +327,7 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_label("Grid resolution")
 	menu.add_button("256²", func(): _set_grid_n(256))
 	menu.add_button("512²", func(): _set_grid_n(512))

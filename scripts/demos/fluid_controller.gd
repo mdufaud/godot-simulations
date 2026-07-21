@@ -34,7 +34,7 @@ func _setup_ui() -> void:
 	menu.add_section("Simulation")
 	menu.add_option_button("Solver", ["PBF", "SPH"], fluid.method, _on_method_selected)
 	menu.add_toggle("Lava mode", fluid.mode > 0.5, _on_lava_toggled)
-	menu.add_button("Reset drop", func(): fluid.restart())
+	menu.add_action("↺", "Reset", func(): fluid.restart())
 	menu.add_separator()
 	menu.add_section("Parameters")
 
@@ -69,7 +69,7 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("Performance")
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
 	menu.add_label("Particles")
 	menu.add_button("16k", func(): fluid.set_particle_count(16384))

@@ -390,8 +390,11 @@ func _explosion_flash(pos: Vector3) -> void:
 # ── UI ───────────────────────────────────────────────────────────────────────
 
 func _setup_ui() -> void:
+	menu.add_action("↺", "Rebuild", _build_wall)
+	menu.add_action("💥", "Fire", func(): _fire(get_viewport().get_visible_rect().size * 0.5))
+	menu.add_action("🧹", "Clear", _clear_projectiles)
+
 	menu.add_section("Walls")
-	menu.add_button("↺ Rebuild walls", _build_wall)
 	menu.add_slider("Chunks / wall", 40.0, 180.0, float(chunk_count), _on_chunk_count)
 	menu.add_slider("Shard bias", 0.0, 1.0, fracture_bias, _on_bias)
 	status_label = menu.add_label("")
@@ -400,14 +403,9 @@ func _setup_ui() -> void:
 	menu.add_section("Weapon")
 	menu.add_option_button("Projectile", _projectile_defs.map(func(d): return d.name),
 			_projectile_idx, func(i): _projectile_idx = i)
-	menu.add_button("💥 Fire", func(): _fire(get_viewport().get_visible_rect().size * 0.5))
 	menu.add_label("Right-click to shoot at the cursor")
 	menu.add_slider("Blast radius ×", 0.3, 2.5, radius_scale, func(v): radius_scale = v)
 	menu.add_slider("Blast power ×", 0.2, 3.0, power_scale, func(v): power_scale = v)
-	menu.add_separator()
-
-	menu.add_section("Scene")
-	menu.add_button("🧹 Clear rubble", _clear_projectiles)
 	menu.add_separator()
 
 	menu.add_section("Performance")

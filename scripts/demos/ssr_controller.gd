@@ -1,12 +1,11 @@
 extends Node3D
 ## SSR Physics Demo — Refined reflections, multi-light, material categories,
-## full slider control panel for SSR / SSAO / SSIL / Glow / Lighting / Materials.
+## full SimMenu control panel for SSR / SSAO / SSIL / Glow / Lighting / Materials.
 
 # ── Scene references ─────────────────────────────────────────────────────────
 @onready var spawn_timer: Timer = $SpawnTimer
 @onready var orbit_cam: OrbitCamera = $CameraPivot
-@onready var info_label: Label = $UI/Control/InfoPanel/ScrollContainer/VBoxContainer/InfoLabel
-@onready var fps_label: Label = $UI/Control/InfoPanel/ScrollContainer/VBoxContainer/FPSLabel
+@onready var menu: SimMenu = $UI/SimMenu
 @onready var world_env: WorldEnvironment = $WorldEnvironment
 @onready var dir_light: DirectionalLight3D = $DirectionalLight3D
 @onready var omni_red: OmniLight3D = $OmniLightRed
@@ -14,22 +13,7 @@ extends Node3D
 @onready var omni_warm: OmniLight3D = $OmniLightWarm
 @onready var spot_accent: SpotLight3D = $SpotLightAccent
 
-# ── UI label references (updated by sliders) ────────────────────────────────
-const _V := "UI/Control/InfoPanel/ScrollContainer/VBoxContainer/"
-@onready var ssr_max_steps_label: Label = get_node(_V + "SSRMaxStepsLabel")
-@onready var ssr_fade_in_label: Label = get_node(_V + "SSRFadeInLabel")
-@onready var ssr_fade_out_label: Label = get_node(_V + "SSRFadeOutLabel")
-@onready var ssr_depth_tol_label: Label = get_node(_V + "SSRDepthToleranceLabel")
-@onready var ssao_intensity_label: Label = get_node(_V + "SSAOIntensityLabel")
-@onready var ssao_radius_label: Label = get_node(_V + "SSAORadiusLabel")
-@onready var ssil_intensity_label: Label = get_node(_V + "SSILIntensityLabel")
-@onready var glow_intensity_label: Label = get_node(_V + "GlowIntensityLabel")
-@onready var glow_bloom_label: Label = get_node(_V + "GlowBloomLabel")
-@onready var dir_light_energy_label: Label = get_node(_V + "DirLightEnergyLabel")
-@onready var omni_light_energy_label: Label = get_node(_V + "OmniLightEnergyLabel")
-@onready var spot_light_energy_label: Label = get_node(_V + "SpotLightEnergyLabel")
-@onready var roughness_label: Label = get_node(_V + "RoughnessLabel")
-@onready var metallic_label: Label = get_node(_V + "MetallicLabel")
+var _info_label: Label
 
 # ── Constants ────────────────────────────────────────────────────────────────
 const SPAWN_HEIGHT := 12.0
@@ -72,10 +56,6 @@ func _ready() -> void:
 	max_objects = GameManager.get_setting("ssr_demo_max_objects", 200)
 	spawn_timer.wait_time = GameManager.get_setting("ssr_demo_spawn_rate", 0.25)
 
-	var env := world_env.environment
-	env.ssr_enabled = GameManager.get_setting("ssr_enabled", true)
-	env.ssr_max_steps = GameManager.get_setting("ssr_max_steps", 96)
-
 	# Configure orbit camera
 	orbit_cam.target = Vector3.ZERO
 	orbit_cam.distance = 18.0
@@ -88,9 +68,7 @@ func _ready() -> void:
 
 	spawn_timer.timeout.connect(_on_spawn_timer_timeout)
 
-	# Disable scroll on all sliders so scrolling scrolls the panel, not the values
-	for slider in $UI.find_children("*", "HSlider"):
-		slider.scrollable = false
+	_build_menu()
 
 	# Give each wall its own material so it can fade independently when the
 	# camera moves outside the room (walls no longer block the view)
@@ -105,9 +83,50 @@ func _ready() -> void:
 		_wall_fades.append({"mesh": mesh, "normal": info[1], "mat": mat})
 
 
+func _build_menu() -> void:
+	var env := world_env.environment
+	menu.title = "🔮 SSR Physics Demo"
+	_info_label = menu.add_label("Objects: 0")
+
+	menu.add_section("SSR")
+	menu.add_toggle("SSR Enabled", true, func(on: bool) -> void: env.ssr_enabled = on)
+	menu.add_slider("Max Steps", 16.0, 256.0, 96.0, func(v: float) -> void: env.ssr_max_steps = int(v))
+	menu.add_slider("Fade In", 0.0, 1.0, 0.05, func(v: float) -> void: env.ssr_fade_in = v)
+	menu.add_slider("Fade Out", 0.0, 5.0, 3.0, func(v: float) -> void: env.ssr_fade_out = v)
+	menu.add_slider("Depth Tolerance", 0.01, 1.0, 0.25, func(v: float) -> void: env.ssr_depth_tolerance = v)
+
+	menu.add_section("SSAO")
+	menu.add_toggle("SSAO Enabled", true, func(on: bool) -> void: env.ssao_enabled = on)
+	menu.add_slider("Intensity", 0.0, 4.0, 1.5, func(v: float) -> void: env.ssao_intensity = v)
+	menu.add_slider("Radius", 0.1, 5.0, 1.2, func(v: float) -> void: env.ssao_radius = v)
+
+	menu.add_section("SSIL")
+	menu.add_toggle("SSIL Enabled", true, func(on: bool) -> void: env.ssil_enabled = on)
+	menu.add_slider("Intensity", 0.0, 3.0, 1.2, func(v: float) -> void: env.ssil_intensity = v)
+
+	menu.add_section("Glow")
+	menu.add_toggle("Glow Enabled", true, func(on: bool) -> void: env.glow_enabled = on)
+	menu.add_slider("Intensity", 0.0, 2.0, 0.5, func(v: float) -> void: env.glow_intensity = v)
+	menu.add_slider("Bloom", 0.0, 1.0, 0.05, func(v: float) -> void: env.glow_bloom = v)
+
+	menu.add_section("Lights")
+	menu.add_slider("Directional", 0.0, 5.0, 1.3, func(v: float) -> void: dir_light.light_energy = v)
+	menu.add_slider("Omni Lights", 0.0, 8.0, 3.0, func(v: float) -> void:
+		omni_red.light_energy = v
+		omni_blue.light_energy = v
+		omni_warm.light_energy = v * 0.83)  # keep warm slightly dimmer
+	menu.add_slider("Spot Light", 0.0, 10.0, 4.0, func(v: float) -> void: spot_accent.light_energy = v)
+	menu.add_toggle("Volumetric Fog", false, func(on: bool) -> void: env.volumetric_fog_enabled = on)
+
+	menu.add_section("Material")
+	menu.add_slider("Roughness Override", -1.0, 1.0, -1.0, _on_roughness_override_changed)
+	menu.add_slider("Metallic Override", -1.0, 1.0, -1.0, _on_metallic_override_changed)
+
+	menu.add_action("🧹", "Clear", _on_clear_pressed)
+
+
 func _process(_delta: float) -> void:
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
-	info_label.text = "Objects: %d / %d" % [spawned_objects.size(), max_objects]
+	_info_label.text = "Objects: %d / %d" % [spawned_objects.size(), max_objects]
 	_update_wall_fade()
 	_cleanup_fallen_objects()
 
@@ -301,100 +320,20 @@ func _apply_material_override_to_existing() -> void:
 				if metallic_override >= 0.0:
 					m.metallic = metallic_override
 
-# ── UI Callbacks — SSR ───────────────────────────────────────────────────────
-
-func _on_ssr_toggled(enabled: bool) -> void:
-	world_env.environment.ssr_enabled = enabled
-
-func _on_ssr_max_steps_changed(value: float) -> void:
-	world_env.environment.ssr_max_steps = int(value)
-	ssr_max_steps_label.text = "Max Steps: %d" % int(value)
-
-func _on_ssr_fade_in_changed(value: float) -> void:
-	world_env.environment.ssr_fade_in = value
-	ssr_fade_in_label.text = "Fade In: %.2f" % value
-
-func _on_ssr_fade_out_changed(value: float) -> void:
-	world_env.environment.ssr_fade_out = value
-	ssr_fade_out_label.text = "Fade Out: %.1f" % value
-
-func _on_ssr_depth_tolerance_changed(value: float) -> void:
-	world_env.environment.ssr_depth_tolerance = value
-	ssr_depth_tol_label.text = "Depth Tolerance: %.2f" % value
-
-# ── UI Callbacks — SSAO ──────────────────────────────────────────────────────
-
-func _on_ssao_toggled(enabled: bool) -> void:
-	world_env.environment.ssao_enabled = enabled
-
-func _on_ssao_intensity_changed(value: float) -> void:
-	world_env.environment.ssao_intensity = value
-	ssao_intensity_label.text = "Intensity: %.1f" % value
-
-func _on_ssao_radius_changed(value: float) -> void:
-	world_env.environment.ssao_radius = value
-	ssao_radius_label.text = "Radius: %.1f" % value
-
-# ── UI Callbacks — SSIL ──────────────────────────────────────────────────────
-
-func _on_ssil_toggled(enabled: bool) -> void:
-	world_env.environment.ssil_enabled = enabled
-
-func _on_ssil_intensity_changed(value: float) -> void:
-	world_env.environment.ssil_intensity = value
-	ssil_intensity_label.text = "Intensity: %.1f" % value
-
-# ── UI Callbacks — Glow ──────────────────────────────────────────────────────
-
-func _on_glow_toggled(enabled: bool) -> void:
-	world_env.environment.glow_enabled = enabled
-
-func _on_glow_intensity_changed(value: float) -> void:
-	world_env.environment.glow_intensity = value
-	glow_intensity_label.text = "Intensity: %.2f" % value
-
-func _on_glow_bloom_changed(value: float) -> void:
-	world_env.environment.glow_bloom = value
-	glow_bloom_label.text = "Bloom: %.2f" % value
-
-# ── UI Callbacks — Lights ────────────────────────────────────────────────────
-
-func _on_dir_light_energy_changed(value: float) -> void:
-	dir_light.light_energy = value
-	dir_light_energy_label.text = "Directional: %.1f" % value
-
-func _on_omni_light_energy_changed(value: float) -> void:
-	omni_red.light_energy = value
-	omni_blue.light_energy = value
-	omni_warm.light_energy = value * 0.83  # keep warm slightly dimmer
-	omni_light_energy_label.text = "Omni Lights: %.1f" % value
-
-func _on_spot_light_energy_changed(value: float) -> void:
-	spot_accent.light_energy = value
-	spot_light_energy_label.text = "Spot Light: %.1f" % value
-
-func _on_vfog_toggled(enabled: bool) -> void:
-	world_env.environment.volumetric_fog_enabled = enabled
-
 # ── UI Callbacks — Material overrides ────────────────────────────────────────
 
 func _on_roughness_override_changed(value: float) -> void:
 	roughness_override = value
-	if value < 0.0:
-		roughness_label.text = "Roughness Override: OFF"
-	else:
-		roughness_label.text = "Roughness Override: %.2f" % value
+	if value >= 0.0:
 		_apply_material_override_to_existing()
+
 
 func _on_metallic_override_changed(value: float) -> void:
 	metallic_override = value
-	if value < 0.0:
-		metallic_label.text = "Metallic Override: OFF"
-	else:
-		metallic_label.text = "Metallic Override: %.2f" % value
+	if value >= 0.0:
 		_apply_material_override_to_existing()
 
-# ── Clear / Back ─────────────────────────────────────────────────────────────
+# ── Clear ────────────────────────────────────────────────────────────────────
 
 func _on_clear_pressed() -> void:
 	for obj in spawned_objects:
@@ -402,7 +341,3 @@ func _on_clear_pressed() -> void:
 			obj.queue_free()
 	spawned_objects.clear()
 	spawn_timer.start()
-
-
-func _on_back_pressed() -> void:
-	GameManager.go_to_menu()

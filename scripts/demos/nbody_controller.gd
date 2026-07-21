@@ -160,7 +160,7 @@ func _setup_ui() -> void:
 
 	menu.add_section("Scene")
 	menu.add_option_button("Preset", titles, 0, _on_scene_selected)
-	menu.add_button("↺ Reset", _restart)
+	menu.add_action("↺", "Reset", _restart)
 	status_label = menu.add_label("")
 	_build_scene_params()
 	menu.add_separator()
@@ -182,7 +182,7 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_label("Particles")
 	menu.add_button("65k", func(): _set_particle_count(65536))
 	menu.add_button("262k", func(): _set_particle_count(262144))

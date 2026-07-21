@@ -1,52 +1,143 @@
-[gd_scene load_steps=3 format=3 uid="uid://sim_menu_component"]
+[gd_scene load_steps=4 format=3 uid="uid://sim_menu_component"]
 
 [ext_resource type="Script" path="res://scripts/ui/sim_menu.gd" id="1_sim_menu"]
 [ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="2_theme"]
 
-[node name="SimMenu" type="PanelContainer"]
-anchors_preset = 3
-anchor_left = 1.0
-anchor_top = 0.0
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_panel"]
+bg_color = Color(0.09, 0.11, 0.14, 0.82)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+content_margin_left = 10.0
+content_margin_top = 10.0
+content_margin_right = 10.0
+content_margin_bottom = 10.0
+
+[node name="SimMenu" type="Control"]
+layout_mode = 3
+anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
-offset_left = -320.0
-offset_top = 20.0
-offset_right = -20.0
-offset_bottom = -20.0
-grow_horizontal = 0
+grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
 theme = ExtResource("2_theme")
 script = ExtResource("1_sim_menu")
 
-[node name="VBox" type="VBoxContainer" parent="."]
-layout_mode = 2
+[node name="TopRight" type="VBoxContainer" parent="."]
+layout_mode = 1
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -76.0
+offset_top = 20.0
+offset_right = -20.0
+grow_horizontal = 0
+theme_override_constants/separation = 10
 
-[node name="Header" type="HBoxContainer" parent="VBox"]
+[node name="BackButton" type="Button" parent="TopRight"]
+custom_minimum_size = Vector2(56, 56)
 layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "←"
 
-[node name="TitleLabel" type="Label" parent="VBox/Header"]
+[node name="GearButton" type="Button" parent="TopRight"]
+custom_minimum_size = Vector2(56, 56)
+layout_mode = 2
+theme_override_font_sizes/font_size = 28
+text = "⚙"
+
+[node name="DebugStrip" type="VBoxContainer" parent="TopRight"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="BottomRight" type="ScrollContainer" parent="."]
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -76.0
+offset_top = -560.0
+offset_right = -20.0
+offset_bottom = -20.0
+grow_horizontal = 0
+grow_vertical = 0
+mouse_filter = 2
+horizontal_scroll_mode = 0
+vertical_scroll_mode = 3
+
+[node name="ActionBar" type="VBoxContainer" parent="BottomRight"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_font_sizes/font_size = 20
+size_flags_vertical = 10
+alignment = 2
+theme_override_constants/separation = 6
+
+[node name="Panel" type="PanelContainer" parent="."]
+visible = false
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = 20.0
+offset_right = -84.0
+offset_bottom = -20.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="VBox" type="VBoxContainer" parent="Panel"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Header" type="HBoxContainer" parent="Panel/VBox"]
+layout_mode = 2
+
+[node name="TitleLabel" type="Label" parent="Panel/VBox/Header"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_font_sizes/font_size = 22
 text = "Simulation"
 
-[node name="BackButton" type="Button" parent="VBox/Header"]
+[node name="CloseButton" type="Button" parent="Panel/VBox/Header"]
+custom_minimum_size = Vector2(40, 40)
 layout_mode = 2
-text = "← Back"
+theme_override_font_sizes/font_size = 20
+text = "✕"
 
-[node name="FPSLabel" type="Label" parent="VBox"]
+[node name="FPSLabel" type="Label" parent="Panel/VBox"]
 layout_mode = 2
 text = "FPS: 60"
 
-[node name="HSeparator" type="HSeparator" parent="VBox"]
+[node name="HSeparator" type="HSeparator" parent="Panel/VBox"]
 layout_mode = 2
 
-[node name="Scroll" type="ScrollContainer" parent="VBox"]
+[node name="Scroll" type="ScrollContainer" parent="Panel/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
 horizontal_scroll_mode = 0
 
-[node name="Content" type="VBoxContainer" parent="VBox/Scroll"]
+[node name="Margin" type="MarginContainer" parent="Panel/VBox/Scroll"]
 layout_mode = 2
 size_flags_horizontal = 3
-theme_override_constants/separation = 4
+theme_override_constants/margin_right = 30
+
+[node name="Content" type="VBoxContainer" parent="Panel/VBox/Scroll/Margin"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 6
+
+[node name="Footer" type="HBoxContainer" parent="Panel/VBox"]
+layout_mode = 2
+
+[node name="ResetButton" type="Button" parent="Panel/VBox/Footer"]
+custom_minimum_size = Vector2(0, 44)
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Reset defaults"

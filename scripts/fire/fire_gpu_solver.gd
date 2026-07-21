@@ -153,10 +153,14 @@ var droplet_heat_transfer := 50.0
 ## (measured); below ~20 the density boost wins and water makes the fire worse.
 var water_suppression := 40.0
 ## NON-PAPER: slow loss of pooled liquid to the ground per second, as
-## rho_l *= (1 - rate.dt), applied on top of Eq. 26-28 evaporation. A cold puddle
+## m_p *= (1 - rate.dt), applied on top of Eq. 26-28 evaporation. A cold puddle
 ## cannot heat itself back to its boiling point, so real evaporation stalls and the
-## grid stays wet and suppressed forever; this drains it (runs off / soaks in) so a
-## rekindled fire can recover. water_return then shrinks the particles to match.
+## grid stays wet and suppressed forever; this drains the droplets (runs off / soaks
+## in) so a rekindled fire can recover, and is the only way one ever leaves.
+##
+## Owned here so one slider drives it, but applied by water_return.comp through
+## FireWater.drain_rate: it has to run on frames where the evaporation stage is
+## skipped, which is where it is the only cleanup left.
 var liquid_drain_rate := 0.2
 var evaporation_enabled := true
 
@@ -676,11 +680,13 @@ func _upload_config() -> void:
 	v[41] = latent_heat
 	v[42] = liquid_heat_capacity
 	v[43] = droplet_density
-	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, drain
+	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, unused.
+	# The drain moved to water_return.comp, which reads liquid_drain_rate through
+	# FireWater's push constant instead — it has to run on frames where the
+	# evaporation stage does not.
 	v[44] = droplet_diameter
 	v[45] = droplet_heat_transfer
 	v[46] = water_suppression
-	v[47] = liquid_drain_rate
 
 	_rd.buffer_update(_config_buf, 0, v.size() * 4, v.to_byte_array())
 

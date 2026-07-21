@@ -30,7 +30,6 @@ var _case_option: OptionButton
 var _hud_label: Label
 var _debug_label: Label
 var _touch_controls: Control
-var _menu_button: Button
 var _jump_button: Button
 var _sprint_button: Button
 var _reserve_props: Array[PortalRigidBody3D] = []
@@ -420,14 +419,14 @@ func _build_spherical_garden() -> void:
 
 func _setup_ui() -> void:
 	menu.title = "Non-Euclidean Laboratory"
-	menu.visible = false
+	menu.panel_toggled.connect(_on_menu_panel_toggled)
 	menu.add_section("Navigation")
 	_case_option = menu.add_option_button("Area", EXHIBIT_NAMES, 0, _go_to_case)
-	menu.add_button("Reset area", _reset_current_case)
+	menu.add_action("↺", "Reset", _reset_current_case)
 	menu.add_separator()
 	menu.add_section("Impossible Storage")
 	menu.add_label("Live native-resolution view · dedicated render target · no fallback image")
-	menu.add_toggle("Debug crossing volume", false,
+	menu.add_debug_toggle("🧊", "Debug crossing volume", false,
 		func(enabled: bool) -> void:
 			render_manager.set_debug_enabled(enabled)
 			_debug_label.visible = enabled
@@ -487,11 +486,6 @@ func _setup_touch_controls() -> void:
 	get_viewport().size_changed.connect(_layout_touch_controls)
 	_layout_touch_controls()
 
-	_menu_button = Button.new()
-	_menu_button.text = "Menu"
-	_menu_button.pressed.connect(_toggle_menu)
-	_touch_controls.add_child(_menu_button)
-
 	_jump_button = Button.new()
 	_jump_button.text = "Saut"
 	_jump_button.pressed.connect(player.request_touch_jump)
@@ -509,9 +503,6 @@ func _layout_touch_controls() -> void:
 	if _touch_controls == null:
 		return
 	_touch_controls.size = get_viewport().get_visible_rect().size
-	if _menu_button != null:
-		_menu_button.position = Vector2(_touch_controls.size.x - 152.0, 24.0)
-		_menu_button.size = Vector2(128.0, 64.0)
 	if _jump_button != null:
 		_jump_button.position = Vector2(_touch_controls.size.x - 152.0, _touch_controls.size.y - 104.0)
 		_jump_button.size = Vector2(128.0, 72.0)
@@ -521,14 +512,15 @@ func _layout_touch_controls() -> void:
 
 
 func _toggle_menu() -> void:
-	menu.visible = not menu.visible
-	player.set_controls_enabled(not menu.visible)
-	if _menu_button != null:
-		_menu_button.text = "Reprendre" if menu.visible else "Menu"
+	menu.toggle_panel()
+
+
+func _on_menu_panel_toggled(open: bool) -> void:
+	player.set_controls_enabled(not open)
 	if _jump_button != null:
-		_jump_button.visible = not menu.visible
+		_jump_button.visible = not open
 	if _sprint_button != null:
-		_sprint_button.visible = not menu.visible
+		_sprint_button.visible = not open
 
 
 func _go_to_case(index: int) -> void:
@@ -550,8 +542,8 @@ func _go_to_case(index: int) -> void:
 	if _case_option != null:
 		_case_option.select(index)
 	_update_hud()
-	if menu.visible:
-		_toggle_menu()
+	if menu.is_panel_open():
+		menu.toggle_panel()
 
 
 func _reset_current_case() -> void:

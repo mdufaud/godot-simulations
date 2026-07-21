@@ -3,30 +3,18 @@ extends Node3D
 ## State-of-the-art CRPOM with self-shadowing and multiple surface presets
 
 @onready var orbit_cam: OrbitCamera = $CameraPivot
-@onready var fps_label: Label = $UI/Control/InfoPanel/VBoxContainer/FPSLabel
+@onready var menu: SimMenu = $UI/SimMenu
 @onready var parallax_mesh: MeshInstance3D = $ParallaxSurface
 @onready var parallax_mesh_cube: MeshInstance3D = $ParallaxCube
 
-# UI Controls
-@onready var render_mode_option: OptionButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/RenderModeOption
-@onready var preset_option: OptionButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/PresetOption
-@onready var mesh_option: OptionButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/MeshOption
-@onready var height_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/HeightSlider
-@onready var height_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/HeightValue
-@onready var min_layers_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/MinLayersSlider
-@onready var min_layers_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/MinLayersValue
-@onready var max_layers_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/MaxLayersSlider
-@onready var max_layers_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/MaxLayersValue
-@onready var uv_scale_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/UVScaleSlider
-@onready var uv_scale_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/UVScaleValue
-@onready var normal_strength_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/NormalStrengthSlider
-@onready var normal_strength_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/NormalStrengthValue
-@onready var roughness_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/RoughnessSlider
-@onready var roughness_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/RoughnessValue
-@onready var shadow_strength_slider: HSlider = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/ShadowStrengthSlider
-@onready var shadow_strength_value: Label = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/ShadowStrengthValue
-@onready var self_shadow_check: CheckButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/SelfShadowCheck
-@onready var computed_normals_check: CheckButton = $UI/Control/ControlPanel/ScrollContainer/VBoxContainer/ComputedNormalsCheck
+# Slider references so preset selection can drive them.
+var _height_slider: HSlider
+var _min_layers_slider: HSlider
+var _max_layers_slider: HSlider
+var _uv_scale_slider: HSlider
+var _normal_slider: HSlider
+var _roughness_slider: HSlider
+var _shadow_slider: HSlider
 
 var parallax_material: ShaderMaterial
 var _tex_cache := {}
@@ -101,9 +89,8 @@ const PRESET_DEFAULTS := {
 
 
 func _ready() -> void:
-	_load_settings()
 	_setup_material()
-	_setup_ui()
+	_build_menu()
 	# Restore saved values as-is; presets only apply on explicit selection
 	_generate_textures_for_preset(current_preset)
 	_apply_shader_settings()
@@ -118,91 +105,32 @@ func _ready() -> void:
 	orbit_cam.zoom_speed = 0.3
 
 
-func _load_settings() -> void:
-	display_mode = int(GameManager.get_setting("parallax_display_mode", 2))
-	height_scale = GameManager.get_setting("parallax_height", 0.04)
-	min_layers = int(GameManager.get_setting("parallax_min_layers", 8))
-	max_layers = int(GameManager.get_setting("parallax_max_layers", 32))
-	uv_scale = GameManager.get_setting("parallax_uv_scale", 2.0)
-	normal_strength = GameManager.get_setting("parallax_normal_strength", 1.0)
-	roughness_val = GameManager.get_setting("parallax_roughness", 0.8)
-	shadow_strength = GameManager.get_setting("parallax_shadow_strength", 0.8)
-	self_shadow_enabled = GameManager.get_setting("parallax_self_shadow", true)
-	computed_normals = GameManager.get_setting("parallax_computed_normals", false)
-	current_preset = int(GameManager.get_setting("parallax_preset", 0))
-	current_mesh = int(GameManager.get_setting("parallax_mesh", 0))
-
-
 func _setup_material() -> void:
 	parallax_material = ShaderMaterial.new()
 	parallax_material.shader = preload("res://shaders/parallax/parallax.gdshader")
 
 
-func _setup_ui() -> void:
-	# Disable scroll on all sliders so scrolling scrolls the panel, not the values
-	for slider in $UI.find_children("*", "HSlider"):
-		slider.scrollable = false
+func _build_menu() -> void:
+	menu.title = "🪨 Parallax Mapping"
 
-	# Render mode selector (Flat / Normal Map / POM comparison)
-	render_mode_option.clear()
-	render_mode_option.add_item("Flat (no relief)")
-	render_mode_option.add_item("Normal Map Only")
-	render_mode_option.add_item("Parallax (POM)")
-	render_mode_option.selected = display_mode
-	render_mode_option.item_selected.connect(_on_render_mode_selected)
+	menu.add_section("Surface")
+	menu.add_option_button("Render Mode",
+		["Flat (no relief)", "Normal Map Only", "Parallax (POM)"], display_mode, _on_render_mode_selected)
+	menu.add_option_button("Preset", PRESET_NAMES, current_preset, _on_preset_selected)
+	menu.add_option_button("Mesh", ["Plane", "Cube"], current_mesh, _on_mesh_selected)
 
-	# Preset selector
-	preset_option.clear()
-	for p_name in PRESET_NAMES:
-		preset_option.add_item(p_name)
-	preset_option.selected = current_preset
-	preset_option.item_selected.connect(_on_preset_selected)
+	menu.add_section("Relief")
+	_height_slider = menu.add_slider("Height", 0.005, 0.4, 0.04, _on_height_changed)
+	_min_layers_slider = menu.add_slider("Min Layers", 4.0, 64.0, 8.0, _on_min_layers_changed)
+	_max_layers_slider = menu.add_slider("Max Layers", 8.0, 128.0, 32.0, _on_max_layers_changed)
+	_uv_scale_slider = menu.add_slider("UV Scale", 0.5, 8.0, 2.0, _on_uv_scale_changed)
+	_normal_slider = menu.add_slider("Normal Strength", 0.0, 2.0, 1.0, _on_normal_strength_changed)
+	_roughness_slider = menu.add_slider("Roughness", 0.0, 1.0, 0.8, _on_roughness_changed)
 
-	# Mesh selector
-	mesh_option.clear()
-	mesh_option.add_item("Plane")
-	mesh_option.add_item("Cube")
-	mesh_option.selected = current_mesh
-	mesh_option.item_selected.connect(_on_mesh_selected)
-
-	# Sliders
-	height_slider.value = height_scale
-	height_value.text = "%.3f" % height_scale
-	height_slider.value_changed.connect(_on_height_changed)
-
-	min_layers_slider.value = min_layers
-	min_layers_value.text = "%d" % min_layers
-	min_layers_slider.value_changed.connect(_on_min_layers_changed)
-
-	max_layers_slider.value = max_layers
-	max_layers_value.text = "%d" % max_layers
-	max_layers_slider.value_changed.connect(_on_max_layers_changed)
-
-	uv_scale_slider.value = uv_scale
-	uv_scale_value.text = "%.1f" % uv_scale
-	uv_scale_slider.value_changed.connect(_on_uv_scale_changed)
-
-	normal_strength_slider.value = normal_strength
-	normal_strength_value.text = "%.2f" % normal_strength
-	normal_strength_slider.value_changed.connect(_on_normal_strength_changed)
-
-	roughness_slider.value = roughness_val
-	roughness_value.text = "%.2f" % roughness_val
-	roughness_slider.value_changed.connect(_on_roughness_changed)
-
-	shadow_strength_slider.value = shadow_strength
-	shadow_strength_value.text = "%.2f" % shadow_strength
-	shadow_strength_slider.value_changed.connect(_on_shadow_strength_changed)
-
-	self_shadow_check.button_pressed = self_shadow_enabled
-	self_shadow_check.toggled.connect(_on_self_shadow_toggled)
-
-	computed_normals_check.button_pressed = computed_normals
-	computed_normals_check.toggled.connect(_on_computed_normals_toggled)
-
-
-func _process(_delta: float) -> void:
-	fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+	menu.add_section("Shadow")
+	_shadow_slider = menu.add_slider("Shadow Strength", 0.0, 2.0, 0.8, _on_shadow_strength_changed)
+	menu.add_toggle("Self-Shadowing", true, _on_self_shadow_toggled)
+	menu.add_toggle("Heightmap Normals", false, _on_computed_normals_toggled)
 
 
 func _update_mesh_visibility() -> void:
@@ -215,41 +143,21 @@ func _update_mesh_visibility() -> void:
 
 # ─── Preset System ────────────────────────────────
 
-func _apply_preset(preset_idx: int, update_ui: bool = true) -> void:
+func _apply_preset(preset_idx: int) -> void:
 	current_preset = preset_idx
-	GameManager.set_setting("parallax_preset", preset_idx)
 
+	# Driving the sliders re-fires their callbacks (updates vars + shader + persist).
 	var defaults: Dictionary = PRESET_DEFAULTS[preset_idx]
-	height_scale = defaults["height_scale"]
-	min_layers = int(defaults["min_layers"])
-	max_layers = int(defaults["max_layers"])
-	uv_scale = defaults["uv_scale"]
-	roughness_val = defaults["roughness"]
-	normal_strength = defaults["normal_strength"]
-	shadow_strength = defaults["shadow_strength"]
-
-	if update_ui:
-		_sync_ui_to_values()
+	_height_slider.value = defaults["height_scale"]
+	_min_layers_slider.value = defaults["min_layers"]
+	_max_layers_slider.value = defaults["max_layers"]
+	_uv_scale_slider.value = defaults["uv_scale"]
+	_normal_slider.value = defaults["normal_strength"]
+	_roughness_slider.value = defaults["roughness"]
+	_shadow_slider.value = defaults["shadow_strength"]
 
 	_generate_textures_for_preset(preset_idx)
 	_apply_shader_settings()
-
-
-func _sync_ui_to_values() -> void:
-	height_slider.value = height_scale
-	height_value.text = "%.3f" % height_scale
-	min_layers_slider.value = min_layers
-	min_layers_value.text = "%d" % min_layers
-	max_layers_slider.value = max_layers
-	max_layers_value.text = "%d" % max_layers
-	uv_scale_slider.value = uv_scale
-	uv_scale_value.text = "%.1f" % uv_scale
-	normal_strength_slider.value = normal_strength
-	normal_strength_value.text = "%.2f" % normal_strength
-	roughness_slider.value = roughness_val
-	roughness_value.text = "%.2f" % roughness_val
-	shadow_strength_slider.value = shadow_strength
-	shadow_strength_value.text = "%.2f" % shadow_strength
 
 
 func _generate_textures_for_preset(preset_idx: int) -> void:
@@ -312,22 +220,6 @@ func _apply_shader_settings() -> void:
 	parallax_material.set_shader_parameter("shadow_strength", shadow_strength)
 	parallax_material.set_shader_parameter("self_shadow_enabled", self_shadow_enabled)
 	parallax_material.set_shader_parameter("use_computed_normals", computed_normals)
-
-	_save_all_settings()
-
-
-func _save_all_settings() -> void:
-	GameManager.set_setting("parallax_display_mode", display_mode)
-	GameManager.set_setting("parallax_height", height_scale)
-	GameManager.set_setting("parallax_min_layers", min_layers)
-	GameManager.set_setting("parallax_max_layers", max_layers)
-	GameManager.set_setting("parallax_uv_scale", uv_scale)
-	GameManager.set_setting("parallax_normal_strength", normal_strength)
-	GameManager.set_setting("parallax_roughness", roughness_val)
-	GameManager.set_setting("parallax_shadow_strength", shadow_strength)
-	GameManager.set_setting("parallax_self_shadow", self_shadow_enabled)
-	GameManager.set_setting("parallax_computed_normals", computed_normals)
-	GameManager.set_setting("parallax_mesh", current_mesh)
 
 
 # ─── Rock Preset ──────────────────────────────────
@@ -540,29 +432,25 @@ func _on_preset_selected(idx: int) -> void:
 
 func _on_mesh_selected(idx: int) -> void:
 	current_mesh = idx
-	GameManager.set_setting("parallax_mesh", idx)
 	_update_mesh_visibility()
 
 
 func _on_height_changed(value: float) -> void:
 	height_scale = value
-	height_value.text = "%.3f" % value
 	_apply_shader_settings()
 
 
 func _on_min_layers_changed(value: float) -> void:
 	min_layers = int(value)
-	min_layers_value.text = "%d" % min_layers
 	if min_layers > max_layers:
-		max_layers_slider.value = value
+		_max_layers_slider.value = value
 	_apply_shader_settings()
 
 
 func _on_max_layers_changed(value: float) -> void:
 	max_layers = int(value)
-	max_layers_value.text = "%d" % max_layers
 	if max_layers < min_layers:
-		min_layers_slider.value = value
+		_min_layers_slider.value = value
 	_apply_shader_settings()
 
 
@@ -573,25 +461,21 @@ func _on_render_mode_selected(idx: int) -> void:
 
 func _on_uv_scale_changed(value: float) -> void:
 	uv_scale = value
-	uv_scale_value.text = "%.1f" % value
 	_apply_shader_settings()
 
 
 func _on_normal_strength_changed(value: float) -> void:
 	normal_strength = value
-	normal_strength_value.text = "%.2f" % value
 	_apply_shader_settings()
 
 
 func _on_roughness_changed(value: float) -> void:
 	roughness_val = value
-	roughness_value.text = "%.2f" % value
 	_apply_shader_settings()
 
 
 func _on_shadow_strength_changed(value: float) -> void:
 	shadow_strength = value
-	shadow_strength_value.text = "%.2f" % value
 	_apply_shader_settings()
 
 
@@ -603,7 +487,3 @@ func _on_self_shadow_toggled(pressed: bool) -> void:
 func _on_computed_normals_toggled(pressed: bool) -> void:
 	computed_normals = pressed
 	_apply_shader_settings()
-
-
-func _on_back_pressed() -> void:
-	GameManager.go_to_menu()

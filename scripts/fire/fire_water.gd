@@ -24,17 +24,36 @@ extends RefCounted
 
 ## Droplet radius drives the SPH smoothing length; the paper's h_s range is
 ## 0.06-0.4 m (Tab. 3) and the neighbour search needs cell_size == h.
-const SPH_H := 0.2
+##
+## Sized against the RENDERED volume, not just the neighbourhood: a parcel occupies
+## a spacing^3 = (h/2)^3 cell of the surface the screen-space renderer reconstructs,
+## while it only carries DROPLET_MASS kilograms into the grid. At h = 0.2 m that was
+## 1e-3 m^3 of visible water per 0.025 kg, i.e. an effective 25 kg/m^3 -- the stream
+## looked forty times bigger than the water it actually delivered to evaporation.
+## Halving h cuts the parcel volume 8x and brings the ratio to ~5x. Going further
+## (h = 0.07 for a physical 1:1) costs 9M neighbour-grid cells and is not worth it.
+##
+## Neither the delivered kg/s nor the particle count moves with this: the emitter
+## frequency and DROPLET_MASS are untouched, and _stream_radius shrinks with
+## spacing^1.5, so the jet gets thinner rather than denser in parcels.
+const SPH_H := 0.1
 ## Mass one particle stands for, not the mass of one droplet: a 1 mm droplet is
-## 5e-7 kg. This is Fire-X Tab. 3 "Particle Emitter Parameter / Mass", whose range
-## is 0.1-1.0 kg; at the nozzle's default 60 Hz the low end is a 6 kg/s hose.
+## 5e-7 kg. Fire-X Tab. 3 "Particle Emitter Parameter / Mass" gives 0.1-1.0 kg.
+##
+## Held at a QUARTER of Tab. 3's low end, because the particle count is a rendering
+## decision here, not a physical one: the screen-space surface only resolves a
+## continuous stream when many parcels share it, and parcels cannot pack tighter
+## than the SPH rest spacing, so a denser-looking jet has to be a wider one with
+## more particles in it. Emitting 4x the particles at 1/4 the mass each leaves the
+## delivered kg/s -- and therefore the grid coupling, suppression and evaporation --
+## exactly where they were. water_return.comp's DRAIN_CUTOFF is scaled to match.
 ##
 ## It matters where the water goes rather than how much of it there is: the same
 ## 0.1 kg dropped as a single packed ball puts ~1000 kg/m^3 of liquid in one cell,
 ## and Eq. 32 then throttles the updraft hard enough to make the flame burn
 ## *hotter*. Fig. 8 makes the same point — a stream aimed at the top of a flame
 ## has "a limited extinguishing effect".
-const DROPLET_MASS := 0.1
+const DROPLET_MASS := 0.025
 const AMBIENT_T := 300.0
 
 var particle_count := 1024
@@ -60,6 +79,13 @@ var _jet_emitted := 0
 ## Mirrors FireGpuSolver.evaporation_enabled: mass is expected to leave when it is
 ## on, so the round-trip conservation check is only meaningful when it is off.
 var evaporation_active := false
+## Mirrors FireGpuSolver.liquid_drain_rate, applied by water_return.comp. Owned by
+## the solver so one slider drives it, but consumed here because the drain has to
+## run whether or not the evaporation stage does.
+var drain_rate := 0.2
+## Simulated seconds the drain covers, i.e. FireGpuSolver.sim_delta for this frame —
+## the same clock the grid stage used, not the frame delta.
+var step_dt := 0.0
 
 var sph: SphFluidSolver
 
@@ -175,7 +201,7 @@ func _init_sph(domain: Vector3) -> void:
 	# in form. The *numbers* still cannot be transcribed, for two reasons:
 	#  1. Kernel normalisation. The paper's density is the bare Clavet sum of
 	#     (1 - r/h)^2; this solver's is a SpikyPow2 kernel carrying a 15/(2.pi.h^5)
-	#     factor, so its rho is ~15/(2.pi.h^3) times larger (~300x at h = 0.2 m) and
+	#     factor, so its rho is ~15/(2.pi.h^3) times larger (~2400x at h = 0.1 m) and
 	#     a matching k_s would be that much smaller. Tab. 3's Stiffness 0.004-0.005
 	#     is defined against the bare sum, not this one.
 	#  2. Integration scheme. Clavet applies the pressure as a position displacement
@@ -189,14 +215,22 @@ func _init_sph(domain: Vector3) -> void:
 	# impact. These droplet-only values put the near term on top and add viscous
 	# cohesion so a jet lands as a puddle. They do not touch the shared solver used
 	# by the fluid demos.
+	# Near-dominant still (short-range incompressibility holds the puddle together
+	# rather than letting droplets interpenetrate), but far softer than the 240 that
+	# suited sphere-rendered droplets. A dense stream arriving at 10+ m/s onto an
+	# existing puddle turns that stiffness into an impact explosion — measured
+	# droplets thrown 4 m ABOVE the nozzle — and every airborne fragment renders as
+	# its own glassy ball.
 	sph.pressure_mult = 60.0
-	sph.near_pressure_mult = 240.0
+	sph.near_pressure_mult = 140.0
 	# Clavet's viscosity is a linear/quadratic impulse (Eq. 17, Tab. 3: Linear 0.0,
 	# Quadratic 0.4); this solver's is XSPH velocity smoothing, a different model,
 	# so the number is not the paper's 0.4 either. Raised from the demo's 0.14 for
 	# the cohesion a settling puddle needs; kept under 0.5, where XSPH goes unstable.
 	sph.viscosity_strength = 0.4
-	sph.collision_damping = 0.3
+	# Water arrives at the floor fast and should stay there and spread, not bounce:
+	# a lively restitution is what turns the impact ring into flying droplets.
+	sph.collision_damping = 0.6
 	# Spawn spacing feeds the rest-density estimate; at the droplet smoothing length
 	# it wants to be a fraction of h, not the demo's fixed 0.12 m.
 	sph.spacing = SPH_H * 0.5
@@ -259,11 +293,18 @@ func _image_uniform(binding: int, tex: RID) -> RDUniform:
 ## have.
 ##
 ## Render thread only.
-func emit_jet(delta: float) -> void:
+## [param rate_dt] is simulated time and sets HOW MANY particles leave the nozzle,
+## so the count does not drift with the frame rate. [param move_dt] is the frame
+## time the SPH integrator actually advances the droplets with, and sets WHERE they
+## are laid down. The two are not the same clock (FireGpuSolver.sim_delta quantises
+## and clamps), and using the simulated one for both spread each burst over only a
+## fraction of the distance the stream really travelled that frame, leaving a
+## periodic gap behind it — a row of golf balls instead of a jet.
+func emit_jet(rate_dt: float, move_dt: float) -> void:
 	if not initialized:
 		return
 
-	_jet_accum += delta * jet_frequency
+	_jet_accum += rate_dt * jet_frequency
 	var count := int(_jet_accum)
 	if count <= 0:
 		return
@@ -281,17 +322,42 @@ func emit_jet(delta: float) -> void:
 	if side.length_squared() < 1e-6:
 		side = dir.cross(Vector3.RIGHT)
 	side = side.normalized()
-	var up := dir.cross(side)
+	var up := dir.cross(side).normalized()
 	var half_angle := deg_to_rad(jet_spray_angle) * 0.5
+	# Size the mouth from the rate actually being emitted into the droplets' own
+	# clock, not the nominal frequency, so the stream carries rest density whatever
+	# the two clocks are doing.
+	var mouth := _stream_radius(float(count) / maxf(move_dt, 1e-5))
+	# How far the stream advances while this burst is emitted. The whole burst used
+	# to spawn at the nozzle point once per frame, which lays down a clump every
+	# v/fps metres — a row of golf balls rather than a stream. Staggering the burst
+	# across the travel makes the emission continuous in space.
+	var span := jet_velocity * move_dt
 
+	# The burst is laid out as ONE disc across the aim -- a slice of stream per frame,
+	# which is what a nozzle actually emits -- on a sunflower lattice.
+	#
+	# It has to be a lattice, not uniform random sampling. At rest density the slice
+	# has no slack at all (count parcels of spacing^3 exactly fill it), so random
+	# placement always produces pairs far closer than the rest spacing, and
+	# near-pressure (240) fires those apart at 20+ m/s: the golf balls flew UP, well
+	# above the nozzle. The sunflower keeps every pair near the ideal separation.
+	const GOLDEN_ANGLE := 2.39996322972865332
 	for i in count:
+		var fi := float(i) + 0.5
+		# sqrt keeps the disc evenly covered rather than crowding the centre.
+		var rr := mouth * sqrt(fi / float(count))
+		var ang := fi * GOLDEN_ANGLE
+		var lateral := (side * cos(ang) + up * sin(ang)) * rr
 		# Cone sampling: uniform azimuth, angle scaled by the square root so the
 		# cross-section fills evenly instead of clumping on the axis.
 		var phi := randf() * TAU
 		var theta := half_angle * sqrt(randf())
 		var d := (dir * cos(theta)
 			+ (side * cos(phi) + up * sin(phi)) * sin(theta)).normalized()
-		var p := jet_position + d * (jet_nozzle_radius * randf())
+		# Slight axial jitter breaks the rigid lattice without closing any pair up.
+		var p := jet_position + lateral \
+			+ dir * (span * (0.5 + (randf() - 0.5) * 0.3))
 		seed[i * 4 + 0] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z
@@ -322,6 +388,27 @@ func emit_jet(delta: float) -> void:
 	sph.active_count = particles_active
 	initial_mass = DROPLET_MASS * float(particles_active)
 	mass_measured_once = false
+
+
+## Radius the emitted stream needs so a burst arriving at [param rate] particles per
+## second lands at roughly the SPH rest spacing instead of on top of itself.
+##
+## Same lesson as [method spawn_droplets]: what detonates a spawn is start density,
+## not particle count. A cylinder of radius R moving at v carries pi.R^2.v cubic
+## metres per second, and one particle wants a spacing^3 cell of it, so holding
+## rate.spacing^3 = pi.R^2.v gives the mouth that delivers rest density. Emitting a
+## firehose through the paper's narrow nozzle instead packs several particles into
+## one smoothing radius, and near-pressure (240) throws them apart as golf balls.
+##
+## This is also why a denser-LOOKING jet is a wider one: parcels cannot be packed
+## below rest spacing, so the only way to put more of them in the stream is to give
+## the stream more cross-section.
+##
+## [member jet_nozzle_radius] stays the floor, so a slow trickle keeps a tight mouth.
+func _stream_radius(rate: float) -> float:
+	var s: float = sph.spacing
+	var v := maxf(jet_velocity, 0.5)
+	return maxf(jet_nozzle_radius, sqrt(rate * s * s * s / (PI * v)))
 
 
 ## Must run on the render thread, after [method init_render] has actually executed
@@ -373,6 +460,48 @@ func spawn_droplets(count: int, pos: Vector3, radius: float,
 	_jet_emitted = n
 
 
+## Drop every droplet on the floor, for a demo reset.
+##
+## Clearing the grid's liquid_scal is not enough on its own: water_gather rebuilds
+## that field from the particles every frame, so a reset that only wipes the grid
+## is undone before it is ever displayed. The particles are the state.
+##
+## The buffers are not shrunk, only banished below the world and zeroed in mass,
+## which is the same state water_return leaves a fully drained droplet in — the
+## scatter and the return both skip out-of-domain particles, so they cost nothing
+## beyond their MultiMesh instance until the emitter recycles their slot.
+##
+## Render thread only.
+func clear_droplets() -> void:
+	if not initialized:
+		return
+
+	var pos := PackedFloat32Array()
+	pos.resize(particle_count * 4)
+	var vel := PackedFloat32Array()
+	vel.resize(particle_count * 4)
+	for i in particle_count:
+		pos[i * 4 + 1] = -1000.0
+		pos[i * 4 + 3] = AMBIENT_T
+
+	var pos_bytes := pos.to_byte_array()
+	var vel_bytes := vel.to_byte_array()
+	for parity in 2:
+		_rd.buffer_update(sph.parity_positions_rid(parity), 0, pos_bytes.size(), pos_bytes)
+		_rd.buffer_update(sph.parity_velocities_rid(parity), 0, vel_bytes.size(), vel_bytes)
+
+	particles_active = 0
+	sph.active_count = 0
+	_jet_cursor = 0
+	_jet_emitted = 0
+	_jet_accum = 0.0
+	initial_mass = 0.0
+	measured_mass = 0.0
+	mass_error = 0.0
+	coupled_count = 0
+	mass_measured_once = false
+
+
 ## std430 rounds a push constant block up to a 16-byte multiple, and the driver
 ## rejects anything shorter than the rounded size.
 func _push_bytes(ints: PackedInt32Array, floats: PackedFloat32Array) -> PackedByteArray:
@@ -388,6 +517,16 @@ func _particle_push() -> PackedByteArray:
 		PackedInt32Array([particles_active, _grid_dims.x, _grid_dims.y, _grid_dims.z]),
 		PackedFloat32Array([_cell_size, _h_liquid,
 			_grid_origin.x, _grid_origin.y, _grid_origin.z]))
+
+
+## The scatter's block plus the drain the return applies to the particle mass. Both
+## pad to the same 48 bytes, so the two stages still share one dispatch size.
+func _return_push() -> PackedByteArray:
+	return _push_bytes(
+		PackedInt32Array([particles_active, _grid_dims.x, _grid_dims.y, _grid_dims.z]),
+		PackedFloat32Array([_cell_size, _h_liquid,
+			_grid_origin.x, _grid_origin.y, _grid_origin.z,
+			drain_rate, step_dt]))
 
 
 ## Advances the droplets themselves (Eq. 12-17). Runs before the scatter, so the
@@ -442,7 +581,7 @@ func return_render() -> void:
 	if not set_rid.is_valid():
 		return
 
-	var push := _particle_push()
+	var push := _return_push()
 	var cl := _rd.compute_list_begin()
 	_rd.compute_list_bind_compute_pipeline(cl, _pipeline_return)
 	_rd.compute_list_bind_uniform_set(cl, set_rid, 0)

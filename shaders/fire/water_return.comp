@@ -45,6 +45,10 @@ layout(push_constant, std430) uniform Params {
 	float origin_x;
 	float origin_y;
 	float origin_z;
+	// Only this stage declares these two; water_scatter shares _particle_push() and
+	// reads the prefix above. Both land in the same 48-byte padded block.
+	float drain_rate;
+	float dt;
 } params;
 
 void main() {
@@ -114,11 +118,27 @@ void main() {
 		}
 	}
 
-	// A droplet whose mass has drained to almost nothing (see the drainage term in
-	// fire_evaporate.comp) has effectively soaked away: banish it below the world so
-	// it stops rendering as a stray blob and drops out of the domain the next scatter
-	// skips. The SPH integrator then just lets it fall further, never to return.
-	const float DRAIN_CUTOFF = 0.004; // kg, 4% of a fresh droplet
+	// NON-PAPER drainage. A cold puddle can never reach T_B on its own, so the
+	// Eq. 26-28 evaporation stalls at d_rho = 0 and the droplets would sit there wet
+	// and suppressing combustion for good. This bleeds them off to the ground
+	// (run-off / soak-in) so a rekindled fire recovers.
+	//
+	// It is applied here rather than on the grid because it is the only route out of
+	// the simulation a droplet has, and the evaporation stage that used to own it is
+	// skipped whenever evaporation is toggled off — leaving the puddle immortal in
+	// precisely the mode with no other cleanup. Draining the particle mass directly
+	// also means the round trip stays exact: what leaves is what the grid no longer
+	// has to hand back next frame.
+	m_new *= max(0.0, 1.0 - params.drain_rate * params.dt);
+
+	// A droplet whose mass has drained to almost nothing has effectively soaked
+	// away: banish it below the world so it stops rendering as a stray blob and
+	// drops out of the domain the next scatter skips. The SPH integrator then just
+	// lets it fall further, never to return.
+	// Stays 4% of a fresh parcel: FireWater.DROPLET_MASS is 0.025 kg, sized so a
+	// dense stream renders as a surface without changing the delivered kg/s. An
+	// absolute cutoff would banish healthy droplets once the parcel mass shrank.
+	const float DRAIN_CUTOFF = 0.001; // kg, 4% of a fresh droplet
 	if (m_new < DRAIN_CUTOFF) {
 		part.positions[pidx].y = -1000.0;
 		vel.velocities[pidx].w = 0.0;

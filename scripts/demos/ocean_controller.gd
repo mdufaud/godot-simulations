@@ -139,9 +139,7 @@ func _setup_ui() -> void:
 	menu.add_slider("Time scale", 0.0, 2.0, time_scale, func(v): time_scale = v)
 	menu.add_separator()
 
-	menu.add_section("Objects")
-	menu.add_button("Throw crate", _throw_crate)
-	menu.add_separator()
+	menu.add_action("📦", "Throw", _throw_crate)
 
 	menu.add_section("Foam")
 	_add_solver_slider("Whitecap", 0.0, 2.0, "whitecap")
@@ -161,7 +159,7 @@ func _setup_ui() -> void:
 
 	menu.add_section("Performance")
 	menu.add_toggle("Amortize cascades", false, func(on): solver.amortize = on)
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_label("FFT map size")
 	menu.add_button("128", func(): _set_map_size(128))
 	menu.add_button("256", func(): _set_map_size(256))

@@ -548,17 +548,23 @@ func _setup_ui() -> void:
 		sun_auto_rotate = on
 	)
 
+	# Fluid actions are hidden until the fluid is enabled: without a solver they do nothing.
+	var pour_action: Button = menu.add_action("💧", "Pour", func() -> void:
+		if _fluid_started:
+			fluid.pour_at(aim_point())
+	)
+	var reset_action: Button = menu.add_action("↺", "Reset", _rebuild_fluid)
+	pour_action.visible = false
+	reset_action.visible = false
+
 	menu.add_section("Fluid")
 	menu.add_toggle("Enabled", false, func(on: bool) -> void:
 		fluid_enabled = on
 		_crosshair.visible = on
+		pour_action.visible = on
+		reset_action.visible = on
 		_rebuild_fluid()
 	)
-	menu.add_button("Pour here", func() -> void:
-		if _fluid_started:
-			fluid.pour_at(aim_point())
-	)
-	menu.add_button("Reset fluid", _rebuild_fluid)
 	menu.add_slider("Pour amount", 0.02, 0.5, 0.15, func(v: float) -> void:
 		if _fluid_started:
 			fluid.pour_fraction = v

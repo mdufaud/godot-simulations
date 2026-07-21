@@ -1554,7 +1554,7 @@ func _setup_ui() -> void:
 	menu.add_toggle("Vegetation shadows", true, _on_vegetation_shadows)
 	menu.add_toggle("SDFGI", true, func(on: bool):
 		world_env.environment.sdfgi_enabled = on)
-	menu.add_toggle("Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 
 
 func _on_wind_changed(v: float) -> void:
