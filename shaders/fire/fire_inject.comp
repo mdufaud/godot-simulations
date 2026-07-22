@@ -1,12 +1,29 @@
 // Scene interaction with the grid: one dispatch per queued event, the kind
 // arriving in params.dims.w.
-//   1 = fuel emitter, 2 = ignition source, 3 = water spray, 4 = smother
+//   1 = fuel emitter, 2 = ignition source, 3 = water spray, 4 = smother,
+//   5 = wood pile
 //
 // Fire-X drives its scenes with grid emitters carrying fuel/oxygen/nitrogen
 // mass fractions and a temperature in the 300-1500 K band (Tab. 3, "Grid
 // Emitter Parameter"), which is what modes 1 and 2 reproduce. There is no
 // ignition temperature in the model: a source simply has to be hot enough that
 // the Arrhenius rate outruns the radiative loss.
+//
+// Mode 5 is NON-PAPER: the same gas emitter as mode 1, one per log, batched into
+// a single dispatch off the config table so a twelve-log bed does not cost twelve
+// full-grid dispatches a frame.
+
+// Injected fuel displaces the local mixture rather than being added on top of
+// it, so the mass fractions stay normalised. Residuals are condensed soot and
+// are not part of the gas mixture, so they are left alone.
+void add_fuel(inout vec4 s, inout vec4 s2, float amount) {
+	float add = min(amount, 1.0 - s.y);
+	s.y += add;
+	float shrink = 1.0 - add;
+	s.z *= shrink;
+	s.w *= shrink;
+	s2.x *= shrink;
+}
 
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
@@ -28,6 +45,61 @@ void main() {
 		return;
 	}
 
+	vec4 s = imageLoad(scal_src, c);
+	vec4 s2 = imageLoad(scal2_src, c);
+	float t_amb = cfg.thermo.x;
+	float t_emit = cfg.misc.w; // emitter temperature, Tab. 3 range 300-1500 K
+
+	// Wood pile. The whole bed in one pass, from the config table: every log is
+	// its own little fuel emitter, so a bigger pile releases more volatiles and
+	// burns bigger without a single number changing anywhere else.
+	//
+	// The pilot temperature is per log and computed on the CPU (wood_pile.gd):
+	// it stands for the glowing char layer, which in a real wood fire burns
+	// alongside the flame rather than being lit by it. It follows how hard the
+	// log is gasifying, so a log the water has cooled stops holding its cells
+	// hot within a few seconds instead of re-lighting forever.
+	if (mode_v == 5) {
+		vec3 wc = cell_to_world(c);
+		float dt = params.event2.x;
+		for (int i = 0; i < MAX_LOGS; i++) {
+			float radius = cfg.wood[i].w;
+			if (radius <= 0.0) {
+				continue;
+			}
+			float dist = distance(wc, cfg.wood[i].xyz);
+			if (dist > radius) {
+				continue;
+			}
+			float falloff = 1.0 - dist / radius;
+			float rate = cfg.wood_rate[i].x;
+			float pilot = cfg.wood_rate[i].y;
+			if (rate > 0.0) {
+				// NON-PAPER: a solid bed cannot build the fuel-rich premixed charge
+				// a gas leak can, so the local fraction is capped near stoichiometric
+				// (Y_st ~ 0.055 for methane). Without this the bed accumulated fuel
+				// while cold and deflagrated it in one jet the instant it lit. Same
+				// displacement bookkeeping as add_fuel, inlined so modes 1/2/6 (gas)
+				// keep the uncapped path.
+				const float Y_WOOD_MAX = 0.08;
+				float add = min(rate * dt * falloff, max(Y_WOOD_MAX - s.y, 0.0));
+				s.y += add;
+				float shrink = 1.0 - add;
+				s.z *= shrink;
+				s.w *= shrink;
+				s2.x *= shrink;
+			}
+			// Pilot heats a wide shell around the log rather than a hot core, so the
+			// combustion wraps the wood and the raymarcher shows flame enveloping it.
+			if (pilot > 0.0 && falloff > 0.25) {
+				s.x = max(s.x, mix(t_amb, pilot, smoothstep(0.25, 0.9, falloff)));
+			}
+		}
+		imageStore(scal_src, c, s);
+		imageStore(scal2_src, c, s2);
+		return;
+	}
+
 	float radius = params.event.w;
 	float dist = distance(cell_to_world(c), params.event.xyz);
 	if (dist > radius) {
@@ -37,31 +109,9 @@ void main() {
 	float amount = params.event2.x;
 	int mode = params.dims.w;
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
-	float t_amb = cfg.thermo.x;
-	float t_emit = cfg.misc.w; // emitter temperature, Tab. 3 range 300-1500 K
-
 	if (mode == 1) {
-		// Fuel emitter. Injected fuel displaces the local mixture rather than
-		// being added on top of it, so the mass fractions stay normalised.
-		float add = min(amount * falloff, 1.0 - s.y);
-		s.y += add;
-		float shrink = 1.0 - add;
-		s.z *= shrink;
-		s.w *= shrink;
-		s2.x *= shrink;
-		// Pilot: the emitter core stays hot enough to keep the bed alight.
-		if (falloff > 0.8 && s.y > 0.05) {
-			s.x = max(s.x, t_emit);
-		}
+		add_fuel(s, s2, amount * falloff);
 	} else if (mode == 2) {
-		float add = min(amount * falloff, 1.0 - s.y);
-		s.y += add;
-		float shrink = 1.0 - add;
-		s.z *= shrink;
-		s.w *= shrink;
-		s2.x *= shrink;
 		s.x = max(s.x, mix(t_amb, t_emit, falloff));
 	} else if (mode == 3) {
 		// Water. Grid-side stand-in for the paper's SPH droplets: the latent

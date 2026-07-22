@@ -19,12 +19,14 @@ var _info_label: Label
 const SPAWN_HEIGHT := 12.0
 const SPAWN_RADIUS := 10.0
 const KILL_Y := -12.0
-const WALL_FADE_ALPHA := 0.12
-const WALL_FADE_DISTANCE := 2.0
+const KEY_LIGHT_ORBIT_RADIUS := 10.0
+const KEY_LIGHT_ORBIT_HEIGHT := 10.0
+const KEY_LIGHT_ORBIT_SPEED := 0.45
 
 var max_objects: int = 200
 var spawned_objects: Array[RigidBody3D] = []
-var _wall_fades: Array[Dictionary] = []
+var _camera_side_walls: Array[Dictionary] = []
+var _key_light_angle := 0.0
 
 # Material override values: -1 means "use per-object random"
 var roughness_override: float = -1.0
@@ -65,27 +67,27 @@ func _ready() -> void:
 	orbit_cam.auto_rotate_speed = 0.15
 	orbit_cam.min_distance = 5.0
 	orbit_cam.max_distance = 30.0
+	_update_key_light()
 
 	spawn_timer.timeout.connect(_on_spawn_timer_timeout)
 
 	_build_menu()
 
-	# Give each wall its own material so it can fade independently when the
-	# camera moves outside the room (walls no longer block the view)
 	for info: Array in [
-		[$WallBack/MeshInstance3D, Vector3(0, 0, -1)],
-		[$WallLeft/MeshInstance3D, Vector3(-1, 0, 0)],
-		[$WallRight/MeshInstance3D, Vector3(1, 0, 0)],
+		["WallBack/MeshInstance3D", Vector3(0, 0, -1)],
+		["WallLeft/MeshInstance3D", Vector3(-1, 0, 0)],
+		["WallRight/MeshInstance3D", Vector3(1, 0, 0)],
+		["WallFront/MeshInstance3D", Vector3(0, 0, 1)],
 	]:
-		var mesh: MeshInstance3D = info[0]
-		var mat: StandardMaterial3D = mesh.get_surface_override_material(0).duplicate()
-		mesh.set_surface_override_material(0, mat)
-		_wall_fades.append({"mesh": mesh, "normal": info[1], "mat": mat})
+		var mesh: MeshInstance3D = get_node_or_null(info[0]) as MeshInstance3D
+		if mesh == null:
+			continue
+		_camera_side_walls.append({"mesh": mesh, "normal": info[1]})
 
 
 func _build_menu() -> void:
 	var env := world_env.environment
-	menu.title = "🔮 SSR Physics Demo"
+	menu.title = "🔮 Space screen reflection"
 	_info_label = menu.add_label("Objects: 0")
 
 	menu.add_section("SSR")
@@ -115,7 +117,7 @@ func _build_menu() -> void:
 		omni_red.light_energy = v
 		omni_blue.light_energy = v
 		omni_warm.light_energy = v * 0.83)  # keep warm slightly dimmer
-	menu.add_slider("Spot Light", 0.0, 10.0, 4.0, func(v: float) -> void: spot_accent.light_energy = v)
+	menu.add_slider("Spot Light", 0.0, 10.0, 6.0, func(v: float) -> void: spot_accent.light_energy = v)
 	menu.add_toggle("Volumetric Fog", false, func(on: bool) -> void: env.volumetric_fog_enabled = on)
 
 	menu.add_section("Material")
@@ -125,29 +127,32 @@ func _build_menu() -> void:
 	menu.add_action("🧹", "Clear", _on_clear_pressed)
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	_info_label.text = "Objects: %d / %d" % [spawned_objects.size(), max_objects]
-	_update_wall_fade()
+	_update_key_light(delta)
+	_update_wall_visibility()
 	_cleanup_fallen_objects()
 
 
-func _update_wall_fade() -> void:
+func _update_key_light(delta: float = 0.0) -> void:
+	_key_light_angle = fmod(_key_light_angle + delta * KEY_LIGHT_ORBIT_SPEED, TAU)
+	spot_accent.position = Vector3(
+		cos(_key_light_angle) * KEY_LIGHT_ORBIT_RADIUS,
+		KEY_LIGHT_ORBIT_HEIGHT,
+		sin(_key_light_angle) * KEY_LIGHT_ORBIT_RADIUS
+	)
+	spot_accent.look_at(Vector3(0.0, 1.0, 0.0), Vector3.UP)
+
+
+func _update_wall_visibility() -> void:
 	var cam := orbit_cam.get_camera()
 	if cam == null:
 		return
 	var cam_pos := cam.global_position
-	for w in _wall_fades:
+	for w in _camera_side_walls:
 		var mesh: MeshInstance3D = w["mesh"]
 		var outside: float = (cam_pos - mesh.global_position).dot(w["normal"])
-		var alpha := clampf(1.0 - outside / WALL_FADE_DISTANCE, WALL_FADE_ALPHA, 1.0)
-		var mat: StandardMaterial3D = w["mat"]
-		# Keep the wall opaque (so SSR reflects it) unless it actually needs to fade
-		if alpha >= 0.99:
-			mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
-			mat.albedo_color.a = 1.0
-		else:
-			mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-			mat.albedo_color.a = alpha
+		mesh.visible = outside <= 0.0
 
 
 func _cleanup_fallen_objects() -> void:

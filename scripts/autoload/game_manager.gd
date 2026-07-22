@@ -23,8 +23,9 @@ var settings: Dictionary = {
 	"ocean_map_size": 256,
 
 	# SSR demo
-	"ssr_demo_max_objects": 200,
+	"ssr_demo_max_objects": 60,
 	"ssr_demo_spawn_rate": 0.25,
+	"ssr_demo_spawn_enabled": false,
 	
 	# Parallax demo
 	"parallax_height": 0.08,
@@ -80,7 +81,7 @@ const CATEGORIES: Array[Dictionary] = [
 ## Ordered list of demos shown on the main menu.
 ## To add a new demo, just append a {key, title, icon, category} entry here.
 const DEMOS: Array[Dictionary] = [
-	{key = "ssr_demo",      title = "SSR Physics Demo",     icon = "🔮", category = "rigid"},
+	{key = "ssr_demo",      title = "Screen space reflection",     icon = "🔮", category = "rigid"},
 	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓", category = "fluids"},
 	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles"},
 	{key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌", category = "particles"},

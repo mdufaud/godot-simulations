@@ -1,0 +1,47 @@
+// NON-PAPER: Smagorinsky sub-grid eddy viscosity nu_t = (Cs.h)^2 . |S|, with
+// |S| = sqrt(2 S_ij S_ij) the strain-rate magnitude. Standard coarse-grid fire
+// practice (FDS's default closure): at 0.2 m cells the turbulent entrainment
+// that dilutes a real plume is unresolved, so without this the Boussinesq
+// buoyancy accelerates the undiluted hot column into a ballistic jet. Written
+// once per cell into nu_t_tex; fire_diffusion samples it for both momentum and
+// scalar mixing rather than repeating the nine-gradient stencil per face.
+//
+// Like fire_curl, the strain lives at cell centres, reconstructed from the
+// face-averaged velocity — one geometry the solver already carries, and an
+// eddy-viscosity model is a closure, not a conservation law.
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (out_of_grid(c)) {
+		return;
+	}
+	if (!is_interior(c)) {
+		imageStore(nu_t_tex, c, vec4(0.0));
+		return;
+	}
+
+	float inv_h = params.cell.z;
+	float inv_2h = 0.5 * inv_h;
+
+	// Diagonal terms: compact differences across the cell's own faces (exact at
+	// the centre on a MAC grid).
+	float sxx = (imageLoad(u_src, c + ivec3(1, 0, 0)).r - imageLoad(u_src, c).r) * inv_h;
+	float syy = (imageLoad(v_src, c + ivec3(0, 1, 0)).r - imageLoad(v_src, c).r) * inv_h;
+	float szz = (imageLoad(w_src, c + ivec3(0, 0, 1)).r - imageLoad(w_src, c).r) * inv_h;
+
+	// Off-diagonal terms: central differences of the face-averaged velocity.
+	vec3 px = vel_at_cell(c + ivec3(1, 0, 0));
+	vec3 nx = vel_at_cell(c - ivec3(1, 0, 0));
+	vec3 py = vel_at_cell(c + ivec3(0, 1, 0));
+	vec3 ny = vel_at_cell(c - ivec3(0, 1, 0));
+	vec3 pz = vel_at_cell(c + ivec3(0, 0, 1));
+	vec3 nz = vel_at_cell(c - ivec3(0, 0, 1));
+	float sxy = 0.5 * ((px.y - nx.y) + (py.x - ny.x)) * inv_2h;
+	float sxz = 0.5 * ((px.z - nx.z) + (pz.x - nz.x)) * inv_2h;
+	float syz = 0.5 * ((py.z - ny.z) + (pz.y - nz.y)) * inv_2h;
+
+	float ss = sxx * sxx + syy * syy + szz * szz
+		+ 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
+	float cs_h = params.cell.w * params.cell.x;
+	imageStore(nu_t_tex, c, vec4(cs_h * cs_h * sqrt(2.0 * ss), 0.0, 0.0, 0.0));
+}

@@ -75,6 +75,7 @@ func _process(delta: float) -> void:
 			move_dir.z += _joystick.value.y
 
 		if move_dir != Vector3.ZERO:
+			auto_rotate = false
 			move_dir = move_dir.limit_length(1.0)
 			# Rotation relative to the camera's yaw (not pitch, to stay grounded)
 			var rotated := move_dir.rotated(Vector3.UP, deg_to_rad(yaw))
@@ -95,6 +96,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		var btn := event as InputEventMouseButton
 		if btn.button_index == MOUSE_BUTTON_LEFT:
 			_is_dragging = btn.pressed
+			if btn.pressed:
+				auto_rotate = false
 		elif enable_zoom:
 			# Block zoom when mouse hovers any UI control (panels, sliders, etc.)
 			if btn.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
@@ -102,11 +105,14 @@ func _unhandled_input(event: InputEvent) -> void:
 					return
 			if btn.button_index == MOUSE_BUTTON_WHEEL_UP:
 				distance = clampf(distance - zoom_speed, min_distance, max_distance)
+				auto_rotate = false
 			elif btn.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 				distance = clampf(distance + zoom_speed, min_distance, max_distance)
+				auto_rotate = false
 
 	elif event is InputEventMouseMotion and _is_dragging:
 		var motion := event as InputEventMouseMotion
+		auto_rotate = false
 		yaw -= motion.relative.x * rotation_speed
 		pitch = clampf(pitch - motion.relative.y * rotation_speed, min_pitch, max_pitch)
 
@@ -114,6 +120,7 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif event is InputEventScreenTouch:
 		var touch := event as InputEventScreenTouch
 		if touch.pressed:
+			auto_rotate = false
 			_touch_points[touch.index] = touch.position
 		else:
 			_touch_points.erase(touch.index)
@@ -128,6 +135,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	elif event is InputEventScreenDrag:
 		var drag := event as InputEventScreenDrag
+		auto_rotate = false
 		_touch_points[drag.index] = drag.position
 
 		if _touch_points.size() == 1:

@@ -37,7 +37,14 @@ void main() {
 	float c_o = rho * s.z / cfg.molar.x;
 
 	if (c_f > 1e-6 && c_o > 1e-6) {
-		v_c = cfg.kinetics.x * exp(-cfg.kinetics.y / temp)
+		// NON-PAPER flame holder: inside a glowing-char wood sphere the Arrhenius
+		// rate sees at least the pilot temperature (wood_pilot_at), which is what
+		// relights the bed's own volatiles on this coarse grid. ONLY the rate's
+		// exponential uses it — the energy update below keeps the real temperature,
+		// so no heat is injected: the released heat comes from consuming actual fuel
+		// and self-limits when the volatiles run out. Empty in gas mode.
+		float t_rate = max(temp, wood_pilot_at(cell_to_world(c)));
+		v_c = cfg.kinetics.x * exp(-cfg.kinetics.y / t_rate)
 			* pow(c_f, cfg.kinetics.z) * pow(c_o, cfg.kinetics.w);
 
 		// Neither reactant can go past depletion within one step. This is the

@@ -12,6 +12,20 @@
 // averaged from the two cells the face separates. Applying it to a cell-centred
 // vector and splitting afterwards would smear the force by half a cell.
 
+// NON-PAPER: the wind setting is the free stream at the standard 10 m reference
+// height, and what reaches the fire is the atmospheric boundary layer under it —
+// the log law u(y) = u_ref.ln(y/z0)/ln(10/z0), with z0 the roughness length of
+// open grass. Imposing the full speed at every height instead put the whole 2 m/s
+// across a bed sitting at 0.36 m and tore the flame off its pilot inside two
+// seconds (measured), which is not what a breeze does to a camp fire. The plume
+// still leans: at 6 m the profile is already at 0.91.
+float wind_profile(int cy) {
+	const float z0 = 0.03;
+	const float inv_ref = 1.0 / 5.809; // 1/ln(10/z0)
+	float y = (float(cy) + 0.5) * params.cell.x;
+	return max(log(y / z0), 0.0) * inv_ref;
+}
+
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
 	float dt = params.cell.y;
@@ -20,15 +34,20 @@ void main() {
 	ivec3 gmax = grid_max();
 	vec3 wind = cfg.wind.xyz;
 
+	// NON-PAPER: horizontal flow is damped inside the bed's wind shadow (see
+	// wood_shelter). rate is cfg.liquid2.w [1/s]; zero rate or an empty wood table
+	// (gas mode) leaves this a no-op. Only u and w — buoyancy on v must survive so
+	// the plume still rises and leans downwind above the logs.
+	float shelter_decay = exp(-cfg.liquid2.w * dt);
+
 	if (in_u(c)) {
 		float u = imageLoad(u_src, c).r * decay;
 		// Wind enters at the upwind faces; the interior picks it up by advection
 		// rather than being pushed as a body force.
-		if (wind.x > 0.0 && c.x == 0) {
-			u = wind.x;
-		} else if (wind.x < 0.0 && c.x == params.dims.x) {
-			u = wind.x;
+		if ((wind.x > 0.0 && c.x == 0) || (wind.x < 0.0 && c.x == params.dims.x)) {
+			u = wind.x * wind_profile(c.y);
 		}
+		u *= mix(1.0, shelter_decay, wood_shelter(u_face_to_world(c)));
 		imageStore(u_src, c, vec4(clamp(u, -50.0, 50.0), 0.0, 0.0, 0.0));
 	}
 
@@ -51,11 +70,10 @@ void main() {
 
 	if (in_w(c)) {
 		float w = imageLoad(w_src, c).r * decay;
-		if (wind.z > 0.0 && c.z == 0) {
-			w = wind.z;
-		} else if (wind.z < 0.0 && c.z == params.dims.z) {
-			w = wind.z;
+		if ((wind.z > 0.0 && c.z == 0) || (wind.z < 0.0 && c.z == params.dims.z)) {
+			w = wind.z * wind_profile(c.y);
 		}
+		w *= mix(1.0, shelter_decay, wood_shelter(w_face_to_world(c)));
 		imageStore(w_src, c, vec4(clamp(w, -50.0, 50.0), 0.0, 0.0, 0.0));
 	}
 }

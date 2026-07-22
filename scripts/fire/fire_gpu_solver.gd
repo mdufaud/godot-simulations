@@ -15,8 +15,8 @@ extends RefCounted
 const SHADER_DIR := "res://shaders/fire/"
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
-	"combustion", "diffusion", "evaporate", "evapapply", "divergence", "pressure",
-	"project", "display",
+	"combustion", "strain", "diffusion", "evaporate", "evapapply", "divergence",
+	"pressure", "project", "display",
 ]
 ## Stages that touch the staggered velocity faces, and so must be dispatched
 ## over the face grid (dims + 1 on every axis) rather than the cell grid. Each
@@ -26,10 +26,17 @@ const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
 	"diffusion", "evapapply", "project"]
 ## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
 const WG := Vector3i(8, 8, 4)
-const STATS_WORDS := 11
-const CONFIG_VEC4S := 12
+## Wood emitters the campfire can hold. Each one costs a slot in the config tail
+## and a distance test per cell in fire_display; keep it in step with the
+## MAX_LOGS define in fire_common.comp.
+const MAX_LOGS := 12
+## 11 reduced scalars, then one probed gas temperature per wood emitter.
+const STATS_WORDS := 11 + MAX_LOGS
+## 12 physical blocks, then the wood tail: (pos, radius) and (rate, -, -, -).
+const CONFIG_VEC4S := 12 + 2 * MAX_LOGS
 
-enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4 }
+enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
+	EVENT_WOOD = 5 }
 
 ## Concentration units the Arrhenius pre-exponential factor is expressed in.
 ## Westbrook & Dryer Tab. I states "Units are cm-sec-mole-kcal-Kelvins", so the
@@ -125,7 +132,13 @@ var vorticity_temperature_lo := 301.0 ## Fire-X Tab. 3
 var wind := Vector3.ZERO ## NON-PAPER: inflow boundary condition for the demo
 var gravity := 9.81 ## Buoyancy magnitude in Eq. 1
 var kinematic_viscosity := 1.5e-5 ## NON-PAPER: air at ambient, Eq. 1 nu
+var smagorinsky_cs := 0.17 ## NON-PAPER: sub-grid turbulence constant, 0 = disabled
 var drag := 0.0 ## NON-PAPER: stability aid, 0 = disabled
+## NON-PAPER: how fast the wood bed damps horizontal flow in its own wind shadow
+## [1/s], so a breeze leans the plume instead of tearing the flame off the bed.
+## Only acts inside the wood emitter spheres (see wood_shelter in fire_common),
+## so it is a no-op in gas mode. 0 disables it.
+var wood_shelter_rate := 8.0
 var oxygen_replenish := 6.0 ## NON-PAPER: open-boundary inflow rate [1/s]
 var residual_dissipation := 0.03 ## NON-PAPER: soot settling in cold cells
 ## Evaporation (Eq. 9-11, 26-32). Water at 1 atm, from the NIST Chemistry
@@ -183,6 +196,11 @@ var _groups_face := Vector3i.ZERO
 
 var _events: Array[Dictionary] = []
 var _events_mutex := Mutex.new()
+## Wood emitters, flattened as the config tail expects: eight floats per slot,
+## (pos.xyz, radius) then (rate, 0, 0, 0). A zero radius marks a free slot.
+var _wood := PackedFloat32Array()
+var _wood_mutex := Mutex.new()
+var _wood_any := false
 var _stats := PackedInt64Array()
 var _stats_mutex := Mutex.new()
 var _stats_pending := false
@@ -192,6 +210,7 @@ var _timings_mutex := Mutex.new()
 
 func _init() -> void:
 	_stats.resize(STATS_WORDS)
+	_wood.resize(MAX_LOGS * 8)
 
 
 func get_display_tex_rid() -> RID:
@@ -234,13 +253,47 @@ func sim_delta(delta: float) -> float:
 
 ## Queue a grid interaction; consumed by the next [method step_render].
 ## Safe to call from the main thread.
+##
 func push_event(mode: int, position: Vector3, radius: float, amount: float) -> void:
 	_events_mutex.lock()
 	# Bounded: the caller queues one emitter event per frame, so an unconsumed
 	# queue means the solver never came up and events would pile up forever.
 	if _events.size() < 64:
-		_events.append({"mode": mode, "pos": position, "radius": radius, "amount": amount})
+		_events.append({"mode": mode, "pos": position, "radius": radius,
+			"amount": amount})
 	_events_mutex.unlock()
+
+
+## Replace the whole set of wood emitters, as
+## [code]{pos, radius, rate, pilot}[/code] dictionaries. Rates are fuel mass
+## fraction per simulated second, the same unit the gas emitter's amount is in;
+## [code]pilot[/code] is the glowing char surface temperature in kelvins, 0 for a
+## log that is not burning.
+##
+## They are uploaded with the config rather than queued as events, so the entire
+## pile costs ONE inject dispatch instead of one per log — and the same table
+## doubles as the probe list fire_display reduces the local gas temperature into,
+## which is what drives the pyrolysis on the CPU side. A log with a zero rate
+## still needs its slot: that is how a cold log gets a temperature to heat up by.
+##
+## Safe to call from the main thread.
+func set_wood_emitters(emitters: Array) -> void:
+	var flat := PackedFloat32Array()
+	flat.resize(MAX_LOGS * 8)
+	var count := mini(emitters.size(), MAX_LOGS)
+	for i in count:
+		var e: Dictionary = emitters[i]
+		var p: Vector3 = e["pos"]
+		flat[i * 4 + 0] = p.x
+		flat[i * 4 + 1] = p.y
+		flat[i * 4 + 2] = p.z
+		flat[i * 4 + 3] = e["radius"]
+		flat[MAX_LOGS * 4 + i * 4] = e["rate"]
+		flat[MAX_LOGS * 4 + i * 4 + 1] = e["pilot"]
+	_wood_mutex.lock()
+	_wood = flat
+	_wood_any = count > 0
+	_wood_mutex.unlock()
 
 
 ## Last reduced frame. Safe to call from the main thread.
@@ -250,7 +303,15 @@ func get_stats() -> Dictionary:
 	_stats_mutex.unlock()
 	var region := maxf(float(s[5]), 1.0)
 	var column := maxf(float(s[7]), 1.0)
+	# Peak gas temperature inside each wood emitter's sphere over the last
+	# substep, in kelvins. This is what couples the pyrolysis to the flame the
+	# solver actually produced rather than to a global scalar.
+	var wood_temps := PackedFloat32Array()
+	wood_temps.resize(MAX_LOGS)
+	for i in MAX_LOGS:
+		wood_temps[i] = float(s[11 + i])
 	return {
+		"wood_temperatures": wood_temps,
 		"max_temperature": float(s[0]),
 		"total_reaction": float(s[1]) * 0.001,
 		"max_reaction": float(s[2]) * 0.001,
@@ -389,7 +450,7 @@ func _create_textures() -> void:
 				_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, face_dims),
 				RDTextureView.new(), [])
 
-	for key in ["press_a", "press_b", "diverg"]:
+	for key in ["press_a", "press_b", "diverg", "nu_t"]:
 		_tex[key] = _rd.texture_create(
 			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, grid_dims),
 			RDTextureView.new(), [])
@@ -433,7 +494,8 @@ func clear_fields() -> void:
 ## Every field that starts at zero: still air, no pressure, nothing rendered.
 func _zeroed_keys() -> Array:
 	var keys := ["scal2_a", "scal2_b", "scal_fwd", "scal2_fwd", "curl",
-		"press_a", "press_b", "diverg", "display", "liquid_scal", "liquid_vel"]
+		"press_a", "press_b", "diverg", "display", "liquid_scal", "liquid_vel",
+		"nu_t"]
 	for axis in "uvw":
 		for suffix in ["_a", "_b", "_fwd"]:
 			keys.append(axis + suffix)
@@ -455,7 +517,7 @@ func _build_uniform_sets() -> void:
 		2: "scal_a", 3: "scal_b", 5: "scal_fwd",
 		12: "scal2_a", 13: "scal2_b", 14: "scal2_fwd",
 		6: "curl", 7: "press_a", 8: "press_b", 9: "diverg", 10: "display",
-		22: "liquid_scal", 23: "liquid_vel",
+		22: "liquid_scal", 23: "liquid_vel", 24: "nu_t",
 	}
 	var fields_flipped := fields.duplicate()
 	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
@@ -524,6 +586,15 @@ func step_render(delta: float) -> void:
 			for e in events:
 				_dispatch(cl, "inject", _parity,
 					_push_constant(e["mode"], e["pos"], e["radius"], e["amount"]))
+		# The whole wood pile in one dispatch per substep, reading its table from
+		# the config buffer. Amount is one timestep's worth, so the fuel budget over
+		# the frame is unchanged; running it every substep instead of once re-asserts
+		# the pilot temperature floor each step rather than letting it decay for the
+		# 1-3 substeps between injections, which is what let a gust snuff the flame
+		# before the next injection could hold it.
+		if _wood_any:
+			_dispatch(cl, "inject", _parity, _push_constant(EVENT_WOOD,
+				Vector3.ZERO, 1.0, timestep))
 		_substep(cl)
 
 	_rd.compute_list_end()
@@ -554,7 +625,10 @@ func _substep(cl: int) -> void:
 	# 18. Combustion, in place.
 	_dispatch(cl, "combustion", p, pc)
 
-	# 19-20. Diffusion + thermal radiation: also a stencil, so it swaps again.
+	# 19-20. Sub-grid eddy viscosity (NON-PAPER), then diffusion + thermal
+	# radiation. Both stencils; diffusion swaps parity. strain always runs
+	# (writes ~0 when Cs = 0) so a live Cs change never leaves stale nu_t behind.
+	_dispatch(cl, "strain", p, pc)
 	_dispatch(cl, "diffusion", p, pc)
 	p = 1 - p
 
@@ -607,15 +681,12 @@ func _push_constant(mode: int, pos: Vector3, radius: float, amount: float) -> Pa
 	pc.encode_float(16, cell_size)
 	pc.encode_float(20, timestep)
 	pc.encode_float(24, 1.0 / cell_size)
-	pc.encode_float(28, 0.0)
+	pc.encode_float(28, smagorinsky_cs)
 	pc.encode_float(32, pos.x)
 	pc.encode_float(36, pos.y)
 	pc.encode_float(40, pos.z)
 	pc.encode_float(44, radius)
 	pc.encode_float(48, amount)
-	pc.encode_float(52, 0.0)
-	pc.encode_float(56, 0.0)
-	pc.encode_float(60, 0.0)
 	return pc
 
 
@@ -680,13 +751,21 @@ func _upload_config() -> void:
 	v[41] = latent_heat
 	v[42] = liquid_heat_capacity
 	v[43] = droplet_density
-	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, unused.
-	# The drain moved to water_return.comp, which reads liquid_drain_rate through
-	# FireWater's push constant instead — it has to run on frames where the
-	# evaporation stage does not.
+	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, wood
+	# shelter rate. The drain moved to water_return.comp, which reads
+	# liquid_drain_rate through FireWater's push constant instead — it has to run on
+	# frames where the evaporation stage does not.
 	v[44] = droplet_diameter
 	v[45] = droplet_heat_transfer
 	v[46] = water_suppression
+	v[47] = wood_shelter_rate
+
+	# Wood tail: the emitter/probe table, read by fire_inject (mode 5) and by
+	# fire_display's temperature probes.
+	_wood_mutex.lock()
+	for i in _wood.size():
+		v[48 + i] = _wood[i]
+	_wood_mutex.unlock()
 
 	_rd.buffer_update(_config_buf, 0, v.size() * 4, v.to_byte_array())
 

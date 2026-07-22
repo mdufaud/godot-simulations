@@ -1,5 +1,11 @@
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
 
+// Wood emitter slots, in step with FireGpuSolver.MAX_LOGS. The stats buffer is
+// eleven reduced scalars followed by one probed gas temperature per slot, and
+// fire_advect clears the whole run at the head of every substep.
+#define MAX_LOGS 12
+#define STATS_WORDS (11 + MAX_LOGS)
+
 // Field textures ping-pong: *_src is the current state, *_dst receives the
 // advected result, after which the solver flips parity.
 //   vel   = (u.xyz, unused)
@@ -54,6 +60,13 @@ layout(rgba32f, set = 0, binding = 14) uniform restrict image3D scal2_fwd;
 layout(rgba32f, set = 0, binding = 22) uniform restrict image3D liquid_scal;
 layout(rgba32f, set = 0, binding = 23) uniform restrict image3D liquid_vel;
 
+// NON-PAPER: Smagorinsky sub-grid eddy viscosity [m^2/s] at cell centres, written
+// by fire_strain and read by fire_diffusion. At 0.2 m cells the turbulent
+// entrainment that would dilute a real plume is unresolved, so pure Boussinesq
+// buoyancy keeps accelerating the undiluted hot column into a jet; this closure
+// (FDS's default) supplies the missing mixing.
+layout(r32f, set = 0, binding = 24) uniform restrict image3D nu_t_tex;
+
 // Physical constants, uploaded once per frame. Kept out of the push constant
 // block because the fuel table alone exceeds the 128-byte guaranteed limit.
 layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
@@ -69,12 +82,21 @@ layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
 	vec4 misc; // o2_replenish, display_temperature, reaction_reference, emitter_T
 	vec4 liquid; // T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
 	vec4 liquid2; // d_d [m], h_conv [W/(m^2.K)], wet_suppression, unused  Tab. 3 / INFERRED
+	// Wood emitters (campfire room). One slot per log: where it is and how wide
+	// its gas release is, then how much it releases. A radius of zero is a free
+	// slot. NON-PAPER: Fire-X only has the gas grid emitter of Tab. 3; the solid
+	// fuel bed that feeds it lives on the CPU (see wood_pile.gd), and these are
+	// the two directions that couple the two — the release goes down through
+	// fire_inject (mode 5), the gas temperature that drives it comes back up
+	// through fire_display's probes.
+	vec4 wood[MAX_LOGS]; // pos.xyz, radius [m]
+	vec4 wood_rate[MAX_LOGS]; // Y_fuel per simulated second, unused.yzw
 }
 cfg;
 
 layout(push_constant, std430) uniform Params {
 	ivec4 dims; // xyz = grid dims, w = event mode
-	vec4 cell; // cell size, dt, 1/cell size, unused
+	vec4 cell; // cell size, dt, 1/cell size, smagorinsky Cs
 	vec4 event; // xyz = world position, w = radius
 	vec4 event2; // x = amount, yzw unused
 }
@@ -100,6 +122,66 @@ bool is_interior(ivec3 c) {
 vec3 cell_to_world(ivec3 c) {
 	vec3 half_xz = vec3(params.dims.x, 0.0, params.dims.z) * params.cell.x * 0.5;
 	return (vec3(c) + vec3(0.5)) * params.cell.x - half_xz;
+}
+
+// NON-PAPER: the wood bed shelters its own flame base. The logs are a porous
+// obstacle and the volatile layer lives in their wind shadow, so fire_forces
+// damps the horizontal flow by this 0..1 weight over slightly enlarged emitter
+// spheres — a breeze then leans the plume without tearing it off the pilot. The
+// wood table is empty in gas mode (all radii zero), so this returns 0 there and
+// every caller is a no-op.
+float wood_shelter(vec3 wp) {
+	// AABB reject: the campfire bed sits on the floor, so nothing above this can be
+	// inside a log sphere. Skips the per-log loop for ~all of the tall face grid.
+	if (wp.y > 3.0) {
+		return 0.0;
+	}
+	float sh = 0.0;
+	for (int i = 0; i < MAX_LOGS; i++) {
+		float r = cfg.wood[i].w;
+		if (r <= 0.0) {
+			continue;
+		}
+		sh = max(sh, 1.0 - distance(wp, cfg.wood[i].xyz) / (r * 1.4));
+	}
+	return clamp(sh, 0.0, 1.0);
+}
+
+// NON-PAPER flame-holder temperature [K] anchored at wp by the wood bed, else 0.
+// fire_combustion evaluates its Arrhenius rate at no less than this, which is
+// what lets the bed light and relight its own volatiles — the one behaviour the
+// pure model cannot reach on a 0.2 m grid, where the mixing dilutes them below
+// flammability first (see wood_pile.gd).
+//
+// A log anchors the flame while it is GASIFYING (rate > 0), not only once its
+// char glows: without the rate branch the holder cannot bootstrap combustion at
+// all, because the char only heats past its glow threshold once a flame already
+// exists (measured — the bed died at react = 0, char stuck at ~610 K). WOOD_HOLD_T
+// crosses the methane Arrhenius knee, and the release then self-amplifies to real
+// flame temperature; the per-cell fuel cap in fire_inject keeps it from jetting.
+// A wet log stops gasifying (rate -> 0) and its char cools, so both terms fall to
+// zero and water still puts the fire out. Empty in gas mode (all radii zero).
+const float WOOD_HOLD_T = 1400.0;
+float wood_pilot_at(vec3 wp) {
+	// AABB reject (see wood_shelter): the bed is on the floor.
+	if (wp.y > 3.0) {
+		return 0.0;
+	}
+	float p = 0.0;
+	for (int i = 0; i < MAX_LOGS; i++) {
+		if (cfg.wood[i].w <= 0.0) {
+			continue;
+		}
+		float rate = cfg.wood_rate[i].x;
+		float pilot = cfg.wood_rate[i].y;
+		if (rate <= 0.0 && pilot <= 0.0) {
+			continue;
+		}
+		if (distance(wp, cfg.wood[i].xyz) < cfg.wood[i].w) {
+			p = max(p, max((rate > 0.0) ? WOOD_HOLD_T : 0.0, pilot));
+		}
+	}
+	return p;
 }
 
 // =========================================================================

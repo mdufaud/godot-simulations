@@ -69,12 +69,13 @@ mouse_filter = 2
 horizontal_scroll_mode = 0
 vertical_scroll_mode = 3
 
-[node name="ActionBar" type="VBoxContainer" parent="BottomRight"]
+[node name="ActionBar" type="GridContainer" parent="BottomRight"]
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 10
-alignment = 2
-theme_override_constants/separation = 6
+columns = 1
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 6
 
 [node name="Panel" type="PanelContainer" parent="."]
 visible = false
@@ -91,6 +92,16 @@ offset_bottom = -20.0
 grow_horizontal = 2
 grow_vertical = 2
 theme_override_styles/panel = SubResource("StyleBoxFlat_panel")
+
+[node name="FPSLabel" type="Label" parent="."]
+layout_mode = 0
+offset_left = 20.0
+offset_top = 20.0
+offset_right = 80.0
+offset_bottom = 50.0
+mouse_filter = 2
+theme_override_font_sizes/font_size = 18
+text = "60"
 
 [node name="VBox" type="VBoxContainer" parent="Panel"]
 layout_mode = 2
@@ -110,10 +121,6 @@ custom_minimum_size = Vector2(40, 40)
 layout_mode = 2
 theme_override_font_sizes/font_size = 20
 text = "✕"
-
-[node name="FPSLabel" type="Label" parent="Panel/VBox"]
-layout_mode = 2
-text = "FPS: 60"
 
 [node name="HSeparator" type="HSeparator" parent="Panel/VBox"]
 layout_mode = 2

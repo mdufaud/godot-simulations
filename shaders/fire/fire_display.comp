@@ -58,6 +58,20 @@ void main() {
 		atomicAdd(stats.data[5], 1u);
 	}
 
+	// Wood probes: the peak gas temperature inside each log's emitter sphere.
+	// The CPU pyrolysis model drives the whole campfire off these, so they have
+	// to measure the flame this solver produced, not a global maximum — a log at
+	// the edge of the bed is metres of cold air away from the plume core and must
+	// stay unlit. Free here: this stage already visits every cell, and the async
+	// stats readback already in place carries the values back.
+	vec3 wc = cell_to_world(c);
+	for (int i = 0; i < MAX_LOGS; i++) {
+		float r = cfg.wood[i].w;
+		if (r > 0.0 && distance(wc, cfg.wood[i].xyz) <= r) {
+			atomicMax(stats.data[11 + i], uint(max(s.x, 0.0)));
+		}
+	}
+
 	// Mass-fraction closure probe: sum over the burner column, read back as a
 	// conservation check (should hold at 1.0 with default product coefficients).
 	if (c.x == centre.x && c.z == centre.z) {

@@ -31,18 +31,32 @@
 	imageStore(p_dst, c, vec4(cur_, 0.0, 0.0, 0.0)); \
 }
 
+// NON-PAPER: the face diffusion coefficient is the molecular nu plus the
+// Smagorinsky eddy viscosity averaged from the two cells the face separates,
+// as nu.dt/h^2 and clamped to the 3D explicit-stability limit. Indices are
+// clamped so boundary faces (copied through anyway) never read out of grid.
+float face_alpha(ivec3 ca, ivec3 cb, float base) {
+	ivec3 gmax = grid_max();
+	float nut = 0.5 * (imageLoad(nu_t_tex, clamp(ca, ivec3(0), gmax)).r
+		+ imageLoad(nu_t_tex, clamp(cb, ivec3(0), gmax)).r);
+	return min(base + nut * params.cell.y * params.cell.z * params.cell.z, 0.16);
+}
+
 void main() {
 	ivec3 c = ivec3(gl_GlobalInvocationID);
 
-	float nu = min(cfg.transport.w * params.cell.y * params.cell.z * params.cell.z, 0.16);
+	float base = cfg.transport.w * params.cell.y * params.cell.z * params.cell.z;
 	if (in_u(c)) {
-		DIFFUSE_FACE(u_src, u_dst, u_dims(), nu);
+		float a_u = face_alpha(c - ivec3(1, 0, 0), c, base);
+		DIFFUSE_FACE(u_src, u_dst, u_dims(), a_u);
 	}
 	if (in_v(c)) {
-		DIFFUSE_FACE(v_src, v_dst, v_dims(), nu);
+		float a_v = face_alpha(c - ivec3(0, 1, 0), c, base);
+		DIFFUSE_FACE(v_src, v_dst, v_dims(), a_v);
 	}
 	if (in_w(c)) {
-		DIFFUSE_FACE(w_src, w_dst, w_dims(), nu);
+		float a_w = face_alpha(c - ivec3(0, 0, 1), c, base);
+		DIFFUSE_FACE(w_src, w_dst, w_dims(), a_w);
 	}
 
 	if (out_of_grid(c)) {
@@ -70,13 +84,21 @@ void main() {
 		// physical coefficients land around 2e-5, i.e. thousands of times below
 		// the limit — real flames at this scale are advection dominated — but
 		// the clamp keeps a user-supplied value from detonating the field.
+		// NON-PAPER: turbulent scalar mixing on top of the molecular coefficients,
+		// alpha_t = nu_t / Pr_t with Pr_t = Sc_t = 0.7. Mixing O2 into the fuel
+		// column completes combustion lower and shortens the flame. The residual
+		// soot marker (s2.y) keeps molecular-only diffusion — turbulent smearing
+		// would wash out the smoke appearance.
 		float rho = gas_density(s, s2);
-		float alpha_t = min(cfg.fuel.w / (rho * mixture_cp(s, s2)) * dt * inv_h2, 0.16);
-		float alpha_y = min(cfg.coeffs.x * dt * inv_h2, 0.16);
+		float turb = imageLoad(nu_t_tex, c).r * (1.0 / 0.7) * dt * inv_h2;
+		float alpha_t = min(cfg.fuel.w / (rho * mixture_cp(s, s2)) * dt * inv_h2 + turb, 0.16);
+		float alpha_y = min(cfg.coeffs.x * dt * inv_h2 + turb, 0.16);
+		float alpha_r = min(cfg.coeffs.x * dt * inv_h2, 0.16);
 
 		s.x += alpha_t * lap_s.x;
 		s.yzw += alpha_y * lap_s.yzw;
-		s2.xy += alpha_y * lap_s2.xy;
+		s2.x += alpha_y * lap_s2.x;
+		s2.y += alpha_r * lap_s2.y;
 	}
 
 	// Radiative exchange (Algorithm 1 line 20).

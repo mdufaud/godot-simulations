@@ -516,6 +516,25 @@ func clear_droplets() -> void:
 	mass_measured_once = false
 
 
+## Drop every droplet on the floor, without touching the buffers.
+##
+## Nothing has to be cleared: every pass and the renderer alike walk only the
+## first [member particles_active] slots, so zeroing the count retires the whole
+## population and the next emission overwrites the stale positions in place.
+## Used when the demo swaps rooms, so the previous room's puddle does not follow
+## the player into the next one.
+func reset_droplets() -> void:
+	particles_active = 0
+	if sph != null:
+		sph.active_count = 0
+	_jet_emitted = 0
+	_jet_cursor = 0
+	_jet_accum = 0.0
+	initial_mass = 0.0
+	measured_mass = 0.0
+	mass_measured_once = false
+
+
 ## std430 rounds a push constant block up to a 16-byte multiple, and the driver
 ## rejects anything shorter than the rounded size.
 func _push_bytes(ints: PackedInt32Array, floats: PackedFloat32Array) -> PackedByteArray:

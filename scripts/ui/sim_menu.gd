@@ -20,11 +20,11 @@ signal panel_toggled(open: bool)
 @onready var _gear_button: Button = $TopRight/GearButton
 @onready var _debug_strip: VBoxContainer = $TopRight/DebugStrip
 @onready var _action_lane: ScrollContainer = $BottomRight
-@onready var _action_bar: VBoxContainer = $BottomRight/ActionBar
+@onready var _action_bar: GridContainer = $BottomRight/ActionBar
 @onready var _panel: PanelContainer = $Panel
 @onready var _title_label: Label = $Panel/VBox/Header/TitleLabel
 @onready var _close_button: Button = $Panel/VBox/Header/CloseButton
-@onready var _fps_label: Label = $Panel/VBox/FPSLabel
+@onready var _fps_label: Label = $FPSLabel
 @onready var _content: VBoxContainer = $Panel/VBox/Scroll/Margin/Content
 @onready var _reset_button: Button = $Panel/VBox/Footer/ResetButton
 
@@ -41,6 +41,12 @@ var _entries: Dictionary = {}
 var _section: String = "General"
 var _restored := false
 var _reset_dialog: ConfirmationDialog = null
+var _actions: Array[Button] = []
+var _action_shortcuts: Dictionary = {}
+var _action_layout_key := ""
+
+const ACTION_BUTTON_SIZE := Vector2(56.0, 52.0)
+const AZERTY_ACTION_KEYS := "&é\"'(-è_ç"
 
 # Cached styleboxes so SimMenu's flat look doesn't inherit the chunky main-menu theme.
 var _sb_section: StyleBoxFlat
@@ -93,16 +99,28 @@ func _layout_panel() -> void:
 	_panel.offset_bottom = -20.0
 
 
-## The action lane shares the right column with the back/gear/debug strip: it spans
-## whatever is left under that strip, so a long action list scrolls instead of
-## sliding under the gear.
 func _layout_action_lane() -> void:
 	var top_strip: Control = $TopRight
 	var top: float = top_strip.position.y + top_strip.size.y + 12.0
-	_action_lane.offset_top = -maxf(120.0, get_viewport_rect().size.y - top)
-	# More actions than the lane can show: keep the bottom of the strip in view (it is
-	# the anchored edge), the overflow scrolls up.
-	_action_lane.scroll_vertical = int(_action_bar.get_combined_minimum_size().y)
+	var vp_size := get_viewport_rect().size
+	var available_height := maxf(120.0, vp_size.y - top - 20.0)
+	_action_bar.columns = 1
+	var one_column_height := _action_bar.get_combined_minimum_size().y
+	var touch_ui := _is_touch_ui()
+	if touch_ui and one_column_height > available_height:
+		_action_bar.columns = 2
+
+	var action_width := 56.0 if _action_bar.columns == 1 else 118.0
+	var max_width := maxf(56.0, vp_size.x - 40.0)
+	action_width = minf(action_width, max_width)
+	_action_lane.offset_left = -action_width - 20.0
+	_action_lane.offset_right = -20.0
+	var action_height := _action_bar.get_combined_minimum_size().y
+	var lane_height := minf(maxf(120.0, action_height), available_height)
+	_action_lane.offset_top = -lane_height - 20.0
+	_action_lane.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED if touch_ui \
+		else ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	_action_lane.scroll_vertical = 0 if touch_ui else int(action_height)
 
 
 func _host() -> Node:
@@ -187,7 +205,75 @@ func _register(label_text: String, node: Control, cb: Callable, kind: String, de
 
 
 func _process(_delta: float) -> void:
-	_fps_label.text = "FPS: %d" % Engine.get_frames_per_second()
+	_fps_label.text = "%d" % Engine.get_frames_per_second()
+	var vp_size := get_viewport_rect().size
+	var layout_key := "%d:%d:%s" % [int(vp_size.x), int(vp_size.y), _visible_action_signature()]
+	if layout_key != _action_layout_key:
+		_action_layout_key = layout_key
+		_update_action_shortcuts()
+		_layout_action_lane.call_deferred()
+
+
+func _is_touch_ui() -> bool:
+	return OS.has_feature("mobile") or OS.get_environment("FORCE_TOUCH_UI") == "1"
+
+
+func _is_pc() -> bool:
+	return OS.has_feature("pc") and not _is_touch_ui()
+
+
+func _visible_action_signature() -> String:
+	var signature := ""
+	for button in _actions:
+		signature += "1" if button.visible else "0"
+	return signature
+
+
+func _update_action_shortcuts() -> void:
+	var visible_index := 0
+	for button in _actions:
+		var label: Label = _action_shortcuts.get(button)
+		if button.visible:
+			if label != null:
+				label.visible = visible_index < 9
+				label.text = str(visible_index + 1) if visible_index < 9 else ""
+			visible_index += 1
+		elif label != null:
+			label.visible = false
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	if not _is_pc() or not (event is InputEventKey):
+		return
+	var key_event := event as InputEventKey
+	if not key_event.pressed or key_event.echo or key_event.alt_pressed \
+			or key_event.ctrl_pressed or key_event.meta_pressed or key_event.shift_pressed:
+		return
+	var action_index := _action_index_from_key(key_event)
+	if action_index < 0:
+		return
+	var visible_index := 0
+	for button in _actions:
+		if not button.visible:
+			continue
+		if visible_index == action_index:
+			if not button.disabled:
+				if button.toggle_mode:
+					button.button_pressed = not button.button_pressed
+				button.pressed.emit()
+			get_viewport().set_input_as_handled()
+			return
+		visible_index += 1
+
+
+func _action_index_from_key(event: InputEventKey) -> int:
+	if event.physical_keycode >= KEY_1 and event.physical_keycode <= KEY_9:
+		return event.physical_keycode - KEY_1
+	if event.keycode >= KEY_1 and event.keycode <= KEY_9:
+		return event.keycode - KEY_1
+	if event.unicode > 0:
+		return AZERTY_ACTION_KEYS.find(String.chr(event.unicode))
+	return -1
 
 
 func _on_gear_pressed() -> void:
@@ -370,7 +456,7 @@ func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Call
 ## a second text line because Button renders its own text on one line.
 func _make_action_button(icon: String, label_text: String) -> Button:
 	var button := Button.new()
-	button.custom_minimum_size = Vector2(56, 52)
+	button.custom_minimum_size = ACTION_BUTTON_SIZE
 	button.tooltip_text = label_text
 	button.clip_contents = true
 
@@ -393,7 +479,18 @@ func _make_action_button(icon: String, label_text: String) -> Button:
 	caption.add_theme_font_size_override("font_size", 10)
 	box.add_child(caption)
 
+	if _is_pc():
+		var shortcut := Label.new()
+		shortcut.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		shortcut.position = Vector2(5.0, 2.0)
+		shortcut.size = Vector2(16.0, 14.0)
+		shortcut.add_theme_font_size_override("font_size", 10)
+		shortcut.add_theme_color_override("font_color", Color(0.75, 0.8, 0.9, 0.9))
+		button.add_child(shortcut)
+		_action_shortcuts[button] = shortcut
+
 	_action_bar.add_child(button)
+	_actions.append(button)
 	_layout_action_lane.call_deferred()
 	return button
 
