@@ -132,6 +132,7 @@ func _host() -> Node:
 
 
 func _ready() -> void:
+	set_focus_behavior_recursive(Control.FOCUS_BEHAVIOR_DISABLED)
 	_build_styles()
 	_title_label.text = title
 	_gear_button.pressed.connect(_on_gear_pressed)
