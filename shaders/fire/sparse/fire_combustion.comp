@@ -1,0 +1,129 @@
+// Global one-step combustion, Fire-X Sec. 4.2 (Algorithm 1, line 18).
+//
+//   rho  = p_amb/(R.T) . (sum Y_i/M_i)^-1                            Eq. 8
+//   c_i  = rho.Y_i/M_i                                       [mol/m^3]
+//   v_c  = A.T^n.exp(-Ea/(R.T)).c_f^a.c_o^b            [mol/(m^3.s)]  Eq. 5
+//   J_c  = -phi.v_c.dcH                                     [W/m^3]   Eq. 6
+//   dT   = J_c/(rho.Cp).dt                                            Eq. 2
+//   dY_i = v_c.q_i.M_i/rho.dt                                         Eq. 7
+//
+// n = 0 for every fuel (Fire-X Tab. 4, after Westbrook & Dryer 1981), so the
+// T^n factor is omitted. There is no ignition threshold: the exponential is
+// the switch. With Ea = 30 kcal/mol (Ea/R = 15097 K) the rate spans nine
+// decades between 500 K and flame temperature, which is what makes the front
+// sharp.
+//
+// Everything here is cell-local, so reading and writing in place cannot race.
+//
+// The body is a function rather than main so that the merged combustion+strain
+// stage can call it; nothing in it may contain a barrier, since it returns early.
+
+void combustion_body(ivec3 c) {
+	if (out_of_grid(c)) {
+		return;
+	}
+
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
+	float dt = params.cell.y;
+	float temp = max(s.x, 1.0);
+
+	float rho = gas_density(s, s2);
+	float v_c = 0.0;
+
+	// Molar concentrations. The fuel exponent is negative for methane (-0.3)
+	// and cyclopropane (-0.1), so an empty cell would raise 0 to a negative
+	// power; the guard keeps the rate expression bounded, as Westbrook & Dryer
+	// note for the same reason.
+	float c_f = rho * s.y / cfg.fuel.y;
+	float c_o = rho * s.z / cfg.molar.x;
+
+	if (c_f > 1e-6 && c_o > 1e-6) {
+		// NON-PAPER flame holder: inside a glowing-char wood sphere the Arrhenius
+		// rate sees at least the pilot temperature (wood_pilot_at), which is what
+		// relights the bed's own volatiles on this coarse grid. ONLY the rate's
+		// exponential uses it — the energy update below keeps the real temperature,
+		// so no heat is injected: the released heat comes from consuming actual fuel
+		// and self-limits when the volatiles run out. Empty in gas mode.
+		float t_rate = max(temp, wood_pilot_at(cell_to_world(c)));
+		v_c = cfg.kinetics.x * exp(-cfg.kinetics.y / t_rate)
+			* pow(c_f, cfg.kinetics.z) * pow(c_o, cfg.kinetics.w);
+
+		// Neither reactant can go past depletion within one step. This is the
+		// limiting-reactant behaviour of the stoichiometry, applied to the rate
+		// rather than bolted on afterwards.
+		float max_by_fuel = c_f / (abs(cfg.stoich.x) * dt);
+		float max_by_o2 = c_o / (abs(cfg.stoich.y) * dt);
+		v_c = min(v_c, min(max_by_fuel, max_by_o2));
+
+		// Liquid water blankets the reaction: it wets the fuel and, as it flashes
+		// to steam, drives the surrounding air out of the cell. Fire-X does not
+		// give this as a rate term — in the paper it emerges from the flow
+		// disruption of a real spray (Sec. 6.1.3: "the fire is effectively
+		// suppressed as ... oxygen supply is reduced"). This grid, with a pinned
+		// fuel emitter and a steady open-boundary oxygen inflow, cannot blow its
+		// flame out that way: cooling alone only densifies the gas and raises the
+		// molar oxygen concentration, so a wet flame burns *wider* instead of
+		// dying (measured). The explicit suppression restores the right sign.
+		// NON-PAPER, exposed as a coefficient.
+		float rho_l = load_liquid_scal(c).x;
+		v_c *= 1.0 / (1.0 + cfg.liquid2.z * rho_l);
+	}
+
+	if (v_c > 0.0) {
+		float inv_rho = 1.0 / rho;
+		float scale = v_c * dt * inv_rho;
+
+		s.y += cfg.stoich.x * cfg.fuel.y * scale; // fuel   (q_f < 0)
+		s.z += cfg.stoich.y * cfg.molar.x * scale; // O2     (q_o < 0)
+		// Product coefficients modulate the visible combustion products without
+		// feeding back into the reaction (Fire-X Sec. 6.1). At the default of
+		// 1.0 the species balance is exactly stoichiometric.
+		s.w += cfg.coeffs.w * cfg.stoich.z * cfg.molar.y * scale; // CO2
+		s2.x += cfg.vort.w * cfg.stoich.w * cfg.molar.z * scale; // H2O
+
+		// Soot has no stoichiometric coefficient in Tab. 1; the paper exposes it
+		// only as an appearance coefficient. Modelled as a fraction of the
+		// carbon flux, i.e. proportional to the fuel consumed.
+		s2.y = min(s2.y + cfg.coeffs.z * abs(cfg.stoich.x) * cfg.fuel.y * scale, 1.0);
+
+		// Eq. 6 + Eq. 2. dcH is negative (exothermic) and phi is the heat
+		// efficiency, so J_c is positive and heats the cell.
+		float j_c = -cfg.coeffs.y * v_c * cfg.fuel.x;
+		temp += j_c * inv_rho / mixture_cp(s, s2) * dt;
+	}
+
+	s.x = clamp(temp, cfg.thermo.x, cfg.thermo.w);
+	s.y = clamp(s.y, 0.0, 1.0);
+	s.z = clamp(s.z, 0.0, 1.0);
+	s.w = clamp(s.w, 0.0, 1.0);
+	s2.x = clamp(s2.x, 0.0, 1.0);
+
+	// No open-boundary sponge band: a tile's neighbour is either resident, and
+	// simulated, or absent — and an absent one already reads as ambient air at
+	// 23.3 % oxygen through the accessors. The resident surface is also two tiles of
+	// dilation away from anything burning, so there is nothing there to relax.
+
+	// NON-PAPER: the steam marker fades on the same timescale a visible plume
+	// disperses. Without it the marker only ever grows, since nothing consumes it,
+	// and the domain ends up uniformly white after a long pour.
+	s2.w = max(s2.w * exp(-0.6 * dt), 0.0);
+
+	// Soot only settles out where the gas has cooled; hot soot keeps glowing.
+	if (s.x < 500.0) {
+		s2.y = max(s2.y - cfg.wind.w * dt, 0.0);
+	}
+
+	// Reaction intensity for the renderer: a decaying trace of recent activity,
+	// advected with the other scalars.
+	s2.z = max(s2.z * exp(-3.25 * dt), v_c);
+
+	store_scal_src(c, s);
+	store_scal2_src(c, s2);
+}
+
+#ifndef FIRE_MERGED
+void main() {
+	combustion_body(cell_coord());
+}
+#endif

@@ -177,10 +177,18 @@ ivec3 cell_of(vec3 p) {
 }
 
 uint cell_index(ivec3 c) {
+	if (params.misc.y < 0) {
+		uvec3 v = uvec3(c);
+		uint h = v.x * 73856093u ^ v.y * 19349663u ^ v.z * 83492791u;
+		return h & (uint(-params.misc.y) * 256u - 1u);
+	}
 	return uint(c.x + c.y * params.grid_dims.x + c.z * params.grid_dims.x * params.grid_dims.y);
 }
 
 uint num_cells() {
+	if (params.misc.y < 0) {
+		return uint(-params.misc.y) * 256u;
+	}
 	return uint(params.grid_dims.x * params.grid_dims.y * params.grid_dims.z);
 }
 
@@ -272,25 +280,48 @@ vec3 orthonormal(vec3 v) {
 // (x + y*dimx + z*dimx*dimy), so their particle ranges form one contiguous span.
 #define FOREACH_NEIGHBOR(P, BODY) { \
 	ivec3 cc_ = cell_of(P); \
-	int x0_ = max(cc_.x - 1, 0); \
-	int x1_ = min(cc_.x + 1, params.grid_dims.x - 1); \
-	for (int dz_ = -1; dz_ <= 1; dz_++) { \
-		int z_ = cc_.z + dz_; \
-		if (z_ < 0 || z_ >= params.grid_dims.z) { \
-			continue; \
+	if (params.misc.y < 0) { \
+		for (int dz_ = -1; dz_ <= 1; dz_++) { \
+			for (int dy_ = -1; dy_ <= 1; dy_++) { \
+				for (int dx_ = -1; dx_ <= 1; dx_++) { \
+					ivec3 nc_ = cc_ + ivec3(dx_, dy_, dz_); \
+					if (any(lessThan(nc_, ivec3(0))) || any(greaterThanEqual(nc_, params.grid_dims.xyz))) { \
+						continue; \
+					} \
+					uint bucket_ = cell_index(nc_); \
+					uint start_ = cell_start.data[bucket_]; \
+					uint end_ = start_ + cell_count.data[bucket_]; \
+					for (uint s_ = start_; s_ < end_; s_++) { \
+						uint j = s_; \
+						if (any(notEqual(cell_of(predicted.data[j].xyz), nc_))) { \
+							continue; \
+						} \
+						BODY \
+					} \
+				} \
+			} \
 		} \
-		for (int dy_ = -1; dy_ <= 1; dy_++) { \
-			int y_ = cc_.y + dy_; \
-			if (y_ < 0 || y_ >= params.grid_dims.y) { \
+	} else { \
+		int x0_ = max(cc_.x - 1, 0); \
+		int x1_ = min(cc_.x + 1, params.grid_dims.x - 1); \
+		for (int dz_ = -1; dz_ <= 1; dz_++) { \
+			int z_ = cc_.z + dz_; \
+			if (z_ < 0 || z_ >= params.grid_dims.z) { \
 				continue; \
 			} \
-			uint row0_ = cell_index(ivec3(x0_, y_, z_)); \
-			uint row1_ = cell_index(ivec3(x1_, y_, z_)); \
-			uint start_ = cell_start.data[row0_]; \
-			uint end_ = cell_start.data[row1_] + cell_count.data[row1_]; \
-			for (uint s_ = start_; s_ < end_; s_++) { \
-				uint j = s_; \
-				BODY \
+			for (int dy_ = -1; dy_ <= 1; dy_++) { \
+				int y_ = cc_.y + dy_; \
+				if (y_ < 0 || y_ >= params.grid_dims.y) { \
+					continue; \
+				} \
+				uint row0_ = cell_index(ivec3(x0_, y_, z_)); \
+				uint row1_ = cell_index(ivec3(x1_, y_, z_)); \
+				uint start_ = cell_start.data[row0_]; \
+				uint end_ = cell_start.data[row1_] + cell_count.data[row1_]; \
+				for (uint s_ = start_; s_ < end_; s_++) { \
+					uint j = s_; \
+					BODY \
+				} \
 			} \
 		} \
 	} \

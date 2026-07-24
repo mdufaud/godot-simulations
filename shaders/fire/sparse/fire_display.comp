@@ -1,0 +1,142 @@
+// Packs the state into the RGBA8 volume the fire shader raymarches, and reduces
+// the handful of scalars the controller needs for the dynamic light and the UI.
+// Keeping the reduction on the GPU avoids reading a 6 MB field back per frame.
+// R = normalised temperature, G = residuals (soot), B = reaction, A = fuel.
+
+shared uint visual_max_bits;
+
+void main() {
+	ivec3 c = cell_coord();
+	if (gl_LocalInvocationIndex == 0u) {
+		visual_max_bits = 0u;
+	}
+	barrier();
+
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
+	float t_amb = cfg.thermo.x;
+	float t_norm = (s.x - t_amb) / max(cfg.misc.y - t_amb, 1.0);
+	float reaction = clamp(s2.z / max(cfg.misc.z, 1e-6), 0.0, 1.0);
+
+	// No render-side edge fade: the volume ends where the plume ends rather than at
+	// an AABB plane, and the tile that would be cut against is two dilation tiles of
+	// still ambient air past anything visible.
+	const float fade = 1.0;
+
+	// A carries the steam marker (vapour of evaporation origin, fire_evaporate),
+	// not Y_H2O: Fire-X Sec. 5.6 samples "vapor" as its own field, and combustion
+	// water alone would paint a permanent white cloud over a methane flame. The
+	// channel used to hold the fuel fraction, which no shader ever read.
+	store_display(c,
+		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s2.w * fade));
+	float visual_signal = max(max(clamp(t_norm, 0.0, 1.0), s2.y),
+		max(s2.w, reaction));
+	atomicMax(visual_max_bits, floatBitsToUint(max(visual_signal, 0.0)));
+	barrier();
+	store_visual_activity(c, uintBitsToFloat(visual_max_bits));
+
+	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
+
+	// Peak |div u| surviving the projection, in milli-1/s so it fits an atomic
+	// uint. This stage runs after fire_project, so it measures what the solve
+	// actually left behind. With the staggered discretisation this is the Jacobi
+	// residual and nothing else, and it must therefore fall as pressure_iterations
+	// rises — that is the check that the gradient really is the adjoint of the
+	// divergence, rather than merely compiling and looking like fire.
+	// Measured over the solved cells only. The ghost shell is the boundary
+	// condition rather than part of the domain, and it keeps a fixed non-zero
+	// divergence by construction, since one of its faces does not exist to be
+	// corrected.
+	if (solved_cell(c)) {
+		atomicMax(stats.data[8], uint(clamp(abs(divergence_at(c)) * 1000.0, 0.0, 4.2e9)));
+	}
+	atomicAdd(stats.data[1], uint(reaction * 1000.0));
+	atomicMax(stats.data[2], uint(reaction * 1000.0));
+
+	// Fuel and oxygen are only meaningful over the burner region: averaged over
+	// the whole domain they would read as "no fuel, plain air" forever.
+	ivec3 centre = params.dims.xyz / 2;
+	if (abs(c.x - centre.x) < 8 && abs(c.z - centre.z) < 8 && c.y < 24) {
+		atomicAdd(stats.data[3], uint(s.y * 1000.0));
+		atomicAdd(stats.data[4], uint(s.z * 1000.0));
+		atomicAdd(stats.data[5], 1u);
+	}
+
+	// Wood probes: the peak gas temperature inside each log's emitter sphere.
+	// The CPU pyrolysis model drives the whole campfire off these, so they have
+	// to measure the flame this solver produced, not a global maximum — a log at
+	// the edge of the bed is metres of cold air away from the plume core and must
+	// stay unlit. Free here: this stage already visits every cell, and the async
+	// stats readback already in place carries the values back.
+	vec3 wc = cell_to_world(c);
+	for (int i = 0; i < MAX_LOGS; i++) {
+		float r = cfg.wood[i].w;
+		if (r > 0.0 && distance(wc, cfg.wood[i].xyz) <= r) {
+			atomicMax(stats.data[11 + i], uint(max(s.x, 0.0)));
+		}
+	}
+
+	// Mass-fraction closure probe: sum over the burner column, read back as a
+	// conservation check (should hold at 1.0 with default product coefficients).
+	if (c.x == centre.x && c.z == centre.z) {
+		float total = s.y + s.z + s.w + s2.x + nitrogen_fraction(s, s2);
+		atomicAdd(stats.data[6], uint(total * 1000.0));
+		atomicAdd(stats.data[7], 1u);
+	}
+
+	// Keep signal for the tile pool, reduced per tile by tile_mark at the head of
+	// the next frame. A tile stays resident while any of these says its cells are
+	// not still ambient air; each term is divided by the smallest value worth
+	// simulating, so the pool thresholds the reduction at a plain 1.0 and the
+	// physics of the criterion stays here rather than in the allocator.
+	//
+	// These cut-offs set the resident-set size, and the velocity one dominates: a
+	// buoyant plume entrains air over a far wider volume than it heats, and a
+	// threshold near zero grows the active set until the pool is exhausted, because
+	// each newly resident tile picks up entrainment velocity from the projection
+	// and so qualifies as a core for the next frame's dilation. They are cut where
+	// the field stops being able to influence the fire rather than where it becomes
+	// exactly zero.
+	//
+	// Liquid keeps a tile alive on its own so falling droplets always have a grid
+	// to couple into, and the steam marker does too so a visible plume is not
+	// deallocated out from under the renderer.
+	//
+	// The velocity term is measured AGAINST THE WIND, not against zero. With a
+	// breeze on, the whole atmosphere moves: an absolute test would find every tile
+	// in the virtual domain worth keeping and exhaust the pool on the first gust,
+	// since the wind is exactly what fire_clear fills a new tile with. What matters
+	// is air the fire has disturbed, which is the departure from the profile.
+	const float KEEP_TEMPERATURE = 5.0; // K above ambient
+	const float KEEP_SPEED = 0.5; // m/s
+	const float KEEP_FUEL = 1e-4;
+	const float KEEP_SOOT = 1e-3;
+	const float KEEP_STEAM = 1e-2;
+	const float KEEP_LIQUID = 1e-3; // kg/m^3
+	float act = max(
+		max(max((s.x - t_amb) / KEEP_TEMPERATURE, s.y / KEEP_FUEL),
+			max(s2.y / KEEP_SOOT, s2.w / KEEP_STEAM)),
+		max(length(vel_at_cell(c) - ambient_wind(c.y)) / KEEP_SPEED,
+			load_liquid_scal(c).x / KEEP_LIQUID));
+	store_activity(c, act);
+
+	// Cell-space bounding box of the resident set, for the raymarcher's ray clip.
+	// Without it every screen pixel walks the indirection volume from the camera to
+	// the far side of a 410 m domain, which costs far more than the plume does.
+	//
+	// One thread per tile rather than per cell: this workgroup IS one tile, so its
+	// origin and extent are already known here, and six atomics per resident tile
+	// cost nothing where six per resident CELL would serialise on the same words.
+	// It rides the stats buffer because that is already read back asynchronously
+	// every frame — a bounding box one or two frames stale is why the controller
+	// adds a margin rather than why it needs its own readback.
+	if (gl_LocalInvocationIndex == 0u) {
+		ivec3 hi = c + ivec3(8);
+		atomicMin(stats.data[STAT_BOUNDS + 0], uint(c.x));
+		atomicMin(stats.data[STAT_BOUNDS + 1], uint(c.y));
+		atomicMin(stats.data[STAT_BOUNDS + 2], uint(c.z));
+		atomicMax(stats.data[STAT_BOUNDS + 3], uint(hi.x));
+		atomicMax(stats.data[STAT_BOUNDS + 4], uint(hi.y));
+		atomicMax(stats.data[STAT_BOUNDS + 5], uint(hi.z));
+	}
+}

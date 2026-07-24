@@ -35,6 +35,13 @@ var near_pressure_mult := 12.0
 var viscosity_strength := 0.14
 var collision_damping := 0.15
 var mode := 0.0
+var hash_grid_enabled := false
+var hash_grid_load_factor := 2.0
+var adaptive_substeps := false
+var min_substeps := 12
+var max_substeps := 16
+var stability_speed := 0.0
+var last_substeps := 0
 
 var tex_width := 256
 
@@ -189,7 +196,7 @@ func init_render() -> void:
 		_pipelines[stage] = _rd.compute_pipeline_create(shader)
 
 	var n := particle_count
-	var cells := grid_dims.x * grid_dims.y * grid_dims.z
+	var cells := _grid_cell_count()
 	var num_blocks := ceili(float(cells) / WG)
 	var vec4_bytes := n * 16
 	var zero_vec4 := PackedByteArray()
@@ -345,7 +352,9 @@ func step_render(dt: float) -> void:
 		return
 	_read_timings()
 	dt = minf(dt, 1.0 / 60.0)
-	var dt_sub := dt / float(substeps)
+	var step_count := _effective_substeps(dt)
+	last_substeps = step_count
+	var dt_sub := dt / float(step_count)
 	_frame += 1
 	_sim_time += dt
 	_rd.buffer_update(_foam_ubo, 0, FOAM_UBO_SIZE, _pack_foam_ubo(dt))
@@ -355,17 +364,17 @@ func step_render(dt: float) -> void:
 	if live_count() == 0:
 		return
 	var n_groups := ceili(float(live_count()) / WG)
-	var cells := grid_dims.x * grid_dims.y * grid_dims.z
+	var cells := _grid_cell_count()
 	var cell_groups := ceili(float(cells) / WG)
 	var foam_groups := ceili(float(foam_cap()) / WG)
 
 	_rd.capture_timestamp("sph/start")
 	var cl := _rd.compute_list_begin()
-	for s in substeps:
-		var last := s == substeps - 1
+	for s in step_count:
+		var last := s == step_count - 1
 		# Salting the seed per (frame, sub-step) stops every sub-step from
 		# drawing the same random numbers and stacking foam on the same spots.
-		var pc := _pack_push_constant(dt_sub, 1 if last else 0, _frame * substeps + s)
+		var pc := _pack_push_constant(dt_sub, 1 if last else 0, _frame * step_count + s)
 		_dispatch(cl, "grid_clear", pc, cell_groups)
 		_dispatch(cl, "sph_external", pc, n_groups)
 		_dispatch(cl, "grid_scan", pc, cell_groups)
@@ -491,7 +500,7 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, groups: int) -> void
 
 
 func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray:
-	var cells := grid_dims.x * grid_dims.y * grid_dims.z
+	var cells := _grid_cell_count()
 	var num_blocks := ceili(float(cells) / WG)
 	var h2 := h * h
 	var k_sp2 := 15.0 / (2.0 * PI * pow(h, 5))
@@ -531,10 +540,30 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	pc.encode_float(104, gravity.z)
 	pc.encode_float(108, mode)
 	pc.encode_s32(112, tex_width)
-	pc.encode_s32(116, num_blocks)
+	pc.encode_s32(116, -num_blocks if hash_grid_enabled else num_blocks)
 	pc.encode_s32(120, last)
 	pc.encode_s32(124, seed)
 	return pc
+
+
+func _grid_cell_count() -> int:
+	if not hash_grid_enabled:
+		return grid_dims.x * grid_dims.y * grid_dims.z
+	var target := maxi(WG, ceili(float(particle_count) * hash_grid_load_factor))
+	var cells := WG
+	while cells < target:
+		cells *= 2
+	return cells
+
+
+func _effective_substeps(dt: float) -> int:
+	if not adaptive_substeps:
+		return maxi(substeps, 1)
+	var lo := clampi(min_substeps, 1, maxi(max_substeps, 1))
+	var hi := maxi(max_substeps, lo)
+	var speed := maxf(stability_speed, gravity.length() * dt)
+	var cfl_steps := ceili(speed * dt / maxf(h * 0.4, 1e-5))
+	return clampi(maxi(cfl_steps, lo), lo, hi)
 
 
 # std140: three 16-byte rows. Mirrors the PlanetParams block in sph_common.comp.

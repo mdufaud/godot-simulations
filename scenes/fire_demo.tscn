@@ -1,7 +1,7 @@
 [gd_scene load_steps=27 format=3 uid="uid://fire_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/fire_controller.gd" id="1_controller"]
-[ext_resource type="Shader" path="res://shaders/fire/fire.gdshader" id="2_fire_shader"]
+[ext_resource type="Shader" path="res://shaders/fire/sparse/fire.gdshader" id="2_fire_shader"]
 [ext_resource type="Script" path="res://scripts/fps_walker.gd" id="3_walker"]
 [ext_resource type="Script" path="res://scripts/fire/wood_pile.gd" id="4_wood_pile"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="6_sim_menu"]

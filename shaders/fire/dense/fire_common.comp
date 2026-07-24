@@ -1,0 +1,614 @@
+// Workgroup geometry. The dense build keeps the frozen 8x8x4 reference shape and
+// is dispatched over the cell grid (or the face grid, one larger on every axis).
+// The sparse build uses 8^3 so that one workgroup owns exactly one fully
+// resident tile, and is dispatched indirectly over the pool's active tile list —
+// which is why no sparse inner loop needs a bounds check.
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+
+// Wood emitter slots, in step with FireGpuSolver.MAX_LOGS. The stats buffer is
+// eleven reduced scalars followed by one probed gas temperature per slot, and
+// fire_advect clears the whole run at the head of every substep.
+#define MAX_LOGS 12
+// Then six more: the cell-space bounding box of the resident set, reduced by
+// fire_display so the raymarcher can clip its ray to the fire rather than to the
+// whole virtual domain. Written on the sparse build only, but the run is the same
+// length in both so one stats layout serves them.
+#define STAT_BOUNDS (11 + MAX_LOGS)
+#define STATS_WORDS (STAT_BOUNDS + 6)
+
+// Field textures ping-pong: *_src is the current state, *_dst receives the
+// advected result, after which the solver flips parity.
+//   vel   = (u.xyz, unused)
+//   scal  = (T [K], Y_fuel, Y_O2, Y_CO2)          mass fractions, Fire-X Eq. 3
+//   scal2 = (Y_H2O, Y_residual, reaction, unused)
+// Y_N2 is not transported: nitrogen is inert (Fire-X Tab. 4 gives its reaction
+// coefficient as 0), so it is recovered as 1 - sum of the other gas species.
+// Velocity is staggered on a marker-and-cell grid (Fire-X Sec. 5.1: "velocity u
+// is represented in a staggered marker-and-cell (MAC) grid layout with
+// components stored at face centers [Bridson 2015]"). Each component is a
+// separate scalar texture sized dims + 1 on its own axis: u-face (i,j,k) sits on
+// the boundary between cells i-1 and i, at world x = i.h, y = (j+0.5).h.
+//
+// This is what makes the discrete gradient the exact adjoint of the discrete
+// divergence: both are one-cell differences across the same face, so the
+// projection actually removes the divergence instead of leaving a checkerboard
+// mode that a 2h-wide central difference cannot see.
+layout(r32f, set = 0, binding = 0) uniform restrict image3D u_src;
+layout(r32f, set = 0, binding = 1) uniform restrict image3D u_dst;
+layout(r32f, set = 0, binding = 4) uniform restrict image3D u_fwd;
+layout(r32f, set = 0, binding = 16) uniform restrict image3D v_src;
+layout(r32f, set = 0, binding = 17) uniform restrict image3D v_dst;
+layout(r32f, set = 0, binding = 18) uniform restrict image3D v_fwd;
+layout(r32f, set = 0, binding = 19) uniform restrict image3D w_src;
+layout(r32f, set = 0, binding = 20) uniform restrict image3D w_dst;
+layout(r32f, set = 0, binding = 21) uniform restrict image3D w_fwd;
+
+layout(rgba32f, set = 0, binding = 2) uniform restrict image3D scal_src;
+layout(rgba32f, set = 0, binding = 3) uniform restrict image3D scal_dst;
+layout(rgba32f, set = 0, binding = 5) uniform restrict image3D scal_fwd;
+// FMT_CURL, FMT_LIQ_VEL and FMT_NU_T are fp16 wherever the device supports the
+// storage format (FireGpuSolver.scratch_formats, which also records why the other
+// scratch fields are not). Each is written and consumed inside the substep that
+// produced it, and the stage that streams it does little arithmetic on it, which
+// is the case where halving the bytes shows up in the timings.
+layout(FMT_CURL, set = 0, binding = 6) uniform restrict image3D curl_tex;
+layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
+layout(r32f, set = 0, binding = 8) uniform restrict image3D press_dst;
+layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
+layout(rgba8, set = 0, binding = 10) uniform restrict image3D display_tex;
+layout(r32f, set = 0, binding = 29) uniform restrict image3D visual_activity_tex;
+
+layout(std430, set = 0, binding = 11) restrict buffer Stats {
+	uint data[];
+}
+stats;
+
+layout(rgba32f, set = 0, binding = 12) uniform restrict image3D scal2_src;
+layout(rgba32f, set = 0, binding = 13) uniform restrict image3D scal2_dst;
+layout(rgba32f, set = 0, binding = 14) uniform restrict image3D scal2_fwd;
+
+// Liquid phase sampled from the SPH droplets (Eq. 19-25), filled by
+// water_gather.comp before the grid loop runs.
+//   liquid_scal = (rho_l [kg/m^3], T_l [K], omega_j, rho' mixing factor)
+//   liquid_vel  = (u_l.xyz, unused)
+// The fourth lane of liquid_scal is written by fire_evaporate and read by
+// fire_evapapply; water_gather resets it to zero every frame.
+layout(rgba32f, set = 0, binding = 22) uniform restrict image3D liquid_scal;
+layout(FMT_LIQ_VEL, set = 0, binding = 23) uniform restrict image3D liquid_vel;
+
+// NON-PAPER: Smagorinsky sub-grid eddy viscosity [m^2/s] at cell centres, written
+// by fire_strain and read by fire_diffusion. At 0.2 m cells the turbulent
+// entrainment that would dilute a real plume is unresolved, so pure Boussinesq
+// buoyancy keeps accelerating the undiluted hot column into a jet; this closure
+// (FDS's default) supplies the missing mixing.
+layout(FMT_NU_T, set = 0, binding = 24) uniform restrict image3D nu_t_tex;
+
+// Physical constants, uploaded once per frame. Kept out of the push constant
+// block because the fuel table alone exceeds the 128-byte guaranteed limit.
+layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
+	vec4 kinetics; // A (SI), Ea/R [K], a, b            Fire-X Eq. 5 / WD Tab. I
+	vec4 fuel; // dcH [J/mol], M_f [kg/mol], Cp, k      Fire-X Tab. 1
+	vec4 stoich; // q_f, q_o, q_CO2, q_H2O              Fire-X Tab. 1
+	vec4 coeffs; // D_f, phi, residual_coeff, co2_coeff Fire-X Tab. 1 / Tab. 3
+	vec4 thermo; // T_amb, radiation_coeff, p_amb, T_clamp
+	vec4 transport; // buoyancy, vorticity_eps, drag, nu
+	vec4 vort; // vel_lo, vel_hi, temp_lo, h2o_coeff    Fire-X Tab. 3
+	vec4 wind; // wind.xyz, residual_dissipation
+	vec4 molar; // M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
+	vec4 misc; // o2_replenish, display_temperature, reaction_reference, emitter_T
+	vec4 liquid; // T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
+	vec4 liquid2; // d_d [m], h_conv [W/(m^2.K)], wet_suppression, unused  Tab. 3 / INFERRED
+	// Wood emitters (campfire room). One slot per log: where it is and how wide
+	// its gas release is, then how much it releases. A radius of zero is a free
+	// slot. NON-PAPER: Fire-X only has the gas grid emitter of Tab. 3; the solid
+	// fuel bed that feeds it lives on the CPU (see wood_pile.gd), and these are
+	// the two directions that couple the two — the release goes down through
+	// fire_inject (mode 5), the gas temperature that drives it comes back up
+	// through fire_display's probes.
+	vec4 wood[MAX_LOGS]; // pos.xyz, radius [m]
+	vec4 wood_rate[MAX_LOGS]; // Y_fuel per simulated second, unused.yzw
+}
+cfg;
+
+layout(push_constant, std430) uniform Params {
+	ivec4 dims; // xyz = grid dims, w = event mode
+	vec4 cell; // cell size, dt, 1/cell size, smagorinsky Cs
+	vec4 event; // xyz = world position, w = radius
+	vec4 event2; // x = amount, y = SOR omega, z = inner sweeps, w = coarse omega
+}
+params;
+
+const float R_GAS = 8.314; // J/(mol.K)   Fire-X nomenclature
+const float SIGMA_SB = 5.67e-8; // W/(m^2.K^4)
+
+// NON-PAPER: the wind setting is the free stream at the standard 10 m reference
+// height, and what reaches the fire is the atmospheric boundary layer under it —
+// the log law u(y) = u_ref.ln(y/z0)/ln(10/z0), with z0 the roughness length of
+// open grass. Imposing the full speed at every height instead put the whole 2 m/s
+// across a bed sitting at 0.36 m and tore the flame off its pilot inside two
+// seconds (measured), which is not what a breeze does to a camp fire. The plume
+// still leans: at 6 m the profile is already at 0.91.
+//
+// Takes the cell row rather than a world height because every caller evaluates it
+// at a cell-centre height: cell_to_world's y offset is +0.5 on the cell axis and
+// the face offsets are all on the other two. Defined up here because the sparse
+// velocity accessors return this profile for a face in a non-resident tile.
+float wind_profile(int cy) {
+	const float z0 = 0.03;
+	const float inv_ref = 1.0 / 5.809; // 1/ln(10/z0)
+	float y = (float(cy) + 0.5) * params.cell.x;
+	return max(log(y / z0), 0.0) * inv_ref;
+}
+
+// The still-air velocity of the atmosphere at this row. Dense imposes it on the
+// upwind boundary faces; sparse has no reachable boundary, so it is instead what a
+// non-resident tile reads as (the open boundary is drifting ambient air, not still
+// air), what newly resident tiles are filled with, and what the cold far-field is
+// relaxed towards.
+vec3 ambient_wind(int cy) {
+	return vec3(cfg.wind.x, 0.0, cfg.wind.z) * wind_profile(cy);
+}
+
+// =========================================================================
+//  SPARSE TILE INDIRECTION
+//
+// Under FIRE_SPARSE the field textures above are no longer the domain: they are
+// an atlas of NSLOTS resident 8^3 tiles, and every coordinate the solver works
+// in is a VIRTUAL cell coordinate over the whole map. These three bindings are
+// what turns one into the other. The dense build declares none of them and every
+// accessor below stays a direct image access.
+// =========================================================================
+ivec3 invocation_vt;
+ivec3 invocation_atlas_origin;
+bool invocation_tile_contains(ivec3 lo, ivec3 hi) { return false; }
+
+// Whether the pressure Poisson equation is solved at this cell.
+//
+// Dense: every cell of the box, with the AABB walls as its boundary.
+//
+// Sparse: every cell whose six face neighbours are all resident. A cell that
+// fails this sits on the outer surface of the resident set, where one of its
+// faces is the LOW face of a cell in a tile that does not exist. That face is
+// read as a fixed zero by divergence_at and can never be written by fire_project
+// — there is no texel for it — so coupling pressure across it would put a term in
+// the Poisson operator that the projection is unable to apply, and the gradient
+// would stop being the transpose of the divergence. The solve would then compute
+// a correction it cannot make, leaving a residual no number of iterations can
+// remove (measured: max_divergence stalls near 0.1 instead of falling).
+//
+// So those cells are the sparse domain's ghost shell: the exact analogue of the
+// dense build's cells outside the AABB. They are pinned to the Dirichlet p = 0
+// the dense build imposed at its walls, which both keeps the interior system
+// non-singular and gives the plume somewhere to flow out to. The dilation band
+// puts the shell at least two tiles from anything moving, so it lives in still
+// ambient air.
+bool solved_cell(ivec3 c) { return true; }
+uint tile_face_mask() { return 63u; }
+bool solved_cell_masked(ivec3 c, uint mask) { return true; }
+
+// The virtual cell this invocation owns. Dense: the dispatch is the grid, so it
+// is the global id. Sparse: the dispatch is the active tile list, so it is this
+// workgroup's tile origin plus the local id.
+ivec3 cell_coord() {
+	return ivec3(gl_GlobalInvocationID);
+}
+
+// =========================================================================
+//  FIELD ACCESSORS
+//
+// Every field read and write in the solver goes through one of these, so the
+// mapping from a (field, cell) pair to storage lives in exactly one place: the
+// four macros below. Dense expands them to a direct image access at a physical
+// texel. Sparse directly addresses the invocation's atlas tile and resolves the
+// indirection only for cross-tile access; a non-resident read returns ambient
+// and a write is dropped. No call site changes between the two builds.
+//
+// The staggered face accessors take a face coordinate, the cell accessors a cell
+// coordinate. The ping-pong pair a stage swaps (fields *_src/*_dst, or
+// press_src/press_dst) is chosen by the uniform-set variant on the GDScript
+// side, so a name like scal_src always means "whatever texture is bound as the
+// current scalar field".
+// =========================================================================
+#define DEF_LOAD4(p_fn, p_img, p_ambient) \
+	vec4 p_fn(ivec3 c) { return imageLoad(p_img, c); }
+#define DEF_STORE4(p_fn, p_img) \
+	void p_fn(ivec3 c, vec4 v) { imageStore(p_img, c, v); }
+#define DEF_LOAD1(p_fn, p_img) \
+	float p_fn(ivec3 c) { return imageLoad(p_img, c).r; }
+#define DEF_STORE1(p_fn, p_img) \
+	void p_fn(ivec3 c, float v) { imageStore(p_img, c, vec4(v, 0.0, 0.0, 0.0)); }
+#define DEF_LOAD1_VEL(p_fn, p_img, p_comp) \
+	float p_fn(ivec3 c) { return imageLoad(p_img, c).r; }
+
+DEF_LOAD4(load_scal_src, scal_src, ambient_scal())
+DEF_STORE4(store_scal_src, scal_src)
+DEF_LOAD4(load_scal_dst, scal_dst, ambient_scal())
+DEF_STORE4(store_scal_dst, scal_dst)
+DEF_LOAD4(load_scal_fwd, scal_fwd, vec4(0.0))
+DEF_STORE4(store_scal_fwd, scal_fwd)
+DEF_LOAD4(load_scal2_src, scal2_src, vec4(0.0))
+DEF_STORE4(store_scal2_src, scal2_src)
+DEF_LOAD4(load_scal2_dst, scal2_dst, vec4(0.0))
+DEF_STORE4(store_scal2_dst, scal2_dst)
+DEF_LOAD4(load_scal2_fwd, scal2_fwd, vec4(0.0))
+DEF_STORE4(store_scal2_fwd, scal2_fwd)
+DEF_LOAD4(load_curl, curl_tex, vec4(0.0))
+DEF_STORE4(store_curl, curl_tex)
+DEF_LOAD4(load_liquid_scal, liquid_scal, ambient_liquid_scal())
+DEF_STORE4(store_liquid_scal, liquid_scal)
+DEF_LOAD4(load_liquid_vel, liquid_vel, vec4(0.0))
+DEF_STORE4(store_liquid_vel, liquid_vel)
+DEF_STORE4(store_display, display_tex)
+DEF_STORE1(store_visual_activity, visual_activity_tex)
+
+DEF_LOAD1(load_press_src, press_src)
+DEF_STORE1(store_press_src, press_src)
+DEF_STORE1(store_press_dst, press_dst)
+DEF_LOAD1(load_diverg, diverg)
+DEF_STORE1(store_diverg, diverg)
+DEF_LOAD1(load_nu_t, nu_t_tex)
+DEF_STORE1(store_nu_t, nu_t_tex)
+
+DEF_LOAD1_VEL(load_u_src, u_src, x)
+DEF_STORE1(store_u_src, u_src)
+DEF_LOAD1(load_u_fwd, u_fwd)
+DEF_STORE1(store_u_fwd, u_fwd)
+DEF_STORE1(store_u_dst, u_dst)
+DEF_LOAD1_VEL(load_v_src, v_src, y)
+DEF_STORE1(store_v_src, v_src)
+DEF_LOAD1(load_v_fwd, v_fwd)
+DEF_STORE1(store_v_fwd, v_fwd)
+DEF_STORE1(store_v_dst, v_dst)
+DEF_LOAD1_VEL(load_w_src, w_src, z)
+DEF_STORE1(store_w_src, w_src)
+DEF_LOAD1(load_w_fwd, w_fwd)
+DEF_STORE1(store_w_fwd, w_fwd)
+DEF_STORE1(store_w_dst, w_dst)
+
+ivec3 grid_max() {
+	return params.dims.xyz - ivec3(1);
+}
+
+bool out_of_grid(ivec3 c) {
+	return any(greaterThanEqual(c, params.dims.xyz));
+}
+
+// Interior cells only: anything reading a one-cell neighbourhood.
+bool is_interior(ivec3 c) {
+	return all(greaterThan(c, ivec3(0))) && all(lessThan(c, grid_max()));
+}
+
+// Cell centre in world space: x/z centred on the origin, y up from the ground.
+vec3 cell_to_world(ivec3 c) {
+	vec3 half_xz = vec3(params.dims.x, 0.0, params.dims.z) * params.cell.x * 0.5;
+	return (vec3(c) + vec3(0.5)) * params.cell.x - half_xz;
+}
+
+// NON-PAPER: the wood bed shelters its own flame base. The logs are a porous
+// obstacle and the volatile layer lives in their wind shadow, so fire_forces
+// damps the horizontal flow by this 0..1 weight over slightly enlarged emitter
+// spheres — a breeze then leans the plume without tearing it off the pilot. The
+// wood table is empty in gas mode (all radii zero), so this returns 0 there and
+// every caller is a no-op.
+float wood_shelter(vec3 wp) {
+	// AABB reject: the campfire bed sits on the floor, so nothing above this can be
+	// inside a log sphere. Skips the per-log loop for ~all of the tall face grid.
+	if (wp.y > 3.0) {
+		return 0.0;
+	}
+	float sh = 0.0;
+	for (int i = 0; i < MAX_LOGS; i++) {
+		float r = cfg.wood[i].w;
+		if (r <= 0.0) {
+			continue;
+		}
+		sh = max(sh, 1.0 - distance(wp, cfg.wood[i].xyz) / (r * 1.4));
+	}
+	return clamp(sh, 0.0, 1.0);
+}
+
+// NON-PAPER flame-holder temperature [K] anchored at wp by the wood bed, else 0.
+// fire_combustion evaluates its Arrhenius rate at no less than this, which is
+// what lets the bed light and relight its own volatiles — the one behaviour the
+// pure model cannot reach on a 0.2 m grid, where the mixing dilutes them below
+// flammability first (see wood_pile.gd).
+//
+// A log anchors the flame while it is GASIFYING (rate > 0), not only once its
+// char glows: without the rate branch the holder cannot bootstrap combustion at
+// all, because the char only heats past its glow threshold once a flame already
+// exists (measured — the bed died at react = 0, char stuck at ~610 K). WOOD_HOLD_T
+// crosses the methane Arrhenius knee, and the release then self-amplifies to real
+// flame temperature; the per-cell fuel cap in fire_inject keeps it from jetting.
+// A wet log stops gasifying (rate -> 0) and its char cools, so both terms fall to
+// zero and water still puts the fire out. Empty in gas mode (all radii zero).
+const float WOOD_HOLD_T = 1400.0;
+float wood_pilot_at(vec3 wp) {
+	// AABB reject (see wood_shelter): the bed is on the floor.
+	if (wp.y > 3.0) {
+		return 0.0;
+	}
+	float p = 0.0;
+	for (int i = 0; i < MAX_LOGS; i++) {
+		if (cfg.wood[i].w <= 0.0) {
+			continue;
+		}
+		float rate = cfg.wood_rate[i].x;
+		float pilot = cfg.wood_rate[i].y;
+		if (rate <= 0.0 && pilot <= 0.0) {
+			continue;
+		}
+		if (distance(wp, cfg.wood[i].xyz) < cfg.wood[i].w) {
+			p = max(p, max((rate > 0.0) ? WOOD_HOLD_T : 0.0, pilot));
+		}
+	}
+	return p;
+}
+
+// =========================================================================
+//  STAGGERED VELOCITY
+// =========================================================================
+
+// Extents of the three face grids.
+//
+// Dense: each is one longer than the cell grid on the axis its component is
+// normal to, the face dispatch overshoots the cell grid by one everywhere, and
+// every face write is guarded by in_u/in_v/in_w.
+//
+// Sparse: a tile stores 8^3 LOW faces — u(c) is the low-x face of cell c — so the
+// face grids have exactly the cell extent and there is no boundary row to guard.
+// The high face of a tile's last cell is the low face of the next tile's first
+// cell and resolves through the same indirection; when that neighbour tile is not
+// resident the load returns 0, which is precisely the open boundary the dense
+// build had to write out explicitly. This is also why sparse is not bit-identical
+// to dense: those outer faces are now a Dirichlet condition on a surface that
+// moves with the fire rather than on a fixed AABB.
+ivec3 u_dims() { return params.dims.xyz + ivec3(1, 0, 0); }
+ivec3 v_dims() { return params.dims.xyz + ivec3(0, 1, 0); }
+ivec3 w_dims() { return params.dims.xyz + ivec3(0, 0, 1); }
+
+bool in_u(ivec3 f) { return all(lessThan(f, u_dims())); }
+bool in_v(ivec3 f) { return all(lessThan(f, v_dims())); }
+bool in_w(ivec3 f) { return all(lessThan(f, w_dims())); }
+
+// A face centre in world space. Offset is +0.0 along the normal axis (the face
+// sits on the cell boundary) and +0.5 along the other two.
+vec3 u_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.5, 0.0, 0.0) * params.cell.x; }
+vec3 v_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.5, 0.0) * params.cell.x; }
+vec3 w_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.0, 0.5) * params.cell.x; }
+
+// A 10^3 shared-memory apron over the three face components, for stages that
+// reconstruct velocity at every cell of their tile. Opt-in per stage
+// (FIRE_VEL_CACHE in the preamble), because 12 KB of shared memory is not worth
+// spending on a stage that reads velocity once.
+//
+// Reconstructing the tangential components at a face averages four faces of each
+// other kind, so one call to vel_at_u_face is nine loads and the four calls
+// advection makes per cell are 33 — more traffic than the trilinear taps
+// themselves, and almost all of it re-reading what the neighbouring threads have
+// already read. Reading each of the tile's faces once into shared memory instead
+// makes it 3000 loads for a workgroup of 512 rather than 16896.
+//
+// Ten is exactly the reach: every index vel_at_cell and the three face
+// reconstructions touch is within one cell of the tile, because their stencils
+// are one-sided (c and c + 1, or c - 1 and c) and the domain clamps only narrow
+// that. Nothing else may use these accessors without re-checking that.
+void load_velocity_cache() {}
+
+#define VEL_U(p_c) load_u_src(p_c)
+#define VEL_V(p_c) load_v_src(p_c)
+#define VEL_W(p_c) load_w_src(p_c)
+
+// Velocity reconstructed at a cell centre: the mean of the two opposing faces.
+vec3 vel_at_cell(ivec3 c) {
+	return vec3(
+		0.5 * (VEL_U(c) + VEL_U(c + ivec3(1, 0, 0))),
+		0.5 * (VEL_V(c) + VEL_V(c + ivec3(0, 1, 0))),
+		0.5 * (VEL_W(c) + VEL_W(c + ivec3(0, 0, 1))));
+}
+
+// The full velocity vector at a face centre. The normal component is stored
+// there; the two tangential ones are averaged from the four nearest faces of
+// their own kind (Bridson 2015 Sec. 2.2). Cell indices are clamped so the
+// boundary faces reuse the nearest interior column rather than reading out of
+// bounds.
+vec3 vel_at_u_face(ivec3 f) {
+	int lo = max(f.x - 1, 0);
+	int hi = min(f.x, params.dims.x - 1);
+	float vv = 0.25 * (VEL_V(ivec3(lo, f.y, f.z))
+		+ VEL_V(ivec3(hi, f.y, f.z))
+		+ VEL_V(ivec3(lo, f.y + 1, f.z))
+		+ VEL_V(ivec3(hi, f.y + 1, f.z)));
+	float ww = 0.25 * (VEL_W(ivec3(lo, f.y, f.z))
+		+ VEL_W(ivec3(hi, f.y, f.z))
+		+ VEL_W(ivec3(lo, f.y, f.z + 1))
+		+ VEL_W(ivec3(hi, f.y, f.z + 1)));
+	return vec3(VEL_U(f), vv, ww);
+}
+
+vec3 vel_at_v_face(ivec3 f) {
+	int lo = max(f.y - 1, 0);
+	int hi = min(f.y, params.dims.y - 1);
+	float uu = 0.25 * (VEL_U(ivec3(f.x, lo, f.z))
+		+ VEL_U(ivec3(f.x, hi, f.z))
+		+ VEL_U(ivec3(f.x + 1, lo, f.z))
+		+ VEL_U(ivec3(f.x + 1, hi, f.z)));
+	float ww = 0.25 * (VEL_W(ivec3(f.x, lo, f.z))
+		+ VEL_W(ivec3(f.x, hi, f.z))
+		+ VEL_W(ivec3(f.x, lo, f.z + 1))
+		+ VEL_W(ivec3(f.x, hi, f.z + 1)));
+	return vec3(uu, VEL_V(f), ww);
+}
+
+vec3 vel_at_w_face(ivec3 f) {
+	int lo = max(f.z - 1, 0);
+	int hi = min(f.z, params.dims.z - 1);
+	float uu = 0.25 * (VEL_U(ivec3(f.x, f.y, lo))
+		+ VEL_U(ivec3(f.x, f.y, hi))
+		+ VEL_U(ivec3(f.x + 1, f.y, lo))
+		+ VEL_U(ivec3(f.x + 1, f.y, hi)));
+	float vv = 0.25 * (VEL_V(ivec3(f.x, f.y, lo))
+		+ VEL_V(ivec3(f.x, f.y, hi))
+		+ VEL_V(ivec3(f.x, f.y + 1, lo))
+		+ VEL_V(ivec3(f.x, f.y + 1, hi)));
+	return vec3(uu, vv, VEL_W(f));
+}
+
+// Divergence of the staggered field at a cell centre. One compact difference per
+// axis across the cell's own two faces — no 2h stencil, no boundary clamping,
+// and exactly the operator fire_project inverts.
+float divergence_at(ivec3 c) {
+	return (load_u_src(c + ivec3(1, 0, 0)) - load_u_src(c)
+		+ load_v_src(c + ivec3(0, 1, 0)) - load_v_src(c)
+		+ load_w_src(c + ivec3(0, 0, 1)) - load_w_src(c)) * params.cell.z;
+}
+
+// Nitrogen closes the mixture. Residuals are condensed-phase soot, so they are
+// excluded from the gas-phase molar balance.
+float nitrogen_fraction(vec4 s, vec4 s2) {
+	return clamp(1.0 - (s.y + s.z + s.w + s2.x), 0.0, 1.0);
+}
+
+// Fire-X Eq. 8: rho = p_amb / (R.T) . (sum_i Y_i/M_i)^-1
+float gas_density(vec4 s, vec4 s2) {
+	float inv_m = s.y / cfg.fuel.y // fuel
+		+ s.z / cfg.molar.x // O2
+		+ s.w / cfg.molar.y // CO2
+		+ s2.x / cfg.molar.z // H2O
+		+ nitrogen_fraction(s, s2) / cfg.molar.w; // N2
+	return cfg.thermo.z / (R_GAS * max(s.x, 1.0) * max(inv_m, 1e-6));
+}
+
+// Specific heats: NIST-JANAF Shomate coefficients (Chase 1998) from the NIST
+// Chemistry WebBook [Linstrom & Mallard], which is the source Fire-X Tab. 4
+// cites. Fire-X specifies a *temperature averaged* mixture heat capacity, and
+// it matters: N2 alone rises from 1040 to 1285 J/(kg.K) between 300 K and
+// 2000 K, and holding Cp at its ambient value inflates the flame temperature
+// by several hundred kelvin.
+//
+//   Cp_molar = A + B.t + C.t^2 + D.t^3 + E/t^2,  t = T/1000  [J/(mol.K)]
+float shomate(float t, float p_a, float p_b, float p_c, float p_d, float p_e) {
+	return p_a + p_b * t + p_c * t * t + p_d * t * t * t + p_e / (t * t);
+}
+
+float cp_n2(float t) {
+	if (t < 0.5) {
+		return shomate(max(t, 0.1), 28.98641, 1.853978, -9.647459, 16.63537, 0.000117);
+	}
+	if (t < 2.0) {
+		return shomate(t, 19.50583, 19.88705, -8.598535, 1.369784, 0.527601);
+	}
+	return shomate(min(t, 6.0), 35.51872, 1.128728, -0.196103, 0.014662, -4.553760);
+}
+
+float cp_o2(float t) {
+	if (t < 0.7) {
+		return shomate(max(t, 0.1), 31.32234, -20.23531, 57.86644, -36.50624, -0.007374);
+	}
+	if (t < 2.0) {
+		return shomate(t, 30.03235, 8.772972, -3.988133, 0.788313, -0.741599);
+	}
+	return shomate(min(t, 6.0), 20.91111, 10.72071, -2.020498, 0.146449, 9.245722);
+}
+
+float cp_co2(float t) {
+	if (t < 1.2) {
+		return shomate(max(t, 0.298), 24.99735, 55.18696, -33.69137, 7.948387, -0.136638);
+	}
+	return shomate(min(t, 6.0), 58.16639, 2.720074, -0.492289, 0.038844, -6.447293);
+}
+
+float cp_h2o(float t) {
+	if (t < 1.7) {
+		return shomate(max(t, 0.5), 30.09200, 6.832514, 6.793435, -2.534480, 0.082139);
+	}
+	return shomate(min(t, 6.0), 41.96426, 8.622053, -1.499780, 0.098119, -11.15764);
+}
+
+// Mass-weighted mixture heat capacity [J/(kg.K)]. The fuel keeps the single
+// constant Cp that Fire-X Tab. 1 gives it.
+float mixture_cp(vec4 s, vec4 s2) {
+	float t = clamp(s.x, 100.0, 6000.0) * 0.001;
+	return max(s.y * cfg.fuel.z
+			+ s.z * cp_o2(t) / cfg.molar.x
+			+ s.w * cp_co2(t) / cfg.molar.y
+			+ s2.x * cp_h2o(t) / cfg.molar.z
+			+ nitrogen_fraction(s, s2) * cp_n2(t) / cfg.molar.w,
+		1.0);
+}
+
+// Scalar variant of SAMPLE_TRI for the face textures. They each have their own
+// extent, so the clamp bound is passed in rather than taken from grid_max().
+//
+// Takes the ACCESSOR, not the image: that is what makes one body serve both
+// builds. A tap that lands outside the resident set resolves to ambient through
+// the accessor instead of needing its own sparse variant here.
+#define SAMPLE_TRI_R(p_load, p_img, p_pos, p_dmax, p_out, p_min, p_max) { \
+	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(p_dmax)); \
+	ivec3 i0_ = ivec3(floor(pc_)); \
+	ivec3 i1_ = min(i0_ + ivec3(1), p_dmax); \
+	vec3 fr_ = pc_ - vec3(i0_); \
+	float s000_, s100_, s010_, s110_, s001_, s101_, s011_, s111_; \
+	if (invocation_tile_contains(i0_, i1_)) { \
+		ivec3 a0_ = invocation_atlas_origin + (i0_ & ivec3(7)); \
+		ivec3 a1_ = invocation_atlas_origin + (i1_ & ivec3(7)); \
+		s000_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a0_.z)).r; \
+		s100_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a0_.z)).r; \
+		s010_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a0_.z)).r; \
+		s110_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a0_.z)).r; \
+		s001_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a1_.z)).r; \
+		s101_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a1_.z)).r; \
+		s011_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a1_.z)).r; \
+		s111_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a1_.z)).r; \
+	} else { \
+		s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
+		s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
+		s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
+		s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
+		s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
+		s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
+		s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
+		s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	} \
+	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
+	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
+	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \
+		mix(mix(s001_, s101_, fr_.x), mix(s011_, s111_, fr_.x), fr_.y), fr_.z); \
+}
+
+// Trilinear fetch plus the bounds of the eight taps, which the MacCormack
+// limiter needs to reject overshoot. A macro because GLSL cannot portably take
+// an image binding as a function parameter. Parameter names are prefixed: a
+// bare `p` would be substituted inside swizzles. Takes the accessor rather than
+// the image, for the reason given on SAMPLE_TRI_R.
+#define SAMPLE_TRI(p_load, p_img, p_pos, p_out, p_min, p_max) { \
+	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(grid_max())); \
+	ivec3 i0_ = ivec3(floor(pc_)); \
+	ivec3 i1_ = min(i0_ + ivec3(1), grid_max()); \
+	vec3 fr_ = pc_ - vec3(i0_); \
+	vec4 s000_, s100_, s010_, s110_, s001_, s101_, s011_, s111_; \
+	if (invocation_tile_contains(i0_, i1_)) { \
+		ivec3 a0_ = invocation_atlas_origin + (i0_ & ivec3(7)); \
+		ivec3 a1_ = invocation_atlas_origin + (i1_ & ivec3(7)); \
+		s000_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a0_.z)); \
+		s100_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a0_.z)); \
+		s010_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a0_.z)); \
+		s110_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a0_.z)); \
+		s001_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a1_.z)); \
+		s101_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a1_.z)); \
+		s011_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a1_.z)); \
+		s111_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a1_.z)); \
+	} else { \
+		s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
+		s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
+		s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
+		s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
+		s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
+		s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
+		s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
+		s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	} \
+	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
+	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
+	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \
+		mix(mix(s001_, s101_, fr_.x), mix(s011_, s111_, fr_.x), fr_.y), fr_.z); \
+}

@@ -1,4 +1,3 @@
-class_name FireWater
 extends RefCounted
 ## Water droplet ↔ fire grid coupling for Fire-X (Wrede et al., SIGGRAPH Asia 2025).
 ##
@@ -122,8 +121,12 @@ var _h_liquid := 0.15  # 1.5 * cell_size: one particle covers a 3³ block of cel
 ## in x/z with the floor at y = 0 (fire_common.comp cell_to_world), so particle
 ## positions have to be shifted by this before they can be binned.
 var _grid_origin := Vector3.ZERO
+## Set when the fire grid is the sparse tile atlas: [member _grid_dims] is then the
+## whole virtual map and the two particle passes resolve every cell through the
+## pool's indirection volume. See water_common.comp.
+var _sparse := false
 var _indir_tex := RID()
-## The gather is dispatched over the tiles the water actually reaches,
+## Sparse only. The gather is dispatched over the tiles the water actually reaches,
 ## not over the fire solver's active list: that list saturates the 2048-slot pool
 ## while the droplets occupy a jet and a puddle. The scatter raises a flag per slot
 ## it touches, water_tiles compacts them into [member _ssbo_tile_list] and counts
@@ -131,13 +134,13 @@ var _indir_tex := RID()
 var _ssbo_tile_flags := RID()
 var _ssbo_tile_list := RID()
 var _tile_args := RID()
-## Extent the accumulators and the gather dispatch cover: the tile atlas. Never
-## the virtual map, which has 2.1 G cells.
+## Extent the accumulators and the gather dispatch cover: the fire box when dense,
+## the tile atlas when sparse. Never the virtual map, which has 2.1 G cells.
 var _accum_dims := Vector3i.ZERO
-## Corner of the SPH neighbour grid, which is NOT the fire grid's: the droplets
-## need a dense uniform grid at the smoothing length, and the virtual map at 0.1 m
-## would be 17 G cells. The box stays around the emitter and the fire's own domain
-## is the one that grew.
+## Corner of the SPH neighbour grid, which is NOT the fire grid's on the sparse
+## path: the droplets need a dense uniform grid at the smoothing length, and the
+## virtual map at 0.1 m would be 17 G cells. The box stays around the emitter and
+## the fire's own domain is the one that grew.
 var _sph_origin := Vector3.ZERO
 
 var initialized := false
@@ -162,13 +165,13 @@ var _frame_count := 0
 const MEASURE_INTERVAL := 30
 
 
-## [param fire_grid_dims] is the fire solver's simulated extent in cells: the whole
-## virtual tile grid.
+## [param fire_grid_dims] is the fire solver's simulated extent in cells — the box
+## on the dense path, the whole virtual tile grid on the sparse one.
 ##
-## [param indir_tex] is the tile pool's indirection volume, which the two particle
-## passes resolve every cell through. [param sph_box] is the world-space extent the
-## droplets themselves are simulated in; leave it zero to use the fire domain,
-## which is only sensible when that domain is a box.
+## [param indir_tex] is the tile pool's indirection volume, and passing a valid RID
+## is what selects the sparse build of the two particle passes. [param sph_box] is
+## the world-space extent the droplets themselves are simulated in; leave it zero to
+## use the fire domain, which is only sensible when that domain is a box.
 func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
 	if _rd != null:
@@ -181,6 +184,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	particle_cap = particle_count
 	_cell_size = fire_cell_size
 	_h_liquid = fire_cell_size * 1.5
+	_sparse = indir_tex.is_valid()
 	_indir_tex = indir_tex
 	var domain := Vector3(fire_grid_dims) * fire_cell_size
 	_grid_origin = Vector3(-0.5 * domain.x, 0.0, -0.5 * domain.z)
@@ -192,7 +196,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_sph_origin = Vector3(-0.5 * sph_domain.x, 0.0, -0.5 * sph_domain.z)
 	_init_sph(sph_domain)
 
-	_accum_dims = FireTilePool.ATLAS_CELLS
+	_accum_dims = FireTilePool.ATLAS_CELLS if _sparse else fire_grid_dims
 	var num_cells := _accum_dims.x * _accum_dims.y * _accum_dims.z
 	var empty_accum := PackedByteArray()
 	empty_accum.resize(num_cells * 16)
@@ -200,7 +204,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_ssbo_vel_scatter = _rd.storage_buffer_create(num_cells * 16, empty_accum)
 
 	# Only the two particle passes resolve a cell to its storage; the gather walks
-	# that storage itself and needs no mapping.
+	# that storage itself and needs no mapping in either build.
 	_shader_scatter = _compile("water_scatter", true)
 	_shader_gather = _compile("water_gather", false)
 	_shader_return = _compile("water_return", true)
@@ -209,7 +213,8 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_pipeline_scatter = _rd.compute_pipeline_create(_shader_scatter)
 	_pipeline_gather = _rd.compute_pipeline_create(_shader_gather)
 	_pipeline_return = _rd.compute_pipeline_create(_shader_return)
-	_init_tile_list()
+	if _sparse:
+		_init_tile_list()
 
 	for parity in 2:
 		var pos: RID = sph.parity_positions_rid(parity)
@@ -220,14 +225,15 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 			_buffer_uniform(2, _ssbo_scatter),
 			_buffer_uniform(3, _ssbo_vel_scatter),
 		]
-		uniforms.append(_image_uniform(4, _indir_tex))
-		uniforms.append(_buffer_uniform(5, _ssbo_tile_flags))
+		if _sparse:
+			uniforms.append(_image_uniform(4, _indir_tex))
+			uniforms.append(_buffer_uniform(5, _ssbo_tile_flags))
 		_sets_scatter[parity] = _rd.uniform_set_create(uniforms, _shader_scatter, 0)
 
 	initialized = true
 
 
-## Two flag lanes per pool slot — the touches this frame's scatter
+## Sparse only. Two flag lanes per pool slot — the touches this frame's scatter
 ## raises and the list membership carried from last frame — plus the compacted list
 ## and the three-word indirect dispatch header it is counted into.
 func _init_tile_list() -> void:
@@ -260,7 +266,7 @@ func _tile_args_reset() -> PackedByteArray:
 ## Both domains are centred on the origin in x/z with the floor at y = 0, so a
 ## droplet's world position means the same thing to the SPH grid and to the fire
 ## grid and the scatter needs no second transform — even where the two boxes differ
-## in size, which they do.
+## in size, which is what the sparse path does.
 func _init_sph(domain: Vector3) -> void:
 	sph = SphFluidSolver.new()
 	sph.particle_count = particle_count
@@ -346,14 +352,19 @@ func sph_tex_width() -> int:
 	return sph.tex_width if sph != null else 256
 
 
-## [param with_common] pulls in water_common.comp, which declares the indirection
-## binding — only the passes that resolve want it, since glslang keeps a
-## declared-but-unused resource and the uniform set would then have to provide it.
+## One source, two builds, the same way FireGpuSolver does it: the define is part of
+## the string ShaderCache keys on, so the two variants land in separate cache
+## entries by themselves. [param with_common] pulls in water_common.comp, which
+## declares the indirection binding — only the passes that resolve want it, since
+## glslang keeps a declared-but-unused resource and the uniform set would then have
+## to provide it.
 func _compile(name: String, with_common: bool) -> RID:
 	var src: String = "#version 460\n" + str(FireGpuSolver.scratch_formats(_rd)["preamble"])
+	if _sparse:
+		src += "#define WATER_SPARSE\n"
 	if with_common:
-		src += FileAccess.get_file_as_string("res://shaders/fire/sparse/water_common.comp") + "\n"
-	src += FileAccess.get_file_as_string("res://shaders/fire/sparse/%s.comp" % name)
+		src += FileAccess.get_file_as_string("res://shaders/fire/water_common.comp") + "\n"
+	src += FileAccess.get_file_as_string("res://shaders/fire/%s.comp" % name)
 	var spirv := ShaderCache.compile(_rd, name, src)
 	if not spirv.compile_error_compute.is_empty():
 		push_error("%s compile error:\n%s" % [name, spirv.compile_error_compute])
@@ -713,8 +724,8 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 		_rd.capture_timestamp("fire_water/gather_start")
 
 	# The gather walks the storage, not the domain: the accumulator extent, which is
-	# the tile atlas. The liquid textures have exactly that extent, so cell and texel
-	# coincide here.
+	# the fire box when dense and the tile atlas when sparse. The liquid textures
+	# have exactly that extent in both builds, so cell and texel coincide here.
 	var push := _push_bytes(
 		PackedInt32Array([_accum_dims.x, _accum_dims.y, _accum_dims.z]),
 		PackedFloat32Array([_cell_size]))
@@ -723,7 +734,13 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 	_rd.compute_list_bind_compute_pipeline(cl, _pipeline_gather)
 	_rd.compute_list_bind_uniform_set(cl, _uniform_set_gather, 0)
 	_rd.compute_list_set_push_constant(cl, push, push.size())
-	_rd.compute_list_dispatch_indirect(cl, _tile_args, 0)
+	if _sparse:
+		_rd.compute_list_dispatch_indirect(cl, _tile_args, 0)
+	else:
+		_rd.compute_list_dispatch(cl,
+			ceili(float(_accum_dims.x) / 8.0),
+			ceili(float(_accum_dims.y) / 8.0),
+			ceili(float(_accum_dims.z) / 4.0))
 	_rd.compute_list_add_barrier(cl)
 	_rd.compute_list_end()
 	if profiling:
@@ -797,15 +814,15 @@ func _rebuild_texture_sets(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 		_image_uniform(1, liquid_vel_rid),
 		_buffer_uniform(2, _ssbo_scatter),
 		_buffer_uniform(3, _ssbo_vel_scatter),
-		_buffer_uniform(4, _ssbo_tile_list),
-	], _shader_gather, 0)
+	] + ([_buffer_uniform(4, _ssbo_tile_list)] if _sparse else []), _shader_gather, 0)
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [
 			_buffer_uniform(0, sph.parity_positions_rid(parity)),
 			_buffer_uniform(1, sph.parity_velocities_rid(parity)),
 			_image_uniform(2, liquid_scal_rid),
 		]
-		uniforms.append(_image_uniform(4, _indir_tex))
+		if _sparse:
+			uniforms.append(_image_uniform(4, _indir_tex))
 		_sets_return[parity] = _rd.uniform_set_create(uniforms, _shader_return, 0)
 	_cached_scal_rid = liquid_scal_rid
 
@@ -878,7 +895,7 @@ func _free_texture_sets() -> void:
 
 
 func set_indirection_rid(indir_tex: RID) -> void:
-	if _rd == null:
+	if _rd == null or not _sparse:
 		return
 	initialized = false
 	_free_texture_sets()

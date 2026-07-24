@@ -1,0 +1,51 @@
+// Projection step (Algorithm 1 line 22): u -= grad(p), making the field
+// divergence free. This is what turns a vertical buoyancy force into a plume
+// that pinches at the waist and drags fresh air in from the sides.
+//
+// THE POINT OF THE STAGGERED GRID. Each face subtracts the difference of the two
+// pressures it separates, over one cell width:
+//
+//     u[i] -= (p[i] - p[i-1]) / h
+//
+// which is the exact transpose of the divergence fire_divergence takes. Because
+// the two operators are adjoint, the projection removes precisely the divergence
+// the solve measured, and what is left is the Jacobi residual and nothing else.
+// The previous collocated form differenced pressure over 2h while differencing
+// velocity over 2h as well, leaving the odd-even mode invisible to both: the
+// projection could not remove a divergence it could not see, so buoyancy piled
+// up into the field instead of being converted into lateral entrainment.
+//
+// Boundaries follow the same convention as the Poisson stencil: sides and top
+// carry a Dirichlet ghost of p = 0 and are projected against it (outflow), the
+// floor is solid and is pinned to zero instead.
+
+void main() {
+	ivec3 c = cell_coord();
+	ivec3 gmax = grid_max();
+	float inv_h = params.cell.z;
+
+	if (in_u(c)) {
+		// Ghost pressure outside the domain is zero on both open x faces.
+		float p_hi = (c.x <= gmax.x) ? load_press_src(c) : 0.0;
+		float p_lo = (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
+		store_u_src(c, load_u_src(c) - (p_hi - p_lo) * inv_h);
+	}
+
+	if (in_v(c)) {
+		float v = 0.0;
+		if (c.y > 0) {
+			float p_hi = (c.y <= gmax.y) ? load_press_src(c) : 0.0;
+			float p_lo = load_press_src(c - ivec3(0, 1, 0));
+			v = load_v_src(c) - (p_hi - p_lo) * inv_h;
+		}
+		// c.y == 0 is the solid floor: no flow through it, and no projection
+		// either — the Neumann condition is already in the Poisson stencil.
+		store_v_src(c, v);
+	}
+
+	if (in_w(c)) {
+		float p_hi = (c.z <= gmax.z) ? load_press_src(c) : 0.0;
+		float p_lo = (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
+		store_w_src(c, load_w_src(c) - (p_hi - p_lo) * inv_h);
+	}
+}

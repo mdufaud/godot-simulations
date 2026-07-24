@@ -1,4 +1,3 @@
-class_name FireGpuSolver
 extends RefCounted
 ## GPU combustion solver implementing Fire-X (Wrede et al., SIGGRAPH Asia 2025,
 ## ACM TOG 44(6) art. 268), DOI 10.1145/3763338.
@@ -6,30 +5,36 @@ extends RefCounted
 ## Global one-step stoichiometric combustion in real units: mass fractions and
 ## molar concentrations, Arrhenius kinetics from the paper's Table 1, Boussinesq
 ## buoyancy, vorticity confinement, MacCormack advection and a pressure
-## projection — block Gauss-Seidel over a tile-level coarse solve. Every physical
-## constant below is traceable to the paper or to the reference it cites; anything
-## that is not is marked NON-PAPER.
+## projection — Jacobi on the dense build, block Gauss-Seidel over a tile-level
+## coarse solve on the sparse one. Every physical constant below is traceable to the paper or to the
+## reference it cites; anything that is not is marked NON-PAPER.
 ##
 ## All methods except [method push_event] and [method get_stats] must run on the
 ## rendering thread (RenderingDevice is not thread safe).
 
-const SHADER_DIR := "res://shaders/fire/sparse/"
+const SHADER_DIR := "res://shaders/fire/"
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
 	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
 	"pressure", "project", "display",
 ]
-## Resets tiles the pool allocated this frame to ambient air before anything
-## reads them. Dispatched over the pool's new-tile list, not the
+## Sparse-only stage: resets tiles the pool allocated this frame to ambient air
+## before anything reads them. Dispatched over the pool's new-tile list, not the
 ## active list, so it never appears in the substep loop.
 const CLEAR_STAGE := "clear"
-## The coarse level of the pressure solve, one unknown per tile.
+## Sparse-only: the coarse level of the pressure solve, one unknown per tile.
 ## restrict and prolong run one workgroup per tile like everything else; the solve
 ## between them is the one dispatch of the whole solver that is a single
 ## workgroup, because the entire coarse system fits in its shared memory.
 const COARSE_STAGES := ["press_restrict", "press_coarse", "press_prolong"]
 const COARSE_SOLVE_STAGE := "press_coarse"
-## Stages compiled with the shared-memory velocity apron. Both
+## Stages that touch the staggered velocity faces, and so must be dispatched
+## over the face grid (dims + 1 on every axis) rather than the cell grid. Each
+## one guards its own writes, since the three face textures have different
+## extents and none of them fills the dispatch.
+const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
+	"diffusion", "evapapply", "project"]
+## Sparse-only: stages compiled with the shared-memory velocity apron. Both
 ## advection passes reconstruct the velocity at four staggered positions per cell,
 ## which is 33 face loads each and the largest single source of traffic in the
 ## stage; caching the tile's faces once is measurably cheaper (see
@@ -41,13 +46,15 @@ const VEL_CACHE_STAGES := ["advect", "maccormack"]
 ## one source of truth for the physics; the parts' standalone mains are compiled
 ## out by FIRE_MERGED.
 const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
+## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
+const WG := Vector3i(8, 8, 4)
 ## Wood emitters the campfire can hold. Each one costs a slot in the config tail
 ## and a distance test per cell in fire_display; keep it in step with the
 ## MAX_LOGS define in fire_common.comp.
 const MAX_LOGS := 12
 ## 11 reduced scalars, then one probed gas temperature per wood emitter, then the
-## six words of the resident-set bounding box (see STAT_BOUNDS in
-## fire_common.comp).
+## six words of the sparse build's resident-set bounding box (see STAT_BOUNDS in
+## fire_common.comp). Written on the sparse path only; the layout is shared.
 const STAT_BOUNDS := 11 + MAX_LOGS
 const STATS_WORDS := STAT_BOUNDS + 6
 ## 12 physical blocks, then the wood tail: (pos, radius) and (rate, -, -, -).
@@ -136,9 +143,12 @@ const Y_O2_AIR := 0.233
 #  CONFIGURABLE PARAMETERS — ranges from Fire-X Tab. 3
 # =========================================================================
 
-## The fire itself roams the whole virtual domain (see [method sim_dims]); this is
-## only the box the SPH droplets are given as their own neighbour-grid domain,
-## 12.8 x 19.2 x 12.8 m at the default cell size.
+## 64x96x64. Fire-X Tab. 3 runs 64^3 up to 200x300x400.
+##
+## The domain is 12.8 x 19.2 x 12.8 m either way; this is the middle of the three
+## quality presets in the demo controller. 128x192x128 at 0.1 m is the same box at
+## the paper's cell size and works, but costs 86 ms a frame on a Radeon 760M
+## against 10 ms here, so it is the High preset rather than the default.
 var grid_dims := Vector3i(64, 96, 64)
 var cell_size := 0.2 ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
 
@@ -150,23 +160,23 @@ var simulation_hz := 30
 var timestep := 1.0 / 30.0
 var max_catchup_steps := 4
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
-## Relaxation sweeps run inside one pressure dispatch, against the
+## SPARSE ONLY. Relaxation sweeps run inside one pressure dispatch, against the
 ## halo the workgroup cached on entry (block-Jacobi / additive Schwarz). They ride
 ## along inside a pass rather than replacing passes: pressure_iterations still
 ## counts dispatches.
 var pressure_inner_sweeps := 4
-## Over-relaxation of the red-black sweep. 1.0 is plain Gauss-Seidel,
+## SPARSE ONLY. Over-relaxation of the red-black sweep. 1.0 is plain Gauss-Seidel,
 ## and measured, it is the best value: 1.3 was slightly worse, 1.6 clearly worse
 ## and 1.7 diverged (max_divergence 37). Over-relaxing inside a block amplifies
 ## the mismatch against a halo that is frozen for the pass, which is the opposite
 ## of what SOR does on a globally consistent sweep. Kept as a knob because it is
 ## the falsifiable part of that claim.
 var pressure_sor_omega := 1.0
-## Coarse-grid corrections per projection, each followed by an equal
+## SPARSE ONLY. Coarse-grid corrections per projection, each followed by an equal
 ## share of the fine sweeps. 0 disables the two-level solve. A second cycle was
 ## measured inside the run-to-run noise, so one is what ships.
 var pressure_coarse_cycles := 1
-## Over-relaxation of the coarse solve (see fire_press_coarse.comp).
+## SPARSE ONLY. Over-relaxation of the coarse solve (see fire_press_coarse.comp).
 var pressure_coarse_omega := 1.8
 var advection_mode := ADVECTION_MACCORMACK
 
@@ -236,8 +246,14 @@ var evaporation_enabled := true
 var display_temperature := 2600.0 ## Renderer normalisation only
 var reaction_reference := 50.0 ## Renderer normalisation only [mol/(m^3.s)]
 
-## The fire roams a 409.6 x 102.4 x 409.6 m virtual domain at a cost set by how
-## much of it is burning, rather than a fixed box at a cost set by the box.
+## Run on the sparse tile grid instead of the fixed dense box. Must be set before
+## [method init_render]: it selects the shader variant, the texture extents and
+## the dispatch mode. The pool budget can be rebuilt afterwards.
+##
+## The fire then roams a 409.6 x 102.4 x 409.6 m virtual domain at a cost set by
+## how much of it is burning, rather than a 12.8 x 19.2 x 12.8 m box at a cost set
+## by the box. The dense path stays as the A/B reference.
+var sparse := true
 var pool_budget := FireTilePool.NSLOTS
 
 # Tile pool policy. The dilation band has to exceed the distance the fire can
@@ -286,6 +302,8 @@ var _config_cache := PackedByteArray()
 var _parity := 0
 var _simulation_step := 0
 var _topology_prepared := false
+var _groups := Vector3i.ZERO
+var _groups_face := Vector3i.ZERO
 
 var _events: Array[Dictionary] = []
 var _events_mutex := Mutex.new()
@@ -479,11 +497,14 @@ func get_stats() -> Dictionary:
 	}
 
 
-## Simulation-space box for the volume proxy. Safe to call from the main thread.
+## Simulation-space box for the sparse volume proxy. Safe to call from the main
+## thread.
 func display_clip_box(margin := 1.6) -> AABB:
 	var box := Vector3(sim_dims()) * cell_size
 	var origin := Vector3(-box.x * 0.5, 0.0, -box.z * 0.5)
 	var full := AABB(origin, box)
+	if not sparse:
+		return full
 	_stats_mutex.lock()
 	var ready := _display_bounds_ready
 	var lo := Vector3(float(_stats[STAT_BOUNDS]), float(_stats[STAT_BOUNDS + 1]),
@@ -535,10 +556,14 @@ func init_render() -> void:
 		push_error("Fire solver needs a RenderingDevice (Forward+ or Mobile renderer).")
 		return
 
+	# One source, two builds: the define is part of the string ShaderCache keys on,
+	# so the dense and sparse variants land in separate cache entries by themselves.
 	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"])
 	_stages = STAGES.duplicate()
-	_stages.append(CLEAR_STAGE)
-	_stages.append_array(COARSE_STAGES)
+	if sparse:
+		preamble += "#define FIRE_SPARSE\n"
+		_stages.append(CLEAR_STAGE)
+		_stages.append_array(COARSE_STAGES)
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "fire_common.comp")
 	for stage in _stages:
@@ -546,7 +571,7 @@ func init_render() -> void:
 		# The 10^3 velocity apron costs 12 KB of shared memory, so only the two
 		# stages that reconstruct velocity at every cell of their tile get it.
 		var defines := preamble
-		if stage in VEL_CACHE_STAGES:
+		if sparse and stage in VEL_CACHE_STAGES:
 			defines += "#define FIRE_VEL_CACHE\n"
 		if stage in MERGED_PARTS:
 			defines += "#define FIRE_MERGED\n"
@@ -567,11 +592,12 @@ func init_render() -> void:
 	# The pool shares the solver's device and borrows the activity texture, which
 	# fire_display writes and tile_mark reduces. It has to come up before the
 	# uniform sets, which bind its indirection volume and tile lists.
-	_pool = FireTilePool.new()
-	if not _pool.init_render(_rd, _tex["activity"], pool_budget):
-		push_error("Fire solver could not bring up the tile pool.")
-		_pool = null
-		return
+	if sparse:
+		_pool = FireTilePool.new()
+		if not _pool.init_render(_rd, _tex["activity"], pool_budget):
+			push_error("Fire solver could not bring up the sparse tile pool.")
+			_pool = null
+			return
 
 	var stats_bytes := PackedByteArray()
 	stats_bytes.resize(STATS_WORDS * 4)
@@ -581,48 +607,52 @@ func init_render() -> void:
 	config_bytes.resize(CONFIG_VEC4S * 16)
 	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
 
-	# The coarse level of the pressure solve. One unknown per atlas slot, so both
-	# buffers are fixed size: the right-hand side and the correction, then the face
-	# mask, the slot -> unknown map and the six coarse neighbours.
-	var coarse_val_bytes := PackedByteArray()
-	coarse_val_bytes.resize(2 * FireTilePool.NSLOTS * 4)
-	_coarse_val_buf = _rd.storage_buffer_create(coarse_val_bytes.size(), coarse_val_bytes)
-	var coarse_idx_bytes := PackedByteArray()
-	coarse_idx_bytes.resize(8 * FireTilePool.NSLOTS * 4)
-	_coarse_idx_buf = _rd.storage_buffer_create(coarse_idx_bytes.size(), coarse_idx_bytes)
+	if sparse:
+		# The coarse level of the pressure solve. One unknown per atlas slot, so
+		# both buffers are fixed size: the right-hand side and the correction, then
+		# the face mask, the slot -> unknown map and the six coarse neighbours.
+		var coarse_val_bytes := PackedByteArray()
+		coarse_val_bytes.resize(2 * FireTilePool.NSLOTS * 4)
+		_coarse_val_buf = _rd.storage_buffer_create(coarse_val_bytes.size(), coarse_val_bytes)
+		var coarse_idx_bytes := PackedByteArray()
+		coarse_idx_bytes.resize(8 * FireTilePool.NSLOTS * 4)
+		_coarse_idx_buf = _rd.storage_buffer_create(coarse_idx_bytes.size(), coarse_idx_bytes)
 
 	_build_uniform_sets()
-	_bootstrap_pool()
+	_update_groups()
+	if sparse:
+		_bootstrap_pool()
 	_parity = 0
 	_simulation_step = 0
 	_topology_prepared = false
 	initialized = true
 
 
-## Cell dimensions of the simulated domain: the whole virtual tile grid, of which
-## only the resident tiles are ever touched. This is what goes in the push
-## constant, so cell_to_world and every boundary test in the shaders are expressed
-## against it — and it is the coordinate system anything coupling into the grid
-## from outside has to bin into (FireWater).
+## Cell dimensions of the simulated domain. Dense: the box. Sparse: the whole
+## virtual tile grid, of which only the resident tiles are ever touched. This is
+## what goes in the push constant, so cell_to_world and every boundary test in
+## the shaders are expressed against it — and it is the coordinate system anything
+## coupling into the grid from outside has to bin into (FireWater).
 func sim_dims() -> Vector3i:
-	return FireTilePool.VTILES * FireTilePool.TILE
+	return FireTilePool.VTILES * FireTilePool.TILE if sparse else grid_dims
 
 
 ## The tile pool's indirection volume, for a coupled stage that lives outside this
-## class and has to resolve a virtual cell to its atlas texel.
+## class and has to resolve a virtual cell to its atlas texel. Invalid on the dense
+## path, which is also how such a stage selects its build.
 func indirection_rid() -> RID:
 	return _pool.indir_rid() if _pool != null else RID()
 
 
 ## The same volume as a sampled RGBA8 view, for the raymarcher; see
-## [method FireTilePool.indir_bytes_rid].
+## [method FireTilePool.indir_bytes_rid]. Invalid on the dense path.
 func indirection_bytes_rid() -> RID:
 	return _pool.indir_bytes_rid() if _pool != null else RID()
 
 
-## Extent of the field textures: a tile atlas, not the domain.
+## Extent of the field textures. Sparse fields are a tile atlas, not the domain.
 func _field_dims() -> Vector3i:
-	return FireTilePool.ATLAS_CELLS
+	return FireTilePool.ATLAS_CELLS if sparse else grid_dims
 
 
 ## Seed the pool with the tiles around the emitter and pin them resident.
@@ -653,17 +683,39 @@ func _bootstrap_pool() -> void:
 	_frame = 0
 
 
-## Rebuild the tile pool at a new logical slot budget. Rendering thread only.
+## Rebuild dense fields at a new resolution, or rebuild the sparse pool at a new
+## logical slot budget. Rendering thread only.
 ##
-## Shaders, pipelines and the stats/config buffers are budget independent and
-## survive; the fields are cleared, since resampling a reacting mixture onto a
-## different topology has no meaning that would survive the mass-fraction closure
-## check.
+## The domain is [member grid_dims] * [member cell_size], so a caller that wants
+## to keep the same box must change both. Shaders, pipelines and the stats/config
+## buffers are resolution independent and survive; the fields are cleared, since
+## resampling a reacting mixture onto a different grid has no meaning that would
+## survive the mass-fraction closure check.
 ##
-## Callers must stop stepping, detach render-side references and release external
-## indirection uniform sets before queueing this.
-func set_pool_budget(budget: int) -> void:
+## Callers must stop stepping and detach render-side references before queueing
+## this. Sparse callers must also release external indirection uniform sets first.
+func set_resolution(dims: Vector3i, cell: float, budget := 0) -> void:
 	if _rd == null:
+		return
+	if sparse:
+		initialized = false
+		for stage in _sets:
+			for set_rid in _sets[stage]:
+				if set_rid.is_valid():
+					_rd.free_rid(set_rid)
+		_sets.clear()
+		if _pool != null:
+			_pool.free_render()
+		pool_budget = clampi(budget if budget > 0 else pool_budget, 1, FireTilePool.NSLOTS)
+		_pool = FireTilePool.new()
+		if not _pool.init_render(_rd, _tex["activity"], pool_budget):
+			push_error("Fire solver could not rebuild the sparse tile pool.")
+			_pool = null
+			return
+		_build_uniform_sets()
+		clear_fields()
+		_parity = 0
+		initialized = true
 		return
 	initialized = false
 	for stage in _sets:
@@ -671,18 +723,32 @@ func set_pool_budget(budget: int) -> void:
 			if set_rid.is_valid():
 				_rd.free_rid(set_rid)
 	_sets.clear()
-	if _pool != null:
-		_pool.free_render()
-	pool_budget = clampi(budget if budget > 0 else pool_budget, 1, FireTilePool.NSLOTS)
-	_pool = FireTilePool.new()
-	if not _pool.init_render(_rd, _tex["activity"], pool_budget):
-		push_error("Fire solver could not rebuild the tile pool.")
-		_pool = null
-		return
+	for key in _tex:
+		if _tex[key].is_valid():
+			_rd.free_rid(_tex[key])
+	_tex.clear()
+
+	grid_dims = dims
+	cell_size = cell
+	_create_textures()
 	_build_uniform_sets()
-	clear_fields()
+	_update_groups()
 	_parity = 0
 	initialized = true
+
+
+## Cell dims are multiples of the workgroup, face dims (dims + 1) never are, so
+## the face dispatch always overshoots and every face stage bounds-checks its
+## own writes.
+func _update_groups() -> void:
+	_groups = Vector3i(
+		ceili(float(grid_dims.x) / WG.x),
+		ceili(float(grid_dims.y) / WG.y),
+		ceili(float(grid_dims.z) / WG.z))
+	_groups_face = Vector3i(
+		ceili(float(grid_dims.x + 1) / WG.x),
+		ceili(float(grid_dims.y + 1) / WG.y),
+		ceili(float(grid_dims.z + 1) / WG.z))
 
 
 func _create_textures() -> void:
@@ -701,13 +767,17 @@ func _create_textures() -> void:
 		_make_format(scratch["four"], usage, dims), RDTextureView.new(), [])
 
 	# Staggered MAC velocity (Fire-X Sec. 5.1, Bridson 2015): one scalar per face
-	# centre instead of a vector per cell centre. One LOW face per cell, so the face
-	# textures have exactly the cell extent and a tile's high faces belong to its
-	# neighbour (see the face-grid note in fire_common.comp).
+	# centre instead of a vector per cell centre. A u-face sits between cells i-1
+	# and i on x, so densely there is one more of them than there are cells on that
+	# axis. Sparse instead stores one LOW face per cell, so the face textures have
+	# exactly the cell extent and a tile's high faces belong to its neighbour (see
+	# the face-grid note in fire_common.comp).
+	var face_offsets: Array[Vector3i] = [Vector3i(1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, 0, 1)]
 	for axis in 3:
+		var face_dims: Vector3i = dims if sparse else dims + face_offsets[axis]
 		for suffix in ["_a", "_b", "_fwd"]:
 			_tex["uvw"[axis] + suffix] = _rd.texture_create(
-				_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
+				_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, face_dims),
 				RDTextureView.new(), [])
 
 	# diverg is the pressure right-hand side, and fp16 there sets a floor under the
@@ -740,15 +810,17 @@ func _create_textures() -> void:
 	_tex["visual_activity_prev"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
 		RDTextureView.new(), [])
-	_tex["indir_prev"] = _rd.texture_create(
-		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage,
-			FireTilePool.VTILES), RDTextureView.new(), [])
+	if sparse:
+		_tex["indir_prev"] = _rd.texture_create(
+			_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage,
+				FireTilePool.VTILES), RDTextureView.new(), [])
 
 	# Tile keep signal: written by fire_display, reduced per tile by tile_mark.
 	# A field like any other, so clear_fields and the atlas layout cover it.
-	_tex["activity"] = _rd.texture_create(
-		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
-		RDTextureView.new(), [])
+	if sparse:
+		_tex["activity"] = _rd.texture_create(
+			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
+			RDTextureView.new(), [])
 
 	clear_fields()
 
@@ -817,7 +889,7 @@ func clear_fields() -> void:
 	# The atlas now holds nothing, so the pool's topology must be reset to match:
 	# leaving tiles resident over cleared fields would keep them alive on stale
 	# metadata until the hysteresis expired.
-	if _pool != null and _pool.initialized:
+	if sparse and _pool != null and _pool.initialized:
 		_bootstrap_pool()
 
 
@@ -825,7 +897,9 @@ func clear_fields() -> void:
 func _zeroed_keys() -> Array:
 	var keys := ["scal2_a", "scal2_b", "scal_fwd", "scal2_fwd", "curl",
 		"press_a", "press_b", "diverg", "display", "display_prev", "liquid_scal",
-		"liquid_vel", "nu_t", "visual_activity", "visual_activity_prev", "activity"]
+		"liquid_vel", "nu_t", "visual_activity", "visual_activity_prev"]
+	if sparse:
+		keys.append("activity")
 	for axis in "uvw":
 		for suffix in ["_a", "_b", "_fwd"]:
 			keys.append(axis + suffix)
@@ -833,8 +907,8 @@ func _zeroed_keys() -> Array:
 
 
 ## Preserve the last complete display sample for render interpolation. Physics
-## fields are not copied or blended. Rendering thread only, before topology
-## changes its virtual-tile mapping.
+## fields are not copied or blended. Rendering thread only, before sparse
+## topology changes its virtual-tile mapping.
 func capture_interpolation_state_render() -> void:
 	if not initialized:
 		return
@@ -843,7 +917,7 @@ func capture_interpolation_state_render() -> void:
 		Vector3.ZERO, Vector3(dims), 0, 0, 0, 0)
 	_rd.texture_copy(_tex["visual_activity"], _tex["visual_activity_prev"],
 		Vector3.ZERO, Vector3.ZERO, Vector3(dims), 0, 0, 0, 0)
-	if _pool != null:
+	if sparse and _pool != null:
 		_rd.texture_copy(_pool.indir_bytes_rid(), _tex["indir_prev"], Vector3.ZERO,
 			Vector3.ZERO, Vector3(FireTilePool.VTILES), 0, 0, 0, 0)
 
@@ -865,7 +939,8 @@ func _build_uniform_sets() -> void:
 		6: "curl", 7: "press_a", 8: "press_b", 9: "diverg", 10: "display",
 		22: "liquid_scal", 23: "liquid_vel", 24: "nu_t",
 	}
-	fields[27] = "activity"
+	if sparse:
+		fields[27] = "activity"
 	fields[29] = "visual_activity"
 	var fields_flipped := fields.duplicate()
 	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
@@ -874,14 +949,16 @@ func _build_uniform_sets() -> void:
 	var pressure_flipped := fields.duplicate()
 	_swap_binding(pressure_flipped, 7, 8)
 
-	# The indirection volume and the tile lists are the same for every stage and
-	# every variant: only the fields ping-pong.
-	var extra_buffers := [
-		[11, _stats_buf], [15, _config_buf],
-		[26, _pool.active_list_rid()], [28, _pool.new_list_rid()],
-		[30, _pool.active_slots_rid()], [31, _pool.counts_rid()],
-		[32, _coarse_val_buf], [33, _coarse_idx_buf],
-	]
+	# The sparse build adds the indirection volume and the two tile lists. They are
+	# the same for every stage and every variant: only the fields ping-pong.
+	var extra_buffers := [[11, _stats_buf], [15, _config_buf]]
+	if sparse:
+		extra_buffers.append([26, _pool.active_list_rid()])
+		extra_buffers.append([28, _pool.new_list_rid()])
+		extra_buffers.append([30, _pool.active_slots_rid()])
+		extra_buffers.append([31, _pool.counts_rid()])
+		extra_buffers.append([32, _coarse_val_buf])
+		extra_buffers.append([33, _coarse_idx_buf])
 
 	for stage in _stages:
 		var variants := [fields, pressure_flipped] if stage == "pressure" \
@@ -896,11 +973,12 @@ func _build_uniform_sets() -> void:
 				u.binding = binding
 				u.add_id(_tex[order[binding]])
 				uniforms.append(u)
-			var ind := RDUniform.new()
-			ind.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-			ind.binding = 25
-			ind.add_id(_pool.indir_rid())
-			uniforms.append(ind)
+			if sparse:
+				var ind := RDUniform.new()
+				ind.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+				ind.binding = 25
+				ind.add_id(_pool.indir_rid())
+				uniforms.append(ind)
 			for pair in extra_buffers:
 				var b := RDUniform.new()
 				b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -940,7 +1018,7 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	if profiling:
 		_rd.capture_timestamp("fire/start")
 
-	if not _topology_prepared:
+	if sparse and not _topology_prepared:
 		prepare_topology_render()
 	_topology_prepared = false
 
@@ -966,7 +1044,7 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/end")
-		if _frame % 8 == 0:
+		if sparse and _frame % 8 == 0:
 			_update_pool_stats_cache()
 
 
@@ -978,7 +1056,7 @@ func poll_render() -> void:
 
 
 func prepare_topology_render() -> void:
-	if not initialized or _topology_prepared:
+	if not initialized or not sparse or _topology_prepared:
 		return
 	_upload_config()
 	_frame += 1
@@ -1076,13 +1154,14 @@ func _substep(cl: int, liquid_active: bool) -> void:
 	_simulation_step += 1
 
 
-## Relaxations per pressure dispatch, against the halo cache.
+## Relaxations per pressure dispatch. The dense build has no halo cache to relax
+## against, so its dispatch is one plain Jacobi sweep, as in the paper.
 func _inner_sweeps() -> int:
-	return clampi(pressure_inner_sweeps, 1, 16)
+	return clampi(pressure_inner_sweeps, 1, 16) if sparse else 1
 
 
 func _coarse_enabled() -> bool:
-	return pressure_coarse_cycles > 0
+	return sparse and pressure_coarse_cycles > 0
 
 
 func _effective_vorticity_strength() -> float:
@@ -1115,7 +1194,7 @@ func _dispatch(cl: int, stage: String, variant: int, pc: PackedByteArray, mark :
 		# many of its unknowns are live is read from the pool's counter inside the
 		# shader — so this is the one dispatch whose size is not the tile count.
 		_rd.compute_list_dispatch(cl, 1, 1, 1)
-	else:
+	elif sparse:
 		# One workgroup per tile, and the workgroup count lives on the GPU: the
 		# pool's counters double as the dispatch args, so nothing about the fire's
 		# extent ever has to come back to the CPU. The clear stage runs over the
@@ -1123,6 +1202,9 @@ func _dispatch(cl: int, stage: String, variant: int, pc: PackedByteArray, mark :
 		var offset := FireTilePool.NEW_ARGS_OFFSET if stage == CLEAR_STAGE \
 			else FireTilePool.ACTIVE_ARGS_OFFSET
 		_rd.compute_list_dispatch_indirect(cl, _pool.counts_rid(), offset)
+	else:
+		var g := _groups_face if stage in FACE_STAGES else _groups
+		_rd.compute_list_dispatch(cl, g.x, g.y, g.z)
 	_rd.compute_list_add_barrier(cl)
 
 
@@ -1254,11 +1336,12 @@ func _on_stats_ready(bytes: PackedByteArray) -> void:
 	_stats_mutex.lock()
 	for i in STATS_WORDS:
 		_stats[i] = bytes.decode_u32(i * 4)
-	var lo := Vector3i(int(_stats[STAT_BOUNDS]), int(_stats[STAT_BOUNDS + 1]),
-		int(_stats[STAT_BOUNDS + 2]))
-	var hi := Vector3i(int(_stats[STAT_BOUNDS + 3]), int(_stats[STAT_BOUNDS + 4]),
-		int(_stats[STAT_BOUNDS + 5]))
-	_display_bounds_ready = lo.x <= hi.x and lo.y <= hi.y and lo.z <= hi.z
+	if sparse:
+		var lo := Vector3i(int(_stats[STAT_BOUNDS]), int(_stats[STAT_BOUNDS + 1]),
+			int(_stats[STAT_BOUNDS + 2]))
+		var hi := Vector3i(int(_stats[STAT_BOUNDS + 3]), int(_stats[STAT_BOUNDS + 4]),
+			int(_stats[STAT_BOUNDS + 5]))
+		_display_bounds_ready = lo.x <= hi.x and lo.y <= hi.y and lo.z <= hi.z
 	_stats_mutex.unlock()
 
 
@@ -1306,10 +1389,10 @@ func _read_timings() -> void:
 		_timings_mutex.unlock()
 
 
-## Pool occupancy, for the verification harness and the debug overlay. Rendering
-## thread only: it reads the counters back synchronously.
+## Pool occupancy, for the verification harness and the debug overlay. Empty on
+## the dense path. Rendering thread only: it reads the counters back synchronously.
 func read_pool_stats() -> Dictionary:
-	if _pool == null or not _pool.initialized:
+	if not sparse or _pool == null or not _pool.initialized:
 		return {}
 	var c := _pool.read_counts()
 	return {

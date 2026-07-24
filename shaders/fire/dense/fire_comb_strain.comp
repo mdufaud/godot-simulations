@@ -1,0 +1,25 @@
+// Combustion and the Smagorinsky strain closure in one dispatch.
+//
+// The two stages are independent: combustion is cell-local on the scalar pair,
+// strain reads the velocity faces and writes nu_t, and neither reads what the
+// other writes. Merging them is therefore not an approximation — it is the same
+// two bodies in the same order, one workgroup launch and one barrier fewer.
+//
+// The order below is the point of the merge, not an accident. strain's 11^3
+// velocity cache is 3993 loads that combustion does not need, and combustion is
+// the solver's only transcendental-heavy stage (an exp and two pow per cell), so
+// the cache fill is issued first and combustion's arithmetic runs while it is in
+// flight. The barrier that publishes the cache sits between them, which is why
+// combustion_body must not contain one: it returns early on out-of-grid cells and
+// a barrier it skipped would not be workgroup-uniform.
+//
+// The sources of both stages are concatenated ahead of this file by
+// FireGpuSolver, which compiles them with FIRE_MERGED so their standalone mains
+// are left out.
+
+void main() {
+	ivec3 c = cell_coord();
+	strain_prefetch();
+	combustion_body(c);
+	strain_body(c);
+}

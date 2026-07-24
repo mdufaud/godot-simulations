@@ -1,0 +1,156 @@
+// Return grid liquid properties to the particles (Eq. 21, 24, Algorithm 1 lines 23-24).
+//
+// Mass conservation over the round trip is the whole point of the P3 criterion, so
+// the two directions use different normalisations and neither is arbitrary:
+//
+//   scatter  w_hat_pj = w_pj / Sum_j w_pj      -> Sum_j w_hat_pj = 1
+//            M_j = Sum_p m_p * w_hat_pj        -> Sum_j M_j = Sum_p m_p
+//   return   m_p' = Sum_j M_j * w_hat_pj / omega_j,  omega_j = Sum_p w_hat_pj (Eq. 20)
+//            Sum_p m_p' = Sum_j M_j * (omega_j / omega_j) = Sum_j M_j = Sum_p m_p
+//
+// Dividing by omega_j is what makes each cell hand out exactly the mass it holds.
+// Without it a cell shared by n particles would emit n times its own mass.
+//
+// Temperature (Eq. 24) needs no omega: Sum_j w_hat_pj is already 1, so the
+// weighted sum of T_lj is a plain average over the support.
+//
+// Dispatch: one thread per active particle.
+//
+// Cells with no storage are skipped through water_common.comp's grid_texel exactly
+// as water_scatter skips them, in both passes, so the two directions still agree on
+// which cells a particle touches and with what weight.
+
+layout(local_size_x = 256) in;
+
+// The SPH solver's own buffers; see water_scatter.comp for why the droplet
+// attributes live in the w lanes. Position xyz is read only — the SPH integrator
+// owns it — while the w lanes are written back.
+layout(std430, set = 0, binding = 0) buffer PartBuf {
+	vec4 positions[];  // xyz = position [m], w = temperature [K]
+} part;
+
+layout(std430, set = 0, binding = 1) buffer VelBuf {
+	vec4 velocities[];  // xyz = velocity [m/s], w = mass [kg]
+} vel;
+
+layout(rgba32f, set = 0, binding = 2) uniform restrict readonly image3D liquid_scal;
+
+// Must match water_scatter.comp exactly: the two passes have to agree on which
+// cells a particle touches and with what weight, or the round trip leaks mass.
+layout(push_constant, std430) uniform Params {
+	int active_count;
+	int grid_dim_x;
+	int grid_dim_y;
+	int grid_dim_z;
+	float cell_size;
+	float h_liquid;
+	float origin_x;
+	float origin_y;
+	float origin_z;
+	// Only this stage declares these two; water_scatter shares _particle_push() and
+	// reads the prefix above. Both land in the same 48-byte padded block.
+	float drain_rate;
+	float dt;
+} params;
+
+void main() {
+	uint pidx = gl_GlobalInvocationID.x;
+	if (pidx >= uint(params.active_count)) {
+		return;
+	}
+
+	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
+	vec3 p_local = part.positions[pidx].xyz
+		- vec3(params.origin_x, params.origin_y, params.origin_z);
+
+	if (any(lessThan(p_local, vec3(0.0))) ||
+	    any(greaterThanEqual(p_local, vec3(dims) * params.cell_size))) {
+		return;
+	}
+
+	ivec3 c_base = clamp(ivec3(p_local / params.cell_size), ivec3(0), dims - 1);
+	int search_rad = int(ceil(params.h_liquid / params.cell_size));
+	float cell_volume = params.cell_size * params.cell_size * params.cell_size;
+
+	// Pass 1: the same per-particle weight sum the scatter used.
+	float w_sum = 0.0;
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				if (grid_texel(c, dims).x < 0) {
+					continue;
+				}
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				w_sum += max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid);
+			}
+		}
+	}
+	// Nothing to read back from, so nothing to write: the particle keeps the mass
+	// and temperature it arrived with, including the drain below, which would
+	// otherwise banish a droplet flying over ground the fire has not reached.
+	if (w_sum < 1e-9) {
+		return;
+	}
+
+	// Pass 2: pull mass and temperature back out of the grid.
+	float m_new = 0.0;
+	float T_new = 0.0;
+	for (int dx = -search_rad; dx <= search_rad; ++dx) {
+		for (int dy = -search_rad; dy <= search_rad; ++dy) {
+			for (int dz = -search_rad; dz <= search_rad; ++dz) {
+				ivec3 c = c_base + ivec3(dx, dy, dz);
+				ivec3 t = grid_texel(c, dims);
+				if (t.x < 0) {
+					continue;
+				}
+
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				float w = max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid) / w_sum;
+				if (w < 1e-9) {
+					continue;
+				}
+
+				vec4 liq = imageLoad(liquid_scal, t);
+				float M_j = liq.r * cell_volume;  // Eq. 19 back to a mass
+				float T_lj = liq.g;
+				float omega_j = liq.b;            // Eq. 20
+
+				if (omega_j > 1e-9) {
+					m_new += M_j * w / omega_j;   // Eq. 21
+				}
+				T_new += T_lj * w;                // Eq. 24
+			}
+		}
+	}
+
+	// NON-PAPER drainage. A cold puddle can never reach T_B on its own, so the
+	// Eq. 26-28 evaporation stalls at d_rho = 0 and the droplets would sit there wet
+	// and suppressing combustion for good. This bleeds them off to the ground
+	// (run-off / soak-in) so a rekindled fire recovers.
+	//
+	// It is applied here rather than on the grid because it is the only route out of
+	// the simulation a droplet has, and the evaporation stage that used to own it is
+	// skipped whenever evaporation is toggled off — leaving the puddle immortal in
+	// precisely the mode with no other cleanup. Draining the particle mass directly
+	// also means the round trip stays exact: what leaves is what the grid no longer
+	// has to hand back next frame.
+	m_new *= max(0.0, 1.0 - params.drain_rate * params.dt);
+
+	// A droplet whose mass has drained to almost nothing has effectively soaked
+	// away: banish it below the world so it stops rendering as a stray blob and
+	// drops out of the domain the next scatter skips. The SPH integrator then just
+	// lets it fall further, never to return.
+	// Stays 4% of a fresh parcel: FireWater.DROPLET_MASS is 0.025 kg, sized so a
+	// dense stream renders as a surface without changing the delivered kg/s. An
+	// absolute cutoff would banish healthy droplets once the parcel mass shrank.
+	const float DRAIN_CUTOFF = 0.001; // kg, 4% of a fresh droplet
+	if (m_new < DRAIN_CUTOFF) {
+		part.positions[pidx].y = -1000.0;
+		vel.velocities[pidx].w = 0.0;
+		return;
+	}
+
+	vel.velocities[pidx].w = m_new;
+	part.positions[pidx].w = T_new;
+}

@@ -1,0 +1,93 @@
+// NON-PAPER: Smagorinsky sub-grid eddy viscosity nu_t = (Cs.h)^2 . |S|, with
+// |S| = sqrt(2 S_ij S_ij) the strain-rate magnitude. Standard coarse-grid fire
+// practice (FDS's default closure): at 0.2 m cells the turbulent entrainment
+// that dilutes a real plume is unresolved, so without this the Boussinesq
+// buoyancy accelerates the undiluted hot column into a ballistic jet. Written
+// once per cell into nu_t_tex; fire_diffusion samples it for both momentum and
+// scalar mixing rather than repeating the nine-gradient stencil per face.
+//
+// Like fire_curl, the strain lives at cell centres, reconstructed from the
+// face-averaged velocity — one geometry the solver already carries, and an
+// eddy-viscosity model is a closure, not a conservation law.
+
+const int VELOCITY_CACHE_SIDE = 11;
+const int VELOCITY_CACHE_SIZE = VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE;
+shared float strain_u_cache[VELOCITY_CACHE_SIZE];
+shared float strain_v_cache[VELOCITY_CACHE_SIZE];
+shared float strain_w_cache[VELOCITY_CACHE_SIZE];
+
+int strain_cache_index(ivec3 p) {
+	return p.x + VELOCITY_CACHE_SIDE * (p.y + VELOCITY_CACHE_SIDE * p.z);
+}
+
+vec3 cached_strain_velocity(ivec3 offset) {
+	ivec3 p = ivec3(gl_LocalInvocationID) + ivec3(1) + offset;
+	return vec3(
+		0.5 * (strain_u_cache[strain_cache_index(p)] + strain_u_cache[strain_cache_index(p + ivec3(1, 0, 0))]),
+		0.5 * (strain_v_cache[strain_cache_index(p)] + strain_v_cache[strain_cache_index(p + ivec3(0, 1, 0))]),
+		0.5 * (strain_w_cache[strain_cache_index(p)] + strain_w_cache[strain_cache_index(p + ivec3(0, 0, 1))]));
+}
+
+// Fills the cache but does not synchronise, so a merged stage can put unrelated
+// arithmetic between the loads and the barrier that consumes them.
+void strain_prefetch() {
+	ivec3 tile_origin = invocation_vt * 8;
+	for (uint i = gl_LocalInvocationIndex; i < uint(VELOCITY_CACHE_SIZE);
+			i += gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z) {
+		ivec3 hp = ivec3(int(i) % VELOCITY_CACHE_SIDE,
+			(int(i) / VELOCITY_CACHE_SIDE) % VELOCITY_CACHE_SIDE,
+			int(i) / (VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE));
+		ivec3 vc = tile_origin + hp - ivec3(1);
+		strain_u_cache[i] = load_u_src(vc);
+		strain_v_cache[i] = load_v_src(vc);
+		strain_w_cache[i] = load_w_src(vc);
+	}
+}
+
+void strain_body(ivec3 c) {
+	if (out_of_grid(c)) {
+		return;
+	}
+	if (!is_interior(c)) {
+		store_nu_t(c, 0.0);
+		return;
+	}
+
+	float inv_h = params.cell.z;
+	float inv_2h = 0.5 * inv_h;
+
+	// Diagonal terms: compact differences across the cell's own faces (exact at
+	// the centre on a MAC grid).
+	ivec3 lc = ivec3(gl_LocalInvocationID) + ivec3(1);
+	float sxx = (strain_u_cache[strain_cache_index(lc + ivec3(1, 0, 0))]
+		- strain_u_cache[strain_cache_index(lc)]) * inv_h;
+	float syy = (strain_v_cache[strain_cache_index(lc + ivec3(0, 1, 0))]
+		- strain_v_cache[strain_cache_index(lc)]) * inv_h;
+	float szz = (strain_w_cache[strain_cache_index(lc + ivec3(0, 0, 1))]
+		- strain_w_cache[strain_cache_index(lc)]) * inv_h;
+
+	// Off-diagonal terms: central differences of the face-averaged velocity.
+	vec3 px = cached_strain_velocity(ivec3(1, 0, 0));
+	vec3 nx = cached_strain_velocity(ivec3(-1, 0, 0));
+	vec3 py = cached_strain_velocity(ivec3(0, 1, 0));
+	vec3 ny = cached_strain_velocity(ivec3(0, -1, 0));
+	vec3 pz = cached_strain_velocity(ivec3(0, 0, 1));
+	vec3 nz = cached_strain_velocity(ivec3(0, 0, -1));
+	float sxy = 0.5 * ((px.y - nx.y) + (py.x - ny.x)) * inv_2h;
+	float sxz = 0.5 * ((px.z - nx.z) + (pz.x - nz.x)) * inv_2h;
+	float syz = 0.5 * ((py.z - ny.z) + (pz.y - nz.y)) * inv_2h;
+
+	float ss = sxx * sxx + syy * syy + szz * szz
+		+ 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
+	float cs_h = params.cell.w * params.cell.x;
+	store_nu_t(c, cs_h * cs_h * sqrt(2.0 * ss));
+}
+
+#ifndef FIRE_MERGED
+void main() {
+	ivec3 c = cell_coord();
+	strain_prefetch();
+	barrier();
+	strain_body(c);
+}
+#endif
