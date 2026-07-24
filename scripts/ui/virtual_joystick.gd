@@ -1,4 +1,3 @@
-class_name VirtualJoystick
 extends Control
 ## On-screen analog stick for touch devices, polled each frame via `value`.
 ## x = right, y = down (so stick-up = -y = forward for a camera).
@@ -23,11 +22,12 @@ static func is_touch_ui() -> bool:
 
 
 ## Adds a joystick on its own CanvasLayer under `parent` (any Node works).
-static func spawn(parent: Node) -> VirtualJoystick:
+static func spawn(parent: Node) -> Control:
 	var layer := CanvasLayer.new()
 	layer.name = "TouchControls"
 	parent.add_child(layer)
-	var stick := VirtualJoystick.new()
+	var Script: GDScript = load("res://scripts/ui/virtual_joystick.gd")
+	var stick: Control = Script.new()
 	layer.add_child(stick)
 	return stick
 

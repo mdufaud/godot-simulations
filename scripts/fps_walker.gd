@@ -4,7 +4,7 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## Grounded first-person walker: captured-mouse look, WASD walk relative to yaw,
 ## sprint on move_down (Shift), jump on move_up (Space), gravity + floor snap.
 ## Esc releases the cursor for the UI; click in the viewport recaptures it.
-## Touch devices get a VirtualJoystick for movement and free drag for look.
+## Touch devices get a VirtualJoystickScript for movement and free drag for look.
 
 @export var mouse_sensitivity := 0.15
 @export var touch_sensitivity := 0.2

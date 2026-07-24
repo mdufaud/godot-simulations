@@ -1,6 +1,7 @@
 extends Node3D
 
 const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
+
 ## Procedural planet demo, ported from SebLague/Fluid-Planet ("Terra").
 ## A density field is marched into a mesh on the GPU, shaded by quantised height
 ## bands, and wrapped in a raymarched Rayleigh atmosphere.
