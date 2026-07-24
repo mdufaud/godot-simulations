@@ -14,8 +14,18 @@
 // previous solution — the plume is quasi-steady, so it starts close.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
+		return;
+	}
+
+	// Sparse ghost shell: a cell whose stencil reaches a tile that is not resident
+	// is the boundary, not part of the solve, and carries the same Dirichlet p = 0
+	// the dense build imposes outside its AABB. See solved_cell in fire_common —
+	// leaving these in the solve is what breaks gradient/divergence adjointness.
+	// Always true on the dense path.
+	if (!solved_cell(c)) {
+		store_press_dst(c, 0.0);
 		return;
 	}
 
@@ -23,18 +33,18 @@ void main() {
 	float sum = 0.0;
 	float divisor = 5.0; // the five faces that are always open or interior
 
-	sum += (c.x < gmax.x) ? imageLoad(press_src, c + ivec3(1, 0, 0)).r : 0.0;
-	sum += (c.x > 0) ? imageLoad(press_src, c - ivec3(1, 0, 0)).r : 0.0;
-	sum += (c.y < gmax.y) ? imageLoad(press_src, c + ivec3(0, 1, 0)).r : 0.0;
-	sum += (c.z < gmax.z) ? imageLoad(press_src, c + ivec3(0, 0, 1)).r : 0.0;
-	sum += (c.z > 0) ? imageLoad(press_src, c - ivec3(0, 0, 1)).r : 0.0;
+	sum += (c.x < gmax.x) ? load_press_src(c + ivec3(1, 0, 0)) : 0.0;
+	sum += (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
+	sum += (c.y < gmax.y) ? load_press_src(c + ivec3(0, 1, 0)) : 0.0;
+	sum += (c.z < gmax.z) ? load_press_src(c + ivec3(0, 0, 1)) : 0.0;
+	sum += (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
 
 	// Downward face: interior below row 0, solid at it.
 	if (c.y > 0) {
-		sum += imageLoad(press_src, c - ivec3(0, 1, 0)).r;
+		sum += load_press_src(c - ivec3(0, 1, 0));
 		divisor += 1.0;
 	}
 
 	float h = params.cell.x;
-	imageStore(press_dst, c, vec4((sum - h * h * imageLoad(diverg, c).r) / divisor, 0.0, 0.0, 0.0));
+	store_press_dst(c, (sum - h * h * load_diverg(c)) / divisor);
 }

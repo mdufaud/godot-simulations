@@ -12,10 +12,10 @@
 // fire_evaporate writes its energy ledger before the projection.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	imageStore(diverg, c, vec4(divergence_at(c), 0.0, 0.0, 0.0));
+	store_diverg(c, divergence_at(c));
 }

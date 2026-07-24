@@ -8,25 +8,25 @@
 // they touch.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	float dt = params.cell.y;
 	ivec3 gmax = grid_max();
 
 	if (in_u(c)) {
-		float f = 0.5 * (imageLoad(scal_fwd, ivec3(max(c.x - 1, 0), c.y, c.z)).x
-			+ imageLoad(scal_fwd, ivec3(min(c.x, gmax.x), c.y, c.z)).x);
-		imageStore(u_src, c, vec4(imageLoad(u_src, c).r + f * dt, 0.0, 0.0, 0.0));
+		float f = 0.5 * (load_scal_fwd(ivec3(max(c.x - 1, 0), c.y, c.z)).x
+			+ load_scal_fwd(ivec3(min(c.x, gmax.x), c.y, c.z)).x);
+		store_u_src(c, load_u_src(c) + f * dt);
 	}
 	if (in_v(c)) {
-		float f = 0.5 * (imageLoad(scal_fwd, ivec3(c.x, max(c.y - 1, 0), c.z)).y
-			+ imageLoad(scal_fwd, ivec3(c.x, min(c.y, gmax.y), c.z)).y);
+		float f = 0.5 * (load_scal_fwd(ivec3(c.x, max(c.y - 1, 0), c.z)).y
+			+ load_scal_fwd(ivec3(c.x, min(c.y, gmax.y), c.z)).y);
 		// Solid ground: the confinement force cannot push flow through the floor.
-		float v = (c.y == 0) ? 0.0 : imageLoad(v_src, c).r + f * dt;
-		imageStore(v_src, c, vec4(v, 0.0, 0.0, 0.0));
+		float v = (c.y == 0) ? 0.0 : load_v_src(c) + f * dt;
+		store_v_src(c, v);
 	}
 	if (in_w(c)) {
-		float f = 0.5 * (imageLoad(scal_fwd, ivec3(c.x, c.y, max(c.z - 1, 0))).z
-			+ imageLoad(scal_fwd, ivec3(c.x, c.y, min(c.z, gmax.z))).z);
-		imageStore(w_src, c, vec4(imageLoad(w_src, c).r + f * dt, 0.0, 0.0, 0.0));
+		float f = 0.5 * (load_scal_fwd(ivec3(c.x, c.y, max(c.z - 1, 0))).z
+			+ load_scal_fwd(ivec3(c.x, c.y, min(c.z, gmax.z))).z);
+		store_w_src(c, load_w_src(c) + f * dt);
 	}
 }

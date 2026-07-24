@@ -1,0 +1,29 @@
+// Pass 3/5. A resident tile that has not been wanted for hold_frames pushes its
+// slot back onto the free list and clears its indirection entry. Runs before
+// tile_alloc so a slot freed this frame is reusable this frame.
+//
+// The hysteresis window keeps a flickering flame front from thrashing the pool:
+// a tile has to fall out of every core's dilation band and stay out for
+// hold_frames before it dies.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+	uint slot = gl_GlobalInvocationID.x;
+	if (slot >= NSLOTS || sm_used(slot) != 1u) {
+		return;
+	}
+
+	// Unsigned subtraction is safe: wanted_frame is only ever set to the current
+	// or an earlier frame, so frame - wanted never wraps.
+	if (pc.frame - sm_wanted(slot) <= pc.hold_frames) {
+		return;
+	}
+
+	ivec3 vt = vti_to_vt(sm_vti(slot));
+	uint idx = atomicAdd(counts[C_FREE], 1u); // push onto the free-list stack
+	free_list[idx] = slot;
+	imageStore(indir, vt, uvec4(INACTIVE));
+	slot_meta[slot * 4u + 2u] = 0u;        // used = 0
+	slot_meta[slot * 4u + 0u] = INACTIVE;  // vti
+}

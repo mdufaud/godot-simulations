@@ -1,0 +1,33 @@
+// Pass 5/5. Rebuilds the compact active list the solver dispatches its stages
+// over, one workgroup per entry. Entries are VIRTUAL TILE INDICES, not slots:
+// that is all a stage needs to turn gl_WorkGroupID into a virtual cell
+// coordinate, and every field accessor resolves the slot through the indirection
+// volume anyway.
+//
+// Thread 0 also settles the frame's bookkeeping: the deterministic pop in
+// tile_alloc left C_FREE untouched, so here the new stack top is the old one
+// minus the requests that actually found a slot, and the rest are exhaustion.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+	uint slot = gl_GlobalInvocationID.x;
+
+	// Single-writer scalar bookkeeping. C_FREE still holds the post-free stack top
+	// because tile_alloc never wrote it; no other thread touches these words.
+	if (slot == 0u) {
+		uint fstart = counts[C_FREE];
+		uint nreq = min(counts[C_REQUEST], NSLOTS);
+		uint succ = min(nreq, fstart);
+		counts[C_EXHAUST] += nreq - succ;
+		counts[C_FREE] = fstart - succ;
+	}
+
+	if (slot >= NSLOTS) {
+		return;
+	}
+	if (sm_used(slot) == 1u) {
+		uint idx = atomicAdd(counts[C_ACTIVE], 1u);
+		active_list[idx] = sm_vti(slot);
+	}
+}

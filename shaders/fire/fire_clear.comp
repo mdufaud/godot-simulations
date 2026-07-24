@@ -1,0 +1,56 @@
+// SPARSE ONLY. Resets the 8^3 block of every tile the pool allocated this frame
+// to still ambient air, before any other stage reads it.
+//
+// Slots are recycled, so the atlas block a tile is handed may still hold the
+// previous tenant's hot gas, velocity and pressure. Without this a tile that
+// becomes resident again lights itself from a fire that burned out somewhere
+// else entirely, and the warm-started pressure field injects a gradient that was
+// solved for a different part of the map.
+//
+// tile_alloc cannot do the work itself — the pool has no idea what fields the
+// solver keeps — so it records each newly allocated tile in new_list and this
+// stage, dispatched indirectly over that list, clears them.
+//
+// Both halves of every ping-pong pair are written, so the result does not depend
+// on which parity the substep loop happens to start from.
+
+void main() {
+	ivec3 c = tile_of_index(new_list[gl_WorkGroupID.x]) * 8 + ivec3(gl_LocalInvocationID);
+
+	vec4 air = ambient_scal();
+	store_scal_src(c, air);
+	store_scal_dst(c, air);
+	store_scal_fwd(c, vec4(0.0));
+	store_scal2_src(c, vec4(0.0));
+	store_scal2_dst(c, vec4(0.0));
+	store_scal2_fwd(c, vec4(0.0));
+
+	// Ambient air is only still when there is no wind. A tile allocated ahead of a
+	// leaning plume has to arrive already moving at the boundary-layer profile,
+	// otherwise the fire keeps advecting into a wall of dead air it then has to
+	// accelerate — and the resulting shear is exactly the signal tile_mark reads as
+	// activity, so the pool would chase its own artefact downwind. The profile
+	// depends on height alone, so the tile starts divergence free.
+	// The forward buffers are pure scratch, always written before they are read.
+	vec3 amb = ambient_wind(c.y);
+	store_u_src(c, amb.x);
+	store_u_dst(c, amb.x);
+	store_u_fwd(c, 0.0);
+	store_v_src(c, 0.0);
+	store_v_dst(c, 0.0);
+	store_v_fwd(c, 0.0);
+	store_w_src(c, amb.z);
+	store_w_dst(c, amb.z);
+	store_w_fwd(c, 0.0);
+
+	store_press_src(c, 0.0);
+	store_press_dst(c, 0.0);
+	store_diverg(c, 0.0);
+	store_curl(c, vec4(0.0));
+	store_nu_t(c, 0.0);
+
+	store_liquid_scal(c, vec4(0.0));
+	store_liquid_vel(c, vec4(0.0));
+	store_display(c, vec4(0.0));
+	store_activity(c, 0.0);
+}

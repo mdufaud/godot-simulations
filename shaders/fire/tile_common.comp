@@ -1,0 +1,95 @@
+// Shared header for the sparse tile-pool topology passes (Phase 3).
+//
+// The pool owns a virtual tile grid of VTILES tiles (each 8x8x8 cells) covering
+// the whole map, but only NSLOTS of them are ever resident. An indirection
+// volume maps a virtual tile to its atlas slot; a per-slot metadata buffer, a
+// free-list stack and a compact active list are updated once per frame by the
+// five passes mark -> dilate -> free -> alloc -> compact.
+//
+// The activity image is the keep signal reduced by tile_mark: an R32F atlas in
+// the same slot layout as the field textures, written by fire_display at the end
+// of each substep (Phase 4) or painted by the standalone driver (Phase 3).
+
+const uint NSLOTS = 2048u;
+const ivec3 VTILES = ivec3(256, 64, 256); // 409.6 x 102.4 x 409.6 m at 0.2 m
+const ivec3 ATLAS_TILES = ivec3(16, 8, 16); // 16*8*16 = 2048 slots
+const uint TILE = 8u;
+
+// Sentinels stored in the indirection volume. Real slot indices are < NSLOTS,
+// so any value at or above SLOT_MAX is a marker, not a slot.
+const uint INACTIVE = 0xFFFFFFFFu; // no tile here
+const uint RESERVED = 0xFFFFFFFEu; // requested this frame, not yet allocated
+const uint SLOT_MAX = 0xFFFFFFF0u;
+
+// counts[] words. Persistent across frames: C_FREE, C_EXHAUST, C_PEAK. Reset by
+// the CPU before each topology run: C_ACTIVE, C_REQUEST, C_NEW.
+//
+// The two counters the fire stages dispatch over are laid out so that each is
+// followed by two words holding 1, which makes the triple a ready-made
+// VkDispatchIndirectCommand. The solver dispatches straight out of this buffer at
+// byte offset 24 (all active tiles) and 36 (tiles allocated this frame), so no
+// separate args pass and no separate args buffer are needed. The two trailing 1s
+// of each triple are written once at bootstrap and never touched again.
+const uint C_FREE = 0u;    // free-list stack top (number of free slots)
+const uint C_REQUEST = 1u; // alloc requests appended this frame
+const uint C_FRAME = 2u;   // last frame number, for readback only
+const uint C_EXHAUST = 3u; // cumulative dropped requests
+const uint C_PEAK = 4u;    // reserved for CPU-side peak tracking
+const uint C_ACTIVE = 6u;  // resident tiles; .x of the active dispatch args
+const uint C_NEW = 9u;     // tiles allocated this frame; .x of the clear args
+
+layout(set = 0, binding = 0, r32ui) uniform restrict uimage3D indir;
+layout(std430, set = 0, binding = 1) restrict buffer SlotMeta { uint slot_meta[]; };
+layout(std430, set = 0, binding = 2) restrict buffer FreeList { uint free_list[]; };
+layout(std430, set = 0, binding = 3) restrict buffer ActiveList { uint active_list[]; };
+layout(std430, set = 0, binding = 4) restrict buffer AllocReq { uint alloc_request[]; };
+layout(std430, set = 0, binding = 5) restrict buffer Counts { uint counts[]; };
+layout(set = 0, binding = 6, r32f) uniform restrict image3D activity;
+layout(std430, set = 0, binding = 7) restrict buffer NewList { uint new_list[]; };
+
+// pin_lo/pin_hi is an inclusive virtual-tile box that tile_mark keeps resident
+// unconditionally. The emitter sits in it, so the tiles the fire is lit in can
+// never age out — without that a fire that walks away frees its own burner and
+// the next injection lands in an inactive tile and is dropped. An empty box
+// (any component of pin_lo greater than pin_hi) pins nothing.
+layout(push_constant, std430) uniform Push {
+	uint frame;
+	float threshold;
+	uint hold_frames;
+	uint dilate_radius;
+	ivec4 pin_lo;
+	ivec4 pin_hi;
+} pc;
+
+bool tile_pinned(ivec3 vt) {
+	return all(greaterThanEqual(vt, pc.pin_lo.xyz)) && all(lessThanEqual(vt, pc.pin_hi.xyz));
+}
+
+// slot_meta: four uints per slot.
+//   [0] vti          virtual tile index this slot occupies (INACTIVE if free)
+//   [1] wanted_frame last frame the tile was a core or in a core's dilation band
+//   [2] used         1 while allocated
+//   [3] keep         1 if tile_mark found activity above threshold this frame
+uint sm_vti(uint s) { return slot_meta[s * 4u + 0u]; }
+uint sm_wanted(uint s) { return slot_meta[s * 4u + 1u]; }
+uint sm_used(uint s) { return slot_meta[s * 4u + 2u]; }
+uint sm_keep(uint s) { return slot_meta[s * 4u + 3u]; }
+
+ivec3 vti_to_vt(uint vti) {
+	uint xy = uint(VTILES.x) * uint(VTILES.y);
+	return ivec3(int(vti % uint(VTILES.x)),
+		int((vti / uint(VTILES.x)) % uint(VTILES.y)),
+		int(vti / xy));
+}
+
+uint vt_to_vti(ivec3 vt) {
+	return uint(vt.x) + uint(vt.y) * uint(VTILES.x)
+		+ uint(vt.z) * uint(VTILES.x) * uint(VTILES.y);
+}
+
+// Slot -> origin of its 8^3 block in the atlas, laid out 16 x 8 x 16 tiles.
+ivec3 slot_atlas_origin(uint s) {
+	return ivec3(int(s % uint(ATLAS_TILES.x)),
+		int((s / uint(ATLAS_TILES.x)) % uint(ATLAS_TILES.y)),
+		int(s / uint(ATLAS_TILES.x * ATLAS_TILES.y))) * int(TILE);
+}

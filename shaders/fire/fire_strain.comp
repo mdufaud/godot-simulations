@@ -11,12 +11,12 @@
 // eddy-viscosity model is a closure, not a conservation law.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 	if (!is_interior(c)) {
-		imageStore(nu_t_tex, c, vec4(0.0));
+		store_nu_t(c, 0.0);
 		return;
 	}
 
@@ -25,9 +25,9 @@ void main() {
 
 	// Diagonal terms: compact differences across the cell's own faces (exact at
 	// the centre on a MAC grid).
-	float sxx = (imageLoad(u_src, c + ivec3(1, 0, 0)).r - imageLoad(u_src, c).r) * inv_h;
-	float syy = (imageLoad(v_src, c + ivec3(0, 1, 0)).r - imageLoad(v_src, c).r) * inv_h;
-	float szz = (imageLoad(w_src, c + ivec3(0, 0, 1)).r - imageLoad(w_src, c).r) * inv_h;
+	float sxx = (load_u_src(c + ivec3(1, 0, 0)) - load_u_src(c)) * inv_h;
+	float syy = (load_v_src(c + ivec3(0, 1, 0)) - load_v_src(c)) * inv_h;
+	float szz = (load_w_src(c + ivec3(0, 0, 1)) - load_w_src(c)) * inv_h;
 
 	// Off-diagonal terms: central differences of the face-averaged velocity.
 	vec3 px = vel_at_cell(c + ivec3(1, 0, 0));
@@ -43,5 +43,5 @@ void main() {
 	float ss = sxx * sxx + syy * syy + szz * szz
 		+ 2.0 * (sxy * sxy + sxz * sxz + syz * syz);
 	float cs_h = params.cell.w * params.cell.x;
-	imageStore(nu_t_tex, c, vec4(cs_h * cs_h * sqrt(2.0 * ss), 0.0, 0.0, 0.0));
+	store_nu_t(c, cs_h * cs_h * sqrt(2.0 * ss));
 }

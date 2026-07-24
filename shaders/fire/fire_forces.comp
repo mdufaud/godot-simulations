@@ -12,22 +12,38 @@
 // averaged from the two cells the face separates. Applying it to a cell-centred
 // vector and splitting afterwards would smear the force by half a cell.
 
-// NON-PAPER: the wind setting is the free stream at the standard 10 m reference
-// height, and what reaches the fire is the atmospheric boundary layer under it —
-// the log law u(y) = u_ref.ln(y/z0)/ln(10/z0), with z0 the roughness length of
-// open grass. Imposing the full speed at every height instead put the whole 2 m/s
-// across a bed sitting at 0.36 m and tore the flame off its pilot inside two
-// seconds (measured), which is not what a breeze does to a camp fire. The plume
-// still leans: at 6 m the profile is already at 0.91.
-float wind_profile(int cy) {
-	const float z0 = 0.03;
-	const float inv_ref = 1.0 / 5.809; // 1/ln(10/z0)
-	float y = (float(cy) + 0.5) * params.cell.x;
-	return max(log(y / z0), 0.0) * inv_ref;
-}
+// The wind profile itself lives in fire_common.comp: fire_clear fills newly
+// resident tiles with it and fire_display measures activity against it, so it can
+// no longer belong to this stage alone.
+//
+// SPARSE: there is no upwind boundary to pin an inflow at. The virtual domain's
+// wall is 200 m of never-resident air away, so the c.x == 0 test below is simply
+// never true and the wind would be silently ignored. Instead the wind IS the
+// ambient air the fire sits in: fire_clear starts every tile the pool allocates at
+// the profile, and the horizontal components of the resident interior relax
+// towards it here. The target depends only on y, so it is divergence free and the
+// projection has nothing to undo.
+//
+// The relaxation is a sponge on the ambient far-field, NOT a body force on the
+// fire: it is gated to nothing when the cell is hot, ramps to full over a few
+// kelvin above ambient (RELAX_T_BAND), so the plume keeps every bit of its own
+// circulation and lean while the cold air around it is snapped back to the profile.
+//
+// That gate is what makes the wind survivable on the sparse pool. The velocity
+// activity signal keeps a tile resident, and without the sponge a horizontal gust
+// off the plume advects downwind faster than it decays, so each tile it reaches
+// becomes a dilation core and the resident front marches across the whole map until
+// the pool exhausts (measured: 2048/2048, millions of dropped requests). Snapping
+// the COLD wake back to the profile inside a fraction of a tile of travel stops the
+// front dead, while leaving the hot column — which stays resident on temperature
+// and soot anyway — free to move. WIND_RELAX is then aggressive on purpose: a ~0.15 s
+// constant knocks a several-m/s cold perturbation under the keep threshold within
+// half a metre at a walking-pace breeze.
+const float WIND_RELAX = 7.0; // 1/s, on cold air only
+const float RELAX_T_BAND = 15.0; // K above ambient over which the sponge fades out
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	float dt = params.cell.y;
 	float t_amb = cfg.thermo.x;
 	float decay = exp(-cfg.transport.z * dt); // drag, per second so it is frame independent
@@ -39,24 +55,42 @@ void main() {
 	// (gas mode) leaves this a no-op. Only u and w — buoyancy on v must survive so
 	// the plume still rises and leans downwind above the logs.
 	float shelter_decay = exp(-cfg.liquid2.w * dt);
+#ifdef FIRE_SPARSE
+	vec3 amb = ambient_wind(c.y);
+	// With no wind set there is no ambient flow to relax towards, and relaxing
+	// towards zero is a drag — one the dense path does not have, since its own
+	// inflow condition simply never fires. Measured: left unguarded it cost the
+	// still-air plume 3 % of its peak temperature.
+	float relax_base = (wind.x != 0.0 || wind.z != 0.0)
+		? (1.0 - exp(-WIND_RELAX * dt))
+		: 0.0;
+#endif
 
 	if (in_u(c)) {
-		float u = imageLoad(u_src, c).r * decay;
+		float u = load_u_src(c) * decay;
+#ifdef FIRE_SPARSE
+		// Coolness of the two cells this low-x face separates: any warmth on either
+		// side switches the sponge off, so it never touches the plume or its lean.
+		float t_u = max(load_scal_src(ivec3(max(c.x - 1, 0), c.y, c.z)).x, load_scal_src(c).x);
+		float cool_u = clamp(1.0 - (t_u - t_amb) / RELAX_T_BAND, 0.0, 1.0);
+		u = mix(u, amb.x, relax_base * cool_u);
+#else
 		// Wind enters at the upwind faces; the interior picks it up by advection
 		// rather than being pushed as a body force.
 		if ((wind.x > 0.0 && c.x == 0) || (wind.x < 0.0 && c.x == params.dims.x)) {
 			u = wind.x * wind_profile(c.y);
 		}
+#endif
 		u *= mix(1.0, shelter_decay, wood_shelter(u_face_to_world(c)));
-		imageStore(u_src, c, vec4(clamp(u, -50.0, 50.0), 0.0, 0.0, 0.0));
+		store_u_src(c, clamp(u, -50.0, 50.0));
 	}
 
 	if (in_v(c)) {
-		float v = imageLoad(v_src, c).r * decay;
+		float v = load_v_src(c) * decay;
 		// Temperature at the face: mean of the cells below and above. Clamped so
 		// the top and bottom faces read the single cell they actually touch.
-		float t_lo = imageLoad(scal_src, ivec3(c.x, max(c.y - 1, 0), c.z)).x;
-		float t_hi = imageLoad(scal_src, ivec3(c.x, min(c.y, gmax.y), c.z)).x;
+		float t_lo = load_scal_src(ivec3(c.x, max(c.y - 1, 0), c.z)).x;
+		float t_hi = load_scal_src(ivec3(c.x, min(c.y, gmax.y), c.z)).x;
 		float temp = 0.5 * (t_lo + t_hi);
 		if (temp > t_amb + 1.0) {
 			v += cfg.transport.x * (1.0 - t_amb / temp) * dt;
@@ -65,15 +99,21 @@ void main() {
 		if (c.y == 0) {
 			v = 0.0;
 		}
-		imageStore(v_src, c, vec4(clamp(v, -50.0, 50.0), 0.0, 0.0, 0.0));
+		store_v_src(c, clamp(v, -50.0, 50.0));
 	}
 
 	if (in_w(c)) {
-		float w = imageLoad(w_src, c).r * decay;
+		float w = load_w_src(c) * decay;
+#ifdef FIRE_SPARSE
+		float t_w = max(load_scal_src(ivec3(c.x, c.y, max(c.z - 1, 0))).x, load_scal_src(c).x);
+		float cool_w = clamp(1.0 - (t_w - t_amb) / RELAX_T_BAND, 0.0, 1.0);
+		w = mix(w, amb.z, relax_base * cool_w);
+#else
 		if ((wind.z > 0.0 && c.z == 0) || (wind.z < 0.0 && c.z == params.dims.z)) {
 			w = wind.z * wind_profile(c.y);
 		}
+#endif
 		w *= mix(1.0, shelter_decay, wood_shelter(w_face_to_world(c)));
-		imageStore(w_src, c, vec4(clamp(w, -50.0, 50.0), 0.0, 0.0, 0.0));
+		store_w_src(c, clamp(w, -50.0, 50.0));
 	}
 }

@@ -1,0 +1,49 @@
+// Pass 4/5. One workgroup per alloc request. The free-list pop is deterministic
+// rather than a racing atomic: every workgroup reads the same stack top fstart
+// (nothing writes C_FREE during this pass), and request gid claims
+// free_list[fstart-1-gid] iff gid < fstart. That cannot underflow, needs no undo
+// path, and tile_compact settles the new stack top afterwards. Requests beyond
+// the free supply release their reservation and are counted as exhaustion there.
+//
+// The 512 threads of the workgroup clear the new tile's 8^3 block to ambient in
+// the same dispatch, so a freshly resident tile never shows a previous tenant.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+void main() {
+	uint gid = gl_WorkGroupID.x;
+	uint nreq = min(counts[C_REQUEST], NSLOTS);
+	if (gid >= nreq) {
+		return;
+	}
+
+	uint fstart = counts[C_FREE];
+	uint vti = alloc_request[gid];
+	ivec3 vt = vti_to_vt(vti);
+
+	if (gid >= fstart) {
+		// Pool exhausted for this request: undo the reservation (compact counts
+		// the drop). Only one thread needs to touch the shared indirection entry.
+		if (gl_LocalInvocationIndex == 0u) {
+			imageStore(indir, vt, uvec4(INACTIVE));
+		}
+		return;
+	}
+
+	uint slot = free_list[fstart - 1u - gid];
+	if (gl_LocalInvocationIndex == 0u) {
+		imageStore(indir, vt, uvec4(slot));
+		slot_meta[slot * 4u + 0u] = vti;      // vti
+		slot_meta[slot * 4u + 1u] = pc.frame; // wanted_frame
+		slot_meta[slot * 4u + 2u] = 1u;       // used
+		slot_meta[slot * 4u + 3u] = 0u;       // keep (mark decides next frame)
+		// The slot may have held another tile until this frame's tile_free, and the
+		// field atlas still carries that tenant's hot gas. Record the tile so the
+		// solver's clear stage can reset its 8^3 block to ambient air before any
+		// simulation stage reads it.
+		new_list[atomicAdd(counts[C_NEW], 1u)] = vti;
+	}
+
+	ivec3 org = slot_atlas_origin(slot);
+	imageStore(activity, org + ivec3(gl_LocalInvocationID), vec4(0.0));
+}

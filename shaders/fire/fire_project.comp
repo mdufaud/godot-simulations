@@ -20,32 +20,32 @@
 // floor is solid and is pinned to zero instead.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	ivec3 gmax = grid_max();
 	float inv_h = params.cell.z;
 
 	if (in_u(c)) {
 		// Ghost pressure outside the domain is zero on both open x faces.
-		float p_hi = (c.x <= gmax.x) ? imageLoad(press_src, c).r : 0.0;
-		float p_lo = (c.x > 0) ? imageLoad(press_src, c - ivec3(1, 0, 0)).r : 0.0;
-		imageStore(u_src, c, vec4(imageLoad(u_src, c).r - (p_hi - p_lo) * inv_h, 0.0, 0.0, 0.0));
+		float p_hi = (c.x <= gmax.x) ? load_press_src(c) : 0.0;
+		float p_lo = (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
+		store_u_src(c, load_u_src(c) - (p_hi - p_lo) * inv_h);
 	}
 
 	if (in_v(c)) {
 		float v = 0.0;
 		if (c.y > 0) {
-			float p_hi = (c.y <= gmax.y) ? imageLoad(press_src, c).r : 0.0;
-			float p_lo = imageLoad(press_src, c - ivec3(0, 1, 0)).r;
-			v = imageLoad(v_src, c).r - (p_hi - p_lo) * inv_h;
+			float p_hi = (c.y <= gmax.y) ? load_press_src(c) : 0.0;
+			float p_lo = load_press_src(c - ivec3(0, 1, 0));
+			v = load_v_src(c) - (p_hi - p_lo) * inv_h;
 		}
 		// c.y == 0 is the solid floor: no flow through it, and no projection
 		// either — the Neumann condition is already in the Poisson stencil.
-		imageStore(v_src, c, vec4(v, 0.0, 0.0, 0.0));
+		store_v_src(c, v);
 	}
 
 	if (in_w(c)) {
-		float p_hi = (c.z <= gmax.z) ? imageLoad(press_src, c).r : 0.0;
-		float p_lo = (c.z > 0) ? imageLoad(press_src, c - ivec3(0, 0, 1)).r : 0.0;
-		imageStore(w_src, c, vec4(imageLoad(w_src, c).r - (p_hi - p_lo) * inv_h, 0.0, 0.0, 0.0));
+		float p_hi = (c.z <= gmax.z) ? load_press_src(c) : 0.0;
+		float p_lo = (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
+		store_w_src(c, load_w_src(c) - (p_hi - p_lo) * inv_h);
 	}
 }

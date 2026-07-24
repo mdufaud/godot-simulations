@@ -18,39 +18,50 @@
 // a reset behind it would zero the numbers before they were read.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	float scale = params.cell.y * params.cell.z; // dt / h, world units -> index
 
-	if (gl_GlobalInvocationID == uvec3(0)) {
+	// One invocation of the whole dispatch clears the run. Written as "first
+	// thread of the first workgroup" rather than global id zero because the sparse
+	// build's workgroups are tiles scattered across the map, so no invocation has
+	// a global id of zero.
+	if (gl_WorkGroupID == uvec3(0) && gl_LocalInvocationIndex == 0u) {
 		for (int i = 0; i < STATS_WORDS; i++) {
 			stats.data[i] = 0u;
 		}
+#ifdef FIRE_SPARSE
+		// The low corner of the resident-set bounds reduces with atomicMin, so its
+		// accumulator has to start at the top of the range rather than at zero.
+		for (int i = 0; i < 3; i++) {
+			stats.data[STAT_BOUNDS + i] = 0xFFFFFFFFu;
+		}
+#endif
 	}
 
 	float val, lo, hi;
 
 	if (in_u(c)) {
-		SAMPLE_TRI_R(u_src, vec3(c) - vel_at_u_face(c) * scale,
+		SAMPLE_TRI_R(load_u_src, vec3(c) - vel_at_u_face(c) * scale,
 			u_dims() - ivec3(1), val, lo, hi);
-		imageStore(u_fwd, c, vec4(val, 0.0, 0.0, 0.0));
+		store_u_fwd(c, val);
 	}
 	if (in_v(c)) {
-		SAMPLE_TRI_R(v_src, vec3(c) - vel_at_v_face(c) * scale,
+		SAMPLE_TRI_R(load_v_src, vec3(c) - vel_at_v_face(c) * scale,
 			v_dims() - ivec3(1), val, lo, hi);
-		imageStore(v_fwd, c, vec4(val, 0.0, 0.0, 0.0));
+		store_v_fwd(c, val);
 	}
 	if (in_w(c)) {
-		SAMPLE_TRI_R(w_src, vec3(c) - vel_at_w_face(c) * scale,
+		SAMPLE_TRI_R(load_w_src, vec3(c) - vel_at_w_face(c) * scale,
 			w_dims() - ivec3(1), val, lo, hi);
-		imageStore(w_fwd, c, vec4(val, 0.0, 0.0, 0.0));
+		store_w_fwd(c, val);
 	}
 
 	if (!out_of_grid(c)) {
 		vec3 back = vec3(c) - vel_at_cell(c) * scale;
 		vec4 sval, slo, shi;
-		SAMPLE_TRI(scal_src, back, sval, slo, shi);
-		imageStore(scal_fwd, c, sval);
-		SAMPLE_TRI(scal2_src, back, sval, slo, shi);
-		imageStore(scal2_fwd, c, sval);
+		SAMPLE_TRI(load_scal_src, back, sval, slo, shi);
+		store_scal_fwd(c, sval);
+		SAMPLE_TRI(load_scal2_src, back, sval, slo, shi);
+		store_scal2_fwd(c, sval);
 	}
 }

@@ -1,0 +1,63 @@
+// Storage mapping shared by the two particle-side water passes, water_scatter and
+// water_return. water_gather does not include it: it walks the storage directly
+// and so never has to resolve anything.
+//
+// DENSE: the fire grid is a box, a cell has storage at its own coordinate, and the
+// accumulators are one entry per cell of that box.
+//
+// SPARSE: the coordinates the particles bin into are VIRTUAL cells over the whole
+// 409.6 x 102.4 x 409.6 m map, of which only the resident tiles have storage. Both
+// passes resolve through the pool's indirection volume, and the accumulators are
+// sized to the atlas (128 x 64 x 128 = 1.05 M entries) rather than to the map,
+// which has 2.1 G cells. A virtual cell whose tile is not resident has nowhere to
+// accumulate into and is skipped — by BOTH passes, in the weight-sum pass as well
+// as the deposit, so the per-particle normalisation is taken over exactly the cells
+// that were written and the round trip stays exact over the resident set. A droplet
+// with no resident cell in its support is left untouched, the same as one outside
+// the domain: it is picked up on a later frame if the fire's dilation band reaches
+// it.
+//
+// The mapping mirrors fire_common.comp's, which owns it for the solver stages; the
+// two shader families are compiled separately and share no header.
+
+#ifdef WATER_SPARSE
+
+const ivec3 VTILES = ivec3(256, 64, 256);
+const ivec3 ATLAS_TILES = ivec3(16, 8, 16);
+const ivec3 ATLAS_CELLS = ivec3(128, 64, 128);
+const uint TILE_SLOT_MAX = 0xFFFFFFF0u; // at or above this is a sentinel
+
+layout(r32ui, set = 0, binding = 4) uniform restrict readonly uimage3D tile_indir;
+
+#endif
+
+// Storage texel backing virtual cell [c], or ivec3(-1) when it has none.
+ivec3 grid_texel(ivec3 c, ivec3 dims) {
+	if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+		return ivec3(-1);
+	}
+#ifdef WATER_SPARSE
+	uint slot = imageLoad(tile_indir, c >> 3).r;
+	if (slot >= TILE_SLOT_MAX) {
+		return ivec3(-1);
+	}
+	int s = int(slot);
+	ivec3 org = ivec3(s % ATLAS_TILES.x, (s / ATLAS_TILES.x) % ATLAS_TILES.y,
+			s / (ATLAS_TILES.x * ATLAS_TILES.y))
+		* 8;
+	return org + (c & ivec3(7));
+#else
+	return c;
+#endif
+}
+
+// Where that texel accumulates. The same linearisation water_gather applies to its
+// own dispatch coordinate, which is what lets that stage stay build agnostic: it is
+// handed the atlas extent instead of the grid extent and needs no other change.
+uint texel_index(ivec3 t, ivec3 dims) {
+#ifdef WATER_SPARSE
+	return uint(t.x + t.y * ATLAS_CELLS.x + t.z * ATLAS_CELLS.x * ATLAS_CELLS.y);
+#else
+	return uint(t.x + t.y * dims.x + t.z * dims.x * dims.y);
+#endif
+}

@@ -1,0 +1,42 @@
+// Pass 1/5. One workgroup per slot reduces its 8^3 block of the activity image
+// to a single max, and sets the tile's keep flag if it clears the threshold. A
+// kept tile refreshes its wanted_frame so tile_free spares it and tile_dilate
+// scatters a band around it.
+//
+// Activity is non-negative, so floatBitsToUint is monotonic and an integer
+// atomicMax over shared memory is an exact float max reduction.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+shared uint s_maxbits;
+
+void main() {
+	uint slot = gl_WorkGroupID.x;
+	if (slot >= NSLOTS) {
+		return;
+	}
+	if (gl_LocalInvocationIndex == 0u) {
+		s_maxbits = 0u;
+	}
+	barrier();
+
+	uint used = sm_used(slot);
+	if (used == 1u) {
+		ivec3 org = slot_atlas_origin(slot);
+		float a = imageLoad(activity, org + ivec3(gl_LocalInvocationID)).r;
+		atomicMax(s_maxbits, floatBitsToUint(max(a, 0.0)));
+	}
+	barrier();
+
+	if (gl_LocalInvocationIndex == 0u && used == 1u) {
+		float m = uintBitsToFloat(s_maxbits);
+		// A pinned tile is kept whatever its activity: it holds the emitter, and a
+		// burner that ages out cannot be lit again (the injection would land in an
+		// inactive tile and be dropped).
+		uint keep = (m > pc.threshold || tile_pinned(vti_to_vt(sm_vti(slot)))) ? 1u : 0u;
+		slot_meta[slot * 4u + 3u] = keep;
+		if (keep == 1u) {
+			slot_meta[slot * 4u + 1u] = pc.frame; // wanted_frame
+		}
+	}
+}

@@ -19,16 +19,16 @@
 // with its own extent, and boundary faces are copied through rather than left
 // undefined — the solver flips parity after this stage, so anything not written
 // here becomes garbage next substep.
-#define DIFFUSE_FACE(p_src, p_dst, p_dims, p_nu) { \
+#define DIFFUSE_FACE(p_load, p_store, p_dims, p_nu) { \
 	ivec3 dm_ = p_dims - ivec3(1); \
-	float cur_ = imageLoad(p_src, c).r; \
+	float cur_ = p_load(c); \
 	if (p_nu > 0.0 && all(greaterThan(c, ivec3(0))) && all(lessThan(c, dm_))) { \
-		float sum_ = imageLoad(p_src, c + ivec3(1, 0, 0)).r + imageLoad(p_src, c - ivec3(1, 0, 0)).r \
-			+ imageLoad(p_src, c + ivec3(0, 1, 0)).r + imageLoad(p_src, c - ivec3(0, 1, 0)).r \
-			+ imageLoad(p_src, c + ivec3(0, 0, 1)).r + imageLoad(p_src, c - ivec3(0, 0, 1)).r; \
+		float sum_ = p_load(c + ivec3(1, 0, 0)) + p_load(c - ivec3(1, 0, 0)) \
+			+ p_load(c + ivec3(0, 1, 0)) + p_load(c - ivec3(0, 1, 0)) \
+			+ p_load(c + ivec3(0, 0, 1)) + p_load(c - ivec3(0, 0, 1)); \
 		cur_ += p_nu * (sum_ - 6.0 * cur_); \
 	} \
-	imageStore(p_dst, c, vec4(cur_, 0.0, 0.0, 0.0)); \
+	p_store(c, cur_); \
 }
 
 // NON-PAPER: the face diffusion coefficient is the molecular nu plus the
@@ -37,45 +37,45 @@
 // clamped so boundary faces (copied through anyway) never read out of grid.
 float face_alpha(ivec3 ca, ivec3 cb, float base) {
 	ivec3 gmax = grid_max();
-	float nut = 0.5 * (imageLoad(nu_t_tex, clamp(ca, ivec3(0), gmax)).r
-		+ imageLoad(nu_t_tex, clamp(cb, ivec3(0), gmax)).r);
+	float nut = 0.5 * (load_nu_t(clamp(ca, ivec3(0), gmax))
+		+ load_nu_t(clamp(cb, ivec3(0), gmax)));
 	return min(base + nut * params.cell.y * params.cell.z * params.cell.z, 0.16);
 }
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 
 	float base = cfg.transport.w * params.cell.y * params.cell.z * params.cell.z;
 	if (in_u(c)) {
 		float a_u = face_alpha(c - ivec3(1, 0, 0), c, base);
-		DIFFUSE_FACE(u_src, u_dst, u_dims(), a_u);
+		DIFFUSE_FACE(load_u_src, store_u_dst, u_dims(), a_u);
 	}
 	if (in_v(c)) {
 		float a_v = face_alpha(c - ivec3(0, 1, 0), c, base);
-		DIFFUSE_FACE(v_src, v_dst, v_dims(), a_v);
+		DIFFUSE_FACE(load_v_src, store_v_dst, v_dims(), a_v);
 	}
 	if (in_w(c)) {
 		float a_w = face_alpha(c - ivec3(0, 0, 1), c, base);
-		DIFFUSE_FACE(w_src, w_dst, w_dims(), a_w);
+		DIFFUSE_FACE(load_w_src, store_w_dst, w_dims(), a_w);
 	}
 
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
 	float dt = params.cell.y;
 
 	if (is_interior(c)) {
 		float inv_h2 = params.cell.z * params.cell.z;
 
-		vec4 sum_s = imageLoad(scal_src, c + ivec3(1, 0, 0)) + imageLoad(scal_src, c - ivec3(1, 0, 0)) +
-			imageLoad(scal_src, c + ivec3(0, 1, 0)) + imageLoad(scal_src, c - ivec3(0, 1, 0)) +
-			imageLoad(scal_src, c + ivec3(0, 0, 1)) + imageLoad(scal_src, c - ivec3(0, 0, 1));
-		vec4 sum_s2 = imageLoad(scal2_src, c + ivec3(1, 0, 0)) + imageLoad(scal2_src, c - ivec3(1, 0, 0)) +
-			imageLoad(scal2_src, c + ivec3(0, 1, 0)) + imageLoad(scal2_src, c - ivec3(0, 1, 0)) +
-			imageLoad(scal2_src, c + ivec3(0, 0, 1)) + imageLoad(scal2_src, c - ivec3(0, 0, 1));
+		vec4 sum_s = load_scal_src(c + ivec3(1, 0, 0)) + load_scal_src(c - ivec3(1, 0, 0)) +
+			load_scal_src(c + ivec3(0, 1, 0)) + load_scal_src(c - ivec3(0, 1, 0)) +
+			load_scal_src(c + ivec3(0, 0, 1)) + load_scal_src(c - ivec3(0, 0, 1));
+		vec4 sum_s2 = load_scal2_src(c + ivec3(1, 0, 0)) + load_scal2_src(c - ivec3(1, 0, 0)) +
+			load_scal2_src(c + ivec3(0, 1, 0)) + load_scal2_src(c - ivec3(0, 1, 0)) +
+			load_scal2_src(c + ivec3(0, 0, 1)) + load_scal2_src(c - ivec3(0, 0, 1));
 
 		vec4 lap_s = sum_s - 6.0 * s;
 		vec4 lap_s2 = sum_s2 - 6.0 * s2;
@@ -90,7 +90,7 @@ void main() {
 		// soot marker (s2.y) keeps molecular-only diffusion — turbulent smearing
 		// would wash out the smoke appearance.
 		float rho = gas_density(s, s2);
-		float turb = imageLoad(nu_t_tex, c).r * (1.0 / 0.7) * dt * inv_h2;
+		float turb = load_nu_t(c) * (1.0 / 0.7) * dt * inv_h2;
 		float alpha_t = min(cfg.fuel.w / (rho * mixture_cp(s, s2)) * dt * inv_h2 + turb, 0.16);
 		float alpha_y = min(cfg.coeffs.x * dt * inv_h2 + turb, 0.16);
 		float alpha_r = min(cfg.coeffs.x * dt * inv_h2, 0.16);
@@ -123,6 +123,6 @@ void main() {
 		s2.x *= inv;
 	}
 
-	imageStore(scal_dst, c, vec4(s.x, s.yzw));
-	imageStore(scal2_dst, c, vec4(s2.x, clamp(s2.y, 0.0, 1.0), max(s2.z, 0.0), s2.w));
+	store_scal_dst(c, vec4(s.x, s.yzw));
+	store_scal2_dst(c, vec4(s2.x, clamp(s2.y, 0.0, 1.0), max(s2.z, 0.0), s2.w));
 }

@@ -55,23 +55,23 @@
 // two cells cannot cancel each other's error into a clean number.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec4 liq = imageLoad(liquid_scal, c);
+	vec4 liq = load_liquid_scal(c);
 	float rho_l = liq.x;
 	float T_l = liq.y;
 
 	// rho' = 1 in a dry cell, which makes fire_evapapply a no-op there.
 	if (rho_l < 1e-9) {
-		imageStore(liquid_scal, c, vec4(liq.xyz, 1.0));
+		store_liquid_scal(c, vec4(liq.xyz, 1.0));
 		return;
 	}
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
 
 	float dt = params.cell.y;
 	float t_amb = cfg.thermo.x;
@@ -131,8 +131,8 @@ void main() {
 	// else, which is exactly the transport this needs.
 	s2.w = min(s2.w + (1.0 - rho_prime), 1.0);
 
-	imageStore(scal_src, c, s);
-	imageStore(scal2_src, c, s2);
+	store_scal_src(c, s);
+	store_scal2_src(c, s2);
 
 	// The NON-PAPER drainage that used to sit here now lives in water_return.comp,
 	// on the particle mass itself. It is the only way a droplet ever leaves the
@@ -142,7 +142,7 @@ void main() {
 
 	// omega_j (b) is left alone: water_return needs the same value the gather
 	// wrote, or the mass it hands back stops matching the mass the grid holds.
-	imageStore(liquid_scal, c, vec4(remaining, T_l, liq.z, rho_prime));
+	store_liquid_scal(c, vec4(remaining, T_l, liq.z, rho_prime));
 
 	float volume = params.cell.x * params.cell.x * params.cell.x;
 	float dE_gas = cp_g * ((rho + d_rho) * (T_new - t_amb) - rho * (T0 - t_amb)) * volume;
