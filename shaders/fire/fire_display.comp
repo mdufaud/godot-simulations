@@ -3,11 +3,22 @@
 // Keeping the reduction on the GPU avoids reading a 6 MB field back per frame.
 // R = normalised temperature, G = residuals (soot), B = reaction, A = fuel.
 
+#ifdef FIRE_SPARSE
+shared uint visual_max_bits;
+#endif
+
 void main() {
 	ivec3 c = cell_coord();
+#ifdef FIRE_SPARSE
+	if (gl_LocalInvocationIndex == 0u) {
+		visual_max_bits = 0u;
+	}
+	barrier();
+#else
 	if (out_of_grid(c)) {
 		return;
 	}
+#endif
 
 	vec4 s = load_scal_src(c);
 	vec4 s2 = load_scal2_src(c);
@@ -44,6 +55,15 @@ void main() {
 	// channel used to hold the fuel fraction, which no shader ever read.
 	store_display(c,
 		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s2.w * fade));
+	float visual_signal = max(max(clamp(t_norm, 0.0, 1.0), s2.y),
+		max(s2.w, reaction));
+#ifdef FIRE_SPARSE
+	atomicMax(visual_max_bits, floatBitsToUint(max(visual_signal, 0.0)));
+	barrier();
+	store_visual_activity(c, uintBitsToFloat(visual_max_bits));
+#else
+	store_visual_activity(c, visual_signal);
+#endif
 
 	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
 

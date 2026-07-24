@@ -10,8 +10,42 @@
 // offset this introduces costs nothing that can be measured against the paper.
 // It is a choice, not an equivalence.
 
+#ifdef FIRE_SPARSE
+const int VELOCITY_CACHE_SIDE = 11;
+const int VELOCITY_CACHE_SIZE = VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE;
+shared float curl_u_cache[VELOCITY_CACHE_SIZE];
+shared float curl_v_cache[VELOCITY_CACHE_SIZE];
+shared float curl_w_cache[VELOCITY_CACHE_SIZE];
+
+int curl_cache_index(ivec3 p) {
+	return p.x + VELOCITY_CACHE_SIDE * (p.y + VELOCITY_CACHE_SIDE * p.z);
+}
+
+vec3 cached_curl_velocity(ivec3 offset) {
+	ivec3 p = ivec3(gl_LocalInvocationID) + ivec3(1) + offset;
+	return vec3(
+		0.5 * (curl_u_cache[curl_cache_index(p)] + curl_u_cache[curl_cache_index(p + ivec3(1, 0, 0))]),
+		0.5 * (curl_v_cache[curl_cache_index(p)] + curl_v_cache[curl_cache_index(p + ivec3(0, 1, 0))]),
+		0.5 * (curl_w_cache[curl_cache_index(p)] + curl_w_cache[curl_cache_index(p + ivec3(0, 0, 1))]));
+}
+#endif
+
 void main() {
 	ivec3 c = cell_coord();
+#ifdef FIRE_SPARSE
+	ivec3 tile_origin = invocation_vt * 8;
+	for (uint i = gl_LocalInvocationIndex; i < uint(VELOCITY_CACHE_SIZE);
+			i += gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z) {
+		ivec3 hp = ivec3(int(i) % VELOCITY_CACHE_SIDE,
+			(int(i) / VELOCITY_CACHE_SIDE) % VELOCITY_CACHE_SIDE,
+			int(i) / (VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE));
+		ivec3 vc = tile_origin + hp - ivec3(1);
+		curl_u_cache[i] = load_u_src(vc);
+		curl_v_cache[i] = load_v_src(vc);
+		curl_w_cache[i] = load_w_src(vc);
+	}
+	barrier();
+#endif
 	if (out_of_grid(c)) {
 		return;
 	}
@@ -21,12 +55,21 @@ void main() {
 	}
 
 	float inv_2h = 0.5 * params.cell.z;
+#ifdef FIRE_SPARSE
+	vec3 px = cached_curl_velocity(ivec3(1, 0, 0));
+	vec3 nx = cached_curl_velocity(ivec3(-1, 0, 0));
+	vec3 py = cached_curl_velocity(ivec3(0, 1, 0));
+	vec3 ny = cached_curl_velocity(ivec3(0, -1, 0));
+	vec3 pz = cached_curl_velocity(ivec3(0, 0, 1));
+	vec3 nz = cached_curl_velocity(ivec3(0, 0, -1));
+#else
 	vec3 px = vel_at_cell(c + ivec3(1, 0, 0));
 	vec3 nx = vel_at_cell(c - ivec3(1, 0, 0));
 	vec3 py = vel_at_cell(c + ivec3(0, 1, 0));
 	vec3 ny = vel_at_cell(c - ivec3(0, 1, 0));
 	vec3 pz = vel_at_cell(c + ivec3(0, 0, 1));
 	vec3 nz = vel_at_cell(c - ivec3(0, 0, 1));
+#endif
 
 	vec3 omega = vec3(
 			(py.z - ny.z) - (pz.y - nz.y),

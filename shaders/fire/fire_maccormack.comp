@@ -19,24 +19,24 @@ void main() {
 	if (in_u(c)) {
 		vec3 step_uv = vel_at_u_face(c) * scale;
 		ivec3 dmax = u_dims() - ivec3(1);
-		SAMPLE_TRI_R(load_u_src, vec3(c) - step_uv, dmax, hat, lo, hi);
-		SAMPLE_TRI_R(load_u_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		SAMPLE_TRI_R(load_u_src, u_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(load_u_fwd, u_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
 		float nv = clamp(hat + 0.5 * (load_u_src(c) - tld), lo, hi);
 		store_u_dst(c, nv);
 	}
 	if (in_v(c)) {
 		vec3 step_uv = vel_at_v_face(c) * scale;
 		ivec3 dmax = v_dims() - ivec3(1);
-		SAMPLE_TRI_R(load_v_src, vec3(c) - step_uv, dmax, hat, lo, hi);
-		SAMPLE_TRI_R(load_v_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		SAMPLE_TRI_R(load_v_src, v_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(load_v_fwd, v_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
 		float nv = clamp(hat + 0.5 * (load_v_src(c) - tld), lo, hi);
 		store_v_dst(c, nv);
 	}
 	if (in_w(c)) {
 		vec3 step_uv = vel_at_w_face(c) * scale;
 		ivec3 dmax = w_dims() - ivec3(1);
-		SAMPLE_TRI_R(load_w_src, vec3(c) - step_uv, dmax, hat, lo, hi);
-		SAMPLE_TRI_R(load_w_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
+		SAMPLE_TRI_R(load_w_src, w_src, vec3(c) - step_uv, dmax, hat, lo, hi);
+		SAMPLE_TRI_R(load_w_fwd, w_fwd, vec3(c) + step_uv, dmax, tld, ignore_lo, ignore_hi);
 		float nv = clamp(hat + 0.5 * (load_w_src(c) - tld), lo, hi);
 		store_w_dst(c, nv);
 	}
@@ -50,12 +50,12 @@ void main() {
 	vec3 fwd = vec3(c) + step_c;
 	vec4 vhat, vlo, vhi, vtld, vign_lo, vign_hi;
 
-	SAMPLE_TRI(load_scal_src, back, vhat, vlo, vhi);
-	SAMPLE_TRI(load_scal_fwd, fwd, vtld, vign_lo, vign_hi);
+	SAMPLE_TRI(load_scal_src, scal_src, back, vhat, vlo, vhi);
+	SAMPLE_TRI(load_scal_fwd, scal_fwd, fwd, vtld, vign_lo, vign_hi);
 	vec4 scal_new = clamp(vhat + 0.5 * (load_scal_src(c) - vtld), vlo, vhi);
 
-	SAMPLE_TRI(load_scal2_src, back, vhat, vlo, vhi);
-	SAMPLE_TRI(load_scal2_fwd, fwd, vtld, vign_lo, vign_hi);
+	SAMPLE_TRI(load_scal2_src, scal2_src, back, vhat, vlo, vhi);
+	SAMPLE_TRI(load_scal2_fwd, scal2_fwd, fwd, vtld, vign_lo, vign_hi);
 	vec4 scal2_new = clamp(vhat + 0.5 * (load_scal2_src(c) - vtld), vlo, vhi);
 
 	store_scal_dst(c, vec4(

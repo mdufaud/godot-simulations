@@ -3,8 +3,8 @@ extends RefCounted
 ## GPU sparse tile pool for the fire solver (sparse-grid refactor, Phase 3).
 ##
 ## Owns an indirection volume over a virtual tile grid that covers the whole map,
-## an atlas of [constant NSLOTS] resident tiles, a free-list stack and a compact
-## active list. Five compute passes run once per frame — mark, dilate, free,
+## an atlas of [constant NSLOTS] resident tiles, a free-list stack and compact
+## active tile/slot lists. Five compute passes run once per frame — mark, dilate, free,
 ## alloc, compact — to keep exactly the tiles that contain fire (plus a dilation
 ## band) resident, at cost proportional to the burning volume rather than the map.
 ##
@@ -49,7 +49,7 @@ var _shaders := {}
 var _pipelines := {}
 var _sets := {}
 var _tex := {}     # "indir", "activity"
-var _buf := {}     # "slot_meta", "free_list", "active_list", "alloc_request", "counts", "new_list"
+var _buf := {}     # "slot_meta", "free_list", "active_list", "active_slots", "alloc_request", "counts", "new_list"
 var _owns_activity := false
 var _budget := NSLOTS
 var _pin_lo := Vector3i(1, 1, 1)
@@ -136,10 +136,13 @@ func _create_resources() -> void:
 	_buf["slot_meta"] = _new_buffer(NSLOTS * 4)
 	_buf["free_list"] = _new_buffer(NSLOTS)
 	_buf["active_list"] = _new_buffer(NSLOTS)
+	_buf["active_slots"] = _new_buffer(NSLOTS)
 	_buf["alloc_request"] = _new_buffer(NSLOTS)
 	_buf["new_list"] = _new_buffer(NSLOTS)
 	# The counts buffer is also the source of both indirect dispatches.
 	_buf["counts"] = _new_buffer(COUNTS_WORDS,
+		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
+	_buf["active_args"] = _new_buffer(3,
 		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
 
 
@@ -173,7 +176,8 @@ func _build_uniform_sets() -> void:
 			img.add_id(pair[1])
 			uniforms.append(img)
 		var bufs := [[1, "slot_meta"], [2, "free_list"], [3, "active_list"],
-			[4, "alloc_request"], [5, "counts"], [7, "new_list"]]
+			[4, "alloc_request"], [5, "counts"], [7, "new_list"], [8, "active_slots"],
+			[9, "active_args"]]
 		for pair in bufs:
 			var b := RDUniform.new()
 			b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -244,6 +248,12 @@ func bootstrap(vtis: PackedInt32Array, pin_lo := Vector3i(1, 1, 1),
 	for word in [C_ACTIVE + 1, C_ACTIVE + 2, C_NEW + 1, C_NEW + 2]:
 		counts.encode_u32(word * 4, 1)
 	_rd.buffer_update(_buf["counts"], 0, counts.size(), counts)
+	var active_args := PackedByteArray()
+	active_args.resize(12)
+	active_args.encode_u32(0, n)
+	active_args.encode_u32(4, 1)
+	active_args.encode_u32(8, 1)
+	_rd.buffer_update(_buf["active_args"], 0, active_args.size(), active_args)
 
 
 # =========================================================================
@@ -317,6 +327,14 @@ func indir_bytes_rid() -> RID:
 
 func active_list_rid() -> RID:
 	return _buf.get("active_list", RID())
+
+
+func active_slots_rid() -> RID:
+	return _buf.get("active_slots", RID())
+
+
+func active_args_rid() -> RID:
+	return _buf.get("active_args", RID())
 
 
 func new_list_rid() -> RID:

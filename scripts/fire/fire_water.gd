@@ -57,7 +57,11 @@ const DROPLET_MASS := 0.025
 const AMBIENT_T := 300.0
 
 var particle_count := 1024
+var particle_cap := 1024
 var particles_active := 0
+var profiling := false
+var _coupling_timings := {}
+var _coupling_timings_mutex := Mutex.new()
 
 # --- Nozzle, Fire-X Tab. 3 "Particle Emitter Parameter" ---
 ## Droplets emitted per second. Tab. 3 "Frequency", range 10-100 Hz.
@@ -120,6 +124,8 @@ var _grid_origin := Vector3.ZERO
 ## pool's indirection volume. See water_common.comp.
 var _sparse := false
 var _indir_tex := RID()
+var _active_slots := RID()
+var _active_tile_args := RID()
 ## Extent the accumulators and the gather dispatch cover: the fire box when dense,
 ## the tile atlas when sparse. Never the virtual map, which has 2.1 G cells.
 var _accum_dims := Vector3i.ZERO
@@ -157,7 +163,8 @@ const MEASURE_INTERVAL := 30
 ## the world-space extent the droplets themselves are simulated in; leave it zero to
 ## use the fire domain, which is only sensible when that domain is a box.
 func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
-		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
+		indir_tex := RID(), sph_box := Vector3.ZERO, active_slots := RID(),
+		active_tile_args := RID()) -> void:
 	if _rd != null:
 		return
 	_rd = RenderingServer.get_rendering_device()
@@ -165,10 +172,13 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 		return
 
 	_grid_dims = fire_grid_dims
+	particle_cap = particle_count
 	_cell_size = fire_cell_size
 	_h_liquid = fire_cell_size * 1.5
 	_sparse = indir_tex.is_valid()
 	_indir_tex = indir_tex
+	_active_slots = active_slots
+	_active_tile_args = active_tile_args
 	var domain := Vector3(fire_grid_dims) * fire_cell_size
 	_grid_origin = Vector3(-0.5 * domain.x, 0.0, -0.5 * domain.z)
 
@@ -222,6 +232,7 @@ func _init_sph(domain: Vector3) -> void:
 	sph.particle_count = particle_count
 	sph.cell_size = SPH_H
 	sph.h = SPH_H
+	sph.hash_grid_enabled = true
 	sph.grid_origin = _sph_origin
 	sph.grid_dims = Vector3i(
 		ceili(domain.x / SPH_H), ceili(domain.y / SPH_H), ceili(domain.z / SPH_H))
@@ -370,7 +381,7 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 	if count <= 0:
 		return
 	_jet_accum -= float(count)
-	count = mini(count, particle_count)
+	count = mini(count, particle_cap)
 
 	var seed := PackedFloat32Array()
 	seed.resize(count * 4)
@@ -433,7 +444,7 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 	# is at most two buffer_update calls instead of one per droplet.
 	var written := 0
 	while written < count:
-		var run := mini(count - written, particle_count - _jet_cursor)
+		var run := mini(count - written, particle_cap - _jet_cursor)
 		var pos_bytes := seed.slice(written * 4, (written + run) * 4).to_byte_array()
 		var vel_bytes := vel.slice(written * 4, (written + run) * 4).to_byte_array()
 		for parity in 2:
@@ -441,10 +452,10 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 				_jet_cursor * 16, pos_bytes.size(), pos_bytes)
 			_rd.buffer_update(sph.parity_velocities_rid(parity),
 				_jet_cursor * 16, vel_bytes.size(), vel_bytes)
-		_jet_cursor = (_jet_cursor + run) % particle_count
+		_jet_cursor = (_jet_cursor + run) % particle_cap
 		written += run
 
-	particles_active = maxi(particles_active, mini(_jet_emitted + count, particle_count))
+	particles_active = maxi(particles_active, mini(_jet_emitted + count, particle_cap))
 	_jet_emitted += count
 	sph.active_count = particles_active
 	initial_mass = DROPLET_MASS * float(particles_active)
@@ -480,7 +491,7 @@ func spawn_droplets(count: int, pos: Vector3, radius: float,
 	if not initialized or count <= 0:
 		return
 
-	var n := mini(count, particle_count)
+	var n := mini(count, particle_cap)
 	# Position w carries the temperature; the solver preserves it (it is the lava
 	# heat channel, inert with lava mode off) and the sort moves it with the slot.
 	var seed := PackedFloat32Array()
@@ -517,8 +528,17 @@ func spawn_droplets(count: int, pos: Vector3, radius: float,
 	initial_mass = DROPLET_MASS * float(n)
 	mass_measured_once = false
 	# The nozzle appends after whatever this dropped in, rather than overwriting it.
-	_jet_cursor = n % particle_count
+	_jet_cursor = n % particle_cap
 	_jet_emitted = n
+
+
+func set_particle_cap(value: int) -> void:
+	particle_cap = clampi(value, 256, particle_count)
+	particles_active = mini(particles_active, particle_cap)
+	_jet_cursor %= particle_cap
+	_jet_emitted = mini(_jet_emitted, particle_cap)
+	if sph != null:
+		sph.active_count = particles_active
 
 
 ## Drop every droplet on the floor, for a demo reset.
@@ -614,12 +634,16 @@ func _return_push() -> PackedByteArray:
 func step_droplets(delta: float) -> void:
 	if not initialized or particles_active == 0:
 		return
+	sph.stability_speed = droplet_speed_max
 	sph.step_render(delta)
 
 
 func scatter_render() -> void:
 	if not initialized or particles_active == 0:
 		return
+	_read_coupling_timings()
+	if profiling:
+		_rd.capture_timestamp("fire_water/scatter_start")
 
 	var push := _particle_push()
 	var cl := _rd.compute_list_begin()
@@ -627,7 +651,10 @@ func scatter_render() -> void:
 	_rd.compute_list_bind_uniform_set(cl, _sets_scatter[sph.current_parity()], 0)
 	_rd.compute_list_set_push_constant(cl, push, push.size())
 	_rd.compute_list_dispatch(cl, ceili(float(particles_active) / 256.0), 1, 1)
+	_rd.compute_list_add_barrier(cl)
 	_rd.compute_list_end()
+	if profiling:
+		_rd.capture_timestamp("fire_water/scatter_end")
 
 
 func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
@@ -638,6 +665,8 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 
 	if liquid_scal_rid != _cached_scal_rid:
 		_rebuild_texture_sets(liquid_scal_rid, liquid_vel_rid)
+	if profiling:
+		_rd.capture_timestamp("fire_water/gather_start")
 
 	# The gather walks the storage, not the domain: the accumulator extent, which is
 	# the fire box when dense and the tile atlas when sparse. The liquid textures
@@ -650,11 +679,17 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 	_rd.compute_list_bind_compute_pipeline(cl, _pipeline_gather)
 	_rd.compute_list_bind_uniform_set(cl, _uniform_set_gather, 0)
 	_rd.compute_list_set_push_constant(cl, push, push.size())
-	_rd.compute_list_dispatch(cl,
-		ceili(float(_accum_dims.x) / 8.0),
-		ceili(float(_accum_dims.y) / 8.0),
-		ceili(float(_accum_dims.z) / 4.0))
+	if _sparse:
+		_rd.compute_list_dispatch_indirect(cl, _active_tile_args, 0)
+	else:
+		_rd.compute_list_dispatch(cl,
+			ceili(float(_accum_dims.x) / 8.0),
+			ceili(float(_accum_dims.y) / 8.0),
+			ceili(float(_accum_dims.z) / 4.0))
+	_rd.compute_list_add_barrier(cl)
 	_rd.compute_list_end()
+	if profiling:
+		_rd.capture_timestamp("fire_water/gather_end")
 
 
 func return_render() -> void:
@@ -663,6 +698,8 @@ func return_render() -> void:
 	var set_rid: RID = _sets_return[sph.current_parity()]
 	if not set_rid.is_valid():
 		return
+	if profiling:
+		_rd.capture_timestamp("fire_water/return_start")
 
 	var push := _return_push()
 	var cl := _rd.compute_list_begin()
@@ -670,11 +707,45 @@ func return_render() -> void:
 	_rd.compute_list_bind_uniform_set(cl, set_rid, 0)
 	_rd.compute_list_set_push_constant(cl, push, push.size())
 	_rd.compute_list_dispatch(cl, ceili(float(particles_active) / 256.0), 1, 1)
+	_rd.compute_list_add_barrier(cl)
 	_rd.compute_list_end()
+	if profiling:
+		_rd.capture_timestamp("fire_water/return_end")
 
 	_frame_count += 1
 	if _frame_count % MEASURE_INTERVAL == 0:
 		_measure_particle_mass()
+
+
+func get_coupling_timings() -> Dictionary:
+	_coupling_timings_mutex.lock()
+	var copy := _coupling_timings.duplicate()
+	_coupling_timings_mutex.unlock()
+	return copy
+
+
+func _read_coupling_timings() -> void:
+	if not profiling:
+		return
+	var starts := {}
+	var out := {}
+	for i in _rd.get_captured_timestamps_count():
+		var timestamp_name := _rd.get_captured_timestamp_name(i)
+		if not timestamp_name.begins_with("fire_water/"):
+			continue
+		var suffix := timestamp_name.trim_prefix("fire_water/")
+		var timestamp := _rd.get_captured_timestamp_gpu_time(i)
+		if suffix.ends_with("_start"):
+			starts[suffix.trim_suffix("_start")] = timestamp
+		elif suffix.ends_with("_end"):
+			var stage := suffix.trim_suffix("_end")
+			if starts.has(stage):
+				out[stage] = float(timestamp - starts[stage]) / 1e6
+	if out.is_empty():
+		return
+	_coupling_timings_mutex.lock()
+	_coupling_timings = out
+	_coupling_timings_mutex.unlock()
 
 
 ## The gather and return sets bind solver textures, whose RIDs are only known once
@@ -686,7 +757,7 @@ func _rebuild_texture_sets(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 		_image_uniform(1, liquid_vel_rid),
 		_buffer_uniform(2, _ssbo_scatter),
 		_buffer_uniform(3, _ssbo_vel_scatter),
-	], _shader_gather, 0)
+	] + ([_buffer_uniform(4, _active_slots)] if _sparse else []), _shader_gather, 0)
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [
 			_buffer_uniform(0, sph.parity_positions_rid(parity)),
@@ -766,7 +837,8 @@ func _free_texture_sets() -> void:
 			_sets_return[parity] = RID()
 
 
-func set_indirection_rid(indir_tex: RID) -> void:
+func set_indirection_rid(indir_tex: RID, active_slots := RID(),
+		active_tile_args := RID()) -> void:
 	if _rd == null or not _sparse:
 		return
 	initialized = false
@@ -776,7 +848,10 @@ func set_indirection_rid(indir_tex: RID) -> void:
 			_rd.free_rid(_sets_scatter[parity])
 			_sets_scatter[parity] = RID()
 	_indir_tex = indir_tex
-	if not _indir_tex.is_valid():
+	_active_slots = active_slots
+	_active_tile_args = active_tile_args
+	if not (_indir_tex.is_valid() and _active_slots.is_valid()
+			and _active_tile_args.is_valid()):
 		return
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [

@@ -17,6 +17,9 @@ void main() {
 	}
 	if (gl_LocalInvocationIndex == 0u) {
 		s_maxbits = 0u;
+		if (slot == 0u) {
+			active_args[0] = 0u;
+		}
 	}
 	barrier();
 

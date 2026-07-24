@@ -55,6 +55,7 @@ layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
 layout(r32f, set = 0, binding = 8) uniform restrict image3D press_dst;
 layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
 layout(rgba8, set = 0, binding = 10) uniform restrict image3D display_tex;
+layout(r32f, set = 0, binding = 29) uniform restrict image3D visual_activity_tex;
 
 layout(std430, set = 0, binding = 11) restrict buffer Stats {
 	uint data[];
@@ -173,6 +174,12 @@ layout(r32f, set = 0, binding = 27) uniform restrict image3D activity_tex;
 layout(std430, set = 0, binding = 28) restrict readonly buffer NewList {
 	uint new_list[]; // tiles allocated this frame, cleared by fire_clear
 };
+layout(std430, set = 0, binding = 30) restrict readonly buffer ActiveSlots {
+	uint active_slots[]; // atlas slot paired with active_list, written by tile_compact
+};
+
+ivec3 invocation_vt;
+ivec3 invocation_atlas_origin;
 
 ivec3 tile_of_index(uint vti) {
 	int v = int(vti);
@@ -201,6 +208,18 @@ ivec3 sparse_texel(ivec3 vc) {
 	return org + (vc & ivec3(7));
 }
 
+ivec3 field_texel(ivec3 vc) {
+	ivec3 vt = vc >> 3;
+	if (all(equal(vt, invocation_vt))) {
+		return invocation_atlas_origin + (vc & ivec3(7));
+	}
+	return sparse_texel(vc);
+}
+
+bool invocation_tile_contains(ivec3 lo, ivec3 hi) {
+	return all(equal(lo >> 3, invocation_vt)) && all(equal(hi >> 3, invocation_vt));
+}
+
 // What a tap outside the resident set reads: still ambient air, at rest, with no
 // pressure. This is the sparse domain's open boundary — a Dirichlet condition on
 // the active surface, which moves with the fire, instead of on a fixed AABB.
@@ -210,6 +229,10 @@ vec4 ambient_scal() { return vec4(cfg.thermo.x, 0.0, 0.233, 0.0); }
 vec4 ambient_liquid_scal() { return vec4(0.0, 0.0, 0.0, 1.0); }
 
 bool cell_resident(ivec3 vc) { return sparse_texel(vc).x >= 0; }
+#else
+ivec3 invocation_vt;
+ivec3 invocation_atlas_origin;
+bool invocation_tile_contains(ivec3 lo, ivec3 hi) { return false; }
 #endif
 
 // Whether the pressure Poisson equation is solved at this cell.
@@ -270,7 +293,14 @@ bool solved_cell(ivec3 c) { return true; }
 // workgroup's tile origin plus the local id.
 ivec3 cell_coord() {
 #ifdef FIRE_SPARSE
-	return tile_of_index(active_list[gl_WorkGroupID.x]) * 8 + ivec3(gl_LocalInvocationID);
+	uint active_index = gl_WorkGroupID.x;
+	invocation_vt = tile_of_index(active_list[active_index]);
+	uint slot = active_slots[active_index];
+	int s = int(slot);
+	invocation_atlas_origin = ivec3(s % ATLAS_TILES.x,
+		(s / ATLAS_TILES.x) % ATLAS_TILES.y,
+		s / (ATLAS_TILES.x * ATLAS_TILES.y)) * 8;
+	return invocation_vt * 8 + ivec3(gl_LocalInvocationID);
 #else
 	return ivec3(gl_GlobalInvocationID);
 #endif
@@ -282,9 +312,9 @@ ivec3 cell_coord() {
 // Every field read and write in the solver goes through one of these, so the
 // mapping from a (field, cell) pair to storage lives in exactly one place: the
 // four macros below. Dense expands them to a direct image access at a physical
-// texel; sparse expands them to a resolve through the indirection, with a read
-// of a non-resident tile returning ambient and a write to one dropped. No call
-// site anywhere in the solver changes between the two builds.
+// texel. Sparse directly addresses the invocation's atlas tile and resolves the
+// indirection only for cross-tile access; a non-resident read returns ambient
+// and a write is dropped. No call site changes between the two builds.
 //
 // The staggered face accessors take a face coordinate, the cell accessors a cell
 // coordinate. The ping-pong pair a stage swaps (fields *_src/*_dst, or
@@ -295,22 +325,22 @@ ivec3 cell_coord() {
 #ifdef FIRE_SPARSE
 #define DEF_LOAD4(p_fn, p_img, p_ambient) \
 	vec4 p_fn(ivec3 c) { \
-		ivec3 t_ = sparse_texel(c); \
+			ivec3 t_ = field_texel(c); \
 		return (t_.x < 0) ? (p_ambient) : imageLoad(p_img, t_); \
 	}
 #define DEF_STORE4(p_fn, p_img) \
 	void p_fn(ivec3 c, vec4 v) { \
-		ivec3 t_ = sparse_texel(c); \
+			ivec3 t_ = field_texel(c); \
 		if (t_.x >= 0) { imageStore(p_img, t_, v); } \
 	}
 #define DEF_LOAD1(p_fn, p_img) \
 	float p_fn(ivec3 c) { \
-		ivec3 t_ = sparse_texel(c); \
+			ivec3 t_ = field_texel(c); \
 		return (t_.x < 0) ? 0.0 : imageLoad(p_img, t_).r; \
 	}
 #define DEF_STORE1(p_fn, p_img) \
 	void p_fn(ivec3 c, float v) { \
-		ivec3 t_ = sparse_texel(c); \
+			ivec3 t_ = field_texel(c); \
 		if (t_.x >= 0) { imageStore(p_img, t_, vec4(v, 0.0, 0.0, 0.0)); } \
 	}
 // A face in a non-resident tile is the open boundary: undisturbed ambient air,
@@ -322,7 +352,7 @@ ivec3 cell_coord() {
 // always 0, and the scratch/pressure fields keep the plain zero-on-miss loader.
 #define DEF_LOAD1_VEL(p_fn, p_img, p_comp) \
 	float p_fn(ivec3 c) { \
-		ivec3 t_ = sparse_texel(c); \
+			ivec3 t_ = field_texel(c); \
 		return (t_.x < 0) ? ambient_wind(c.y).p_comp : imageLoad(p_img, t_).r; \
 	}
 #else
@@ -357,6 +387,7 @@ DEF_STORE4(store_liquid_scal, liquid_scal)
 DEF_LOAD4(load_liquid_vel, liquid_vel, vec4(0.0))
 DEF_STORE4(store_liquid_vel, liquid_vel)
 DEF_STORE4(store_display, display_tex)
+DEF_STORE1(store_visual_activity, visual_activity_tex)
 
 DEF_LOAD1(load_press_src, press_src)
 DEF_STORE1(store_press_src, press_src)
@@ -651,19 +682,33 @@ float mixture_cp(vec4 s, vec4 s2) {
 // Takes the ACCESSOR, not the image: that is what makes one body serve both
 // builds. A tap that lands outside the resident set resolves to ambient through
 // the accessor instead of needing its own sparse variant here.
-#define SAMPLE_TRI_R(p_load, p_pos, p_dmax, p_out, p_min, p_max) { \
+#define SAMPLE_TRI_R(p_load, p_img, p_pos, p_dmax, p_out, p_min, p_max) { \
 	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(p_dmax)); \
 	ivec3 i0_ = ivec3(floor(pc_)); \
 	ivec3 i1_ = min(i0_ + ivec3(1), p_dmax); \
 	vec3 fr_ = pc_ - vec3(i0_); \
-	float s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
-	float s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
-	float s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
-	float s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
-	float s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
-	float s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
-	float s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
-	float s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	float s000_, s100_, s010_, s110_, s001_, s101_, s011_, s111_; \
+	if (invocation_tile_contains(i0_, i1_)) { \
+		ivec3 a0_ = invocation_atlas_origin + (i0_ & ivec3(7)); \
+		ivec3 a1_ = invocation_atlas_origin + (i1_ & ivec3(7)); \
+		s000_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a0_.z)).r; \
+		s100_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a0_.z)).r; \
+		s010_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a0_.z)).r; \
+		s110_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a0_.z)).r; \
+		s001_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a1_.z)).r; \
+		s101_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a1_.z)).r; \
+		s011_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a1_.z)).r; \
+		s111_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a1_.z)).r; \
+	} else { \
+		s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
+		s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
+		s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
+		s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
+		s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
+		s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
+		s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
+		s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	} \
 	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
 	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
 	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \
@@ -675,19 +720,33 @@ float mixture_cp(vec4 s, vec4 s2) {
 // an image binding as a function parameter. Parameter names are prefixed: a
 // bare `p` would be substituted inside swizzles. Takes the accessor rather than
 // the image, for the reason given on SAMPLE_TRI_R.
-#define SAMPLE_TRI(p_load, p_pos, p_out, p_min, p_max) { \
+#define SAMPLE_TRI(p_load, p_img, p_pos, p_out, p_min, p_max) { \
 	vec3 pc_ = clamp(p_pos, vec3(0.0), vec3(grid_max())); \
 	ivec3 i0_ = ivec3(floor(pc_)); \
 	ivec3 i1_ = min(i0_ + ivec3(1), grid_max()); \
 	vec3 fr_ = pc_ - vec3(i0_); \
-	vec4 s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
-	vec4 s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
-	vec4 s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
-	vec4 s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
-	vec4 s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
-	vec4 s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
-	vec4 s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
-	vec4 s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	vec4 s000_, s100_, s010_, s110_, s001_, s101_, s011_, s111_; \
+	if (invocation_tile_contains(i0_, i1_)) { \
+		ivec3 a0_ = invocation_atlas_origin + (i0_ & ivec3(7)); \
+		ivec3 a1_ = invocation_atlas_origin + (i1_ & ivec3(7)); \
+		s000_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a0_.z)); \
+		s100_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a0_.z)); \
+		s010_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a0_.z)); \
+		s110_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a0_.z)); \
+		s001_ = imageLoad(p_img, ivec3(a0_.x, a0_.y, a1_.z)); \
+		s101_ = imageLoad(p_img, ivec3(a1_.x, a0_.y, a1_.z)); \
+		s011_ = imageLoad(p_img, ivec3(a0_.x, a1_.y, a1_.z)); \
+		s111_ = imageLoad(p_img, ivec3(a1_.x, a1_.y, a1_.z)); \
+	} else { \
+		s000_ = p_load(ivec3(i0_.x, i0_.y, i0_.z)); \
+		s100_ = p_load(ivec3(i1_.x, i0_.y, i0_.z)); \
+		s010_ = p_load(ivec3(i0_.x, i1_.y, i0_.z)); \
+		s110_ = p_load(ivec3(i1_.x, i1_.y, i0_.z)); \
+		s001_ = p_load(ivec3(i0_.x, i0_.y, i1_.z)); \
+		s101_ = p_load(ivec3(i1_.x, i0_.y, i1_.z)); \
+		s011_ = p_load(ivec3(i0_.x, i1_.y, i1_.z)); \
+		s111_ = p_load(ivec3(i1_.x, i1_.y, i1_.z)); \
+	} \
 	p_min = min(min(min(s000_, s100_), min(s010_, s110_)), min(min(s001_, s101_), min(s011_, s111_))); \
 	p_max = max(max(max(s000_, s100_), max(s010_, s110_)), max(max(s001_, s101_), max(s011_, s111_))); \
 	p_out = mix(mix(mix(s000_, s100_, fr_.x), mix(s010_, s110_, fr_.x), fr_.y), \

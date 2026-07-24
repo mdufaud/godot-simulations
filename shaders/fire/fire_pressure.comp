@@ -13,8 +13,33 @@
 // The solver never clears the pressure field, warm-starting each frame from the
 // previous solution — the plume is quasi-steady, so it starts close.
 
+#ifdef FIRE_SPARSE
+const int PRESSURE_CACHE_SIDE = 10;
+const int PRESSURE_CACHE_SIZE = PRESSURE_CACHE_SIDE * PRESSURE_CACHE_SIDE * PRESSURE_CACHE_SIDE;
+shared float pressure_cache[PRESSURE_CACHE_SIZE];
+
+int pressure_cache_index(ivec3 p) {
+	return p.x + PRESSURE_CACHE_SIDE * (p.y + PRESSURE_CACHE_SIDE * p.z);
+}
+
+float cached_pressure(ivec3 offset) {
+	return pressure_cache[pressure_cache_index(ivec3(gl_LocalInvocationID) + ivec3(1) + offset)];
+}
+#endif
+
 void main() {
 	ivec3 c = cell_coord();
+#ifdef FIRE_SPARSE
+	ivec3 tile_origin = invocation_vt * 8;
+	for (uint i = gl_LocalInvocationIndex; i < uint(PRESSURE_CACHE_SIZE);
+			i += gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z) {
+		ivec3 hp = ivec3(int(i) % PRESSURE_CACHE_SIDE,
+			(int(i) / PRESSURE_CACHE_SIDE) % PRESSURE_CACHE_SIDE,
+			int(i) / (PRESSURE_CACHE_SIDE * PRESSURE_CACHE_SIDE));
+		pressure_cache[i] = load_press_src(tile_origin + hp - ivec3(1));
+	}
+	barrier();
+#endif
 	if (out_of_grid(c)) {
 		return;
 	}
@@ -33,15 +58,27 @@ void main() {
 	float sum = 0.0;
 	float divisor = 5.0; // the five faces that are always open or interior
 
+#ifdef FIRE_SPARSE
+	sum += (c.x < gmax.x) ? cached_pressure(ivec3(1, 0, 0)) : 0.0;
+	sum += (c.x > 0) ? cached_pressure(ivec3(-1, 0, 0)) : 0.0;
+	sum += (c.y < gmax.y) ? cached_pressure(ivec3(0, 1, 0)) : 0.0;
+	sum += (c.z < gmax.z) ? cached_pressure(ivec3(0, 0, 1)) : 0.0;
+	sum += (c.z > 0) ? cached_pressure(ivec3(0, 0, -1)) : 0.0;
+#else
 	sum += (c.x < gmax.x) ? load_press_src(c + ivec3(1, 0, 0)) : 0.0;
 	sum += (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
 	sum += (c.y < gmax.y) ? load_press_src(c + ivec3(0, 1, 0)) : 0.0;
 	sum += (c.z < gmax.z) ? load_press_src(c + ivec3(0, 0, 1)) : 0.0;
 	sum += (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
+#endif
 
 	// Downward face: interior below row 0, solid at it.
 	if (c.y > 0) {
+	#ifdef FIRE_SPARSE
+		sum += cached_pressure(ivec3(0, -1, 0));
+	#else
 		sum += load_press_src(c - ivec3(0, 1, 0));
+	#endif
 		divisor += 1.0;
 	}
 

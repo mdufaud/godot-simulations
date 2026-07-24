@@ -20,11 +20,16 @@ const FireWater = preload("res://scripts/fire/fire_water.gd")
 @onready var gas_pipe: Node3D = $Campfire/GasPipe
 @onready var wood_pile: WoodPile = $Campfire/WoodPile
 @onready var menu: SimMenu = $UI/SimMenu
+@onready var ui_layer: CanvasLayer = $UI
 
-var stats_label: Label
-var probe_label: Label
-var timing_label: Label
-var debug_info := false
+var debug_overlay: Label
+var debug_info := true
+var _debug_frame_ms := 0.0
+var _debug_timing_frame := 0
+var _debug_fire_timings := {}
+var _debug_sph_timings := {}
+var _debug_water_timings := {}
+const DEBUG_TIMING_REFRESH_FRAMES := 15
 var fuel_bar: ProgressBar
 var oxygen_bar: ProgressBar
 var temp_bar: ProgressBar
@@ -40,6 +45,7 @@ var water: FireWater
 var volume_material: ShaderMaterial
 var volume_texture: Texture3DRD
 var indir_texture: Texture3DRD
+var visual_activity_texture: Texture3DRD
 var texture_bound := false
 ## The sparse build's field is a tile atlas rather than the domain, so it needs a
 ## raymarcher that resolves through the pool's indirection volume.
@@ -75,6 +81,27 @@ const QUALITY_CELLS := [0.4, 0.2, 0.1]
 const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x128)"]
 const POOL_BUDGETS := [1024, 1536, 2048]
 const POOL_QUALITY_NAMES := ["Low (1024 tiles)", "Medium (1536 tiles)", "High (2048 tiles)"]
+
+enum PerformancePreset { REFERENCE, QUALITY, BALANCED, PERFORMANCE, AUTO }
+const PERFORMANCE_PRESET_NAMES := ["Reference", "Quality", "Balanced", "Performance", "Auto"]
+const AUTO_MIN_HOLD := 3.0
+const AUTO_INITIAL_HOLD := 5.0
+const AUTO_SLOW_FRAME_MS := 18.5
+const AUTO_FAST_FRAME_MS := 15.0
+const AUTO_MAX_LEVEL := 5
+
+var _performance_preset := PerformancePreset.REFERENCE
+var _performance_controls := {}
+var _preset_status_label: Label
+var _auto_level := 0
+var _auto_hold := 0.0
+var _auto_frame_ms := 16.67
+var _water_particle_cap := 16384
+var _water_particle_cap_applied := -1
+var _water_substeps := 16
+var _water_adaptive_substeps := false
+var _fire_update_interval := 1
+var _fire_update_counter := 0
 
 # --- Grid emitter (Fire-X Tab. 3 "Grid Emitter Parameter") — gas mode ---
 var emitter_position := Vector3(0, 0.3, 0)
@@ -152,10 +179,11 @@ func _apply_wind() -> void:
 
 func _ready() -> void:
 	solver = FireGpuSolver.new()
-	# Sparse tile grid instead of the fixed box, for the A/B runs. It has to be set
+	# Sparse is the default on this branch; --dense selects the dense A/B control. It has to be set
 	# before init_render is queued: it selects the shader variant, the texture
 	# extents and the dispatch mode on the solver, and the raymarcher here.
-	solver.sparse = "--sparse" in OS.get_cmdline_user_args()
+	solver.sparse = "--dense" not in OS.get_cmdline_user_args()
+	solver.profiling = debug_info
 	volume_material = fire_volume.material_override as ShaderMaterial
 	if volume_material:
 		_setup_volume_material()
@@ -169,6 +197,7 @@ func _ready() -> void:
 	water = FireWater.new()
 	water.particle_count = 16384
 	water.evaporation_active = solver.evaporation_enabled
+	water.profiling = debug_info
 	# Queued as a closure rather than bound: the pool's indirection volume does not
 	# exist until the solver's own queued init_render has run on the render thread,
 	# so binding it here would capture an invalid RID. The droplets keep the dense
@@ -176,7 +205,8 @@ func _ready() -> void:
 	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
 	RenderingServer.call_on_render_thread(func() -> void:
 		water.init_render(solver.sim_dims(), solver.cell_size,
-			solver.indirection_rid(), sph_box))
+			solver.indirection_rid(), sph_box, solver.active_slots_rid(),
+			solver.active_tile_args_rid()))
 
 	_setup_fluid_renderer()
 	_build_wood_bed()
@@ -185,6 +215,10 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
+	_debug_frame_ms = delta * 1000.0 if _debug_frame_ms == 0.0 else lerpf(
+		_debug_frame_ms, delta * 1000.0, 0.1)
+	_update_auto_quality(delta)
+	_update_debug_overlay()
 	if not solver.initialized:
 		return
 	if not texture_bound:
@@ -198,39 +232,44 @@ func _process(delta: float) -> void:
 				indir_texture = Texture3DRD.new()
 				indir_texture.texture_rd_rid = solver.indirection_bytes_rid()
 				volume_material.set_shader_parameter("indir_tex", indir_texture)
+				visual_activity_texture = Texture3DRD.new()
+				visual_activity_texture.texture_rd_rid = solver.get_texture_rid("visual_activity")
+				volume_material.set_shader_parameter("visual_activity_tex", visual_activity_texture)
 		fire_volume.visible = true
 		texture_bound = true
 	if solver.sparse and volume_material:
-		# The resident set moves with the fire, so the ray clip has to follow it.
-		var clip := solver.display_clip_box()
-		volume_material.set_shader_parameter("clip_min", clip.position)
-		volume_material.set_shader_parameter("clip_max", clip.end)
+		_set_sparse_volume_proxy(solver.display_clip_box())
 
 	# Last frame's reduction, read up front: the wood bed is driven by the per-log
 	# gas temperatures in it, and its emitters have to be uploaded before the
 	# solver steps.
 	var stats := solver.get_stats()
 	var aim := _aim()
+	_fire_update_counter += 1
+	var run_fire := _fire_update_counter >= _fire_update_interval
+	if run_fire:
+		_fire_update_counter = 0
 
 	# Rates are per simulated second, so they must follow the solver's clock and
 	# not the frame delta — see FireGpuSolver.sim_delta.
-	var sim_dt := solver.sim_delta(delta)
-	if gas_mode:
-		if gas_reinjection_enabled:
-			solver.push_event(FireGpuSolver.EVENT_FUEL, emitter_position,
-				emitter_radius, emitter_rate * sim_dt)
-	else:
-		# The bed runs on the solver's clock like everything else, and hands over
-		# the whole emitter table at once. It is a solid rather than a field the
-		# solver substeps, but its coupling to the gas is a rate per SIMULATED
-		# second: on the wall clock it lost mass the emitter never injected —
-		# 73 % of it at 32 fps, measured — so the pile emptied faster the worse
-		# the frame rate got.
-		wood_pile.update(sim_dt, stats["wood_temperatures"], solver.ambient_temperature)
-		solver.set_wood_emitters(wood_pile.emitters())
+	var sim_dt := solver.sim_delta(delta) if run_fire else 0.0
+	if run_fire:
+		if gas_mode:
+			if gas_reinjection_enabled:
+				solver.push_event(FireGpuSolver.EVENT_FUEL, emitter_position,
+					emitter_radius, emitter_rate * sim_dt)
+		else:
+			# The bed runs on the solver's clock like everything else, and hands over
+			# the whole emitter table at once. It is a solid rather than a field the
+			# solver substeps, but its coupling to the gas is a rate per SIMULATED
+			# second: on the wall clock it lost mass the emitter never injected —
+			# 73 % of it at 32 fps, measured — so the pile emptied faster the worse
+			# the frame rate got.
+			wood_pile.update(sim_dt, stats["wood_temperatures"], solver.ambient_temperature)
+			solver.set_wood_emitters(wood_pile.emitters())
 
-	if is_smothering:
-		solver.push_event(FireGpuSolver.EVENT_SMOTHER, Vector3.ZERO, 2.0, 20.0 * sim_dt)
+		if is_smothering:
+			solver.push_event(FireGpuSolver.EVENT_SMOTHER, Vector3.ZERO, 2.0, 20.0 * sim_dt)
 
 	_bucket_cooldown = maxf(_bucket_cooldown - delta, 0.0)
 	_log_cooldown = maxf(_log_cooldown - delta, 0.0)
@@ -239,22 +278,35 @@ func _process(delta: float) -> void:
 	# both ahead of the grid loop (lines 13-14) so the solver reads the liquid field
 	# built this frame, and the return after it (lines 23-24).
 	if water.initialized:
+		if _water_particle_cap_applied != _water_particle_cap:
+			_water_particle_cap_applied = _water_particle_cap
 		if jet_enabled:
 			_aim_hose(aim)
-			# Simulated time, not frame time: emitting per wall-clock second makes
-			# the droplet count a function of the frame rate, and two runs of the
-			# same nozzle then disagree by a couple of hundred kelvin.
-			RenderingServer.call_on_render_thread(water.emit_jet.bind(sim_dt, delta))
-		RenderingServer.call_on_render_thread(water.step_droplets.bind(delta))
-		RenderingServer.call_on_render_thread(water.scatter_render)
-		RenderingServer.call_on_render_thread(water.gather_render.bind(
-			solver.get_texture_rid("liquid_scal"),
-			solver.get_texture_rid("liquid_vel")))
-
-	RenderingServer.call_on_render_thread(solver.step_render.bind(delta))
+	var liquid_scal := solver.get_texture_rid("liquid_scal")
+	var liquid_vel := solver.get_texture_rid("liquid_vel")
+	var water_cap := _water_particle_cap
+	var water_steps := _water_substeps
+	var water_adaptive := _water_adaptive_substeps
+	var emit_water := jet_enabled
+	RenderingServer.call_on_render_thread(func() -> void:
+		if run_fire and solver.sparse:
+			solver.prepare_topology_render()
+		if water.initialized:
+			water.sph.substeps = water_steps
+			water.sph.max_substeps = water_steps
+			water.sph.adaptive_substeps = water_adaptive
+			water.set_particle_cap(water_cap)
+			if emit_water:
+				water.emit_jet(sim_dt, delta)
+			water.step_droplets(delta)
+			water.scatter_render()
+			water.gather_render(liquid_scal, liquid_vel)
+		if run_fire:
+			solver.step_render(delta, water.initialized and water.particles_active > 0)
+		if water.initialized:
+			water.return_render())
 
 	if water.initialized:
-		RenderingServer.call_on_render_thread(water.return_render)
 		fluid_renderer.update(water.sph_position_tex_rid(), water.particles_active)
 
 	_update_light(stats)
@@ -268,6 +320,8 @@ func _exit_tree() -> void:
 		volume_texture.texture_rd_rid = RID()
 	if indir_texture != null:
 		indir_texture.texture_rd_rid = RID()
+	if visual_activity_texture != null:
+		visual_activity_texture.texture_rd_rid = RID()
 	# Water first: its uniform sets bind the solver's liquid textures, and freeing
 	# those first makes Godot drop the dependent sets on its own — FireWater then
 	# frees RIDs that are already gone ("Attempted to free invalid ID").
@@ -386,12 +440,6 @@ func _drop_log() -> void:
 # =========================================================================
 
 ## Point the raymarcher at whichever grid the solver runs on.
-##
-## Dense marches the box at fixed steps. Sparse swaps in a shader that DDAs the
-## tile pool's indirection volume instead: the box the ray is clipped against
-## becomes the whole 409.6 x 102.4 x 409.6 m virtual domain, and the mesh has to
-## grow with it — it is the proxy geometry the fragments come from, so a fire that
-## walks out of the old 12.8 m box would simply have no pixels to be drawn into.
 func _setup_volume_material() -> void:
 	var box := Vector3(solver.sim_dims()) * solver.cell_size
 	if solver.sparse:
@@ -400,11 +448,11 @@ func _setup_volume_material() -> void:
 		volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
 		volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
 		volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
-		(fire_volume.mesh as BoxMesh).size = box
-		# cell_to_world puts the ground at y = 0 and centres x/z on the origin, so
-		# the box mesh sits half its height up either way.
-		fire_volume.position.y = box.y * 0.5
-	volume_material.set_shader_parameter("box_size", box)
+		volume_material.set_shader_parameter("virtual_origin",
+			Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
+		_set_sparse_volume_proxy(solver.display_clip_box())
+	else:
+		volume_material.set_shader_parameter("box_size", box)
 	# The blue reaction core fades over the height of the DENSE domain in both
 	# builds; over the sparse one it would never fade at all.
 	volume_material.set_shader_parameter("blue_height", DOMAIN_SIZE.y)
@@ -416,6 +464,15 @@ func _setup_volume_material() -> void:
 	# back to Godot's default texture, which for the indirection volume is not even
 	# the right format to read.
 	fire_volume.visible = false
+
+
+func _set_sparse_volume_proxy(proxy: AABB) -> void:
+	var extent := proxy.size
+	(fire_volume.mesh as BoxMesh).size = extent
+	fire_volume.position = proxy.position + extent * 0.5
+	volume_material.set_shader_parameter("box_size", extent)
+	volume_material.set_shader_parameter("volume_origin", proxy.position)
+	volume_material.set_shader_parameter("volume_extent", extent)
 
 
 ## Screen-space fluid surface over the SPH position texture, reusing the fluid
@@ -535,7 +592,175 @@ func _pour_water() -> void:
 	var origin: Vector3 = aim["origin"] + aim["direction"] * 1.0
 	var throw: Vector3 = aim["direction"] * 8.0
 	RenderingServer.call_on_render_thread(water.spawn_droplets.bind(
-		mini(water.particle_count, 4000), origin, 0.9, throw))
+		mini(_water_particle_cap, 4000), origin, 0.9, throw))
+
+
+func _preset_values(index: int) -> Dictionary:
+	match index:
+		PerformancePreset.QUALITY:
+			return {pressure = 64, advection = 0, vorticity_mode = 0,
+				vorticity_frequency = 1, fire_substeps = 1, fire_interval = 1,
+				water_substeps = 16, water_adaptive = true,
+				water_cap = 16384, march_step = 1.0, march_budget = 280,
+				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0}
+		PerformancePreset.BALANCED:
+			return {pressure = 48, advection = 0, vorticity_mode = 1,
+				vorticity_frequency = 2, fire_substeps = 1, fire_interval = 1,
+				water_substeps = 14, water_adaptive = true,
+				water_cap = 12288, march_step = 1.5, march_budget = 192,
+				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}
+		PerformancePreset.PERFORMANCE:
+			return {pressure = 32, advection = 1, vorticity_mode = 2,
+				vorticity_frequency = 4, fire_substeps = 1, fire_interval = 2,
+				water_substeps = 12, water_adaptive = true,
+				water_cap = 8192, march_step = 2.0, march_budget = 128,
+				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
+		_:
+			return {pressure = 64, advection = 0, vorticity_mode = 0,
+				vorticity_frequency = 1, fire_substeps = 1, fire_interval = 1,
+				water_substeps = 16, water_adaptive = false,
+				water_cap = 16384, march_step = 0.75, march_budget = 320,
+				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0}
+
+
+func _auto_values(level: int) -> Dictionary:
+	var values := _preset_values(PerformancePreset.REFERENCE)
+	match level:
+		1:
+			values.merge({march_step = 1.0, march_budget = 280,
+				march_distance = 72.0, water_scale = 0.8}, true)
+		2:
+			values.merge({march_step = 1.25, march_budget = 240,
+				march_distance = 64.0, water_scale = 0.65, render_scale = 0.9}, true)
+		3:
+			values.merge({march_step = 1.5, march_budget = 192,
+				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}, true)
+		4:
+			values.merge({pressure = 48, vorticity_mode = 1, vorticity_frequency = 2,
+				water_substeps = 12, water_adaptive = true, water_cap = 12288, march_step = 1.75,
+				march_budget = 160, march_distance = 48.0, water_scale = 0.5,
+				render_scale = 0.75}, true)
+		5:
+			values = _preset_values(PerformancePreset.PERFORMANCE)
+	return values
+
+
+func _set_performance_preset(index: int) -> void:
+	_performance_preset = clampi(index, 0, PERFORMANCE_PRESET_NAMES.size() - 1)
+	if _performance_preset == PerformancePreset.AUTO:
+		_auto_level = 0
+		_auto_hold = AUTO_INITIAL_HOLD
+		_auto_frame_ms = maxf(_debug_frame_ms, 16.67)
+		_apply_performance_values(_auto_values(_auto_level))
+		_update_preset_status()
+		return
+	_apply_performance_values(_preset_values(_performance_preset))
+	_update_preset_status()
+
+
+func _apply_performance_values(values: Dictionary) -> void:
+	_set_performance_control("pressure", values.pressure)
+	_set_performance_control("advection", values.advection)
+	_set_performance_control("vorticity_mode", values.vorticity_mode)
+	_set_performance_control("vorticity_frequency", values.vorticity_frequency)
+	_set_performance_control("fire_substeps", values.fire_substeps)
+	_set_performance_control("fire_interval", values.fire_interval)
+	_set_performance_control("water_substeps", values.water_substeps)
+	_set_performance_control("water_adaptive", values.water_adaptive)
+	_set_performance_control("water_cap", values.water_cap)
+	_set_performance_control("march_step", values.march_step)
+	_set_performance_control("march_budget", values.march_budget)
+	_set_performance_control("march_distance", values.march_distance)
+	_set_performance_control("water_scale", values.water_scale)
+	_set_performance_control("render_scale", values.render_scale)
+
+
+func _set_performance_control(key: String, value: Variant) -> void:
+	if not _performance_controls.has(key):
+		return
+	var entry: Dictionary = _performance_controls[key]
+	var node: Control = entry.node
+	var callback: Callable = entry.callback
+	if node is HSlider:
+		var slider := node as HSlider
+		if is_equal_approx(slider.value, float(value)):
+			callback.call(float(value))
+		else:
+			slider.value = float(value)
+	elif node is OptionButton:
+		var option := node as OptionButton
+		option.select(int(value))
+		callback.call(int(value))
+	elif node is CheckButton:
+		var toggle := node as CheckButton
+		toggle.set_pressed_no_signal(bool(value))
+		callback.call(bool(value))
+
+
+func _register_performance_control(key: String, node: Control, callback: Callable) -> void:
+	_performance_controls[key] = {node = node, callback = callback}
+
+
+func _update_auto_quality(delta: float) -> void:
+	if _performance_preset != PerformancePreset.AUTO:
+		return
+	_auto_frame_ms = lerpf(_auto_frame_ms, minf(delta * 1000.0, 100.0), 0.05)
+	_auto_hold -= delta
+	if _auto_hold <= 0.0:
+		var next_level := _auto_level
+		if _auto_frame_ms > AUTO_SLOW_FRAME_MS and _auto_level < AUTO_MAX_LEVEL:
+			next_level += 1
+		elif _auto_frame_ms < AUTO_FAST_FRAME_MS and _auto_level > 0:
+			next_level -= 1
+		if next_level != _auto_level:
+			_auto_level = next_level
+			_apply_performance_values(_auto_values(_auto_level))
+			_auto_hold = AUTO_MIN_HOLD
+	_update_preset_status()
+
+
+func _update_preset_status() -> void:
+	if _preset_status_label == null:
+		return
+	if _performance_preset == PerformancePreset.AUTO:
+		var scope := "simulation reduced" if _auto_level >= 4 else "rendering only"
+		_preset_status_label.text = "Auto level %d/%d · %s · %.1f ms" % [
+			_auto_level, AUTO_MAX_LEVEL, scope, _auto_frame_ms]
+	else:
+		_preset_status_label.text = "%s · explicit, reversible settings" % \
+			PERFORMANCE_PRESET_NAMES[_performance_preset]
+
+
+func _set_advection_mode(index: int) -> void:
+	solver.advection_mode = clampi(index, FireGpuSolver.ADVECTION_MACCORMACK,
+		FireGpuSolver.ADVECTION_SEMI_LAGRANGIAN)
+
+
+func _set_vorticity_mode(index: int) -> void:
+	solver.vorticity_mode = clampi(index, FireGpuSolver.VORTICITY_FULL,
+		FireGpuSolver.VORTICITY_OFF)
+
+
+func _set_water_particle_cap(value: float) -> void:
+	_water_particle_cap = clampi(int(value), 1024, water.particle_count)
+
+
+func _set_water_substeps(value: float) -> void:
+	_water_substeps = clampi(int(value), 4, 16)
+
+
+func _set_water_adaptive_substeps(value: bool) -> void:
+	_water_adaptive_substeps = value
+
+
+func _set_volume_parameter(name: String, value: Variant) -> void:
+	if volume_material != null:
+		volume_material.set_shader_parameter(name, value)
+
+
+func _set_water_render_scale(value: float) -> void:
+	if fluid_renderer != null:
+		fluid_renderer.set_render_scale(value)
 
 
 ## Swap dense field resolution or sparse pool budget.
@@ -557,13 +782,16 @@ func _set_quality(index: int) -> void:
 		volume_texture.texture_rd_rid = RID()
 	if indir_texture != null:
 		indir_texture.texture_rd_rid = RID()
+	if visual_activity_texture != null:
+		visual_activity_texture.texture_rd_rid = RID()
 	fire_volume.visible = false
 	texture_bound = false
 	if solver.sparse:
 		RenderingServer.call_on_render_thread(func() -> void:
 			water.set_indirection_rid(RID())
 			solver.set_resolution(dims, solver.cell_size, budget)
-			water.set_indirection_rid(solver.indirection_rid()))
+			water.set_indirection_rid(solver.indirection_rid(),
+				solver.active_slots_rid(), solver.active_tile_args_rid()))
 	else:
 		RenderingServer.call_on_render_thread(solver.set_resolution.bind(dims, cell))
 	if not solver.sparse:
@@ -638,28 +866,6 @@ func _update_ui_stats(stats: Dictionary) -> void:
 	var temp_norm := (max_temp - solver.ambient_temperature) \
 		/ (solver.display_temperature - solver.ambient_temperature)
 
-	if debug_info:
-		stats_label.text = "T max: %d K | reaction %.2f mol/(m³·s)" % [
-			int(max_temp), stats["total_reaction"]]
-		if not gas_mode:
-			stats_label.text += " | wood %d K" % int(wood_pile.hottest_surface())
-
-		# Mass-fraction closure: a running check that species transport conserves
-		# mass. Drifts away from 1.0 only if a product coefficient is off default.
-		var timings := solver.get_timings()
-		var probe_text := "ΣY = %.4f" % stats["mass_fraction_sum"]
-		if water.mass_measured_once:
-			probe_text += " | Σm_p %.3f kg" % water.measured_mass
-		# The P4 criterion: the energy the gas loses has to be the latent plus
-		# sensible heat the liquid gave up, to 1 %. Only shown once there is liquid
-		# on the grid, since the ratio is 0/0 in a dry domain.
-		if stats["energy_budget"] > 0.0:
-			probe_text += " | ΔE err %.3f%%" % (stats["energy_residual"] * 100.0)
-		if timings.has("total"):
-			probe_text += " | GPU %.2f ms" % timings["total"]
-		probe_label.text = probe_text
-		timing_label.text = _format_timings(timings)
-
 	fuel_bar.value = stats["avg_fuel"] * 100.0
 	oxygen_bar.value = stats["avg_oxygen"] * 100.0
 	temp_bar.value = clampf(temp_norm * 100.0, 0.0, 100.0)
@@ -667,6 +873,62 @@ func _update_ui_stats(stats: Dictionary) -> void:
 		wood_bar.value = wood_pile.total_fuel() \
 			/ maxf(wood_pile.initial_fuel(), 1e-4) * 100.0
 		_refresh_wood_label()
+
+
+func _update_debug_overlay() -> void:
+	if debug_overlay == null or solver == null:
+		return
+	_debug_timing_frame += 1
+	var stats := solver.get_stats()
+	if _debug_timing_frame % DEBUG_TIMING_REFRESH_FRAMES == 0:
+		var latest_timings := solver.get_timings()
+		if not latest_timings.is_empty():
+			_debug_fire_timings = latest_timings
+	var timings: Dictionary = _debug_fire_timings
+	var proxy := solver.display_clip_box()
+	var pool := solver.get_debug_pool_stats()
+	var lines := [
+		"FIRE DEBUG",
+		"quality %s" % (_preset_status_label.text if _preset_status_label != null else "--"),
+		"frame %.2f ms | FPS %.1f | substeps %d" % [
+			_debug_frame_ms, Engine.get_frames_per_second(), solver.last_substeps],
+		"GPU %s | stages %s" % [
+			"%.2f ms" % timings["total"] if timings.has("total") else "--",
+			_format_timings(timings) if not timings.is_empty() else "--"],
+	]
+	if solver.sparse:
+		lines.append("pool %d/%d resident | %d free | %d new | %d exhausted" % [
+			int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
+			int(pool.get("free", 0)), int(pool.get("allocated_this_frame", 0)),
+			int(pool.get("exhausted", 0))])
+		lines.append("proxy (%.1f, %.1f, %.1f) size (%.1f, %.1f, %.1f)" % [
+			proxy.position.x, proxy.position.y, proxy.position.z,
+			proxy.size.x, proxy.size.y, proxy.size.z])
+	else:
+		lines.append("dense %s" % str(solver.grid_dims))
+	lines.append("T %d K | reaction %.3f | div %.4f | ΣY %.4f" % [
+		int(stats["max_temperature"]), stats["total_reaction"],
+		stats["max_divergence"], stats["mass_fraction_sum"]])
+	if water != null:
+		if _debug_timing_frame % DEBUG_TIMING_REFRESH_FRAMES == 0:
+			var latest_water_timings := water.get_coupling_timings()
+			if not latest_water_timings.is_empty():
+				_debug_water_timings = latest_water_timings
+			var latest_sph_timings := water.sph.get_timings() if water.sph != null else {}
+			if not latest_sph_timings.is_empty():
+				_debug_sph_timings = latest_sph_timings
+		var has_water_timings := water.particles_active > 0 and (
+			_debug_sph_timings.has("total") or not _debug_water_timings.is_empty())
+		var water_total := float(_debug_sph_timings.get("total", 0.0))
+		for key in _debug_water_timings:
+			water_total += float(_debug_water_timings[key])
+		lines.append("water %d active | total %s ms | grid %s ms | scatter %s | gather %s" % [
+			water.particles_active,
+			"%.2f" % water_total if has_water_timings else "--",
+			"%.2f" % _debug_sph_timings["grid"] if has_water_timings and _debug_sph_timings.has("grid") else "--",
+			"%.2f ms" % _debug_water_timings["scatter"] if has_water_timings and _debug_water_timings.has("scatter") else "--",
+			"%.2f ms" % _debug_water_timings["gather"] if has_water_timings and _debug_water_timings.has("gather") else "--"])
+	debug_overlay.text = "\n".join(lines)
 
 
 func _refresh_wood_label() -> void:
@@ -694,25 +956,26 @@ func _format_timings(timings: Dictionary) -> String:
 
 
 func _setup_ui() -> void:
-	stats_label = menu.add_label("T max: 300 K")
-	probe_label = menu.add_label("ΣY = 1.0000")
-	timing_label = menu.add_label("")
-	# Without this a Label reports its whole line as its minimum width, which
-	# widens the panel past its anchored 300 px for as long as the text is set.
-	stats_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	probe_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	timing_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	# Debug readout is hidden until the Debug info toggle turns it on.
-	stats_label.visible = false
-	probe_label.visible = false
-	timing_label.visible = false
-	menu.add_separator()
+	debug_overlay = Label.new()
+	debug_overlay.position = Vector2(16.0, 16.0)
+	debug_overlay.custom_minimum_size = Vector2(620.0, 0.0)
+	debug_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	debug_overlay.add_theme_font_size_override("font_size", 15)
+	debug_overlay.add_theme_color_override("font_color", Color(0.9, 0.96, 1.0, 0.96))
+	debug_overlay.add_theme_color_override("font_outline_color", Color(0.0, 0.0, 0.0, 0.9))
+	debug_overlay.add_theme_constant_override("outline_size", 6)
+	ui_layer.add_child(debug_overlay)
+
 	fuel_bar = menu.add_progress_bar("Fuel", 100.0)
 	oxygen_bar = menu.add_progress_bar("Oxygen", 100.0)
 	temp_bar = menu.add_progress_bar("Temperature", 100.0)
 
 	menu.add_separator()
 	menu.add_section("Quality")
+	menu.add_option_button("Performance preset",
+		PERFORMANCE_PRESET_NAMES, _performance_preset, _set_performance_preset)
+	_preset_status_label = menu.add_label("")
+	_preset_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	var quality_names := POOL_QUALITY_NAMES if solver.sparse else QUALITY_NAMES
 	var quality_index := POOL_BUDGETS.find(solver.pool_budget) if solver.sparse \
 		else QUALITY_CELLS.find(solver.cell_size)
@@ -768,12 +1031,11 @@ func _setup_ui() -> void:
 		_apply_wind())
 	menu.add_action_toggle("🧯", "Smother", false, func(on: bool) -> void:
 		is_smothering = on)
-	menu.add_debug_toggle("🐛", "Debug info", false, func(on: bool) -> void:
+	menu.add_debug_toggle("🐛", "Debug info", debug_info, func(on: bool) -> void:
 		debug_info = on
 		solver.profiling = on
-		stats_label.visible = on
-		probe_label.visible = on
-		timing_label.visible = on)
+		water.profiling = on
+		debug_overlay.visible = on)
 
 	# Ranges below are the paper's own (Fire-X Tab. 3) wherever it gives one.
 	menu.add_separator()
@@ -824,10 +1086,6 @@ func _setup_ui() -> void:
 		func(v: float): solver.smagorinsky_cs = v)
 	menu.add_slider("Buoyancy g", 0.0, 20.0, solver.gravity,
 		func(v: float): solver.gravity = v)
-	menu.add_slider("Pressure iters", 16.0, 128.0, float(solver.pressure_iterations),
-		func(v: float): solver.pressure_iterations = int(v))
-	menu.add_slider("Substeps", 1.0, 4.0, float(solver.substeps),
-		func(v: float): solver.substeps = int(v))
 	# Free stream at the 10 m reference height; the fire sits deep in the boundary
 	# layer under it (see wind_profile in fire_forces.comp).
 	menu.add_slider("Wind X @10 m", -5.0, 5.0, _wind_vector.x,
@@ -841,7 +1099,70 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("Performance")
-	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+	var pressure_slider := menu.add_slider("Pressure iterations", 16.0, 128.0,
+		float(solver.pressure_iterations),
+		func(v: float): solver.pressure_iterations = int(v))
+	pressure_slider.step = 2.0
+	_register_performance_control("pressure", pressure_slider,
+		func(v: float): solver.pressure_iterations = int(v))
+	var advection_option := menu.add_option_button("Advection",
+		["MacCormack", "Semi-Lagrangian"], solver.advection_mode, _set_advection_mode)
+	_register_performance_control("advection", advection_option, _set_advection_mode)
+	var vorticity_option := menu.add_option_button("Vorticity mode",
+		["Full", "Reduced", "Off"], solver.vorticity_mode, _set_vorticity_mode)
+	_register_performance_control("vorticity_mode", vorticity_option, _set_vorticity_mode)
+	var vorticity_frequency := menu.add_slider("Vorticity frequency", 1.0, 4.0,
+		float(solver.vorticity_interval),
+		func(v: float): solver.vorticity_interval = int(v))
+	vorticity_frequency.step = 1.0
+	_register_performance_control("vorticity_frequency", vorticity_frequency,
+		func(v: float): solver.vorticity_interval = int(v))
+	var fire_substeps := menu.add_slider("Fire substeps", 1.0, 4.0,
+		float(solver.substeps), func(v: float): solver.substeps = int(v))
+	fire_substeps.step = 1.0
+	_register_performance_control("fire_substeps", fire_substeps,
+		func(v: float): solver.substeps = int(v))
+	var fire_interval := menu.add_slider("Fire update interval", 1.0, 4.0,
+		float(_fire_update_interval), func(v: float): _fire_update_interval = int(v))
+	fire_interval.step = 1.0
+	_register_performance_control("fire_interval", fire_interval,
+		func(v: float): _fire_update_interval = int(v))
+	var water_substeps := menu.add_slider("Water SPH substeps", 4.0, 16.0,
+		float(_water_substeps), _set_water_substeps)
+	water_substeps.step = 1.0
+	_register_performance_control("water_substeps", water_substeps, _set_water_substeps)
+	var water_adaptive := menu.add_toggle("Adaptive water substeps",
+		_water_adaptive_substeps, _set_water_adaptive_substeps)
+	_register_performance_control("water_adaptive", water_adaptive,
+		_set_water_adaptive_substeps)
+	var water_cap := menu.add_slider("Water particle cap", 1024.0, 16384.0,
+		float(_water_particle_cap), _set_water_particle_cap)
+	water_cap.step = 1024.0
+	_register_performance_control("water_cap", water_cap, _set_water_particle_cap)
+	var march_step := menu.add_slider("Volume march step", 0.25, 4.0, 0.75,
+		func(v: float): _set_volume_parameter("march_step", v))
+	march_step.step = 0.05
+	_register_performance_control("march_step", march_step,
+		func(v: float): _set_volume_parameter("march_step", v))
+	var march_budget := menu.add_slider("Volume march budget", 64.0, 512.0, 320.0,
+		func(v: float): _set_volume_parameter("march_budget", int(v)))
+	march_budget.step = 8.0
+	_register_performance_control("march_budget", march_budget,
+		func(v: float): _set_volume_parameter("march_budget", int(v)))
+	var march_distance := menu.add_slider("Volume max distance", 16.0, 128.0, 80.0,
+		func(v: float): _set_volume_parameter("max_distance", v))
+	march_distance.step = 1.0
+	_register_performance_control("march_distance", march_distance,
+		func(v: float): _set_volume_parameter("max_distance", v))
+	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, 1.0,
+		_set_water_render_scale)
+	water_scale.step = 0.05
+	_register_performance_control("water_scale", water_scale, _set_water_render_scale)
+	var render_scale := menu.add_slider("Global render scale", 0.4, 1.0, 1.0,
+		_set_render_scale)
+	render_scale.step = 0.05
+	_register_performance_control("render_scale", render_scale, _set_render_scale)
+	_update_preset_status()
 
 
 func _set_render_scale(v: float) -> void:

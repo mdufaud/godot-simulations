@@ -18,20 +18,16 @@ uniform sampler3D volume_tex : filter_linear, repeat_disable;
 // format Texture3DRD can carry (see FireTilePool._create_resources). Its four
 // bytes are the slot index, little end first.
 uniform sampler3D indir_tex : filter_nearest, repeat_disable;
+uniform sampler3D visual_activity_tex : filter_nearest, repeat_disable;
 
 uniform vec3 atlas_cells = vec3(128.0, 64.0, 128.0);
 uniform ivec3 atlas_tiles = ivec3(16, 8, 16);
 uniform ivec3 virtual_tiles = ivec3(256, 64, 256);
 uniform float cell_size = 0.2;
-// The extent of the resident set in the mesh's object space, refreshed every frame
-// from the solver's reduction (FireGpuSolver.display_clip_box). The mesh has to
-// span the whole virtual domain — it is the proxy geometry a fire anywhere on the
-// map needs pixels from — but the ray is clipped to the part of it that has tiles
-// in it, so a pixel looking at empty sky discards on the slab test instead of
-// walking hundreds of metres of indirection volume. Defaults to the whole domain,
-// which is correct and merely slow.
-uniform vec3 clip_min = vec3(-204.8, -51.2, -204.8);
-uniform vec3 clip_max = vec3(204.8, 51.2, 204.8);
+uniform vec3 virtual_origin = vec3(-204.8, 0.0, -204.8);
+uniform vec3 volume_origin = vec3(-6.4, 0.0, -6.4);
+uniform vec3 volume_extent = vec3(12.8, 19.2, 12.8);
+uniform float visual_occupancy_threshold = 0.01;
 // Fine step inside an active tile, in cells. The dense march samples roughly
 // every 1.25 cells over its box diagonal, so this is the same sampling density.
 uniform float march_step : hint_range(0.25, 4.0) = 0.75;
@@ -78,12 +74,14 @@ uint tile_slot(ivec3 vt) {
 // nothing at all — which is the right answer and not an approximation: the pool
 // keeps two tiles of dilation band past anything visible, so a missing tile is
 // always clear air, and it is what the dense build's edge fade approximated.
-vec4 tap(ivec3 vc) {
-	uint slot = tile_slot(vc >> 3);
+vec4 tap(ivec3 vc, ivec3 current_tile, uint current_slot, ivec3 current_atlas) {
+	ivec3 vt = vc >> 3;
+	uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt);
 	if (slot >= SLOT_MAX) {
 		return vec4(0.0);
 	}
-	return texelFetch(volume_tex, slot_origin(slot) + (vc & ivec3(7)), 0);
+	ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
+	return texelFetch(volume_tex, atlas + (vc & ivec3(7)), 0);
 }
 
 // Trilinear fetch at a continuous virtual cell position (cell centres sit on
@@ -96,38 +94,45 @@ vec4 tap(ivec3 vc) {
 // block edge is what would bleed an unrelated part of the map into the seam,
 // since two slots that are adjacent in the atlas are almost never adjacent in
 // the world.
-vec4 sample_virtual(vec3 vp) {
+vec4 sample_virtual(vec3 vp, ivec3 current_tile, uint current_slot,
+	ivec3 current_atlas) {
 	vec3 g = vp - vec3(0.5);
 	ivec3 c0 = ivec3(floor(g));
 	vec3 f = g - vec3(c0);
 	ivec3 vt = c0 >> 3;
 	if (all(equal(vt, (c0 + ivec3(1)) >> 3))) {
-		uint slot = tile_slot(vt);
+		uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt);
 		if (slot >= SLOT_MAX) {
 			return vec4(0.0);
 		}
-		vec3 uvw = (vec3(slot_origin(slot) + (c0 & ivec3(7))) + vec3(0.5) + f) / atlas_cells;
+		ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
+		vec3 uvw = (vec3(atlas + (c0 & ivec3(7))) + vec3(0.5) + f) / atlas_cells;
 		return texture(volume_tex, uvw);
 	}
-	vec4 s000 = tap(c0);
-	vec4 s100 = tap(c0 + ivec3(1, 0, 0));
-	vec4 s010 = tap(c0 + ivec3(0, 1, 0));
-	vec4 s110 = tap(c0 + ivec3(1, 1, 0));
-	vec4 s001 = tap(c0 + ivec3(0, 0, 1));
-	vec4 s101 = tap(c0 + ivec3(1, 0, 1));
-	vec4 s011 = tap(c0 + ivec3(0, 1, 1));
-	vec4 s111 = tap(c0 + ivec3(1, 1, 1));
+	vec4 s000 = tap(c0, current_tile, current_slot, current_atlas);
+	vec4 s100 = tap(c0 + ivec3(1, 0, 0), current_tile, current_slot, current_atlas);
+	vec4 s010 = tap(c0 + ivec3(0, 1, 0), current_tile, current_slot, current_atlas);
+	vec4 s110 = tap(c0 + ivec3(1, 1, 0), current_tile, current_slot, current_atlas);
+	vec4 s001 = tap(c0 + ivec3(0, 0, 1), current_tile, current_slot, current_atlas);
+	vec4 s101 = tap(c0 + ivec3(1, 0, 1), current_tile, current_slot, current_atlas);
+	vec4 s011 = tap(c0 + ivec3(0, 1, 1), current_tile, current_slot, current_atlas);
+	vec4 s111 = tap(c0 + ivec3(1, 1, 1), current_tile, current_slot, current_atlas);
 	return mix(mix(mix(s000, s100, f.x), mix(s010, s110, f.x), f.y),
 		mix(mix(s001, s101, f.x), mix(s011, s111, f.x), f.y), f.z);
 }
 
+float visual_tile_signal(ivec3 atlas) {
+	return texelFetch(visual_activity_tex, atlas, 0).r;
+}
+
 void fragment() {
 	vec3 ray_dir = normalize(pos_obj - cam_obj);
-	vec3 half_size = box_size * 0.5;
+	vec3 half_size = volume_extent * 0.5;
+	vec3 volume_center = volume_origin + half_size;
 
 	float t0;
 	float t1;
-	if (!box_span(cam_obj, ray_dir, clip_min, clip_max, t0, t1)) {
+	if (!box_span(cam_obj, ray_dir, -half_size, half_size, t0, t1)) {
 		discard;
 	}
 	t1 = min(t1, scene_depth_distance(SCREEN_UV, INV_PROJECTION_MATRIX,
@@ -146,12 +151,14 @@ void fragment() {
 
 	// ---- DDA setup, in tiles (Amanatides & Woo) ----
 	float tile_world = float(TILE) * cell_size;
-	vec3 entry = cam_obj + ray_dir * t0 + half_size;
-	ivec3 ti = clamp(ivec3(floor(entry / tile_world)), ivec3(0), virtual_tiles - ivec3(1));
+	vec3 entry = (cam_obj + ray_dir * t0 + volume_center - virtual_origin) / tile_world;
+	ivec3 ti = clamp(ivec3(floor(entry)), ivec3(0), virtual_tiles - ivec3(1));
 	ivec3 tstep = ivec3(sgn);
 	vec3 t_delta = abs(tile_world * inv_dir);
 	// t at which the ray leaves this tile through each of the three axes.
-	vec3 plane = (vec3(ti) + max(vec3(tstep), vec3(0.0))) * tile_world - half_size;
+	vec3 plane = virtual_origin
+		+ (vec3(ti) + max(vec3(tstep), vec3(0.0))) * tile_world;
+	plane -= volume_center;
 	vec3 t_next = (plane - cam_obj) * inv_dir;
 
 	// The sample lattice is global along the ray rather than restarted per tile:
@@ -170,16 +177,21 @@ void fragment() {
 	// to unroll (see march_budget).
 	float t_exit = min(min(t_next.x, t_next.y), t_next.z);
 	float seg_end = min(t_exit, t1);
-	bool resident = indir_slot(ti) < SLOT_MAX;
+	uint current_slot = indir_slot(ti);
+	ivec3 current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+	bool resident = current_slot < SLOT_MAX
+		&& visual_tile_signal(current_atlas) >= visual_occupancy_threshold;
 
 	for (int i = 0; i < march_budget; i++) {
 		if (resident && t_cursor < seg_end) {
 			vec3 p = cam_obj + ray_dir * t_cursor;
-			vec4 s = sample_virtual((p + half_size) / cell_size);
+			vec3 sample_pos = p + volume_center;
+			vec4 s = sample_virtual((sample_pos - virtual_origin) / cell_size,
+				ti, current_slot, current_atlas);
 			if (debug_mode == 1) {
 				debug_max = max(debug_max, s.r);
 			} else {
-				accumulate(s, p, p.y + half_size.y, ds, TIME, col, trans);
+				accumulate(s, p, sample_pos.y, ds, TIME, col, trans);
 			}
 			t_cursor += ds;
 			if (trans < 0.01) {
@@ -206,7 +218,10 @@ void fragment() {
 		}
 		t_exit = min(min(t_next.x, t_next.y), t_next.z);
 		seg_end = min(t_exit, t1);
-		resident = indir_slot(ti) < SLOT_MAX;
+		current_slot = indir_slot(ti);
+		current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+		resident = current_slot < SLOT_MAX
+			&& visual_tile_signal(current_atlas) >= visual_occupancy_threshold;
 		// Skipped tiles cost the sample lattice nothing: the cursor is snapped
 		// forward onto it rather than restarted, so the jitter pattern does not
 		// re-phase at every tile boundary and print the tile grid into the plume.

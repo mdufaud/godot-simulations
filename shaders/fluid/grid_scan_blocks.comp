@@ -2,7 +2,7 @@ shared uint temp[256];
 
 void main() {
 	uint lid = gl_LocalInvocationID.x;
-	uint nb = uint(params.misc.y);
+	uint nb = uint(abs(params.misc.y));
 	uint span = (nb + 255u) / 256u;
 	uint base = lid * span;
 	uint sum = 0u;
