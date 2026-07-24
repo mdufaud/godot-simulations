@@ -12,41 +12,9 @@ API_URL = "https://api.polyhaven.com/files"
 RESOLUTION = "2k"
 ROCK_ASSETS = ("boulder_01", "rock_face_02", "namaqualand_boulder_03", "namaqualand_cliff_01")
 MATERIAL_ASSETS = ("concrete_wall_001", "grey_tiles")
-FOREST_ASSETS = (
-    "forest_floor",
-    "bark_brown_02",
-    "pine_bark",
-    "leafy_grass",
-    "forest_ground_06",
-    "dry_river_pebbles",
-)
-FOREST_MODELS = (
-    "pine_tree_01",
-    "jacaranda_tree",
-    "tree_small_02",
-    "island_tree_01",
-    "island_tree_03",
-    "grass_medium_01",
-    "grass_medium_02",
-    "fern_02",
-    "shrub_01",
-    "shrub_02",
-    "shrub_03",
-    "shrub_04",
-    "nettle_plant",
-    "weed_plant_02",
-    "pine_sapling_small",
-    "pine_roots",
-    "tree_stump_01",
-    "dead_tree_trunk",
-    "rock_moss_set_01",
-    "dandelion_01",
-    "periwinkle_plant",
-)
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 ROCKS_DIR = PROJECT_DIR / "resources" / "rocks"
 MATERIALS_DIR = PROJECT_DIR / "resources" / "materials"
-FOREST_DIR = PROJECT_DIR / "resources" / "forest"
 
 # Poly Haven's CDN answers 403 to the default Python-urllib User-Agent.
 USER_AGENT = "physics-playground-asset-fetcher"
@@ -176,11 +144,7 @@ detect_3d/compress_to=1
 
 
 def configure_mobile_texture_imports() -> int:
-    textures = [
-        FOREST_DIR / asset / f"{asset}_{kind}_{RESOLUTION}.jpg"
-        for asset in FOREST_ASSETS
-        for kind in ("diff", "nor_gl", "arm")
-    ]
+    textures = []
     textures.extend(
         MATERIALS_DIR / asset / f"{asset}_{kind}_{RESOLUTION}.jpg"
         for asset in MATERIAL_ASSETS
@@ -212,34 +176,9 @@ def main() -> int:
             print(f"  get  {relpath}")
             download(url, dest)
 
-    for asset in FOREST_ASSETS:
-        print(asset)
-        for relpath, url in forest_files(asset).items():
-            dest = FOREST_DIR / asset / relpath
-            if dest.exists():
-                print(f"  skip {relpath}")
-                continue
-            print(f"  get  {relpath}")
-            download(url, dest)
-
-    for asset in FOREST_MODELS:
-        print(asset)
-        for relpath, url in asset_files(asset).items():
-            dest = FOREST_DIR / asset / relpath
-            if dest.exists():
-                print(f"  skip {relpath}")
-                continue
-            print(f"  get  {relpath}")
-            download(url, dest)
-        # Film-res scans: keep the Godot importer away, they are loaded at runtime.
-        (FOREST_DIR / asset / ".gdignore").touch()
-
     configured = configure_mobile_texture_imports()
     print(f"Configured {configured} mobile texture import profiles.")
 
-    print("Done. Bake the forest tree LODs with:")
-    print("  godot --headless --path . -s tools/bake_forest_trees.gd")
-    print("Then open the project in Godot to re-import.")
     return 0
 
 
