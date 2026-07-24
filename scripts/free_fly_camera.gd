@@ -1,5 +1,6 @@
 class_name FreeFlyCamera
 extends Node3D
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## FPS flythrough camera for raymarched fractals (VR-ready, desktop-first).
 ## Look: captured mouse (free mouselook from relative motion). Esc releases the
 ## cursor for the UI; click in the viewport recaptures it. No camera roll.
@@ -31,7 +32,7 @@ var velocity := Vector3.ZERO
 var _captured := false
 var _camera: Camera3D
 var _touch_ui := false
-var _joystick: VirtualJoystick
+var _joystick: VirtualJoystickScript
 
 
 func _ready() -> void:
@@ -40,9 +41,9 @@ func _ready() -> void:
 		_camera.fov = fov
 	_update_transform()
 	# Touch devices have no mouse to capture: joystick moves, free drag looks.
-	_touch_ui = VirtualJoystick.is_touch_ui()
+	_touch_ui = VirtualJoystickScript.is_touch_ui()
 	if _touch_ui:
-		_joystick = VirtualJoystick.spawn(self)
+		_joystick = VirtualJoystickScript.spawn(self)
 	else:
 		capture_mouse()
 

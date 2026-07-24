@@ -1,4 +1,6 @@
 extends Node3D
+
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## Procedural planet demo, ported from SebLague/Fluid-Planet ("Terra").
 ## A density field is marched into a mesh on the GPU, shaded by quantised height
 ## bands, and wrapped in a raymarched Rayleigh atmosphere.
@@ -111,7 +113,7 @@ var _updating_ui := false
 
 
 func _ready() -> void:
-	_mobile = VirtualJoystick.is_touch_ui()
+	_mobile = VirtualJoystickScript.is_touch_ui()
 
 	var stored_resolution: int = GameManager.get_setting("planet_resolution", 0)
 	generator.resolution = stored_resolution if stored_resolution > 0 else (64 if _mobile else 128)
@@ -600,4 +602,3 @@ func _setup_ui() -> void:
 		surface_mat.set_shader_parameter("detail_octaves", int(v))
 	)
 	_status_label = menu.add_label("Generating…")
-

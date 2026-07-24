@@ -1,5 +1,6 @@
 class_name FpsWalker
 extends CharacterBody3D
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## Grounded first-person walker: captured-mouse look, WASD walk relative to yaw,
 ## sprint on move_down (Shift), jump on move_up (Space), gravity + floor snap.
 ## Esc releases the cursor for the UI; click in the viewport recaptures it.
@@ -19,7 +20,7 @@ var yaw := 0.0
 
 var _captured := false
 var _touch_ui := false
-var _joystick: VirtualJoystick
+var _joystick: VirtualJoystickScript
 var _gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 
 @onready var _camera: Camera3D = $Camera3D
@@ -29,9 +30,9 @@ func _ready() -> void:
 	floor_max_angle = deg_to_rad(50.0)
 	floor_snap_length = 0.6
 	_update_look()
-	_touch_ui = VirtualJoystick.is_touch_ui()
+	_touch_ui = VirtualJoystickScript.is_touch_ui()
 	if _touch_ui:
-		_joystick = VirtualJoystick.spawn(self)
+		_joystick = VirtualJoystickScript.spawn(self)
 	else:
 		capture_mouse()
 

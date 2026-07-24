@@ -1,5 +1,6 @@
 class_name OrbitCamera
 extends Node3D
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## Reusable orbit camera with mouse, touch and WASD keyboard support.
 ## Attach to a Node3D with a Camera3D child.
 ## Uses _unhandled_input(): events consumed by the UI (sliders, buttons)
@@ -31,7 +32,7 @@ extends Node3D
 # --- Internal state ---
 var _is_dragging := false
 var _camera: Camera3D
-var _joystick: VirtualJoystick
+var _joystick: VirtualJoystickScript
 
 # --- Touch / pinch state ---
 var _touch_points := {}       # index → position (Vector2)
@@ -40,8 +41,8 @@ var _prev_pinch_distance := 0.0
 
 func _ready() -> void:
 	_camera = _find_camera()
-	if enable_movement and VirtualJoystick.is_touch_ui():
-		_joystick = VirtualJoystick.spawn(self)
+	if enable_movement and VirtualJoystickScript.is_touch_ui():
+		_joystick = VirtualJoystickScript.spawn(self)
 	_update_transform()
 
 

@@ -1,5 +1,6 @@
 extends Node3D
 
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 const SPHERICAL_GARDEN_SHADER := preload("res://shaders/non_euclidean/spherical_garden.gdshader")
 const RESERVE_OUTER_SIZE := Vector3(6.0, 4.5, 8.0)
 const RESERVE_INNER_SIZE := Vector3(22.0, 7.0, 30.0)
@@ -446,7 +447,7 @@ func _setup_ui() -> void:
 	box.add_child(_hud_label)
 	var hint := Label.new()
 	hint.text = "Joystick + drag to look · Jump, sprint and menu on screen" \
-		if VirtualJoystick.is_touch_ui() else "WASD/ZQSD · Space jump · Shift sprint · F1 settings"
+		if VirtualJoystickScript.is_touch_ui() else "WASD/ZQSD · Space jump · Shift sprint · F1 settings"
 	hint.modulate = Color(1.0, 1.0, 1.0, 0.62)
 	box.add_child(hint)
 
@@ -476,7 +477,7 @@ func _set_render_scale(v: float) -> void:
 
 
 func _setup_touch_controls() -> void:
-	if not VirtualJoystick.is_touch_ui():
+	if not VirtualJoystickScript.is_touch_ui():
 		return
 	_touch_controls = Control.new()
 	_touch_controls.name = "TouchActions"

@@ -1,6 +1,7 @@
 class_name NonEuclideanPlayer
 extends CharacterBody3D
 
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 const PORTAL_EXIT_EPSILON := 0.001
 
 @export var walk_speed := 4.5
@@ -23,7 +24,7 @@ var _camera: Camera3D
 var _pitch := 0.0
 var _captured := false
 var _touch_ui := false
-var _joystick: VirtualJoystick
+var _joystick: VirtualJoystickScript
 var _touch_sprinting := false
 var _touch_jump_requested := false
 var _portal_lock: Portal3D
@@ -45,9 +46,9 @@ func _ready() -> void:
 	gravity_vector = gravity_vector.normalized() * gravity_strength
 	_portal_previous_position = global_position
 	_align_to_gravity()
-	_touch_ui = VirtualJoystick.is_touch_ui()
+	_touch_ui = VirtualJoystickScript.is_touch_ui()
 	if _touch_ui:
-		_joystick = VirtualJoystick.spawn(self)
+		_joystick = VirtualJoystickScript.spawn(self)
 		(_joystick.get_parent() as CanvasLayer).layer = 3
 	elif DisplayServer.get_name() != "headless":
 		call_deferred("_capture_if_focused")

@@ -1,5 +1,6 @@
 extends Node3D
 
+const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 const TornadoWindField = preload("res://scripts/demos/tornado_wind_field.gd")
 
 const PRESETS := [
@@ -365,7 +366,7 @@ func _setup_ui() -> void:
 			_cap_debounce = 0.6)
 	# On touch there is no LMB: the button is the only way to throw.
 	var throw_action: Button = menu.add_action("🎯", "Throw", _throw_from_camera)
-	throw_action.tooltip_text = ("Throw object" if VirtualJoystick.is_touch_ui()
+	throw_action.tooltip_text = ("Throw object" if VirtualJoystickScript.is_touch_ui()
 		else "Throw object (LMB)")
 	menu.add_action("🌾", "Scatter", func() -> void: debris_pool.scatter_props())
 	_debris_bar = menu.add_progress_bar("Active debris", float(debris_pool.debris_cap))
