@@ -15,7 +15,11 @@
 // which is exactly the set of texels that has an accumulator entry — free slots
 // included, whose entries are zero and whose output no one can reach.
 
+#ifdef WATER_SPARSE
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+#else
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+#endif
 
 // RGBA32F to match the textures allocated in FireGpuSolver (r32f silently
 // discards the temperature channel).
@@ -29,6 +33,12 @@ layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
 layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
 	ivec4 accum[];  // xyz = Sum u*w
 } vscatter;
+
+#ifdef WATER_SPARSE
+layout(std430, set = 0, binding = 4) readonly restrict buffer ActiveSlots {
+	uint data[];
+} active_slots;
+#endif
 
 layout(push_constant, std430) uniform Params {
 	int grid_dim_x;
@@ -47,7 +57,17 @@ const float AMBIENT_T = 300.0;
 
 void main() {
 	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c;
+#ifdef WATER_SPARSE
+	uint slot = active_slots.data[gl_WorkGroupID.x];
+	ivec3 tile = ivec3(
+		int(slot % 16u),
+		int((slot / 16u) % 8u),
+		int(slot / 128u));
+	c = tile * 8 + ivec3(gl_LocalInvocationID);
+#else
+	c = ivec3(gl_GlobalInvocationID);
+#endif
 	if (any(greaterThanEqual(c, dims))) {
 		return;
 	}

@@ -51,6 +51,8 @@ enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
 ## its nomenclature gives concentrations in mol/m^3 without mentioning a
 ## conversion, so both readings are offered and compared.
 enum { UNITS_CGS = 0, UNITS_SI_AS_PRINTED = 1 }
+enum { ADVECTION_MACCORMACK = 0, ADVECTION_SEMI_LAGRANGIAN = 1 }
+enum { VORTICITY_FULL = 0, VORTICITY_REDUCED = 1, VORTICITY_OFF = 2 }
 
 # =========================================================================
 #  FUEL TABLE — Fire-X Tab. 1, activation energy from Westbrook & Dryer Tab. I
@@ -122,6 +124,7 @@ var ambient_temperature := 300.0 ## Fire-X Tab. 3
 var timestep := 1.0 / 120.0 ## Fire-X Tab. 3 "Delta Time"
 var substeps := 1 ## Fire-X Tab. 3 "Update Multiplier", range 1-4
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
+var advection_mode := ADVECTION_MACCORMACK
 
 var radiation_coefficient := 1.0 ## Fire-X Tab. 3, range 0.0-6.0
 var heat_efficiency := 1.0 ## phi in Eq. 6; Fire-X Tab. 3, range 0.0-1.0
@@ -132,6 +135,8 @@ var temperature_clamp := 3000.0 ## Tab. 3 "Density temperature coupling limit"
 var emitter_temperature := 1500.0 ## Tab. 3 grid emitter, range 300-1500 K
 
 var vorticity_strength := 8.0 ## Fire-X Tab. 3, range 0.0-50.0
+var vorticity_mode := VORTICITY_FULL
+var vorticity_interval := 1
 var vorticity_velocity_lo := 0.0 ## Fire-X Tab. 3, range 0.0-0.1
 var vorticity_velocity_hi := 5.0 ## Fire-X Tab. 3, range 0.0-5.0
 var vorticity_temperature_lo := 301.0 ## Fire-X Tab. 3
@@ -194,7 +199,7 @@ var reaction_reference := 50.0 ## Renderer normalisation only [mol/(m^3.s)]
 ## The fire then roams a 409.6 x 102.4 x 409.6 m virtual domain at a cost set by
 ## how much of it is burning, rather than a 12.8 x 19.2 x 12.8 m box at a cost set
 ## by the box. The dense path stays as the A/B reference.
-var sparse := false
+var sparse := true
 var pool_budget := FireTilePool.NSLOTS
 
 # Tile pool policy. The dilation band has to exceed the distance the fire can
@@ -211,6 +216,7 @@ const PIN_HEIGHT := 6.4
 
 var initialized := false
 var profiling := false
+var last_substeps := 0
 
 var _rd: RenderingDevice
 var _pool: FireTilePool
@@ -222,7 +228,10 @@ var _sets := {}
 var _tex := {}
 var _stats_buf := RID()
 var _config_buf := RID()
+var _config_cache := PackedByteArray()
 var _parity := 0
+var _simulation_step := 0
+var _topology_prepared := false
 var _groups := Vector3i.ZERO
 var _groups_face := Vector3i.ZERO
 
@@ -236,6 +245,10 @@ var _wood_any := false
 var _stats := PackedInt64Array()
 var _stats_mutex := Mutex.new()
 var _stats_pending := false
+var _pool_stats_cache := {}
+var _pool_stats_mutex := Mutex.new()
+var _bootstrap_bounds := AABB()
+var _display_bounds_ready := false
 var _timings := {}
 var _timings_mutex := Mutex.new()
 
@@ -366,32 +379,46 @@ func get_stats() -> Dictionary:
 	}
 
 
-## Object-space box the volume raymarcher should clip its ray to, in the volume
-## mesh's own frame (centred on the origin). Safe to call from the main thread.
-##
-## Dense is the whole box, as it always was. Sparse is the extent of the RESIDENT
-## SET rather than the 409.6 m virtual domain: without this every screen pixel
-## walks the indirection volume from the camera to the far wall, which costs
-## several times what drawing the plume does. The reduction rides the async stats
-## readback and so lags a frame or two, which is what [param margin] covers — the
-## dilation band already keeps two tiles of still air inside the bound anyway.
+## Simulation-space box for the sparse volume proxy. Safe to call from the main
+## thread.
 func display_clip_box(margin := 1.6) -> AABB:
 	var box := Vector3(sim_dims()) * cell_size
-	var full := AABB(-box * 0.5, box)
+	var origin := Vector3(-box.x * 0.5, 0.0, -box.z * 0.5)
+	var full := AABB(origin, box)
 	if not sparse:
 		return full
 	_stats_mutex.lock()
+	var ready := _display_bounds_ready
 	var lo := Vector3(float(_stats[STAT_BOUNDS]), float(_stats[STAT_BOUNDS + 1]),
 		float(_stats[STAT_BOUNDS + 2]))
 	var hi := Vector3(float(_stats[STAT_BOUNDS + 3]), float(_stats[STAT_BOUNDS + 4]),
 		float(_stats[STAT_BOUNDS + 5]))
 	_stats_mutex.unlock()
-	# Nothing reduced yet: the minima are still at their sentinel.
-	if lo.x > hi.x:
-		return full
-	var p0 := (lo * cell_size - box * 0.5 - Vector3.ONE * margin).clamp(full.position, full.end)
-	var p1 := (hi * cell_size - box * 0.5 + Vector3.ONE * margin).clamp(full.position, full.end)
+	if not ready:
+		var initial := _bootstrap_bounds
+		if initial.size == Vector3.ZERO:
+			initial = _compute_bootstrap_bounds()
+		var initial_p0 := (initial.position - Vector3.ONE * margin).clamp(full.position, full.end)
+		var initial_p1 := (initial.end + Vector3.ONE * margin).clamp(full.position, full.end)
+		return AABB(initial_p0, initial_p1 - initial_p0)
+	var p0 := (origin + lo * cell_size - Vector3.ONE * margin).clamp(full.position, full.end)
+	var p1 := (origin + hi * cell_size + Vector3.ONE * margin).clamp(full.position, full.end)
 	return AABB(p0, p1 - p0)
+
+
+func _compute_bootstrap_bounds() -> AABB:
+	var dims := sim_dims()
+	var half := Vector3(dims.x, 0.0, dims.z) * cell_size * 0.5
+	var lo := Vector3i((Vector3(-PIN_HALF_XZ, 0.0, -PIN_HALF_XZ) + half) / cell_size) \
+		/ FireTilePool.TILE
+	var hi := Vector3i((Vector3(PIN_HALF_XZ, PIN_HEIGHT, PIN_HALF_XZ) + half) / cell_size) \
+		/ FireTilePool.TILE
+	var cell_lo := lo * FireTilePool.TILE
+	var cell_hi := (hi + Vector3i.ONE) * FireTilePool.TILE
+	var origin := Vector3(-float(dims.x) * cell_size * 0.5, 0.0,
+		-float(dims.z) * cell_size * 0.5)
+	return AABB(origin + Vector3(cell_lo) * cell_size,
+		Vector3(cell_hi - cell_lo) * cell_size)
 
 
 func get_timings() -> Dictionary:
@@ -455,6 +482,8 @@ func init_render() -> void:
 	if sparse:
 		_bootstrap_pool()
 	_parity = 0
+	_simulation_step = 0
+	_topology_prepared = false
 	initialized = true
 
 
@@ -472,6 +501,14 @@ func sim_dims() -> Vector3i:
 ## path, which is also how such a stage selects its build.
 func indirection_rid() -> RID:
 	return _pool.indir_rid() if _pool != null else RID()
+
+
+func active_slots_rid() -> RID:
+	return _pool.active_slots_rid() if _pool != null else RID()
+
+
+func active_tile_args_rid() -> RID:
+	return _pool.active_args_rid() if _pool != null else RID()
 
 
 ## The same volume as a sampled RGBA8 view, for the raymarcher; see
@@ -501,6 +538,15 @@ func _bootstrap_pool() -> void:
 			for x in range(lo.x, hi.x + 1):
 				vtis.append(FireTilePool.vti_of(Vector3i(x, y, z)))
 	_pool.bootstrap(vtis, lo, hi)
+	var cell_lo := lo * FireTilePool.TILE
+	var cell_hi := (hi + Vector3i.ONE) * FireTilePool.TILE
+	var origin := Vector3(-float(dims.x) * cell_size * 0.5, 0.0,
+		-float(dims.z) * cell_size * 0.5)
+	_bootstrap_bounds = AABB(origin + Vector3(cell_lo) * cell_size,
+		Vector3(cell_hi - cell_lo) * cell_size)
+	_stats_mutex.lock()
+	_display_bounds_ready = false
+	_stats_mutex.unlock()
 	_frame = 0
 
 
@@ -616,6 +662,9 @@ func _create_textures() -> void:
 	_tex["display"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
 		RDTextureView.new(), [])
+	_tex["visual_activity"] = _rd.texture_create(
+		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
+		RDTextureView.new(), [])
 
 	# Tile keep signal: written by fire_display, reduced per tile by tile_mark.
 	# A field like any other, so clear_fields and the atlas layout cover it.
@@ -648,6 +697,8 @@ func clear_fields() -> void:
 	for key in _zeroed_keys():
 		_rd.texture_clear(_tex[key], Color(0, 0, 0, 0), 0, 1, 0, 1)
 	_parity = 0
+	_simulation_step = 0
+	_topology_prepared = false
 	# The atlas now holds nothing, so the pool's topology must be reset to match:
 	# leaving tiles resident over cleared fields would keep them alive on stale
 	# metadata until the hysteresis expired.
@@ -659,7 +710,7 @@ func clear_fields() -> void:
 func _zeroed_keys() -> Array:
 	var keys := ["scal2_a", "scal2_b", "scal_fwd", "scal2_fwd", "curl",
 		"press_a", "press_b", "diverg", "display", "liquid_scal", "liquid_vel",
-		"nu_t"]
+		"nu_t", "visual_activity"]
 	if sparse:
 		keys.append("activity")
 	for axis in "uvw":
@@ -687,6 +738,7 @@ func _build_uniform_sets() -> void:
 	}
 	if sparse:
 		fields[27] = "activity"
+	fields[29] = "visual_activity"
 	var fields_flipped := fields.duplicate()
 	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
 		_swap_binding(fields_flipped, pair[0], pair[1])
@@ -700,6 +752,7 @@ func _build_uniform_sets() -> void:
 	if sparse:
 		extra_buffers.append([26, _pool.active_list_rid()])
 		extra_buffers.append([28, _pool.new_list_rid()])
+		extra_buffers.append([30, _pool.active_slots_rid()])
 
 	for stage in _stages:
 		var variants := [fields, pressure_flipped] if stage == "pressure" \
@@ -740,7 +793,7 @@ static func _swap_binding(table: Dictionary, a: int, b: int) -> void:
 #  STEP — Fire-X Algorithm 1, lines 16-22
 # =========================================================================
 
-func step_render(delta: float) -> void:
+func step_render(delta: float, liquid_active := false) -> void:
 	if not initialized:
 		return
 	_read_timings()
@@ -751,6 +804,7 @@ func step_render(delta: float) -> void:
 	# many whole steps as the frame covers rather than stretching dt, which
 	# would change the physics with the frame rate.
 	var count := clampi(int(delta / timestep), 1, substeps)
+	last_substeps = count
 
 	_events_mutex.lock()
 	var events := _events.duplicate()
@@ -760,25 +814,11 @@ func step_render(delta: float) -> void:
 	if profiling:
 		_rd.capture_timestamp("fire/start")
 
-	# Topology first, in its own list: the five passes rewrite the active tile list
-	# and the dispatch-indirect counters that every stage below reads, and closing
-	# the list is what orders that write against the indirect reads. Once per
-	# frame, not once per substep — the two-tile dilation band is far wider than a
-	# substep's CFL distance, so the resident set stays ahead of the fire.
-	if sparse:
-		_frame += 1
-		_pool.reset_frame_counts(_frame)
-		var tcl := _rd.compute_list_begin()
-		_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD, TILE_HOLD_FRAMES,
-			TILE_DILATE_RADIUS)
-		_rd.compute_list_end()
+	if sparse and not _topology_prepared:
+		prepare_topology_render()
+	_topology_prepared = false
 
 	var cl := _rd.compute_list_begin()
-
-	# Tiles that became resident this frame still hold whatever the slot's previous
-	# tenant left in the atlas. Reset them before the emitter or any stage runs.
-	if sparse:
-		_dispatch(cl, CLEAR_STAGE, 0, _push_constant(0, Vector3.ZERO, 1.0, 0.0))
 
 	for i in count:
 		# Events are injected once, on the first substep of the frame.
@@ -795,25 +835,49 @@ func step_render(delta: float) -> void:
 		if _wood_any:
 			_dispatch(cl, "inject", _parity, _push_constant(EVENT_WOOD,
 				Vector3.ZERO, 1.0, timestep))
-		_substep(cl)
+		_substep(cl, liquid_active)
 
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/end")
+		if sparse and _frame % 8 == 0:
+			_update_pool_stats_cache()
 
 
-func _substep(cl: int) -> void:
-	var pc := _push_constant(0, Vector3.ZERO, 1.0, 0.0)
+func prepare_topology_render() -> void:
+	if not initialized or not sparse or _topology_prepared:
+		return
+	_upload_config()
+	_frame += 1
+	_pool.reset_frame_counts(_frame)
+	if profiling:
+		_rd.capture_timestamp("fire/topology_start")
+	var tcl := _rd.compute_list_begin()
+	_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD, TILE_HOLD_FRAMES,
+		TILE_DILATE_RADIUS)
+	_rd.compute_list_end()
+	if profiling:
+		_rd.capture_timestamp("fire/topology_end")
+	var clear_list := _rd.compute_list_begin()
+	_dispatch(clear_list, CLEAR_STAGE, 0,
+		_push_constant(0, Vector3.ZERO, 1.0, 0.0), false)
+	_rd.compute_list_end()
+	_topology_prepared = true
+
+
+func _substep(cl: int, liquid_active: bool) -> void:
+	var pc := _push_constant(advection_mode, Vector3.ZERO, 1.0, 0.0)
 	var p := _parity
 
-	# 16. Advection (MacCormack): src -> dst, then the fields swap roles.
 	_dispatch(cl, "advect", p, pc)
-	_dispatch(cl, "maccormack", p, pc)
+	if advection_mode == ADVECTION_MACCORMACK:
+		_dispatch(cl, "maccormack", p, pc)
 	p = 1 - p
 
 	# 17. Buoyancy (+ vorticity confinement, Tab. 3).
 	_dispatch(cl, "forces", p, pc)
-	if vorticity_strength > 0.0:
+	if _effective_vorticity_strength() > 0.0 \
+			and _simulation_step % maxi(vorticity_interval, 1) == 0:
 		# Three passes now: the confinement force is a cell-centred quantity but
 		# the velocity it corrects lives on faces. Computing it once per cell into
 		# a scratch buffer and scattering costs one dispatch; evaluating it again
@@ -836,7 +900,7 @@ func _substep(cl: int) -> void:
 	# two: the scalar budget in place on the cells, then Eq. 32 on the faces,
 	# which has to be its own dispatch because it reads the mixing factor from
 	# both cells either side of a face.
-	if evaporation_enabled:
+	if evaporation_enabled and liquid_active:
 		_dispatch(cl, "evaporate", p, pc)
 		_dispatch(cl, "evapapply", p, pc)
 
@@ -849,6 +913,17 @@ func _substep(cl: int) -> void:
 	_dispatch(cl, "display", p, pc)
 
 	_parity = p
+	_simulation_step += 1
+
+
+func _effective_vorticity_strength() -> float:
+	match vorticity_mode:
+		VORTICITY_REDUCED:
+			return vorticity_strength * 0.5
+		VORTICITY_OFF:
+			return 0.0
+		_:
+			return vorticity_strength
 
 
 ## Timestamps bracket stages: each mark closes the previous stage's interval, so
@@ -933,7 +1008,7 @@ func _upload_config() -> void:
 	v[19] = temperature_clamp
 	# transport: buoyancy, vorticity, drag, nu
 	v[20] = gravity
-	v[21] = vorticity_strength
+	v[21] = _effective_vorticity_strength()
 	v[22] = drag
 	v[23] = kinematic_viscosity
 	# vort thresholds + H2O coefficient
@@ -977,7 +1052,11 @@ func _upload_config() -> void:
 		v[48 + i] = _wood[i]
 	_wood_mutex.unlock()
 
-	_rd.buffer_update(_config_buf, 0, v.size() * 4, v.to_byte_array())
+	var bytes := v.to_byte_array()
+	if bytes == _config_cache:
+		return
+	_config_cache = bytes
+	_rd.buffer_update(_config_buf, 0, bytes.size(), bytes)
 
 
 # =========================================================================
@@ -1000,6 +1079,12 @@ func _on_stats_ready(bytes: PackedByteArray) -> void:
 	_stats_mutex.lock()
 	for i in STATS_WORDS:
 		_stats[i] = bytes.decode_u32(i * 4)
+	if sparse:
+		var lo := Vector3i(int(_stats[STAT_BOUNDS]), int(_stats[STAT_BOUNDS + 1]),
+			int(_stats[STAT_BOUNDS + 2]))
+		var hi := Vector3i(int(_stats[STAT_BOUNDS + 3]), int(_stats[STAT_BOUNDS + 4]),
+			int(_stats[STAT_BOUNDS + 5]))
+		_display_bounds_ready = lo.x <= hi.x and lo.y <= hi.y and lo.z <= hi.z
 	_stats_mutex.unlock()
 
 
@@ -1018,14 +1103,20 @@ func _read_timings() -> void:
 
 	var acc := {}
 	var start_time := 0
+	var topology_start := 0
 	var prev_name := ""
 	var prev_time := 0
 	for i in count:
 		var nm := _rd.get_captured_timestamp_name(i)
 		var t := _rd.get_captured_timestamp_gpu_time(i)
+		if nm == "fire/topology_start":
+			topology_start = t
+		elif nm == "fire/topology_end" and topology_start > 0:
+			acc["topology"] = float(t - topology_start) / 1e6
 		# A mark closes the interval opened by the previous one. "start" and "end"
 		# only bracket the total, so they open no stage of their own.
-		if prev_name.begins_with("fire/") and prev_name != "fire/start":
+		if prev_name.begins_with("fire/") and prev_name not in [
+			"fire/start", "fire/end", "fire/topology_start", "fire/topology_end"]:
 			var key: String = prev_name.substr(5)
 			acc[key] = float(acc.get(key, 0.0)) + float(t - prev_time) / 1e6
 		if nm == "fire/start":
@@ -1055,6 +1146,20 @@ func read_pool_stats() -> Dictionary:
 	}
 
 
+func get_debug_pool_stats() -> Dictionary:
+	_pool_stats_mutex.lock()
+	var copy := _pool_stats_cache.duplicate()
+	_pool_stats_mutex.unlock()
+	return copy
+
+
+func _update_pool_stats_cache() -> void:
+	var snapshot := read_pool_stats()
+	_pool_stats_mutex.lock()
+	_pool_stats_cache = snapshot
+	_pool_stats_mutex.unlock()
+
+
 func free_render() -> void:
 	if _rd == null:
 		return
@@ -1076,6 +1181,7 @@ func free_render() -> void:
 			_rd.free_rid(buf)
 	_stats_buf = RID()
 	_config_buf = RID()
+	_config_cache.clear()
 	for key in _tex:
 		if _tex[key].is_valid():
 			_rd.free_rid(_tex[key])

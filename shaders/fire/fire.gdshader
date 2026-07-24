@@ -9,6 +9,9 @@ render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabl
 // The whole domain, one texel per cell. The sparse build's field is a tile atlas
 // instead and needs the indirection to read; see fire_sparse.gdshader.
 uniform sampler3D volume_tex : filter_linear, repeat_disable;
+uniform float march_step : hint_range(0.25, 4.0) = 0.75;
+uniform float max_distance = 80.0;
+uniform int march_budget : hint_range(64, 512) = 320;
 
 void fragment() {
 	vec3 ray_dir = normalize(pos_obj - cam_obj);
@@ -19,6 +22,7 @@ void fragment() {
 	if (!box_span(cam_obj, ray_dir, -half_size, half_size, t0, t1)) {
 		discard;
 	}
+	t1 = min(t1, t0 + max_distance);
 
 	// ---- Scene depth clamp (opaque geometry occludes the volume) ----
 	t1 = min(t1, scene_depth_distance(SCREEN_UV, INV_PROJECTION_MATRIX,
@@ -30,8 +34,8 @@ void fragment() {
 	// ---- Raymarch, front to back ----
 	// The volume now carries real structure at 0.1 m per cell; undersampling it
 	// aliases the flame front into banding the jitter cannot hide.
-	const int STEPS = 80;
-	float ds = (t1 - t0) / float(STEPS);
+	int steps = min(march_budget, max(1, int(ceil(60.0 / march_step))));
+	float ds = (t1 - t0) / float(steps);
 	// Interleaved gradient noise jitter breaks banding; TIME term animates it
 	float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))) + TIME * 0.61);
 	float t = t0 + ds * jitter;
@@ -40,7 +44,10 @@ void fragment() {
 	float trans = 1.0;
 	float debug_max = 0.0;
 
-	for (int i = 0; i < STEPS; i++) {
+	for (int i = 0; i < march_budget; i++) {
+		if (i >= steps) {
+			break;
+		}
 		vec3 p = cam_obj + ray_dir * t;
 		vec4 s = texture(volume_tex, p / box_size + 0.5);
 

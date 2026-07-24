@@ -1,8 +1,6 @@
 // Pass 5/5. Rebuilds the compact active list the solver dispatches its stages
-// over, one workgroup per entry. Entries are VIRTUAL TILE INDICES, not slots:
-// that is all a stage needs to turn gl_WorkGroupID into a virtual cell
-// coordinate, and every field accessor resolves the slot through the indirection
-// volume anyway.
+// over, one workgroup per entry. Matching virtual-tile and atlas-slot arrays let
+// solver stages address their own tile directly.
 //
 // Thread 0 also settles the frame's bookkeeping: the deterministic pop in
 // tile_alloc left C_FREE untouched, so here the new stack top is the old one
@@ -28,6 +26,8 @@ void main() {
 	}
 	if (sm_used(slot) == 1u) {
 		uint idx = atomicAdd(counts[C_ACTIVE], 1u);
+		atomicAdd(active_args[0], 1u);
 		active_list[idx] = sm_vti(slot);
+		active_slots[idx] = slot;
 	}
 }

@@ -50,12 +50,16 @@ var filter_h_mat: ShaderMaterial
 var filter_v_mat: ShaderMaterial
 var composite_mat: ShaderMaterial
 var foam_mat: ShaderMaterial
+var depth_mmi: MultiMeshInstance3D
+var thick_mmi: MultiMeshInstance3D
+var composite_mi: MeshInstance3D
 
 var pos_texture: Texture2DRD
 var foam_pos_texture: Texture2DRD
 var _tex_bound := false
 var _foam_bound := false
 var _foam_visible := false
+var _rendering_active := true
 
 
 func start() -> void:
@@ -152,7 +156,21 @@ func update(pos_tex_rid: RID, visible_count: int, foam_tex_rid: RID = RID()) -> 
 		_foam_bound = true
 		foam_mmi.visible = _foam_visible
 	set_visible_count(visible_count)
+	_set_rendering_active(visible_count > 0)
 	_sync_cams()
+
+
+func _set_rendering_active(active: bool) -> void:
+	if active == _rendering_active:
+		return
+	_rendering_active = active
+	var mode := SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
+	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp, foam_vp]:
+		if vp != null:
+			vp.render_target_update_mode = mode
+	depth_mmi.visible = active
+	thick_mmi.visible = active
+	composite_mi.visible = active
 
 
 func _exit_tree() -> void:
@@ -206,13 +224,13 @@ func _setup_prepass() -> void:
 	thick_mat.set_shader_parameter("tex_width", tex_width)
 	thick_mat.set_shader_parameter("particle_radius", radius)
 
-	var depth_mmi := MultiMeshInstance3D.new()
+	depth_mmi = MultiMeshInstance3D.new()
 	depth_mmi.multimesh = mm
 	depth_mmi.material_override = depth_mat
 	depth_mmi.layers = LAYER_DEPTH
 	depth_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(depth_mmi)
-	var thick_mmi := MultiMeshInstance3D.new()
+	thick_mmi = MultiMeshInstance3D.new()
 	thick_mmi.multimesh = mm
 	thick_mmi.material_override = thick_mat
 	thick_mmi.layers = LAYER_THICK
@@ -287,10 +305,10 @@ func _setup_composite() -> void:
 		composite_mat.set_shader_parameter("foam_tex", _black_texture())
 	composite_mat.set_shader_parameter("mode", mode)
 	quad.material = composite_mat
-	var mi := MeshInstance3D.new()
-	mi.mesh = quad
-	mi.custom_aabb = AABB(Vector3(-1e4, -1e4, -1e4), Vector3(2e4, 2e4, 2e4))
-	add_child(mi)
+	composite_mi = MeshInstance3D.new()
+	composite_mi.mesh = quad
+	composite_mi.custom_aabb = AABB(Vector3(-1e4, -1e4, -1e4), Vector3(2e4, 2e4, 2e4))
+	add_child(composite_mi)
 
 
 ## Zero-coverage stand-in for the foam texture when foam is not built: the

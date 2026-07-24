@@ -46,6 +46,8 @@ layout(std430, set = 0, binding = 4) restrict buffer AllocReq { uint alloc_reque
 layout(std430, set = 0, binding = 5) restrict buffer Counts { uint counts[]; };
 layout(set = 0, binding = 6, r32f) uniform restrict image3D activity;
 layout(std430, set = 0, binding = 7) restrict buffer NewList { uint new_list[]; };
+layout(std430, set = 0, binding = 8) restrict buffer ActiveSlots { uint active_slots[]; };
+layout(std430, set = 0, binding = 9) restrict buffer ActiveArgs { uint active_args[]; };
 
 // pin_lo/pin_hi is an inclusive virtual-tile box that tile_mark keeps resident
 // unconditionally. The emitter sits in it, so the tiles the fire is lit in can
