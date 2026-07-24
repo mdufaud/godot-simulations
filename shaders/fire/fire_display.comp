@@ -4,13 +4,13 @@
 // R = normalised temperature, G = residuals (soot), B = reaction, A = fuel.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
 	float t_amb = cfg.thermo.x;
 	float t_norm = (s.x - t_amb) / max(cfg.misc.y - t_amb, 1.0);
 	float reaction = clamp(s2.z / max(cfg.misc.z, 1e-6), 0.0, 1.0);
@@ -24,17 +24,25 @@ void main() {
 	//
 	// Sides and top only. The floor is a solid wall the smoke never crosses, and
 	// fading it would eat the base of the flame.
+	//
+	// SPARSE: nothing to fade. The volume ends where the plume ends rather than at
+	// an AABB plane, and the tile that would be cut against is two dilation tiles of
+	// still ambient air past anything visible.
+#ifdef FIRE_SPARSE
+	const float fade = 1.0;
+#else
 	ivec3 gmax = grid_max();
 	const float FADE = 4.0;
 	float edge = min(min(float(c.x), float(gmax.x - c.x)),
 		min(float(c.z), float(gmax.z - c.z)));
 	float fade = clamp(min(edge, float(gmax.y - c.y)) / FADE, 0.0, 1.0);
+#endif
 
 	// A carries the steam marker (vapour of evaporation origin, fire_evaporate),
 	// not Y_H2O: Fire-X Sec. 5.6 samples "vapor" as its own field, and combustion
 	// water alone would paint a permanent white cloud over a methane flame. The
 	// channel used to hold the fuel fraction, which no shader ever read.
-	imageStore(display_tex, c,
+	store_display(c,
 		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s2.w * fade));
 
 	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
@@ -45,7 +53,13 @@ void main() {
 	// residual and nothing else, and it must therefore fall as pressure_iterations
 	// rises — that is the check that the gradient really is the adjoint of the
 	// divergence, rather than merely compiling and looking like fire.
-	atomicMax(stats.data[8], uint(clamp(abs(divergence_at(c)) * 1000.0, 0.0, 4.2e9)));
+	// Measured over the solved cells only. The sparse ghost shell is the boundary
+	// condition rather than part of the domain — the dense build does not measure
+	// the cells outside its AABB either — and it keeps a fixed non-zero divergence
+	// by construction, since one of its faces does not exist to be corrected.
+	if (solved_cell(c)) {
+		atomicMax(stats.data[8], uint(clamp(abs(divergence_at(c)) * 1000.0, 0.0, 4.2e9)));
+	}
 	atomicAdd(stats.data[1], uint(reaction * 1000.0));
 	atomicMax(stats.data[2], uint(reaction * 1000.0));
 
@@ -79,4 +93,62 @@ void main() {
 		atomicAdd(stats.data[6], uint(total * 1000.0));
 		atomicAdd(stats.data[7], 1u);
 	}
+
+#ifdef FIRE_SPARSE
+	// Keep signal for the tile pool, reduced per tile by tile_mark at the head of
+	// the next frame. A tile stays resident while any of these says its cells are
+	// not still ambient air; each term is divided by the smallest value worth
+	// simulating, so the pool thresholds the reduction at a plain 1.0 and the
+	// physics of the criterion stays here rather than in the allocator.
+	//
+	// These cut-offs set the resident-set size, and the velocity one dominates: a
+	// buoyant plume entrains air over a far wider volume than it heats, and a
+	// threshold near zero grows the active set until the pool is exhausted, because
+	// each newly resident tile picks up entrainment velocity from the projection
+	// and so qualifies as a core for the next frame's dilation. They are cut where
+	// the field stops being able to influence the fire rather than where it becomes
+	// exactly zero.
+	//
+	// Liquid keeps a tile alive on its own so falling droplets always have a grid
+	// to couple into, and the steam marker does too so a visible plume is not
+	// deallocated out from under the renderer.
+	//
+	// The velocity term is measured AGAINST THE WIND, not against zero. With a
+	// breeze on, the whole atmosphere moves: an absolute test would find every tile
+	// in the virtual domain worth keeping and exhaust the pool on the first gust,
+	// since the wind is exactly what fire_clear fills a new tile with. What matters
+	// is air the fire has disturbed, which is the departure from the profile.
+	const float KEEP_TEMPERATURE = 5.0; // K above ambient
+	const float KEEP_SPEED = 0.5; // m/s
+	const float KEEP_FUEL = 1e-4;
+	const float KEEP_SOOT = 1e-3;
+	const float KEEP_STEAM = 1e-2;
+	const float KEEP_LIQUID = 1e-3; // kg/m^3
+	float act = max(
+		max(max((s.x - t_amb) / KEEP_TEMPERATURE, s.y / KEEP_FUEL),
+			max(s2.y / KEEP_SOOT, s2.w / KEEP_STEAM)),
+		max(length(vel_at_cell(c) - ambient_wind(c.y)) / KEEP_SPEED,
+			load_liquid_scal(c).x / KEEP_LIQUID));
+	store_activity(c, act);
+
+	// Cell-space bounding box of the resident set, for the raymarcher's ray clip.
+	// Without it every screen pixel walks the indirection volume from the camera to
+	// the far side of a 410 m domain, which costs far more than the plume does.
+	//
+	// One thread per tile rather than per cell: this workgroup IS one tile, so its
+	// origin and extent are already known here, and six atomics per resident tile
+	// cost nothing where six per resident CELL would serialise on the same words.
+	// It rides the stats buffer because that is already read back asynchronously
+	// every frame — a bounding box one or two frames stale is why the controller
+	// adds a margin rather than why it needs its own readback.
+	if (gl_LocalInvocationIndex == 0u) {
+		ivec3 hi = c + ivec3(8);
+		atomicMin(stats.data[STAT_BOUNDS + 0], uint(c.x));
+		atomicMin(stats.data[STAT_BOUNDS + 1], uint(c.y));
+		atomicMin(stats.data[STAT_BOUNDS + 2], uint(c.z));
+		atomicMax(stats.data[STAT_BOUNDS + 3], uint(hi.x));
+		atomicMax(stats.data[STAT_BOUNDS + 4], uint(hi.y));
+		atomicMax(stats.data[STAT_BOUNDS + 5], uint(hi.z));
+	}
+#endif
 }

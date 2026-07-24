@@ -16,13 +16,13 @@
 // Everything here is cell-local, so reading and writing in place cannot race.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
 	float dt = params.cell.y;
 	float temp = max(s.x, 1.0);
 
@@ -64,7 +64,7 @@ void main() {
 		// molar oxygen concentration, so a wet flame burns *wider* instead of
 		// dying (measured). The explicit suppression restores the right sign.
 		// NON-PAPER, exposed as a coefficient.
-		float rho_l = imageLoad(liquid_scal, c).x;
+		float rho_l = load_liquid_scal(c).x;
 		v_c *= 1.0 / (1.0 + cfg.liquid2.z * rho_l);
 	}
 
@@ -104,6 +104,14 @@ void main() {
 	// linearly to zero at the inner edge of the band.
 	//
 	// The floor is solid and supplies nothing, so it has no band.
+	//
+	// SPARSE: gone, along with the oxygen_replenish rate that drives it. The band
+	// exists because the dense box cuts the plume off at an AABB plane that has to
+	// be told it is open air; a sparse tile's neighbour is either resident, and
+	// simulated, or absent — and an absent one already reads as ambient air at
+	// 23.3 % oxygen through the accessors. The resident surface is also two tiles of
+	// dilation away from anything burning, so there is nothing there to relax.
+#ifndef FIRE_SPARSE
 	ivec3 gmax = grid_max();
 	const int BAND = 4;
 	int d_side = min(min(c.x, gmax.x - c.x), min(c.z, gmax.z - c.z));
@@ -120,6 +128,7 @@ void main() {
 		s2.y = mix(s2.y, 0.0, rate);
 		s2.w = mix(s2.w, 0.0, rate);
 	}
+#endif
 
 	// NON-PAPER: the steam marker fades on the same timescale a visible plume
 	// disperses. Without it the marker only ever grows, since nothing consumes it,
@@ -135,6 +144,6 @@ void main() {
 	// advected with the other scalars.
 	s2.z = max(s2.z * exp(-3.25 * dt), v_c);
 
-	imageStore(scal_src, c, s);
-	imageStore(scal2_src, c, s2);
+	store_scal_src(c, s);
+	store_scal2_src(c, s2);
 }

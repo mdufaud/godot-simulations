@@ -10,8 +10,10 @@
 // channel to keep the worst-case sum inside uint32 (see SCALE_* comments).
 //
 // Dispatch: one thread per active particle.
-
-#version 460
+//
+// Where a cell's accumulator lives is water_common.comp's business: a box entry on
+// the dense grid, a tile-atlas entry resolved through the pool's indirection on the
+// sparse one. Non-resident cells drop out of both passes below through grid_texel.
 
 layout(local_size_x = 256) in;
 
@@ -107,7 +109,7 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
-				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+				if (grid_texel(c, dims).x < 0) {
 					continue;
 				}
 				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
@@ -115,7 +117,8 @@ void main() {
 			}
 		}
 	}
-	// A particle whose support falls entirely outside the grid would divide by zero.
+	// A particle whose support has no storage anywhere would divide by zero. Dense:
+	// entirely outside the box. Sparse: no resident tile covers it.
 	if (w_sum < 1e-9) {
 		return;
 	}
@@ -125,7 +128,8 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
-				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+				ivec3 t = grid_texel(c, dims);
+				if (t.x < 0) {
 					continue;
 				}
 
@@ -135,7 +139,7 @@ void main() {
 					continue;
 				}
 
-				uint cidx = uint(c.x + c.y * dims.x + c.z * dims.x * dims.y);
+				uint cidx = texel_index(t, dims);
 
 				atomicAdd(scatter.accum[cidx].x, fixed_point(m_p * w, SCALE_M));
 

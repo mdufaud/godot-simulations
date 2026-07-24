@@ -15,27 +15,26 @@
 
 // Cell indices either side of face f along axis p_axis, clamped to the grid: a
 // boundary face has only one real neighbour and reuses it for both.
-#define FACE_MIX(p_axis, p_face, p_img) { \
+#define FACE_MIX(p_axis, p_face, p_load, p_store) { \
 	ivec3 lo_ = p_face; \
 	ivec3 hi_ = p_face; \
 	lo_[p_axis] = max(p_face[p_axis] - 1, 0); \
 	hi_[p_axis] = min(p_face[p_axis], params.dims[p_axis] - 1); \
-	float mix_ = 0.5 * (imageLoad(liquid_scal, lo_).a + imageLoad(liquid_scal, hi_).a); \
-	float ul_ = 0.5 * (imageLoad(liquid_vel, lo_)[p_axis] + imageLoad(liquid_vel, hi_)[p_axis]); \
-	float u_ = imageLoad(p_img, p_face).r; \
-	imageStore(p_img, p_face, vec4(mix(ul_, u_, mix_), 0.0, 0.0, 0.0)); \
+	float mix_ = 0.5 * (load_liquid_scal(lo_).a + load_liquid_scal(hi_).a); \
+	float ul_ = 0.5 * (load_liquid_vel(lo_)[p_axis] + load_liquid_vel(hi_)[p_axis]); \
+	p_store(p_face, mix(ul_, p_load(p_face), mix_)); \
 }
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 
 	if (in_u(c)) {
-		FACE_MIX(0, c, u_src);
+		FACE_MIX(0, c, load_u_src, store_u_src);
 	}
 	if (in_v(c)) {
-		FACE_MIX(1, c, v_src);
+		FACE_MIX(1, c, load_v_src, store_v_src);
 	}
 	if (in_w(c)) {
-		FACE_MIX(2, c, w_src);
+		FACE_MIX(2, c, load_w_src, store_w_src);
 	}
 }

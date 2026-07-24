@@ -15,8 +15,10 @@
 // weighted sum of T_lj is a plain average over the support.
 //
 // Dispatch: one thread per active particle.
-
-#version 460
+//
+// Cells with no storage are skipped through water_common.comp's grid_texel exactly
+// as water_scatter skips them, in both passes, so the two directions still agree on
+// which cells a particle touches and with what weight.
 
 layout(local_size_x = 256) in;
 
@@ -76,7 +78,7 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
-				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+				if (grid_texel(c, dims).x < 0) {
 					continue;
 				}
 				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
@@ -84,6 +86,9 @@ void main() {
 			}
 		}
 	}
+	// Nothing to read back from, so nothing to write: the particle keeps the mass
+	// and temperature it arrived with, including the drain below, which would
+	// otherwise banish a droplet flying over ground the fire has not reached.
 	if (w_sum < 1e-9) {
 		return;
 	}
@@ -95,7 +100,8 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
-				if (any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, dims))) {
+				ivec3 t = grid_texel(c, dims);
+				if (t.x < 0) {
 					continue;
 				}
 
@@ -105,7 +111,7 @@ void main() {
 					continue;
 				}
 
-				vec4 liq = imageLoad(liquid_scal, c);
+				vec4 liq = imageLoad(liquid_scal, t);
 				float M_j = liq.r * cell_volume;  // Eq. 19 back to a mass
 				float T_lj = liq.g;
 				float omega_j = liq.b;            // Eq. 20

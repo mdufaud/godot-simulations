@@ -26,7 +26,7 @@ void add_fuel(inout vec4 s, inout vec4 s2, float amount) {
 }
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	int mode_v = params.dims.w;
 
 	// The steam updraft of mode 3 is a velocity source, so it is applied on the
@@ -37,7 +37,7 @@ void main() {
 		float d = distance(v_face_to_world(c), params.event.xyz);
 		if (d <= params.event.w && c.y > 0) {
 			float f = (1.0 - d / params.event.w) * params.event2.x;
-			imageStore(v_src, c, vec4(imageLoad(v_src, c).r + f * 3.0, 0.0, 0.0, 0.0));
+			store_v_src(c, load_v_src(c) + f * 3.0);
 		}
 	}
 
@@ -45,8 +45,8 @@ void main() {
 		return;
 	}
 
-	vec4 s = imageLoad(scal_src, c);
-	vec4 s2 = imageLoad(scal2_src, c);
+	vec4 s = load_scal_src(c);
+	vec4 s2 = load_scal2_src(c);
 	float t_amb = cfg.thermo.x;
 	float t_emit = cfg.misc.w; // emitter temperature, Tab. 3 range 300-1500 K
 
@@ -95,8 +95,8 @@ void main() {
 				s.x = max(s.x, mix(t_amb, pilot, smoothstep(0.25, 0.9, falloff)));
 			}
 		}
-		imageStore(scal_src, c, s);
-		imageStore(scal2_src, c, s2);
+		store_scal_src(c, s);
+		store_scal2_src(c, s2);
 		return;
 	}
 
@@ -128,6 +128,6 @@ void main() {
 		s.y = max(s.y - f * 0.08, 0.0);
 	}
 
-	imageStore(scal_src, c, s);
-	imageStore(scal2_src, c, s2);
+	store_scal_src(c, s);
+	store_scal2_src(c, s2);
 }

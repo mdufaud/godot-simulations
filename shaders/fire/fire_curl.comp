@@ -11,12 +11,12 @@
 // It is a choice, not an equivalence.
 
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
+	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
 		return;
 	}
 	if (!is_interior(c)) {
-		imageStore(curl_tex, c, vec4(0.0));
+		store_curl(c, vec4(0.0));
 		return;
 	}
 
@@ -34,5 +34,5 @@ void main() {
 			(px.y - nx.y) - (py.x - ny.x)) *
 		inv_2h;
 
-	imageStore(curl_tex, c, vec4(omega, length(omega)));
+	store_curl(c, vec4(omega, length(omega)));
 }

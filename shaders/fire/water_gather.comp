@@ -8,8 +8,12 @@
 // The scatter normalises w_ij per particle, so Sum_j rho_lj*V_cell == Sum_p m_p.
 // The accumulators are reset here; water_return recomputes its own weights from
 // the particle positions and reads this texture, not the SSBO.
-
-#version 460
+//
+// This stage is the same in both builds and needs no indirection of its own: it
+// walks the storage rather than the domain, and the two coordinates coincide. On
+// the sparse path it is simply handed the ATLAS extent instead of the grid extent,
+// which is exactly the set of texels that has an accumulator entry — free slots
+// included, whose entries are zero and whose output no one can reach.
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
 

@@ -39,7 +39,11 @@ var solver: FireGpuSolver
 var water: FireWater
 var volume_material: ShaderMaterial
 var volume_texture: Texture3DRD
+var indir_texture: Texture3DRD
 var texture_bound := false
+## The sparse build's field is a tile atlas rather than the domain, so it needs a
+## raymarcher that resolves through the pool's indirection volume.
+const SPARSE_VOLUME_SHADER := "res://shaders/fire/fire_sparse.gdshader"
 
 var fluid_renderer: ScreenSpaceFluidRenderer
 
@@ -69,6 +73,8 @@ const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 ## GPU time, and the Jacobi pressure loop alone is half of it.
 const QUALITY_CELLS := [0.4, 0.2, 0.1]
 const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x128)"]
+const POOL_BUDGETS := [1024, 1536, 2048]
+const POOL_QUALITY_NAMES := ["Low (1024 tiles)", "Medium (1536 tiles)", "High (2048 tiles)"]
 
 # --- Grid emitter (Fire-X Tab. 3 "Grid Emitter Parameter") — gas mode ---
 var emitter_position := Vector3(0, 0.3, 0)
@@ -146,14 +152,13 @@ func _apply_wind() -> void:
 
 func _ready() -> void:
 	solver = FireGpuSolver.new()
+	# Sparse tile grid instead of the fixed box, for the A/B runs. It has to be set
+	# before init_render is queued: it selects the shader variant, the texture
+	# extents and the dispatch mode on the solver, and the raymarcher here.
+	solver.sparse = "--sparse" in OS.get_cmdline_user_args()
 	volume_material = fire_volume.material_override as ShaderMaterial
 	if volume_material:
-		volume_material.set_shader_parameter("box_size",
-			Vector3(solver.grid_dims) * solver.cell_size)
-		# The volume stores temperature normalised against these, so the shader
-		# needs them to turn the red channel back into kelvins.
-		volume_material.set_shader_parameter("ambient_temperature", solver.ambient_temperature)
-		volume_material.set_shader_parameter("display_temperature", solver.display_temperature)
+		_setup_volume_material()
 
 	RenderingServer.call_on_render_thread(solver.init_render)
 
@@ -164,7 +169,14 @@ func _ready() -> void:
 	water = FireWater.new()
 	water.particle_count = 16384
 	water.evaporation_active = solver.evaporation_enabled
-	RenderingServer.call_on_render_thread(water.init_render.bind(solver.grid_dims, solver.cell_size))
+	# Queued as a closure rather than bound: the pool's indirection volume does not
+	# exist until the solver's own queued init_render has run on the render thread,
+	# so binding it here would capture an invalid RID. The droplets keep the dense
+	# box as their own SPH domain either way — only the fire grid became the map.
+	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
+	RenderingServer.call_on_render_thread(func() -> void:
+		water.init_render(solver.sim_dims(), solver.cell_size,
+			solver.indirection_rid(), sph_box))
 
 	_setup_fluid_renderer()
 	_build_wood_bed()
@@ -180,7 +192,19 @@ func _process(delta: float) -> void:
 		volume_texture.texture_rd_rid = solver.get_display_tex_rid()
 		if volume_material:
 			volume_material.set_shader_parameter("volume_tex", volume_texture)
+			# Sparse: the display field is an atlas of resident tiles, so the shader
+			# also needs the map from virtual tile to atlas slot to read it.
+			if solver.sparse:
+				indir_texture = Texture3DRD.new()
+				indir_texture.texture_rd_rid = solver.indirection_bytes_rid()
+				volume_material.set_shader_parameter("indir_tex", indir_texture)
+		fire_volume.visible = true
 		texture_bound = true
+	if solver.sparse and volume_material:
+		# The resident set moves with the fire, so the ray clip has to follow it.
+		var clip := solver.display_clip_box()
+		volume_material.set_shader_parameter("clip_min", clip.position)
+		volume_material.set_shader_parameter("clip_max", clip.end)
 
 	# Last frame's reduction, read up front: the wood bed is driven by the per-log
 	# gas temperatures in it, and its emitters have to be uploaded before the
@@ -242,6 +266,8 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
+	if indir_texture != null:
+		indir_texture.texture_rd_rid = RID()
 	# Water first: its uniform sets bind the solver's liquid textures, and freeing
 	# those first makes Godot drop the dependent sets on its own — FireWater then
 	# frees RIDs that are already gone ("Attempted to free invalid ID").
@@ -358,6 +384,39 @@ func _drop_log() -> void:
 # =========================================================================
 #  SCENE SETUP
 # =========================================================================
+
+## Point the raymarcher at whichever grid the solver runs on.
+##
+## Dense marches the box at fixed steps. Sparse swaps in a shader that DDAs the
+## tile pool's indirection volume instead: the box the ray is clipped against
+## becomes the whole 409.6 x 102.4 x 409.6 m virtual domain, and the mesh has to
+## grow with it — it is the proxy geometry the fragments come from, so a fire that
+## walks out of the old 12.8 m box would simply have no pixels to be drawn into.
+func _setup_volume_material() -> void:
+	var box := Vector3(solver.sim_dims()) * solver.cell_size
+	if solver.sparse:
+		volume_material.shader = load(SPARSE_VOLUME_SHADER)
+		volume_material.set_shader_parameter("cell_size", solver.cell_size)
+		volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
+		volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
+		volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
+		(fire_volume.mesh as BoxMesh).size = box
+		# cell_to_world puts the ground at y = 0 and centres x/z on the origin, so
+		# the box mesh sits half its height up either way.
+		fire_volume.position.y = box.y * 0.5
+	volume_material.set_shader_parameter("box_size", box)
+	# The blue reaction core fades over the height of the DENSE domain in both
+	# builds; over the sparse one it would never fade at all.
+	volume_material.set_shader_parameter("blue_height", DOMAIN_SIZE.y)
+	# The volume stores temperature normalised against these, so the shader
+	# needs them to turn the red channel back into kelvins.
+	volume_material.set_shader_parameter("ambient_temperature", solver.ambient_temperature)
+	volume_material.set_shader_parameter("display_temperature", solver.display_temperature)
+	# Nothing to march until the solver's textures exist: an unbound sampler falls
+	# back to Godot's default texture, which for the indirection volume is not even
+	# the right format to read.
+	fire_volume.visible = false
+
 
 ## Screen-space fluid surface over the SPH position texture, reusing the fluid
 ## demo's render chain (ScreenSpaceFluidRenderer) instead of per-particle sphere
@@ -479,7 +538,7 @@ func _pour_water() -> void:
 		mini(water.particle_count, 4000), origin, 0.9, throw))
 
 
-## Swap the field resolution without moving the domain walls.
+## Swap dense field resolution or sparse pool budget.
 ##
 ## The display texture is freed on the render thread, so the binding is dropped
 ## and stepping suspended here, on the main thread, before the rebuild is queued.
@@ -488,17 +547,29 @@ func _pour_water() -> void:
 func _set_quality(index: int) -> void:
 	var cell: float = QUALITY_CELLS[index]
 	var dims := Vector3i((DOMAIN_SIZE / cell).round())
-	if dims == solver.grid_dims:
+	var budget: int = POOL_BUDGETS[index] if solver.sparse else 0
+	if (solver.sparse and budget == solver.pool_budget) \
+			or (not solver.sparse and dims == solver.grid_dims):
 		return
 
 	solver.initialized = false
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
+	if indir_texture != null:
+		indir_texture.texture_rd_rid = RID()
+	fire_volume.visible = false
 	texture_bound = false
-	RenderingServer.call_on_render_thread(solver.set_resolution.bind(dims, cell))
-	# A log emitter narrower than a couple of cells falls between them and injects
-	# nothing at all on the coarse preset.
-	wood_pile.emit_radius = maxf(1.3, cell * 2.0)
+	if solver.sparse:
+		RenderingServer.call_on_render_thread(func() -> void:
+			water.set_indirection_rid(RID())
+			solver.set_resolution(dims, solver.cell_size, budget)
+			water.set_indirection_rid(solver.indirection_rid()))
+	else:
+		RenderingServer.call_on_render_thread(solver.set_resolution.bind(dims, cell))
+	if not solver.sparse:
+		# A log emitter narrower than a couple of cells falls between them and injects
+		# nothing at all on the coarse preset.
+		wood_pile.emit_radius = maxf(1.3, cell * 2.0)
 	_light_fire()
 
 
@@ -642,8 +713,11 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("Quality")
-	menu.add_option_button("Resolution", QUALITY_NAMES,
-		QUALITY_CELLS.find(solver.cell_size), _set_quality)
+	var quality_names := POOL_QUALITY_NAMES if solver.sparse else QUALITY_NAMES
+	var quality_index := POOL_BUDGETS.find(solver.pool_budget) if solver.sparse \
+		else QUALITY_CELLS.find(solver.cell_size)
+	menu.add_option_button("Pool budget" if solver.sparse else "Resolution",
+		quality_names, quality_index, _set_quality)
 
 	menu.add_separator()
 	wood_section = menu.add_section("Wood")
