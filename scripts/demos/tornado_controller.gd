@@ -120,6 +120,7 @@ func _process(delta: float) -> void:
 		_wander_noise.get_noise_2d(wt * 100.0, 500.0)
 	) * wander_radius
 	field.update_centerline(_time * 0.05, s_amount, _wander_noise)
+	field.bake_wind_grid()
 	tornado_node.position = field.base_pos
 	_push_wind_uniforms()
 	_update_lightning(delta)
