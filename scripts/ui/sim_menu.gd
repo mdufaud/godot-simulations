@@ -104,23 +104,24 @@ func _layout_action_lane() -> void:
 	var top: float = top_strip.position.y + top_strip.size.y + 12.0
 	var vp_size := get_viewport_rect().size
 	var available_height := maxf(120.0, vp_size.y - top - 20.0)
+	# One column while it fits, two as soon as it overflows: a clipped lane hides actions
+	# with no affordance, so spilling sideways beats scrolling.
+	var max_width := maxf(56.0, vp_size.x - 40.0)
 	_action_bar.columns = 1
-	var one_column_height := _action_bar.get_combined_minimum_size().y
-	var touch_ui := _is_touch_ui()
-	if touch_ui and one_column_height > available_height:
+	if _action_bar.get_combined_minimum_size().y > available_height and max_width >= 118.0:
 		_action_bar.columns = 2
 
 	var action_width := 56.0 if _action_bar.columns == 1 else 118.0
-	var max_width := maxf(56.0, vp_size.x - 40.0)
 	action_width = minf(action_width, max_width)
 	_action_lane.offset_left = -action_width - 20.0
 	_action_lane.offset_right = -20.0
 	var action_height := _action_bar.get_combined_minimum_size().y
 	var lane_height := minf(maxf(120.0, action_height), available_height)
 	_action_lane.offset_top = -lane_height - 20.0
-	_action_lane.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED if touch_ui \
-		else ScrollContainer.SCROLL_MODE_SHOW_NEVER
-	_action_lane.scroll_vertical = 0 if touch_ui else int(action_height)
+	# Still taller than the lane after two columns: keep it scrollable and start at the top.
+	_action_lane.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED \
+		if action_height <= lane_height else ScrollContainer.SCROLL_MODE_SHOW_NEVER
+	_action_lane.scroll_vertical = 0
 
 
 func _host() -> Node:
