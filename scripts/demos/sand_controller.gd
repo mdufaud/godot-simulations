@@ -46,6 +46,7 @@ var _profile_accum := 0.0
 var _dragging := false
 var _aim := Vector2.ZERO
 var _strength := 1.2
+var _tool_buttons := {}
 
 
 func _ready() -> void:
@@ -310,12 +311,23 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Tool")
-	menu.add_option_button("Brush", ["Dig", "Pour", "Smooth"], tool_choice - 1,
-		func(idx): tool_choice = idx + 1)
 	menu.add_slider("Brush size", 0.08, 0.8, solver.tool_radius, _on_brush_size)
 	menu.add_slider("Strength", 0.3, 3.0, _strength, func(v): _strength = v)
-	menu.add_toggle("Auto pour (pouring scene)", auto_pour, func(on): auto_pour = on)
 	menu.add_label("Right-click drag to sculpt")
+
+	# The brush is switched mid-sculpt, so it belongs in the strip rather than the panel.
+	for entry in [
+		["⛏", "Dig", HeightfieldSand.TOOL_DIG],
+		["🚿", "Pour", HeightfieldSand.TOOL_POUR],
+		["🫓", "Smooth", HeightfieldSand.TOOL_SMOOTH],
+	]:
+		var mode: int = entry[2]
+		var button := menu.add_action_toggle(entry[0], entry[1], tool_choice == mode,
+			func(on: bool) -> void:
+				if on:
+					_select_tool(mode))
+		_tool_buttons[mode] = button
+	menu.add_action_toggle("💧", "Auto", auto_pour, func(on): auto_pour = on)
 	menu.add_separator()
 
 	menu.add_section("Sand")
@@ -361,7 +373,16 @@ func _update_status() -> void:
 	]
 
 
+## Radio behaviour: pressing one brush releases the other two.
+func _select_tool(mode: int) -> void:
+	tool_choice = mode
+	_sync_tool_ui()
+
+
 func _sync_tool_ui() -> void:
+	for mode in _tool_buttons:
+		var button: Button = _tool_buttons[mode]
+		button.set_pressed_no_signal(mode == tool_choice)
 	_scale_marker()
 
 

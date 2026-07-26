@@ -15,6 +15,9 @@ var _uv_scale_slider: HSlider
 var _normal_slider: HSlider
 var _roughness_slider: HSlider
 var _shadow_slider: HSlider
+var _mode_option: OptionButton
+var _preset_option: OptionButton
+var _mesh_option: OptionButton
 
 var parallax_material: ShaderMaterial
 var _tex_cache := {}
@@ -114,10 +117,10 @@ func _build_menu() -> void:
 	menu.title = "🪨 Parallax Mapping"
 
 	menu.add_section("Surface")
-	menu.add_option_button("Render Mode",
+	_mode_option = menu.add_option_button("Render Mode",
 		["Flat (no relief)", "Normal Map Only", "Parallax (POM)"], display_mode, _on_render_mode_selected)
-	menu.add_option_button("Preset", PRESET_NAMES, current_preset, _on_preset_selected)
-	menu.add_option_button("Mesh", ["Plane", "Cube"], current_mesh, _on_mesh_selected)
+	_preset_option = menu.add_option_button("Preset", PRESET_NAMES, current_preset, _on_preset_selected)
+	_mesh_option = menu.add_option_button("Mesh", ["Plane", "Cube"], current_mesh, _on_mesh_selected)
 
 	menu.add_section("Relief")
 	_height_slider = menu.add_slider("Height", 0.005, 0.4, 0.04, _on_height_changed)
@@ -129,8 +132,23 @@ func _build_menu() -> void:
 
 	menu.add_section("Shadow")
 	_shadow_slider = menu.add_slider("Shadow Strength", 0.0, 2.0, 0.8, _on_shadow_strength_changed)
-	menu.add_toggle("Self-Shadowing", true, _on_self_shadow_toggled)
-	menu.add_toggle("Heightmap Normals", false, _on_computed_normals_toggled)
+
+	# Flipping relief on and off is the comparison this demo exists for.
+	menu.add_action("🪨", "Relief", func(): _cycle(_mode_option))
+	menu.add_action("🎨", "Preset", func(): _cycle(_preset_option))
+	menu.add_action("🧊", "Mesh", func(): _cycle(_mesh_option))
+
+	menu.add_debug_toggle("🌑", "Self-shadowing", true, _on_self_shadow_toggled)
+	menu.add_debug_toggle("🧭", "Heightmap normals", false, _on_computed_normals_toggled)
+
+
+## Steps a panel dropdown from the action strip; emitting keeps it persisted and in sync.
+func _cycle(option: OptionButton) -> void:
+	if option == null:
+		return
+	var next := (option.selected + 1) % option.item_count
+	option.select(next)
+	option.item_selected.emit(next)
 
 
 func _update_mesh_visibility() -> void:

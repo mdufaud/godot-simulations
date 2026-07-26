@@ -33,7 +33,7 @@ func _setup_ui() -> void:
 	_update_title()
 	menu.add_section("Simulation")
 	menu.add_option_button("Solver", ["PBF", "SPH"], fluid.method, _on_method_selected)
-	menu.add_toggle("Lava mode", fluid.mode > 0.5, _on_lava_toggled)
+	menu.add_action_toggle("🌋", "Lava", fluid.mode > 0.5, _on_lava_toggled)
 	menu.add_action("↺", "Reset", func(): fluid.restart())
 	menu.add_separator()
 	menu.add_section("Parameters")
@@ -57,7 +57,6 @@ func _setup_ui() -> void:
 	menu.add_slider("Bounce", 0.0, 0.95, sph.collision_damping, func(v): sph.collision_damping = v)
 	menu.add_slider("Sub-steps", 1.0, 6.0, float(sph.substeps),
 		func(v): sph.substeps = int(round(v)))
-	menu.add_toggle("Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on))
 	menu.add_slider("Foam amount", 0.0, 300.0, sph.foam_spawn_rate,
 		func(v): sph.foam_spawn_rate = v)
 	menu.add_slider("Foam threshold", 0.5, 12.0, sph.foam_trapped_min,
@@ -69,6 +68,7 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("Performance")
+	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on))
 	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
 	menu.add_label("Particles")

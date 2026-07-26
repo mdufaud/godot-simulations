@@ -11,7 +11,6 @@ resources/forest/
 resources/materials/
 resources/rocks/
 
-tests/
 .codex
 .claude
 .reasonix/

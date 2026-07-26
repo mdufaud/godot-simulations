@@ -249,8 +249,10 @@ func _setup_ui() -> void:
 	status_label = menu.add_label("")
 	menu.add_separator()
 
+	menu.add_action_toggle("🌬", "Wind", wind_enabled, _on_wind_toggled)
+	menu.add_action("✂", "Unpin", _unpin_all)
+
 	menu.add_section("Wind")
-	menu.add_toggle("Wind", wind_enabled, _on_wind_toggled)
 	wind_label = menu.add_label("")
 	menu.add_slider("Speed", 0.0, 25.0, wind_speed, func(v): wind_speed = v)
 	menu.add_slider("Gustiness", 0.0, 1.0, gustiness, func(v): gustiness = v)
@@ -335,6 +337,11 @@ func _on_stretch(v: float) -> void:
 func _on_bending(v: float) -> void:
 	for s in solvers:
 		s.bend_compliance = pow(10.0, -6.0 + v * 0.7)
+
+
+func _unpin_all() -> void:
+	for s in solvers:
+		RenderingServer.call_on_render_thread(s.unpin_all_render)
 
 
 func _restart() -> void:

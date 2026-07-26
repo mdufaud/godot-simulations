@@ -478,7 +478,7 @@ func _setup_ui() -> void:
 			_queue_regen()
 	)
 
-	menu.add_button("Randomize seed", func() -> void:
+	menu.add_action("🎲", "Seed", func() -> void:
 		generator.noise_position_offset = Vector3(
 			randf_range(-500.0, 500.0), randf_range(-500.0, 500.0), randf_range(-500.0, 500.0)
 		)
@@ -509,9 +509,6 @@ func _setup_ui() -> void:
 	)
 
 	menu.add_section("Atmosphere")
-	menu.add_toggle("Enabled", true, func(on: bool) -> void:
-		atmosphere_quad.visible = on
-	)
 	menu.add_slider("Intensity", 0.0, 2.0, atmosphere_intensity, func(v: float) -> void:
 		atmosphere_intensity = v
 		_update_atmosphere_params()
@@ -547,7 +544,8 @@ func _setup_ui() -> void:
 	menu.add_slider("Yaw", 0.0, 360.0, sun_yaw, func(v: float) -> void:
 		sun_yaw = v
 	)
-	menu.add_toggle("Auto rotate", false, func(on: bool) -> void:
+
+	menu.add_action_toggle("☀", "Sun", false, func(on: bool) -> void:
 		sun_auto_rotate = on
 	)
 
@@ -559,15 +557,19 @@ func _setup_ui() -> void:
 	var reset_action: Button = menu.add_action("↺", "Reset", _rebuild_fluid)
 	pour_action.visible = false
 	reset_action.visible = false
-
-	menu.add_section("Fluid")
-	menu.add_toggle("Enabled", false, func(on: bool) -> void:
+	menu.add_action_toggle("🌊", "Fluid", false, func(on: bool) -> void:
 		fluid_enabled = on
 		_crosshair.visible = on
 		pour_action.visible = on
 		reset_action.visible = on
 		_rebuild_fluid()
 	)
+
+	menu.add_debug_toggle("🌈", "Atmosphere", true, func(on: bool) -> void:
+		atmosphere_quad.visible = on
+	)
+
+	menu.add_section("Fluid")
 	menu.add_slider("Pour amount", 0.02, 0.5, 0.15, func(v: float) -> void:
 		if _fluid_started:
 			fluid.pour_fraction = v

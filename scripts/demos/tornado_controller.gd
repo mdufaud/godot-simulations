@@ -53,6 +53,7 @@ var storm_color := Color(0.3, 0.31, 0.36)
 var storm_type := 0
 
 var _time := 0.0
+var _frozen := false
 var _wander_noise := FastNoiseLite.new()
 var _debris_bar: ProgressBar
 var _funnel_mat: ShaderMaterial
@@ -112,16 +113,17 @@ func _throw_from_camera() -> void:
 
 
 func _process(delta: float) -> void:
-	_time += delta
-	var wt := _time * wander_speed * 0.02
-	field.base_pos = Vector3(
-		_wander_noise.get_noise_2d(wt * 100.0, 0.0),
-		0.0,
-		_wander_noise.get_noise_2d(wt * 100.0, 500.0)
-	) * wander_radius
-	field.update_centerline(_time * 0.05, s_amount, _wander_noise)
-	field.bake_wind_grid()
-	tornado_node.position = field.base_pos
+	if not _frozen:
+		_time += delta
+		var wt := _time * wander_speed * 0.02
+		field.base_pos = Vector3(
+			_wander_noise.get_noise_2d(wt * 100.0, 0.0),
+			0.0,
+			_wander_noise.get_noise_2d(wt * 100.0, 500.0)
+		) * wander_radius
+		field.update_centerline(_time * 0.05, s_amount, _wander_noise)
+		field.bake_wind_grid()
+		tornado_node.position = field.base_pos
 	_push_wind_uniforms()
 	_update_lightning(delta)
 	if _debris_bar:
@@ -353,8 +355,6 @@ func _setup_ui() -> void:
 			_update_funnel_bounds())
 	menu.add_slider("Cloud size", 0.25, 1.0, 1.0,
 		func(v: float) -> void: _cloud_mat.set_shader_parameter("deck_radius", 4200.0 * v))
-	menu.add_toggle("Lightning", lightning_enabled,
-		func(on: bool) -> void: lightning_enabled = on)
 
 	menu.add_section("Debris")
 	menu.add_slider("Spawn rate (/s)", 0.0, 20.0, debris_pool.spawn_rate,
@@ -370,6 +370,11 @@ func _setup_ui() -> void:
 	throw_action.tooltip_text = ("Throw object" if VirtualJoystickScript.is_touch_ui()
 		else "Throw object (LMB)")
 	menu.add_action("🌾", "Scatter", func() -> void: debris_pool.scatter_props())
+	menu.add_action("⚡", "Strike", _trigger_lightning)
+	menu.add_action_toggle("🌩", "Storm", lightning_enabled,
+		func(on: bool) -> void: lightning_enabled = on)
+	# Freezes the funnel's drift and centerline so a shot can be framed; debris keeps flying.
+	menu.add_action_toggle("⏸", "Freeze", false, func(on: bool) -> void: _frozen = on)
 	_debris_bar = menu.add_progress_bar("Active debris", float(debris_pool.debris_cap))
 
 	menu.add_section("Performance")

@@ -544,22 +544,24 @@ func _setup_ui() -> void:
 	_menu.add_section("Julia")
 	_menu.add_slider("Julia Re", -2.0, 2.0, _julia_re, func(v: float) -> void: _julia_re = v)
 	_menu.add_slider("Julia Im", -2.0, 2.0, _julia_im, func(v: float) -> void: _julia_im = v)
-	_menu.add_toggle("Animate Julia", _julia_morph, func(on: bool) -> void:
-		_julia_morph = on
-		if on:
-			_julia_theta = atan2(_julia_im, _julia_re)
-	)
 
 	_menu.add_separator()
 	_menu.add_section("Navigation")
-	_menu.add_toggle("Auto Explore", _auto_on, func(on: bool) -> void:
+	_menu.add_slider("Dive Speed", 0.1, 1.5, _auto_speed, func(v: float) -> void: _auto_speed = v)
+
+	_menu.add_action("↺", "Reset", _reset_view_for_type)
+	_menu.add_action_toggle("🎬", "Auto", _auto_on, func(on: bool) -> void:
 		_auto_on = on
 		if on:
 			_auto_phase = AutoPhase.DIVE
 			_anchor_active = false
 			_t_log_zoom = _log_zoom
 	)
-	_menu.add_slider("Dive Speed", 0.1, 1.5, _auto_speed, func(v: float) -> void: _auto_speed = v)
+	_menu.add_action_toggle("🌀", "Morph", _julia_morph, func(on: bool) -> void:
+		_julia_morph = on
+		if on:
+			_julia_theta = atan2(_julia_im, _julia_re)
+	)
 
 	_menu.add_separator()
 	_menu.add_section("Color")
@@ -591,9 +593,6 @@ func _setup_ui() -> void:
 	_lbl_zoom = _menu.add_label("Zoom: 1.00e+00")
 	_lbl_iters = _menu.add_label("Iterations: 0")
 	_lbl_state = _menu.add_label("State: idle")
-
-	_menu.add_separator()
-	_menu.add_button("Reset View", _reset_view_for_type)
 
 
 func _fmt_zoom(z: float) -> String:

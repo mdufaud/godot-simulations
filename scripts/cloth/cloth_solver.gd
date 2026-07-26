@@ -69,6 +69,19 @@ func set_seed(seed: PackedFloat32Array) -> void:
 	_seed_data = seed
 
 
+## Clears every pin flag in place, so the sheet lets go from where it currently
+## hangs instead of snapping back to its seed pose. Render thread only.
+func unpin_all_render() -> void:
+	if not initialized:
+		return
+	for key in ["positions", "predicted"]:
+		var floats := _rd.buffer_get_data(_buffers[key]).to_float32_array()
+		for i in range(3, floats.size(), 4):
+			floats[i] = 0.0
+		var bytes := floats.to_byte_array()
+		_rd.buffer_update(_buffers[key], 0, bytes.size(), bytes)
+
+
 func init_render() -> void:
 	_rd = RenderingServer.get_rendering_device()
 

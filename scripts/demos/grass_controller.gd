@@ -16,6 +16,12 @@ const SHADOW_DISTANCE := 40.0
 var grass_multimeshes: Array[Array] = []
 var previous_tile_id := Vector3.ZERO
 var density_modifier := 1.0
+var wind_speed := 1.0
+
+const GUST_STRENGTH := 4.0
+const GUST_DECAY := 1.4
+
+var _gust := 0.0
 
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var menu: SimMenu = $UI/SimMenu
@@ -49,7 +55,11 @@ func _ready() -> void:
 
 func _physics_process(_delta: float) -> void:
 	RenderingServer.global_shader_parameter_set("player_position", orbit_cam.target)
-	
+
+	if _gust > 0.0:
+		_gust = maxf(0.0, _gust - GUST_DECAY * _delta)
+		GRASS_MAT.set_shader_parameter("wind_speed", wind_speed + _gust)
+
 	# Update LOD tiles based on camera position
 	var tile_id: Vector3 = ((orbit_cam.target + Vector3.ONE * TILE_SIZE * 0.5) / TILE_SIZE * Vector3(1, 0, 1)).floor()
 	if tile_id != previous_tile_id:
@@ -132,7 +142,8 @@ func _setup_ui() -> void:
 	menu.add_slider("Clumping", 0.0, 1.0, 0.5, func(v: float):
 		GRASS_MAT.set_shader_parameter("clumping_factor", v))
 	menu.add_slider("Wind Speed", 0.0, 5.0, 1.0, func(v: float):
-		GRASS_MAT.set_shader_parameter("wind_speed", v))
+		wind_speed = v
+		GRASS_MAT.set_shader_parameter("wind_speed", v + _gust))
 
 	menu.add_separator()
 	menu.add_section("🎨 Colors")
@@ -145,8 +156,16 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("⚙️ Rendering")
-	menu.add_toggle("Cast Shadows", true, _on_shadows_changed)
 	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+
+	menu.add_action("🌬", "Gust", _blow_gust)
+	menu.add_action("🎲", "Regen", _generate_grass_multimeshes)
+
+	menu.add_debug_toggle("🌑", "Cast shadows", true, _on_shadows_changed)
+
+
+func _blow_gust() -> void:
+	_gust = GUST_STRENGTH
 
 
 func _set_render_scale(v: float) -> void:

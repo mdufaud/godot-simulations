@@ -25,6 +25,7 @@ const KEY_LIGHT_ORBIT_SPEED := 0.45
 
 var max_objects: int = 200
 var spawned_objects: Array[RigidBody3D] = []
+var auto_spawn := true
 var _camera_side_walls: Array[Dictionary] = []
 var _key_light_angle := 0.0
 
@@ -91,23 +92,19 @@ func _build_menu() -> void:
 	_info_label = menu.add_label("Objects: 0")
 
 	menu.add_section("SSR")
-	menu.add_toggle("SSR Enabled", true, func(on: bool) -> void: env.ssr_enabled = on)
 	menu.add_slider("Max Steps", 16.0, 256.0, 96.0, func(v: float) -> void: env.ssr_max_steps = int(v))
 	menu.add_slider("Fade In", 0.0, 1.0, 0.05, func(v: float) -> void: env.ssr_fade_in = v)
 	menu.add_slider("Fade Out", 0.0, 5.0, 3.0, func(v: float) -> void: env.ssr_fade_out = v)
 	menu.add_slider("Depth Tolerance", 0.01, 1.0, 0.25, func(v: float) -> void: env.ssr_depth_tolerance = v)
 
 	menu.add_section("SSAO")
-	menu.add_toggle("SSAO Enabled", true, func(on: bool) -> void: env.ssao_enabled = on)
 	menu.add_slider("Intensity", 0.0, 4.0, 1.5, func(v: float) -> void: env.ssao_intensity = v)
 	menu.add_slider("Radius", 0.1, 5.0, 1.2, func(v: float) -> void: env.ssao_radius = v)
 
 	menu.add_section("SSIL")
-	menu.add_toggle("SSIL Enabled", true, func(on: bool) -> void: env.ssil_enabled = on)
 	menu.add_slider("Intensity", 0.0, 3.0, 1.2, func(v: float) -> void: env.ssil_intensity = v)
 
 	menu.add_section("Glow")
-	menu.add_toggle("Glow Enabled", true, func(on: bool) -> void: env.glow_enabled = on)
 	menu.add_slider("Intensity", 0.0, 2.0, 0.5, func(v: float) -> void: env.glow_intensity = v)
 	menu.add_slider("Bloom", 0.0, 1.0, 0.05, func(v: float) -> void: env.glow_bloom = v)
 
@@ -118,13 +115,22 @@ func _build_menu() -> void:
 		omni_blue.light_energy = v
 		omni_warm.light_energy = v * 0.83)  # keep warm slightly dimmer
 	menu.add_slider("Spot Light", 0.0, 10.0, 6.0, func(v: float) -> void: spot_accent.light_energy = v)
-	menu.add_toggle("Volumetric Fog", false, func(on: bool) -> void: env.volumetric_fog_enabled = on)
 
 	menu.add_section("Material")
 	menu.add_slider("Roughness Override", -1.0, 1.0, -1.0, _on_roughness_override_changed)
 	menu.add_slider("Metallic Override", -1.0, 1.0, -1.0, _on_metallic_override_changed)
 
+	# Reflections on/off is the demo's whole point, so it stays one tap away.
+	menu.add_action_toggle("🔮", "SSR", true, func(on: bool) -> void: env.ssr_enabled = on)
+	menu.add_action("➕", "Spawn", spawn_random_shape)
+	menu.add_action_toggle("⏱", "Auto", true, _on_auto_spawn_toggled)
 	menu.add_action("🧹", "Clear", _on_clear_pressed)
+
+	menu.add_debug_toggle("🌑", "SSAO", true, func(on: bool) -> void: env.ssao_enabled = on)
+	menu.add_debug_toggle("💡", "SSIL", true, func(on: bool) -> void: env.ssil_enabled = on)
+	menu.add_debug_toggle("✨", "Glow", true, func(on: bool) -> void: env.glow_enabled = on)
+	menu.add_debug_toggle("🌫", "Volumetric fog", false,
+		func(on: bool) -> void: env.volumetric_fog_enabled = on)
 
 
 func _process(delta: float) -> void:
@@ -166,10 +172,19 @@ func _cleanup_fallen_objects() -> void:
 			obj.queue_free()
 			spawned_objects.remove_at(i)
 			removed = true
-	if removed and spawn_timer.is_stopped() and spawned_objects.size() < max_objects:
+	if removed and auto_spawn and spawn_timer.is_stopped() and spawned_objects.size() < max_objects:
 		spawn_timer.start()
 
 # ── Spawning ─────────────────────────────────────────────────────────────────
+
+func _on_auto_spawn_toggled(on: bool) -> void:
+	auto_spawn = on
+	if on:
+		if spawned_objects.size() < max_objects:
+			spawn_timer.start()
+	else:
+		spawn_timer.stop()
+
 
 func _on_spawn_timer_timeout() -> void:
 	if spawned_objects.size() >= max_objects:
@@ -179,6 +194,8 @@ func _on_spawn_timer_timeout() -> void:
 
 
 func spawn_random_shape() -> void:
+	if spawned_objects.size() >= max_objects:
+		return
 	var rigid_body := RigidBody3D.new()
 
 	# Spawn position – spread across the arena
@@ -345,4 +362,5 @@ func _on_clear_pressed() -> void:
 		if is_instance_valid(obj):
 			obj.queue_free()
 	spawned_objects.clear()
-	spawn_timer.start()
+	if auto_spawn:
+		spawn_timer.start()

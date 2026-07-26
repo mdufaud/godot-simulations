@@ -37,7 +37,7 @@ var profiler_label: Label
 var param_group: VBoxContainer
 var star_size_slider: HSlider
 var brightness_slider: HSlider
-var self_gravity_toggle: CheckButton
+var _paused := false
 var _sim_time := 0.0
 var _profile_accum := 0.0
 
@@ -165,10 +165,10 @@ func _setup_ui() -> void:
 	_build_scene_params()
 	menu.add_separator()
 
+	menu.add_action_toggle("🪐", "Gravity", solver.self_gravity, _on_self_gravity)
+	menu.add_action_toggle("⏸", "Pause", false, func(on: bool) -> void: _paused = on)
+
 	menu.add_section("Simulation")
-	self_gravity_toggle = menu.add_toggle(
-		"Self-gravity O(N²)", solver.self_gravity, _on_self_gravity
-	)
 	menu.add_slider("Time scale", 0.0, 3.0, time_scale, _on_time_scale)
 	menu.add_slider("Substeps", 1.0, 4.0, float(solver.substeps), _on_substeps)
 	menu.add_slider("Softening", 0.02, 0.5, solver.softening, func(v): solver.softening = v)
@@ -340,6 +340,8 @@ func _process(delta: float) -> void:
 		pos_texture.texture_rd_rid = solver.get_position_tex_rid()
 		star_mat.set_shader_parameter("position_tex", pos_texture)
 		texture_bound = true
+		return
+	if _paused:
 		return
 	_sim_time += TIME_STEP * time_scale
 	solver.sim_time = _sim_time

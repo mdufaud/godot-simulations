@@ -49,6 +49,7 @@ var disp_texture: Texture2DArrayRD
 var norm_texture: Texture2DArrayRD
 var texture_bound := false
 var time_scale := 1.0
+var _frozen := false
 var sun_elevation := 32.0
 var sun_azimuth := 140.0
 
@@ -63,6 +64,7 @@ var _surface_fog_density := 0.0004
 var _surface_fog_color := Color(0.62, 0.72, 0.78)
 
 var _crates: Array[OceanBuoy] = []
+var _preset_option: OptionButton
 
 var _mood := 0.0
 var _mood_target := 0.15
@@ -124,7 +126,7 @@ func _setup_ocean_mesh() -> void:
 
 func _setup_ui() -> void:
 	menu.add_section("Sea state")
-	menu.add_option_button("Preset", PRESETS.keys(), 1, _on_preset_selected)
+	_preset_option = menu.add_option_button("Preset", PRESETS.keys(), 1, _on_preset_selected)
 	_add_solver_slider("Wind speed (m/s)", 0.5, 35.0, "wind_speed")
 	_add_solver_slider("Wind direction", 0.0, TAU, "wind_direction")
 	_add_solver_slider("Fetch (km)", 5.0, 1000.0, "fetch_km")
@@ -139,7 +141,10 @@ func _setup_ui() -> void:
 	menu.add_slider("Time scale", 0.0, 2.0, time_scale, func(v): time_scale = v)
 	menu.add_separator()
 
+	menu.add_action("🌊", "Sea", _cycle_preset)
 	menu.add_action("📦", "Throw", _throw_crate)
+	menu.add_action("🧹", "Clear", _clear_crates)
+	menu.add_action_toggle("⏸", "Freeze", false, func(on: bool) -> void: _frozen = on)
 
 	menu.add_section("Foam")
 	_add_solver_slider("Whitecap", 0.0, 2.0, "whitecap")
@@ -154,11 +159,11 @@ func _setup_ui() -> void:
 	)
 	menu.add_slider("Sun elevation", 2.0, 80.0, sun_elevation, _on_sun_elevation)
 	menu.add_slider("Sun azimuth", 0.0, 360.0, sun_azimuth, _on_sun_azimuth)
-	menu.add_toggle("SSR", false, func(on): world_env.environment.ssr_enabled = on)
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	menu.add_toggle("Amortize cascades", false, func(on): solver.amortize = on)
+	menu.add_debug_toggle("🔮", "SSR", false, func(on): world_env.environment.ssr_enabled = on)
+	menu.add_debug_toggle("🐢", "Amortize cascades", false, func(on): solver.amortize = on)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_label("FFT map size")
 	menu.add_button("128", func(): _set_map_size(128))
@@ -281,7 +286,8 @@ func _process(delta: float) -> void:
 		surface_mat.set_shader_parameter("normals", norm_texture)
 		texture_bound = true
 		return
-	_sim_time += delta * time_scale
+	var step_scale := 0.0 if _frozen else time_scale
+	_sim_time += delta * step_scale
 	solver.sim_time = _sim_time
 	_update_storm(delta)
 
@@ -295,7 +301,7 @@ func _process(delta: float) -> void:
 		)
 		_update_underwater(p, delta)
 
-	RenderingServer.call_on_render_thread(solver.step_render.bind(delta * time_scale))
+	RenderingServer.call_on_render_thread(solver.step_render.bind(delta * step_scale))
 
 	_profile_accum += delta
 	if profiler_label.visible and _profile_accum >= 0.25:
@@ -436,6 +442,22 @@ func _throw_crate() -> void:
 	_crates.append(crate)
 	if _crates.size() > 8:
 		_crates.pop_front().queue_free()
+
+
+func _clear_crates() -> void:
+	for crate in _crates:
+		if is_instance_valid(crate):
+			crate.queue_free()
+	_crates.clear()
+
+
+## Emitting item_selected keeps the panel dropdown and the persisted value in sync.
+func _cycle_preset() -> void:
+	if _preset_option == null:
+		return
+	var next := (_preset_option.selected + 1) % _preset_option.item_count
+	_preset_option.select(next)
+	_preset_option.item_selected.emit(next)
 
 
 ## Camera vs water surface. The FFT height lives on the GPU, so cascade 0's

@@ -423,6 +423,7 @@ func _setup_ui() -> void:
 	menu.panel_toggled.connect(_on_menu_panel_toggled)
 	menu.add_section("Navigation")
 	_case_option = menu.add_option_button("Area", EXHIBIT_NAMES, 0, _go_to_case)
+	menu.add_action("➡", "Area", _next_case)
 	menu.add_action("↺", "Reset", _reset_current_case)
 	menu.add_separator()
 	menu.add_section("Impossible Storage")
@@ -481,7 +482,7 @@ func _setup_touch_controls() -> void:
 		return
 	_touch_controls = Control.new()
 	_touch_controls.name = "TouchActions"
-	_touch_controls.mouse_filter = Control.MOUSE_FILTER_PASS
+	_touch_controls.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_touch_controls.theme = load("res://resources/themes/main_theme.tres")
 	ui_layer.add_child(_touch_controls)
 	get_viewport().size_changed.connect(_layout_touch_controls)
@@ -522,6 +523,14 @@ func _on_menu_panel_toggled(open: bool) -> void:
 		_jump_button.visible = not open
 	if _sprint_button != null:
 		_sprint_button.visible = not open
+
+
+## Teleporting is the whole navigation, so it gets a strip button; emitting keeps
+## the panel dropdown and its persisted value in sync.
+func _next_case() -> void:
+	var next := (_current_exhibit + 1) % EXHIBIT_NAMES.size()
+	_case_option.select(next)
+	_case_option.item_selected.emit(next)
 
 
 func _go_to_case(index: int) -> void:

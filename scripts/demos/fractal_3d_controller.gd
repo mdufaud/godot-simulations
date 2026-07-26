@@ -144,17 +144,41 @@ func _setup_ui() -> void:
 	_menu.add_slider("FOV", 50.0, 110.0, _camera.fov, func(v: float) -> void: _camera.set_fov(v))
 
 	_menu.add_section("Quality")
-	_menu.add_toggle("Adaptive quality", _adaptive, func(on: bool) -> void: _adaptive = on)
 	_menu.add_slider("Render scale", 0.4, 1.0, _render_scale, func(v: float) -> void: _set_render_scale(v))
 	_sliders["max_steps"] = _menu.add_slider("Max steps", 30.0, 400.0, _params["max_steps"], func(v: float) -> void: _set_param("max_steps", int(round(v))))
 	_sliders["max_dist"] = _menu.add_slider("Max distance", 5.0, 200.0, _params["max_dist"], func(v: float) -> void: _set_param("max_dist", v))
 	_sliders["epsilon"] = _menu.add_slider("Precision", 0.0002, 0.01, _params["epsilon"], func(v: float) -> void: _set_param("epsilon", v))
 
 	_menu.add_section("Effects (comfort)")
-	_menu.add_toggle("Post-FX", _post_enabled, func(on: bool) -> void: _set_post_enabled(on))
 	_menu.add_slider("Aberration", 0.0, 0.02, _post["aberration_strength"], func(v: float) -> void: _set_post("aberration_strength", v))
 	_menu.add_slider("Vignette", 0.0, 2.0, _post["vignette_strength"], func(v: float) -> void: _set_post("vignette_strength", v))
 	_menu.add_slider("Grain", 0.0, 0.2, _post["grain_strength"], func(v: float) -> void: _set_post("grain_strength", v))
+
+	# Free flight makes it easy to drift into empty space; Reset flies back to the preset pose.
+	_menu.add_action("↺", "Reset", _reset_view)
+	_menu.add_action("🎲", "Preset", _random_preset)
+
+	_menu.add_debug_toggle("⚡", "Adaptive quality", _adaptive,
+		func(on: bool) -> void: _adaptive = on)
+	_menu.add_debug_toggle("🎞", "Post-FX", _post_enabled,
+		func(on: bool) -> void: _set_post_enabled(on))
+
+
+func _reset_view() -> void:
+	var list: Array = PRESETS[_params["fractal_type"]]
+	_apply_preset(list[clampi(_preset_option.selected, 0, list.size() - 1)])
+
+
+func _random_preset() -> void:
+	var list: Array = PRESETS[_params["fractal_type"]]
+	if list.size() < 2:
+		_reset_view()
+		return
+	var idx := randi() % list.size()
+	if idx == _preset_option.selected:
+		idx = (idx + 1) % list.size()
+	_preset_option.select(idx)
+	_preset_option.item_selected.emit(idx)
 
 
 func _build_param_groups() -> void:
