@@ -44,8 +44,11 @@ var solver: FireGpuSolver
 var water: FireWater
 var volume_material: ShaderMaterial
 var volume_texture: Texture3DRD
+var previous_volume_texture: Texture3DRD
 var indir_texture: Texture3DRD
+var previous_indir_texture: Texture3DRD
 var visual_activity_texture: Texture3DRD
+var previous_visual_activity_texture: Texture3DRD
 var texture_bound := false
 ## The sparse build's field is a tile atlas rather than the domain, so it needs a
 ## raymarcher that resolves through the pool's indirection volume.
@@ -82,8 +85,10 @@ const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x12
 const POOL_BUDGETS := [1536, 1792, 2048]
 const POOL_QUALITY_NAMES := ["Low (1536 tiles)", "Medium (1792 tiles)", "High (2048 tiles)"]
 
-enum PerformancePreset { REFERENCE, QUALITY, BALANCED, PERFORMANCE, AUTO }
-const PERFORMANCE_PRESET_NAMES := ["Reference", "Quality", "Balanced", "Performance", "Auto"]
+enum PerformancePreset { REFERENCE, QUALITY, BALANCED, REALTIME_LITE, PERFORMANCE, AUTO }
+const PERFORMANCE_PRESET_NAMES := [
+	"Reference", "Quality", "Balanced", "Realtime Lite", "Performance", "Auto"]
+const SIMULATION_RATES := [5, 10, 15, 30, 60, 120]
 const AUTO_MIN_HOLD := 3.0
 const AUTO_INITIAL_HOLD := 5.0
 const AUTO_SLOW_FRAME_MS := 18.5
@@ -100,8 +105,7 @@ var _water_particle_cap := 16384
 var _water_particle_cap_applied := -1
 var _water_substeps := 16
 var _water_adaptive_substeps := false
-var _fire_update_interval := 1
-var _fire_update_counter := 0
+var _temporal_interpolation := false
 
 # --- Grid emitter (Fire-X Tab. 3 "Grid Emitter Parameter") — gas mode ---
 var emitter_position := Vector3(0, 0.3, 0)
@@ -218,23 +222,34 @@ func _process(delta: float) -> void:
 	_debug_frame_ms = delta * 1000.0 if _debug_frame_ms == 0.0 else lerpf(
 		_debug_frame_ms, delta * 1000.0, 0.1)
 	_update_auto_quality(delta)
-	_update_debug_overlay()
 	if not solver.initialized:
+		_update_debug_overlay()
 		return
 	if not texture_bound:
 		volume_texture = Texture3DRD.new()
 		volume_texture.texture_rd_rid = solver.get_display_tex_rid()
+		previous_volume_texture = Texture3DRD.new()
+		previous_volume_texture.texture_rd_rid = solver.get_previous_display_tex_rid()
 		if volume_material:
 			volume_material.set_shader_parameter("volume_tex", volume_texture)
+			volume_material.set_shader_parameter("volume_tex_prev", previous_volume_texture)
 			# Sparse: the display field is an atlas of resident tiles, so the shader
 			# also needs the map from virtual tile to atlas slot to read it.
 			if solver.sparse:
 				indir_texture = Texture3DRD.new()
 				indir_texture.texture_rd_rid = solver.indirection_bytes_rid()
 				volume_material.set_shader_parameter("indir_tex", indir_texture)
+				previous_indir_texture = Texture3DRD.new()
+				previous_indir_texture.texture_rd_rid = solver.previous_indirection_bytes_rid()
+				volume_material.set_shader_parameter("indir_tex_prev", previous_indir_texture)
 				visual_activity_texture = Texture3DRD.new()
 				visual_activity_texture.texture_rd_rid = solver.get_texture_rid("visual_activity")
 				volume_material.set_shader_parameter("visual_activity_tex", visual_activity_texture)
+				previous_visual_activity_texture = Texture3DRD.new()
+				previous_visual_activity_texture.texture_rd_rid = \
+					solver.get_previous_visual_activity_tex_rid()
+				volume_material.set_shader_parameter("visual_activity_tex_prev",
+					previous_visual_activity_texture)
 		fire_volume.visible = true
 		texture_bound = true
 	if solver.sparse and volume_material:
@@ -245,14 +260,11 @@ func _process(delta: float) -> void:
 	# solver steps.
 	var stats := solver.get_stats()
 	var aim := _aim()
-	_fire_update_counter += 1
-	var run_fire := _fire_update_counter >= _fire_update_interval
-	if run_fire:
-		_fire_update_counter = 0
-
-	# Rates are per simulated second, so they must follow the solver's clock and
-	# not the frame delta — see FireGpuSolver.sim_delta.
-	var sim_dt := solver.sim_delta(delta) if run_fire else 0.0
+	var step_count := solver.schedule_steps(delta)
+	var run_fire := step_count > 0
+	var sim_dt := float(step_count) * solver.timestep
+	_set_volume_parameter("temporal_blend",
+		solver.interpolation_alpha() if _temporal_interpolation else 1.0)
 	if run_fire:
 		if gas_mode:
 			if gas_reinjection_enabled:
@@ -289,12 +301,17 @@ func _process(delta: float) -> void:
 	var water_adaptive := _water_adaptive_substeps
 	var emit_water := jet_enabled
 	RenderingServer.call_on_render_thread(func() -> void:
-		if run_fire and solver.sparse:
-			solver.prepare_topology_render()
+		if run_fire:
+			solver.capture_interpolation_state_render()
+			if solver.sparse:
+				solver.prepare_topology_render()
+		else:
+			solver.poll_render()
 		if water.initialized:
 			water.sph.substeps = water_steps
 			water.sph.max_substeps = water_steps
 			water.sph.adaptive_substeps = water_adaptive
+			water.step_dt = sim_dt
 			water.set_particle_cap(water_cap)
 			if emit_water:
 				water.emit_jet(sim_dt, delta)
@@ -302,7 +319,7 @@ func _process(delta: float) -> void:
 			water.scatter_render()
 			water.gather_render(liquid_scal, liquid_vel)
 		if run_fire:
-			solver.step_render(delta, water.initialized and water.particles_active > 0)
+			solver.step_render(step_count, water.initialized and water.particles_active > 0)
 		if water.initialized:
 			water.return_render())
 
@@ -311,6 +328,7 @@ func _process(delta: float) -> void:
 
 	_update_light(stats)
 	_update_ui_stats(stats)
+	_update_debug_overlay()
 	if spark_particles:
 		spark_particles.emitting = stats["max_reaction"] > 0.1
 
@@ -318,10 +336,16 @@ func _process(delta: float) -> void:
 func _exit_tree() -> void:
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
+	if previous_volume_texture != null:
+		previous_volume_texture.texture_rd_rid = RID()
 	if indir_texture != null:
 		indir_texture.texture_rd_rid = RID()
+	if previous_indir_texture != null:
+		previous_indir_texture.texture_rd_rid = RID()
 	if visual_activity_texture != null:
 		visual_activity_texture.texture_rd_rid = RID()
+	if previous_visual_activity_texture != null:
+		previous_visual_activity_texture.texture_rd_rid = RID()
 	# Water first: its uniform sets bind the solver's liquid textures, and freeing
 	# those first makes Godot drop the dependent sets on its own — FireWater then
 	# frees RIDs that are already gone ("Attempted to free invalid ID").
@@ -365,6 +389,7 @@ func _unhandled_input(event: InputEvent) -> void:
 ## Swap fuel source in place. The campfire scene and solver stay loaded.
 func _set_fuel_mode(use_gas: bool) -> void:
 	gas_mode = use_gas
+	solver.reset_clock()
 	gas_pipe.visible = use_gas
 	wood_pile.visible = not use_gas
 
@@ -597,25 +622,31 @@ func _preset_values(index: int) -> Dictionary:
 	match index:
 		PerformancePreset.QUALITY:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
-				vorticity_frequency = 1, fire_substeps = 1, fire_interval = 1,
+				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				water_substeps = 16, water_adaptive = true,
 				water_cap = 16384, march_step = 1.0, march_budget = 280,
 				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0}
 		PerformancePreset.BALANCED:
 			return {pressure = 48, advection = 0, vorticity_mode = 1,
-				vorticity_frequency = 2, fire_substeps = 1, fire_interval = 1,
+				vorticity_frequency = 2, simulation_hz = 30, temporal = false,
 				water_substeps = 14, water_adaptive = true,
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
 				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}
+		PerformancePreset.REALTIME_LITE:
+			return {pressure = 32, advection = 0, vorticity_mode = 1,
+				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
+				water_substeps = 12, water_adaptive = true,
+				water_cap = 8192, march_step = 2.0, march_budget = 128,
+				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
 		PerformancePreset.PERFORMANCE:
 			return {pressure = 32, advection = 1, vorticity_mode = 2,
-				vorticity_frequency = 4, fire_substeps = 1, fire_interval = 2,
+				vorticity_frequency = 4, simulation_hz = 30, temporal = false,
 				water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
 				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
 		_:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
-				vorticity_frequency = 1, fire_substeps = 1, fire_interval = 1,
+				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.75, march_budget = 320,
 				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0}
@@ -661,8 +692,8 @@ func _apply_performance_values(values: Dictionary) -> void:
 	_set_performance_control("advection", values.advection)
 	_set_performance_control("vorticity_mode", values.vorticity_mode)
 	_set_performance_control("vorticity_frequency", values.vorticity_frequency)
-	_set_performance_control("fire_substeps", values.fire_substeps)
-	_set_performance_control("fire_interval", values.fire_interval)
+	_set_performance_control("simulation_hz", SIMULATION_RATES.find(values.simulation_hz))
+	_set_performance_control("temporal", values.temporal)
 	_set_performance_control("water_substeps", values.water_substeps)
 	_set_performance_control("water_adaptive", values.water_adaptive)
 	_set_performance_control("water_cap", values.water_cap)
@@ -734,6 +765,20 @@ func _set_advection_mode(index: int) -> void:
 		FireGpuSolver.ADVECTION_SEMI_LAGRANGIAN)
 
 
+func _set_simulation_hz(index: int) -> void:
+	var rate_index := clampi(index, 0, SIMULATION_RATES.size() - 1)
+	solver.set_simulation_hz(SIMULATION_RATES[rate_index])
+	if solver.initialized:
+		RenderingServer.call_on_render_thread(solver.capture_interpolation_state_render)
+
+
+func _set_temporal_interpolation(on: bool) -> void:
+	_temporal_interpolation = on
+	_set_volume_parameter("temporal_blend", solver.interpolation_alpha() if on else 1.0)
+	if on and solver.initialized:
+		RenderingServer.call_on_render_thread(solver.capture_interpolation_state_render)
+
+
 func _set_vorticity_mode(index: int) -> void:
 	solver.vorticity_mode = clampi(index, FireGpuSolver.VORTICITY_FULL,
 		FireGpuSolver.VORTICITY_OFF)
@@ -778,10 +823,16 @@ func _set_quality(index: int) -> void:
 	solver.initialized = false
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
+	if previous_volume_texture != null:
+		previous_volume_texture.texture_rd_rid = RID()
 	if indir_texture != null:
 		indir_texture.texture_rd_rid = RID()
+	if previous_indir_texture != null:
+		previous_indir_texture.texture_rd_rid = RID()
 	if visual_activity_texture != null:
 		visual_activity_texture.texture_rd_rid = RID()
+	if previous_visual_activity_texture != null:
+		previous_visual_activity_texture.texture_rd_rid = RID()
 	fire_volume.visible = false
 	texture_bound = false
 	if solver.sparse:
@@ -796,10 +847,12 @@ func _set_quality(index: int) -> void:
 		# A log emitter narrower than a couple of cells falls between them and injects
 		# nothing at all on the coarse preset.
 		wood_pile.emit_radius = maxf(1.3, cell * 2.0)
+	solver.reset_clock()
 	_light_fire()
 
 
 func _reset_simulation() -> void:
+	solver.reset_clock()
 	RenderingServer.call_on_render_thread(solver.clear_fields)
 	water.reset_droplets()
 	RenderingServer.call_on_render_thread(water.clear_droplets)
@@ -884,12 +937,21 @@ func _update_debug_overlay() -> void:
 			_debug_fire_timings = latest_timings
 	var timings: Dictionary = _debug_fire_timings
 	var proxy := solver.display_clip_box()
+	var clock := solver.get_clock_stats()
 	var pool := solver.get_debug_pool_stats()
 	var lines := [
 		"FIRE DEBUG",
 		"quality %s" % (_preset_status_label.text if _preset_status_label != null else "--"),
-		"frame %.2f ms | FPS %.1f | substeps %d" % [
+		"frame %.2f ms | FPS %.1f | steps %d" % [
 			_debug_frame_ms, Engine.get_frames_per_second(), solver.last_substeps],
+		"clock %d Hz | sim %.2f s | wall %.2f s | ratio %.3f" % [
+			int(clock["simulation_hz"]), float(clock["simulation_time"]),
+			float(clock["wall_time"]), float(clock["ratio"])],
+		"temporal %s | blend %.2f" % [
+			"linear" if _temporal_interpolation else "off",
+			float(clock["interpolation_alpha"]) if _temporal_interpolation else 1.0],
+		"backlog %.1f ms | dropped %.1f ms" % [
+			float(clock["accumulator"]) * 1000.0, float(clock["dropped_time"]) * 1000.0],
 		"GPU %s | stages %s" % [
 			"%.2f ms" % timings["total"] if timings.has("total") else "--",
 			_format_timings(timings) if not timings.is_empty() else "--"],
@@ -1115,16 +1177,14 @@ func _setup_ui() -> void:
 	vorticity_frequency.step = 1.0
 	_register_performance_control("vorticity_frequency", vorticity_frequency,
 		func(v: float): solver.vorticity_interval = int(v))
-	var fire_substeps := menu.add_slider("Fire substeps", 1.0, 4.0,
-		float(solver.substeps), func(v: float): solver.substeps = int(v))
-	fire_substeps.step = 1.0
-	_register_performance_control("fire_substeps", fire_substeps,
-		func(v: float): solver.substeps = int(v))
-	var fire_interval := menu.add_slider("Fire update interval", 1.0, 4.0,
-		float(_fire_update_interval), func(v: float): _fire_update_interval = int(v))
-	fire_interval.step = 1.0
-	_register_performance_control("fire_interval", fire_interval,
-		func(v: float): _fire_update_interval = int(v))
+	var simulation_rate_names := ["5 Hz", "10 Hz", "15 Hz", "30 Hz", "60 Hz", "120 Hz"]
+	var simulation_rate := menu.add_option_button("Simulation rate", simulation_rate_names,
+		SIMULATION_RATES.find(solver.simulation_hz), _set_simulation_hz)
+	_register_performance_control("simulation_hz", simulation_rate, _set_simulation_hz)
+	var temporal_interpolation := menu.add_toggle("Temporal interpolation",
+		_temporal_interpolation, _set_temporal_interpolation)
+	_register_performance_control("temporal", temporal_interpolation,
+		_set_temporal_interpolation)
 	var water_substeps := menu.add_slider("Water SPH substeps", 4.0, 16.0,
 		float(_water_substeps), _set_water_substeps)
 	water_substeps.step = 1.0

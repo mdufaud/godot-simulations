@@ -87,8 +87,8 @@ var evaporation_active := false
 ## the solver so one slider drives it, but consumed here because the drain has to
 ## run whether or not the evaporation stage does.
 var drain_rate := 0.2
-## Simulated seconds the drain covers, i.e. FireGpuSolver.sim_delta for this frame —
-## the same clock the grid stage used, not the frame delta.
+## Simulated seconds the drain covers, i.e. the fire grid's fixed-step clock,
+## not the frame delta.
 var step_dt := 0.0
 
 var sph: SphFluidSolver
@@ -368,10 +368,8 @@ func _image_uniform(binding: int, tex: RID) -> RDUniform:
 ## [param rate_dt] is simulated time and sets HOW MANY particles leave the nozzle,
 ## so the count does not drift with the frame rate. [param move_dt] is the frame
 ## time the SPH integrator actually advances the droplets with, and sets WHERE they
-## are laid down. The two are not the same clock (FireGpuSolver.sim_delta quantises
-## and clamps), and using the simulated one for both spread each burst over only a
-## fraction of the distance the stream really travelled that frame, leaving a
-## periodic gap behind it — a row of golf balls instead of a jet.
+## are laid down. The two are separate clocks: the fixed fire-step clock controls
+## how much water is emitted, while the render frame controls where droplets move.
 func emit_jet(rate_dt: float, move_dt: float) -> void:
 	if not initialized:
 		return

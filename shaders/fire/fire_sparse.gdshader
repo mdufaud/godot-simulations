@@ -13,12 +13,16 @@ render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabl
 // DDA over it: a tile with no slot in it is skipped whole, so the step count
 // tracks the depth of plume along the ray rather than the size of the domain.
 uniform sampler3D volume_tex : filter_linear, repeat_disable;
+uniform sampler3D volume_tex_prev : filter_linear, repeat_disable;
 // The indirection volume is an R32_UINT storage image on the compute side, viewed
 // here as RGBA8_UNORM over the same memory because that is the widest 32-bit
 // format Texture3DRD can carry (see FireTilePool._create_resources). Its four
 // bytes are the slot index, little end first.
 uniform sampler3D indir_tex : filter_nearest, repeat_disable;
+uniform sampler3D indir_tex_prev : filter_nearest, repeat_disable;
 uniform sampler3D visual_activity_tex : filter_nearest, repeat_disable;
+uniform sampler3D visual_activity_tex_prev : filter_nearest, repeat_disable;
+uniform float temporal_blend = 1.0;
 
 uniform vec3 atlas_cells = vec3(128.0, 64.0, 128.0);
 uniform ivec3 atlas_tiles = ivec3(16, 8, 16);
@@ -58,30 +62,34 @@ ivec3 slot_origin(uint slot) {
 
 // Reassemble the stored uint. The +0.5 is the exact inverse of the UNORM encode:
 // a byte b comes back as b/255, so b/255*255 + 0.5 truncates to b for every b.
-uint indir_slot(ivec3 vt) {
-	uvec4 b = uvec4(texelFetch(indir_tex, vt, 0) * 255.0 + 0.5);
+uint indir_slot(ivec3 vt, bool previous) {
+	vec4 encoded = previous ? texelFetch(indir_tex_prev, vt, 0)
+		: texelFetch(indir_tex, vt, 0);
+	uvec4 b = uvec4(encoded * 255.0 + 0.5);
 	return b.r | (b.g << 8u) | (b.b << 16u) | (b.a << 24u);
 }
 
-uint tile_slot(ivec3 vt) {
+uint tile_slot(ivec3 vt, bool previous) {
 	if (any(lessThan(vt, ivec3(0))) || any(greaterThanEqual(vt, virtual_tiles))) {
 		return 0xFFFFFFFFu;
 	}
-	return indir_slot(vt);
+	return indir_slot(vt, previous);
 }
 
 // Nearest tap at a virtual cell. A cell whose tile is not resident reads as
 // nothing at all — which is the right answer and not an approximation: the pool
 // keeps two tiles of dilation band past anything visible, so a missing tile is
 // always clear air, and it is what the dense build's edge fade approximated.
-vec4 tap(ivec3 vc, ivec3 current_tile, uint current_slot, ivec3 current_atlas) {
+vec4 tap(ivec3 vc, ivec3 current_tile, uint current_slot, ivec3 current_atlas,
+	bool previous) {
 	ivec3 vt = vc >> 3;
-	uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt);
+	uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt, previous);
 	if (slot >= SLOT_MAX) {
 		return vec4(0.0);
 	}
 	ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
-	return texelFetch(volume_tex, atlas + (vc & ivec3(7)), 0);
+	return previous ? texelFetch(volume_tex_prev, atlas + (vc & ivec3(7)), 0)
+		: texelFetch(volume_tex, atlas + (vc & ivec3(7)), 0);
 }
 
 // Trilinear fetch at a continuous virtual cell position (cell centres sit on
@@ -95,34 +103,35 @@ vec4 tap(ivec3 vc, ivec3 current_tile, uint current_slot, ivec3 current_atlas) {
 // since two slots that are adjacent in the atlas are almost never adjacent in
 // the world.
 vec4 sample_virtual(vec3 vp, ivec3 current_tile, uint current_slot,
-	ivec3 current_atlas) {
+	ivec3 current_atlas, bool previous) {
 	vec3 g = vp - vec3(0.5);
 	ivec3 c0 = ivec3(floor(g));
 	vec3 f = g - vec3(c0);
 	ivec3 vt = c0 >> 3;
 	if (all(equal(vt, (c0 + ivec3(1)) >> 3))) {
-		uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt);
+		uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt, previous);
 		if (slot >= SLOT_MAX) {
 			return vec4(0.0);
 		}
 		ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
 		vec3 uvw = (vec3(atlas + (c0 & ivec3(7))) + vec3(0.5) + f) / atlas_cells;
-		return texture(volume_tex, uvw);
+		return previous ? texture(volume_tex_prev, uvw) : texture(volume_tex, uvw);
 	}
-	vec4 s000 = tap(c0, current_tile, current_slot, current_atlas);
-	vec4 s100 = tap(c0 + ivec3(1, 0, 0), current_tile, current_slot, current_atlas);
-	vec4 s010 = tap(c0 + ivec3(0, 1, 0), current_tile, current_slot, current_atlas);
-	vec4 s110 = tap(c0 + ivec3(1, 1, 0), current_tile, current_slot, current_atlas);
-	vec4 s001 = tap(c0 + ivec3(0, 0, 1), current_tile, current_slot, current_atlas);
-	vec4 s101 = tap(c0 + ivec3(1, 0, 1), current_tile, current_slot, current_atlas);
-	vec4 s011 = tap(c0 + ivec3(0, 1, 1), current_tile, current_slot, current_atlas);
-	vec4 s111 = tap(c0 + ivec3(1, 1, 1), current_tile, current_slot, current_atlas);
+	vec4 s000 = tap(c0, current_tile, current_slot, current_atlas, previous);
+	vec4 s100 = tap(c0 + ivec3(1, 0, 0), current_tile, current_slot, current_atlas, previous);
+	vec4 s010 = tap(c0 + ivec3(0, 1, 0), current_tile, current_slot, current_atlas, previous);
+	vec4 s110 = tap(c0 + ivec3(1, 1, 0), current_tile, current_slot, current_atlas, previous);
+	vec4 s001 = tap(c0 + ivec3(0, 0, 1), current_tile, current_slot, current_atlas, previous);
+	vec4 s101 = tap(c0 + ivec3(1, 0, 1), current_tile, current_slot, current_atlas, previous);
+	vec4 s011 = tap(c0 + ivec3(0, 1, 1), current_tile, current_slot, current_atlas, previous);
+	vec4 s111 = tap(c0 + ivec3(1, 1, 1), current_tile, current_slot, current_atlas, previous);
 	return mix(mix(mix(s000, s100, f.x), mix(s010, s110, f.x), f.y),
 		mix(mix(s001, s101, f.x), mix(s011, s111, f.x), f.y), f.z);
 }
 
-float visual_tile_signal(ivec3 atlas) {
-	return texelFetch(visual_activity_tex, atlas, 0).r;
+float visual_tile_signal(ivec3 atlas, bool previous) {
+	return previous ? texelFetch(visual_activity_tex_prev, atlas, 0).r
+		: texelFetch(visual_activity_tex, atlas, 0).r;
 }
 
 void fragment() {
@@ -177,17 +186,26 @@ void fragment() {
 	// to unroll (see march_budget).
 	float t_exit = min(min(t_next.x, t_next.y), t_next.z);
 	float seg_end = min(t_exit, t1);
-	uint current_slot = indir_slot(ti);
+	uint current_slot = indir_slot(ti, false);
 	ivec3 current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+	uint previous_slot = indir_slot(ti, true);
+	ivec3 previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
 	bool resident = current_slot < SLOT_MAX
-		&& visual_tile_signal(current_atlas) >= visual_occupancy_threshold;
+		&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
+	resident = resident || (temporal_blend < 0.999 && previous_slot < SLOT_MAX
+		&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 
 	for (int i = 0; i < march_budget; i++) {
 		if (resident && t_cursor < seg_end) {
 			vec3 p = cam_obj + ray_dir * t_cursor;
 			vec3 sample_pos = p + volume_center;
-			vec4 s = sample_virtual((sample_pos - virtual_origin) / cell_size,
-				ti, current_slot, current_atlas);
+			vec3 virtual_pos = (sample_pos - virtual_origin) / cell_size;
+			vec4 s = sample_virtual(virtual_pos, ti, current_slot, current_atlas, false);
+			if (temporal_blend < 0.999) {
+				vec4 previous = sample_virtual(virtual_pos, ti, previous_slot,
+					previous_atlas, true);
+				s = mix(previous, s, temporal_blend);
+			}
 			if (debug_mode == 1) {
 				debug_max = max(debug_max, s.r);
 			} else {
@@ -218,10 +236,14 @@ void fragment() {
 		}
 		t_exit = min(min(t_next.x, t_next.y), t_next.z);
 		seg_end = min(t_exit, t1);
-		current_slot = indir_slot(ti);
+		current_slot = indir_slot(ti, false);
 		current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+		previous_slot = indir_slot(ti, true);
+		previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
 		resident = current_slot < SLOT_MAX
-			&& visual_tile_signal(current_atlas) >= visual_occupancy_threshold;
+			&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
+		resident = resident || (temporal_blend < 0.999 && previous_slot < SLOT_MAX
+			&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 		// Skipped tiles cost the sample lattice nothing: the cursor is snapped
 		// forward onto it rather than restarted, so the jitter pattern does not
 		// re-phase at every tile boundary and print the tile grid into the plume.

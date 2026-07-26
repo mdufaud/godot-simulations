@@ -121,8 +121,9 @@ var fuel_index := 0
 var units_convention := UNITS_CGS
 
 var ambient_temperature := 300.0 ## Fire-X Tab. 3
-var timestep := 1.0 / 120.0 ## Fire-X Tab. 3 "Delta Time"
-var substeps := 2 ## Fire-X Tab. 3 "Update Multiplier", range 1-4
+var simulation_hz := 30
+var timestep := 1.0 / 30.0
+var max_catchup_steps := 4
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
 var advection_mode := ADVECTION_MACCORMACK
 
@@ -203,8 +204,8 @@ var sparse := true
 var pool_budget := FireTilePool.NSLOTS
 
 # Tile pool policy. The dilation band has to exceed the distance the fire can
-# travel between topology updates: velocity is clamped to 50 m/s, so at 1/120 s
-# and 0.2 m cells the worst case is ~2.1 cells, and two tiles is 16.
+# travel between topology updates: velocity is clamped to 50 m/s, so at the
+# lowest supported 30 Hz and 0.2 m cells the worst case is ~8.4 cells.
 const TILE_ACTIVITY_THRESHOLD := 1.0 ## fire_display normalises every term to this
 const TILE_HOLD_FRAMES := 8 ## hysteresis, so a flickering front does not thrash
 const TILE_DILATE_RADIUS := 2
@@ -213,10 +214,14 @@ const TILE_DILATE_RADIUS := 2
 ## injection lands in an inactive tile and is dropped.
 const PIN_HALF_XZ := 3.2
 const PIN_HEIGHT := 6.4
+const CLOCK_EPSILON := 1e-6
 
 var initialized := false
 var profiling := false
 var last_substeps := 0
+var wall_time := 0.0
+var simulation_time := 0.0
+var dropped_time := 0.0
 
 var _rd: RenderingDevice
 var _pool: FireTilePool
@@ -251,6 +256,7 @@ var _bootstrap_bounds := AABB()
 var _display_bounds_ready := false
 var _timings := {}
 var _timings_mutex := Mutex.new()
+var _time_accumulator := 0.0
 
 
 func _init() -> void:
@@ -260,6 +266,18 @@ func _init() -> void:
 
 func get_display_tex_rid() -> RID:
 	return _tex.get("display", RID())
+
+
+func get_previous_display_tex_rid() -> RID:
+	return _tex.get("display_prev", RID())
+
+
+func get_previous_visual_activity_tex_rid() -> RID:
+	return _tex.get("visual_activity_prev", RID())
+
+
+func previous_indirection_bytes_rid() -> RID:
+	return _tex.get("indir_prev", RID())
 
 
 ## Field texture by name, for the stages that live outside this class (the liquid
@@ -285,15 +303,50 @@ func effective_pre_exponential() -> float:
 	return f["a_factor"] * pow(10.0, 6.0 * (1.0 - f["a"] - f["b"]))
 
 
-## Simulated time a frame of length [param delta] will advance.
-##
-## The solver runs whole steps of [member timestep] rather than stretching dt, so
-## simulated time and wall-clock time diverge whenever the frame rate is not
-## 120 Hz. Emitters must scale their rate by this, not by the frame delta: doing
-## otherwise injects more fuel per simulated second the slower the frame rate
-## gets, which floods the burner and starves it of oxygen.
-func sim_delta(delta: float) -> float:
-	return float(clampi(int(delta / timestep), 1, substeps)) * timestep
+func set_simulation_hz(value: int) -> void:
+	simulation_hz = clampi(value, 5, 120)
+	timestep = 1.0 / float(simulation_hz)
+	reset_clock()
+
+
+func reset_clock() -> void:
+	_time_accumulator = 0.0
+	wall_time = 0.0
+	simulation_time = 0.0
+	dropped_time = 0.0
+	last_substeps = 0
+
+
+func schedule_steps(delta: float) -> int:
+	var frame_delta := maxf(delta, 0.0)
+	wall_time += frame_delta
+	if frame_delta > 0.1:
+		dropped_time += frame_delta - 0.1
+		frame_delta = 0.1
+	_time_accumulator += frame_delta
+	var available := int(floor(_time_accumulator / timestep + CLOCK_EPSILON))
+	var count := mini(available, max_catchup_steps)
+	_time_accumulator -= float(count) * timestep
+	last_substeps = count
+	simulation_time += float(count) * timestep
+	return count
+
+
+func interpolation_alpha() -> float:
+	return clampf(_time_accumulator / timestep, 0.0, 1.0)
+
+
+func get_clock_stats() -> Dictionary:
+	return {
+		"simulation_hz": simulation_hz,
+		"timestep": timestep,
+		"wall_time": wall_time,
+		"simulation_time": simulation_time,
+		"accumulator": _time_accumulator,
+		"interpolation_alpha": interpolation_alpha(),
+		"dropped_time": dropped_time,
+		"ratio": simulation_time / maxf(wall_time, 1e-6),
+	}
 
 
 ## Queue a grid interaction; consumed by the next [method step_render].
@@ -662,9 +715,19 @@ func _create_textures() -> void:
 	_tex["display"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
 		RDTextureView.new(), [])
+	_tex["display_prev"] = _rd.texture_create(
+		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
+		RDTextureView.new(), [])
 	_tex["visual_activity"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
 		RDTextureView.new(), [])
+	_tex["visual_activity_prev"] = _rd.texture_create(
+		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
+		RDTextureView.new(), [])
+	if sparse:
+		_tex["indir_prev"] = _rd.texture_create(
+			_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage,
+				FireTilePool.VTILES), RDTextureView.new(), [])
 
 	# Tile keep signal: written by fire_display, reduced per tile by tile_mark.
 	# A field like any other, so clear_fields and the atlas layout cover it.
@@ -709,14 +772,30 @@ func clear_fields() -> void:
 ## Every field that starts at zero: still air, no pressure, nothing rendered.
 func _zeroed_keys() -> Array:
 	var keys := ["scal2_a", "scal2_b", "scal_fwd", "scal2_fwd", "curl",
-		"press_a", "press_b", "diverg", "display", "liquid_scal", "liquid_vel",
-		"nu_t", "visual_activity"]
+		"press_a", "press_b", "diverg", "display", "display_prev", "liquid_scal",
+		"liquid_vel", "nu_t", "visual_activity", "visual_activity_prev"]
 	if sparse:
 		keys.append("activity")
 	for axis in "uvw":
 		for suffix in ["_a", "_b", "_fwd"]:
 			keys.append(axis + suffix)
 	return keys
+
+
+## Preserve the last complete display sample for render interpolation. Physics
+## fields are not copied or blended. Rendering thread only, before sparse
+## topology changes its virtual-tile mapping.
+func capture_interpolation_state_render() -> void:
+	if not initialized:
+		return
+	var dims := _field_dims()
+	_rd.texture_copy(_tex["display"], _tex["display_prev"], Vector3.ZERO,
+		Vector3.ZERO, Vector3(dims), 0, 0, 0, 0)
+	_rd.texture_copy(_tex["visual_activity"], _tex["visual_activity_prev"],
+		Vector3.ZERO, Vector3.ZERO, Vector3(dims), 0, 0, 0, 0)
+	if sparse and _pool != null:
+		_rd.texture_copy(_pool.indir_bytes_rid(), _tex["indir_prev"], Vector3.ZERO,
+			Vector3.ZERO, Vector3(FireTilePool.VTILES), 0, 0, 0, 0)
 
 
 func _build_uniform_sets() -> void:
@@ -793,17 +872,15 @@ static func _swap_binding(table: Dictionary, a: int, b: int) -> void:
 #  STEP — Fire-X Algorithm 1, lines 16-22
 # =========================================================================
 
-func step_render(delta: float, liquid_active := false) -> void:
+func step_render(step_count: int, liquid_active := false) -> void:
 	if not initialized:
+		return
+	if step_count <= 0:
 		return
 	_read_timings()
 	_fetch_stats()
 	_upload_config()
-
-	# The paper fixes dt at 1/120 s with an update multiplier of 1-4; run as
-	# many whole steps as the frame covers rather than stretching dt, which
-	# would change the physics with the frame rate.
-	var count := clampi(int(delta / timestep), 1, substeps)
+	var count := mini(step_count, max_catchup_steps)
 	last_substeps = count
 
 	_events_mutex.lock()
@@ -842,6 +919,13 @@ func step_render(delta: float, liquid_active := false) -> void:
 		_rd.capture_timestamp("fire/end")
 		if sparse and _frame % 8 == 0:
 			_update_pool_stats_cache()
+
+
+func poll_render() -> void:
+	if not initialized:
+		return
+	_read_timings()
+	_fetch_stats()
 
 
 func prepare_topology_render() -> void:
@@ -1126,9 +1210,10 @@ func _read_timings() -> void:
 		prev_name = nm
 		prev_time = t
 
-	_timings_mutex.lock()
-	_timings = acc
-	_timings_mutex.unlock()
+	if not acc.is_empty():
+		_timings_mutex.lock()
+		_timings = acc
+		_timings_mutex.unlock()
 
 
 ## Pool occupancy, for the verification harness and the debug overlay. Empty on

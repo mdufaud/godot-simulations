@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Runs the whole pass/fail suite: portal math (headless), the non-euclidean
-# integration tests, then the SimMenu touch smoke over every demo.
+# Runs the whole pass/fail suite: portal math and fire clock (headless), the
+# non-euclidean integration tests, then the SimMenu touch smoke over every demo.
 #
 # tests/capture_non_euclidean.gd is deliberately not run here: it is an image
 # inspection tool, not a pass/fail test.
@@ -31,6 +31,7 @@ run_suite() {
 }
 
 run_suite portal_math --headless -s res://tests/portal_math_test.gd
+run_suite fire_clock --headless --log-file /tmp/godot-fire-clock-suite.log -s res://tests/fire_clock_test.gd
 run_suite non_euclidean -s res://tests/non_euclidean_runner.gd
 GODOT="$GODOT" "$SCRIPT_DIR/run_ui_smoke.sh" || failed+=(ui_smoke)
 

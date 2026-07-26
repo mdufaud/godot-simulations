@@ -9,6 +9,8 @@ render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabl
 // The whole domain, one texel per cell. The sparse build's field is a tile atlas
 // instead and needs the indirection to read; see fire_sparse.gdshader.
 uniform sampler3D volume_tex : filter_linear, repeat_disable;
+uniform sampler3D volume_tex_prev : filter_linear, repeat_disable;
+uniform float temporal_blend = 1.0;
 uniform float march_step : hint_range(0.25, 4.0) = 0.75;
 uniform float max_distance = 80.0;
 uniform int march_budget : hint_range(64, 512) = 320;
@@ -49,7 +51,11 @@ void fragment() {
 			break;
 		}
 		vec3 p = cam_obj + ray_dir * t;
-		vec4 s = texture(volume_tex, p / box_size + 0.5);
+		vec3 volume_uv = p / box_size + 0.5;
+		vec4 s = texture(volume_tex, volume_uv);
+		if (temporal_blend < 0.999) {
+			s = mix(texture(volume_tex_prev, volume_uv), s, temporal_blend);
+		}
 
 		if (debug_mode == 1) {
 			debug_max = max(debug_max, s.r);
