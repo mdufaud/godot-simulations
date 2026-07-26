@@ -79,8 +79,8 @@ const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 ## GPU time, and the Jacobi pressure loop alone is half of it.
 const QUALITY_CELLS := [0.4, 0.2, 0.1]
 const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x128)"]
-const POOL_BUDGETS := [1024, 1536, 2048]
-const POOL_QUALITY_NAMES := ["Low (1024 tiles)", "Medium (1536 tiles)", "High (2048 tiles)"]
+const POOL_BUDGETS := [1536, 1792, 2048]
+const POOL_QUALITY_NAMES := ["Low (1536 tiles)", "Medium (1792 tiles)", "High (2048 tiles)"]
 
 enum PerformancePreset { REFERENCE, QUALITY, BALANCED, PERFORMANCE, AUTO }
 const PERFORMANCE_PRESET_NAMES := ["Reference", "Quality", "Balanced", "Performance", "Auto"]
@@ -549,8 +549,6 @@ func _aim_hose(aim: Dictionary) -> void:
 func _light_fire() -> void:
 	if gas_mode:
 		if gas_reinjection_enabled and emitter_rate > 0.0:
-			solver.push_event(FireGpuSolver.EVENT_FUEL, emitter_position,
-				emitter_radius, emitter_rate)
 			solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0, 0.5, 0), 1.0, 0.4)
 		return
 	# Kindling under the heap: the core logs start at the pyrolysis onset, so

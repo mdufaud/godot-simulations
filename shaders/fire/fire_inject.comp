@@ -17,9 +17,9 @@
 // it, so the mass fractions stay normalised. Residuals are condensed soot and
 // are not part of the gas mixture, so they are left alone.
 void add_fuel(inout vec4 s, inout vec4 s2, float amount) {
-	float add = min(amount, 1.0 - s.y);
-	s.y += add;
+	float add = clamp(amount, 0.0, 1.0);
 	float shrink = 1.0 - add;
+	s.y = s.y * shrink + add;
 	s.z *= shrink;
 	s.w *= shrink;
 	s2.x *= shrink;

@@ -122,7 +122,7 @@ var units_convention := UNITS_CGS
 
 var ambient_temperature := 300.0 ## Fire-X Tab. 3
 var timestep := 1.0 / 120.0 ## Fire-X Tab. 3 "Delta Time"
-var substeps := 1 ## Fire-X Tab. 3 "Update Multiplier", range 1-4
+var substeps := 2 ## Fire-X Tab. 3 "Update Multiplier", range 1-4
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
 var advection_mode := ADVECTION_MACCORMACK
 
