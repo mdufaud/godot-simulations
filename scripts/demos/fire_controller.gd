@@ -79,7 +79,7 @@ const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 ## in volume at fixed cell size.
 ##
 ## Cost is cubic in the inverse: doubling the cell is 8x fewer cells for ~8x less
-## GPU time, and the Jacobi pressure loop alone is half of it.
+## GPU time, and the pressure loop alone is half of it.
 const QUALITY_CELLS := [0.4, 0.2, 0.1]
 const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x128)"]
 const POOL_BUDGETS := [1536, 1792, 2048]
@@ -94,8 +94,14 @@ const AUTO_INITIAL_HOLD := 5.0
 const AUTO_SLOW_FRAME_MS := 18.5
 const AUTO_FAST_FRAME_MS := 15.0
 const AUTO_MAX_LEVEL := 5
+## Where Auto starts rather than at the Reference level 0. Level 0 is the paper's
+## reference configuration, which measured 8 fps on the 760M in the heavy water
+## scenario, so starting there means every session opens with several seconds of
+## slideshow before the ladder walks down. Auto climbs back up on its own when
+## frames are fast, so a machine that can afford level 0 loses nothing permanent.
+const AUTO_START_LEVEL := 2
 
-var _performance_preset := PerformancePreset.REFERENCE
+var _performance_preset := PerformancePreset.AUTO
 var _performance_controls := {}
 var _preset_status_label: Label
 var _auto_level := 0
@@ -618,56 +624,85 @@ func _pour_water() -> void:
 		mini(_water_particle_cap, 4000), origin, 0.9, throw))
 
 
+## Quality knobs per preset.
+##
+## [code]catchup[/code] is the substep budget a frame may spend catching the
+## simulation clock up. It is the largest single lever measured on the 760M — the
+## solver runs the whole grid loop once per substep, so a frame that takes four of
+## them costs four times a frame that takes one, and a slow frame asks for MORE
+## substeps than a fast one. Left at four for Reference, which is the fidelity
+## control; every playable preset caps it and lets the temporal interpolation
+## cover the difference.
+##
+## [code]pressure[/code] counts dispatches of the projection, and the playable
+## presets are at half what they used to be because the solver behind it changed
+## (Phase 2: block Gauss-Seidel plus a tile-level coarse solve). Measured at 2048
+## resident tiles, the new solver at 32 passes leaves a residual of 0.015 where
+## the old one left 0.087 at 64, so every one of these halvings buys accuracy as
+## well as milliseconds. Reference keeps the paper's 64 (Tab. 3 range 64-128): it
+## is the control, and there it now costs 23 % more for an 18x lower residual.
 func _preset_values(index: int) -> Dictionary:
 	match index:
 		PerformancePreset.QUALITY:
-			return {pressure = 64, advection = 0, vorticity_mode = 0,
+			return {pressure = 32, advection = 0, vorticity_mode = 0,
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
-				water_substeps = 16, water_adaptive = true,
+				catchup = 3, water_substeps = 16, water_adaptive = true,
 				water_cap = 16384, march_step = 1.0, march_budget = 280,
 				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0}
 		PerformancePreset.BALANCED:
-			return {pressure = 48, advection = 0, vorticity_mode = 1,
+			return {pressure = 24, advection = 0, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 30, temporal = false,
-				water_substeps = 14, water_adaptive = true,
+				catchup = 2, water_substeps = 14, water_adaptive = true,
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
 				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}
 		PerformancePreset.REALTIME_LITE:
-			return {pressure = 32, advection = 0, vorticity_mode = 1,
+			return {pressure = 16, advection = 0, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
-				water_substeps = 12, water_adaptive = true,
+				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
 				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
 		PerformancePreset.PERFORMANCE:
-			return {pressure = 32, advection = 1, vorticity_mode = 2,
+			return {pressure = 16, advection = 1, vorticity_mode = 2,
 				vorticity_frequency = 4, simulation_hz = 30, temporal = false,
-				water_substeps = 12, water_adaptive = true,
+				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
 				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
 		_:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
-				water_substeps = 16, water_adaptive = false,
+				catchup = 4, water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.75, march_budget = 320,
 				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0}
 
 
+## The Auto ladder. Levels 1-3 give up rendering only, 4-5 then reduce the
+## simulation — except for the pressure count, which every level overrides off
+## Reference's 64: Reference keeps the paper's iteration count because it is the
+## fidelity control, but there is no reason for an automatic ladder to pay for it
+## when 32 passes of the Phase 2 solver already leave a lower residual than 64 of
+## the old one.
+##
+## Water render scale falls first and fastest: the screen-space droplet pipeline
+## (five sub-viewports) measured ~54 ms of a 121 ms frame with the hose open, more
+## than the whole solver, and it is the one cost that scales with the square of a
+## single number.
 func _auto_values(level: int) -> Dictionary:
 	var values := _preset_values(PerformancePreset.REFERENCE)
 	match level:
 		1:
-			values.merge({march_step = 1.0, march_budget = 280,
-				march_distance = 72.0, water_scale = 0.8}, true)
+			values.merge({pressure = 32, march_step = 1.0, march_budget = 280,
+				march_distance = 72.0, water_scale = 0.6}, true)
 		2:
-			values.merge({march_step = 1.25, march_budget = 240,
-				march_distance = 64.0, water_scale = 0.65, render_scale = 0.9}, true)
+			values.merge({pressure = 32, march_step = 1.25, march_budget = 240,
+				march_distance = 64.0, water_scale = 0.5, render_scale = 0.9}, true)
 		3:
-			values.merge({march_step = 1.5, march_budget = 192,
-				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}, true)
+			values.merge({pressure = 32, march_step = 1.5, march_budget = 192,
+				march_distance = 56.0, water_scale = 0.45, render_scale = 0.8}, true)
 		4:
-			values.merge({pressure = 48, vorticity_mode = 1, vorticity_frequency = 2,
-				water_substeps = 12, water_adaptive = true, water_cap = 12288, march_step = 1.75,
-				march_budget = 160, march_distance = 48.0, water_scale = 0.5,
+			values.merge({pressure = 24, vorticity_mode = 1, vorticity_frequency = 2,
+				catchup = 2, water_substeps = 12, water_adaptive = true,
+				water_cap = 12288, march_step = 1.75,
+				march_budget = 160, march_distance = 48.0, water_scale = 0.4,
 				render_scale = 0.75}, true)
 		5:
 			values = _preset_values(PerformancePreset.PERFORMANCE)
@@ -677,7 +712,7 @@ func _auto_values(level: int) -> Dictionary:
 func _set_performance_preset(index: int) -> void:
 	_performance_preset = clampi(index, 0, PERFORMANCE_PRESET_NAMES.size() - 1)
 	if _performance_preset == PerformancePreset.AUTO:
-		_auto_level = 0
+		_auto_level = AUTO_START_LEVEL
 		_auto_hold = AUTO_INITIAL_HOLD
 		_auto_frame_ms = maxf(_debug_frame_ms, 16.67)
 		_apply_performance_values(_auto_values(_auto_level))
@@ -694,6 +729,7 @@ func _apply_performance_values(values: Dictionary) -> void:
 	_set_performance_control("vorticity_frequency", values.vorticity_frequency)
 	_set_performance_control("simulation_hz", SIMULATION_RATES.find(values.simulation_hz))
 	_set_performance_control("temporal", values.temporal)
+	_set_performance_control("catchup", values.catchup)
 	_set_performance_control("water_substeps", values.water_substeps)
 	_set_performance_control("water_adaptive", values.water_adaptive)
 	_set_performance_control("water_cap", values.water_cap)
@@ -733,13 +769,22 @@ func _register_performance_control(key: String, node: Control, callback: Callabl
 func _update_auto_quality(delta: float) -> void:
 	if _performance_preset != PerformancePreset.AUTO:
 		return
-	_auto_frame_ms = lerpf(_auto_frame_ms, minf(delta * 1000.0, 100.0), 0.05)
+	_auto_frame_ms = lerpf(_auto_frame_ms, minf(delta * 1000.0, 250.0), 0.05)
 	_auto_hold -= delta
 	if _auto_hold <= 0.0:
 		var next_level := _auto_level
 		if _auto_frame_ms > AUTO_SLOW_FRAME_MS and _auto_level < AUTO_MAX_LEVEL:
-			next_level += 1
+			# Proportional, because one level per hold is far too slow to be useful
+			# from where this actually starts: the measured worst case is 121 ms, and
+			# stepping one level every three seconds spends seventeen seconds walking
+			# down a ladder the first adjustment could have descended. Each level is
+			# worth roughly a factor of two, so the overshoot in octaves is the number
+			# of levels to drop.
+			var octaves := log(_auto_frame_ms / AUTO_SLOW_FRAME_MS) / log(2.0)
+			next_level = mini(_auto_level + maxi(int(ceil(octaves)), 1), AUTO_MAX_LEVEL)
 		elif _auto_frame_ms < AUTO_FAST_FRAME_MS and _auto_level > 0:
+			# One at a time on the way back up: fast down, slow up, so the ladder
+			# settles instead of oscillating around the threshold.
 			next_level -= 1
 		if next_level != _auto_level:
 			_auto_level = next_level
@@ -770,6 +815,16 @@ func _set_simulation_hz(index: int) -> void:
 	solver.set_simulation_hz(SIMULATION_RATES[rate_index])
 	if solver.initialized:
 		RenderingServer.call_on_render_thread(solver.capture_interpolation_state_render)
+
+
+## How many simulation substeps one frame may spend catching the clock up. The
+## solver runs its whole grid loop per substep, so this multiplies the frame's
+## entire simulation cost — and the accumulator asks for more of them the slower
+## the frame gets, which is a loop that only opens downwards. Capping it lets the
+## simulation clock fall behind the wall clock instead, which is what the temporal
+## interpolation is there to hide.
+func _set_max_catchup_steps(value: float) -> void:
+	solver.max_catchup_steps = clampi(int(value), 1, 4)
 
 
 func _set_temporal_interpolation(on: bool) -> void:
@@ -1185,6 +1240,10 @@ func _setup_ui() -> void:
 		_temporal_interpolation, _set_temporal_interpolation)
 	_register_performance_control("temporal", temporal_interpolation,
 		_set_temporal_interpolation)
+	var catchup := menu.add_slider("Max catch-up substeps", 1.0, 4.0,
+		float(solver.max_catchup_steps), _set_max_catchup_steps)
+	catchup.step = 1.0
+	_register_performance_control("catchup", catchup, _set_max_catchup_steps)
 	var water_substeps := menu.add_slider("Water SPH substeps", 4.0, 16.0,
 		float(_water_substeps), _set_water_substeps)
 	water_substeps.step = 1.0
@@ -1220,7 +1279,11 @@ func _setup_ui() -> void:
 		_set_render_scale)
 	render_scale.step = 0.05
 	_register_performance_control("render_scale", render_scale, _set_render_scale)
-	_update_preset_status()
+	# Apply the default preset rather than only labelling it. Every slider above was
+	# built with the Reference value baked into its constructor, so a demo that never
+	# applied its own default ran the reference configuration whatever the preset
+	# selector said it was.
+	_set_performance_preset(_performance_preset)
 
 
 func _set_render_scale(v: float) -> void:

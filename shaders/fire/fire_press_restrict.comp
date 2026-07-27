@@ -1,0 +1,74 @@
+// SPARSE ONLY. Fine residual -> coarse right-hand side, one unknown per tile.
+//
+// Jacobi and Gauss-Seidel are both local: they move information one cell (or,
+// since the block sweep, one tile) per pass, so the residual of this solve falls
+// as ~1/N and no number of sweeps ever crosses a domain 80-160 cells wide. What
+// is left after smoothing is the long wavelengths, and those are exactly what a
+// coarse grid sees cheaply. The tile grid is already 8x coarser than the cells
+// and already enumerated, so it is the coarse grid: at most NSLOTS unknowns.
+//
+// The aggregated (Galerkin) stencil of a whole tile is exact and needs no
+// assembly. With A p = b, b = -h^2 div, and A the fine stencil of
+// fire_pressure.comp, summing the fine rows of one 8^3 tile leaves only the
+// couplings that cross the tile's own faces:
+//   diagonal              64 per face that the fine divisor counts, so 6 faces,
+//                         minus the floor face at y = 0 where the wall is Neumann;
+//   off-diagonal          -64 to each face neighbour, one per fine face;
+// so dividing the aggregated row by 64 gives  faces * P_C - sum P_nb = R_C / 64,
+// with R_C the sum of the fine residuals over the tile. That is what this pass
+// writes, and it is why only tiles whose six faces are all coupled take part:
+// their 512 cells are then all solved, which makes the count of crossing faces
+// exactly 64 per side.
+//
+// Tiles on the surface of the resident set stay out of the coarse system and are
+// treated as P = 0 by their neighbours. The fine solution is pinned to zero on
+// that shell anyway, so the correction going to zero there is consistent; what it
+// costs is acceleration in the one tile layer next to the shell, which the fine
+// smoother still handles.
+
+shared float residual_sum[512];
+
+void main() {
+	ivec3 c = cell_coord();
+	uint a = gl_WorkGroupID.x;
+	uint tid = gl_LocalInvocationIndex;
+	uint mask = tile_face_mask();
+
+	if (tid == 0u) {
+		coarse_idx[a] = mask;
+		// The coarse pass walks the tile grid and lands on atlas slots; this is how
+		// it gets back to the unknown that slot holds.
+		coarse_idx[COARSE_SLOT_BASE + active_slots[a]] = a;
+	}
+
+	float r = 0.0;
+	if (mask == COARSE_INTERIOR && !out_of_grid(c)) {
+		ivec3 gmax = grid_max();
+		float sum = 0.0;
+		float divisor = 5.0;
+		sum += (c.x < gmax.x) ? load_press_src(c + ivec3(1, 0, 0)) : 0.0;
+		sum += (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
+		sum += (c.y < gmax.y) ? load_press_src(c + ivec3(0, 1, 0)) : 0.0;
+		sum += (c.z < gmax.z) ? load_press_src(c + ivec3(0, 0, 1)) : 0.0;
+		sum += (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
+		if (c.y > 0) {
+			sum += load_press_src(c - ivec3(0, 1, 0));
+			divisor += 1.0;
+		}
+		float h = params.cell.x;
+		r = (sum - h * h * load_diverg(c)) - divisor * load_press_src(c);
+	}
+
+	residual_sum[tid] = r;
+	barrier();
+	for (uint stride = 256u; stride > 0u; stride >>= 1) {
+		if (tid < stride) {
+			residual_sum[tid] += residual_sum[tid + stride];
+		}
+		barrier();
+	}
+
+	if (tid == 0u) {
+		coarse_val[a] = residual_sum[0] * (1.0 / 64.0);
+	}
+}

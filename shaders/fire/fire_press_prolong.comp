@@ -1,0 +1,18 @@
+// SPARSE ONLY. Adds the coarse correction back onto the fine pressure field.
+//
+// Piecewise constant: one value per tile, added to all 512 of its cells. That
+// leaves a jump at every tile face, which is high frequency and therefore exactly
+// what the block sweep that follows removes — the division of labour a two-level
+// method is made of. It is also why the coarse correction is always followed by
+// smoothing and never comes last.
+//
+// In place on press_src rather than through the ping-pong: a tile writes only its
+// own cells, so no workgroup reads what another is writing.
+
+void main() {
+	ivec3 c = cell_coord();
+	if (coarse_idx[gl_WorkGroupID.x] != COARSE_INTERIOR || out_of_grid(c)) {
+		return;
+	}
+	store_press_src(c, load_press_src(c) + coarse_val[COARSE_P_BASE + gl_WorkGroupID.x]);
+}

@@ -113,7 +113,7 @@ layout(push_constant, std430) uniform Params {
 	ivec4 dims; // xyz = grid dims, w = event mode
 	vec4 cell; // cell size, dt, 1/cell size, smagorinsky Cs
 	vec4 event; // xyz = world position, w = radius
-	vec4 event2; // x = amount, yzw unused
+	vec4 event2; // x = amount, y = SOR omega, z = inner sweeps, w = coarse omega
 }
 params;
 
@@ -177,6 +177,37 @@ layout(std430, set = 0, binding = 28) restrict readonly buffer NewList {
 layout(std430, set = 0, binding = 30) restrict readonly buffer ActiveSlots {
 	uint active_slots[]; // atlas slot paired with active_list, written by tile_compact
 };
+
+// Two-level pressure solve. The coarse grid is the tile grid itself: one unknown
+// per resident tile, so the whole coarse system is at most NSLOTS equations and
+// fits in one workgroup. fire_press_restrict fills it, fire_press_coarse solves
+// it, fire_press_prolong adds the correction back.
+//
+// The pool's counter buffer, so the coarse pass — the one dispatch in the solver
+// that is not one workgroup per tile — can read how many unknowns there are
+// without the count ever coming back to the CPU.
+layout(std430, set = 0, binding = 31) restrict readonly buffer TileCounts {
+	uint tile_counts[]; // counts[] of tile_common.comp
+};
+layout(std430, set = 0, binding = 32) restrict buffer CoarseVal {
+	float coarse_val[]; // [0, N) right-hand side, [N, 2N) correction
+};
+layout(std430, set = 0, binding = 33) restrict buffer CoarseIdx {
+	// [0, N) face mask per active tile, [N, 2N) slot -> active index,
+	// [2N, 8N) the six coarse neighbours of each active tile
+	uint coarse_idx[];
+};
+
+const uint COARSE_SLOTS = uint(ATLAS_TILES.x * ATLAS_TILES.y * ATLAS_TILES.z);
+const uint COARSE_P_BASE = COARSE_SLOTS;
+const uint COARSE_SLOT_BASE = COARSE_SLOTS;
+const uint COARSE_NB_BASE = 2u * COARSE_SLOTS;
+const uint COARSE_NONE = 0xFFFFFFFFu;
+const uint C_ACTIVE_WORD = 6u; // C_ACTIVE in tile_common.comp
+// A tile is a coarse unknown only when all six of its faces are coupled. Then
+// every one of its 512 cells is solved (solved_cell only ever tests those six
+// faces), which is what makes the aggregated stencil below exact.
+const uint COARSE_INTERIOR = 63u;
 
 ivec3 invocation_vt;
 ivec3 invocation_atlas_origin;
@@ -284,8 +315,49 @@ bool solved_cell(ivec3 vc) {
 	if (lc.z == 7 && !neighbour_ok(vc + ivec3(0, 0, 1))) { return false; }
 	return true;
 }
+
+// The same answer, resolved once per workgroup instead of once per cell.
+//
+// Residency is a property of the tile, not of the cell, and topology only moves
+// between frames — so what solved_cell replies over a whole tile is fixed by six
+// bits, one per face of that tile, and re-deriving them per cell on each of the
+// 64 Jacobi iterations is the same lookup ~1200 times over for nothing.
+//
+// Bit i is set when face i may be coupled across: either the neighbouring cell
+// row lies outside the virtual domain — the domain's own wall, which the stencil
+// already handles as Dirichlet on the sides and top and Neumann on the floor — or
+// it lies in a resident tile. Only "inside the domain but not resident" makes a
+// cell part of the ghost shell. The virtual domain is a whole number of tiles, so
+// a face is entirely in or entirely out of it and the test is per tile.
+//
+// Valid for cells of the invocation's own tile that are inside the grid, which is
+// what the caller guards for.
+uint tile_face_mask() {
+	ivec3 org = invocation_vt * 8;
+	uint m = 0u;
+	if (org.x == 0 || cell_resident(org - ivec3(1, 0, 0))) { m |= 1u; }
+	if (org.x + 8 >= params.dims.x || cell_resident(org + ivec3(8, 0, 0))) { m |= 2u; }
+	if (org.y == 0 || cell_resident(org - ivec3(0, 1, 0))) { m |= 4u; }
+	if (org.y + 8 >= params.dims.y || cell_resident(org + ivec3(0, 8, 0))) { m |= 8u; }
+	if (org.z == 0 || cell_resident(org - ivec3(0, 0, 1))) { m |= 16u; }
+	if (org.z + 8 >= params.dims.z || cell_resident(org + ivec3(0, 0, 8))) { m |= 32u; }
+	return m;
+}
+
+bool solved_cell_masked(ivec3 vc, uint mask) {
+	ivec3 lc = vc & ivec3(7);
+	if (lc.x == 0 && (mask & 1u) == 0u) { return false; }
+	if (lc.x == 7 && (mask & 2u) == 0u) { return false; }
+	if (lc.y == 0 && (mask & 4u) == 0u) { return false; }
+	if (lc.y == 7 && (mask & 8u) == 0u) { return false; }
+	if (lc.z == 0 && (mask & 16u) == 0u) { return false; }
+	if (lc.z == 7 && (mask & 32u) == 0u) { return false; }
+	return true;
+}
 #else
 bool solved_cell(ivec3 c) { return true; }
+uint tile_face_mask() { return 63u; }
+bool solved_cell_masked(ivec3 c, uint mask) { return true; }
 #endif
 
 // The virtual cell this invocation owns. Dense: the dispatch is the grid, so it

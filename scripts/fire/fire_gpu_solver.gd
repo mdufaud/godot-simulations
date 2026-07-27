@@ -5,8 +5,9 @@ extends RefCounted
 ##
 ## Global one-step stoichiometric combustion in real units: mass fractions and
 ## molar concentrations, Arrhenius kinetics from the paper's Table 1, Boussinesq
-## buoyancy, vorticity confinement, MacCormack advection and a Jacobi pressure
-## projection. Every physical constant below is traceable to the paper or to the
+## buoyancy, vorticity confinement, MacCormack advection and a pressure
+## projection — Jacobi on the dense build, block Gauss-Seidel over a tile-level
+## coarse solve on the sparse one. Every physical constant below is traceable to the paper or to the
 ## reference it cites; anything that is not is marked NON-PAPER.
 ##
 ## All methods except [method push_event] and [method get_stats] must run on the
@@ -22,6 +23,12 @@ const STAGES: Array[String] = [
 ## before anything reads them. Dispatched over the pool's new-tile list, not the
 ## active list, so it never appears in the substep loop.
 const CLEAR_STAGE := "clear"
+## Sparse-only: the coarse level of the pressure solve, one unknown per tile.
+## restrict and prolong run one workgroup per tile like everything else; the solve
+## between them is the one dispatch of the whole solver that is a single
+## workgroup, because the entire coarse system fits in its shared memory.
+const COARSE_STAGES := ["press_restrict", "press_coarse", "press_prolong"]
+const COARSE_SOLVE_STAGE := "press_coarse"
 ## Stages that touch the staggered velocity faces, and so must be dispatched
 ## over the face grid (dims + 1 on every axis) rather than the cell grid. Each
 ## one guards its own writes, since the three face textures have different
@@ -125,6 +132,24 @@ var simulation_hz := 30
 var timestep := 1.0 / 30.0
 var max_catchup_steps := 4
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
+## SPARSE ONLY. Relaxation sweeps run inside one pressure dispatch, against the
+## halo the workgroup cached on entry (block-Jacobi / additive Schwarz). They ride
+## along inside a pass rather than replacing passes: pressure_iterations still
+## counts dispatches.
+var pressure_inner_sweeps := 4
+## SPARSE ONLY. Over-relaxation of the red-black sweep. 1.0 is plain Gauss-Seidel,
+## and measured, it is the best value: 1.3 was slightly worse, 1.6 clearly worse
+## and 1.7 diverged (max_divergence 37). Over-relaxing inside a block amplifies
+## the mismatch against a halo that is frozen for the pass, which is the opposite
+## of what SOR does on a globally consistent sweep. Kept as a knob because it is
+## the falsifiable part of that claim.
+var pressure_sor_omega := 1.0
+## SPARSE ONLY. Coarse-grid corrections per projection, each followed by an equal
+## share of the fine sweeps. 0 disables the two-level solve. A second cycle was
+## measured inside the run-to-run noise, so one is what ships.
+var pressure_coarse_cycles := 1
+## SPARSE ONLY. Over-relaxation of the coarse solve (see fire_press_coarse.comp).
+var pressure_coarse_omega := 1.8
 var advection_mode := ADVECTION_MACCORMACK
 
 var radiation_coefficient := 1.0 ## Fire-X Tab. 3, range 0.0-6.0
@@ -233,6 +258,8 @@ var _sets := {}
 var _tex := {}
 var _stats_buf := RID()
 var _config_buf := RID()
+var _coarse_val_buf := RID()
+var _coarse_idx_buf := RID()
 var _config_cache := PackedByteArray()
 var _parity := 0
 var _simulation_step := 0
@@ -498,6 +525,7 @@ func init_render() -> void:
 	if sparse:
 		preamble += "#define FIRE_SPARSE\n"
 		_stages.append(CLEAR_STAGE)
+		_stages.append_array(COARSE_STAGES)
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "fire_common.comp")
 	for stage in _stages:
@@ -529,6 +557,17 @@ func init_render() -> void:
 	var config_bytes := PackedByteArray()
 	config_bytes.resize(CONFIG_VEC4S * 16)
 	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
+
+	if sparse:
+		# The coarse level of the pressure solve. One unknown per atlas slot, so
+		# both buffers are fixed size: the right-hand side and the correction, then
+		# the face mask, the slot -> unknown map and the six coarse neighbours.
+		var coarse_val_bytes := PackedByteArray()
+		coarse_val_bytes.resize(2 * FireTilePool.NSLOTS * 4)
+		_coarse_val_buf = _rd.storage_buffer_create(coarse_val_bytes.size(), coarse_val_bytes)
+		var coarse_idx_bytes := PackedByteArray()
+		coarse_idx_bytes.resize(8 * FireTilePool.NSLOTS * 4)
+		_coarse_idx_buf = _rd.storage_buffer_create(coarse_idx_bytes.size(), coarse_idx_bytes)
 
 	_build_uniform_sets()
 	_update_groups()
@@ -832,6 +871,9 @@ func _build_uniform_sets() -> void:
 		extra_buffers.append([26, _pool.active_list_rid()])
 		extra_buffers.append([28, _pool.new_list_rid()])
 		extra_buffers.append([30, _pool.active_slots_rid()])
+		extra_buffers.append([31, _pool.counts_rid()])
+		extra_buffers.append([32, _coarse_val_buf])
+		extra_buffers.append([33, _coarse_idx_buf])
 
 	for stage in _stages:
 		var variants := [fields, pressure_flipped] if stage == "pressure" \
@@ -990,14 +1032,42 @@ func _substep(cl: int, liquid_active: bool) -> void:
 
 	# 22. Pressure projection.
 	_dispatch(cl, "divergence", p, pc)
-	var iters := pressure_iterations + (pressure_iterations & 1)
-	for i in iters:
-		_dispatch(cl, "pressure", i & 1, pc, i == 0)
+	# pressure_iterations is the number of dispatches, as it has always been: a
+	# tile's inner sweeps ride along inside one and cost a fraction of it
+	# (measured: a four-sweep pass costs 1.4 passes), so charging the budget for
+	# them would trade the thing that is expensive — the halo exchange, which is
+	# also the only thing that moves information between tiles — for the thing that
+	# is nearly free.
+	#
+	# The coarse correction goes in front of each share of the passes. Smoothing
+	# has to follow it, never precede it, because the correction is piecewise
+	# constant and leaves a jump at every tile face.
+	var cycles := maxi(pressure_coarse_cycles, 1) if _coarse_enabled() else 1
+	var passes := maxi(ceili(float(pressure_iterations) / float(cycles)), 1)
+	# Even, so the pressure pair ends every cycle on the same texture the coarse
+	# passes and fire_project read.
+	passes += passes & 1
+	for cycle in cycles:
+		if _coarse_enabled():
+			for stage in COARSE_STAGES:
+				_dispatch(cl, stage, 0, pc)
+		for i in passes:
+			_dispatch(cl, "pressure", i & 1, pc, i == 0)
 	_dispatch(cl, "project", p, pc)
 	_dispatch(cl, "display", p, pc)
 
 	_parity = p
 	_simulation_step += 1
+
+
+## Relaxations per pressure dispatch. The dense build has no halo cache to relax
+## against, so its dispatch is one plain Jacobi sweep, as in the paper.
+func _inner_sweeps() -> int:
+	return clampi(pressure_inner_sweeps, 1, 16) if sparse else 1
+
+
+func _coarse_enabled() -> bool:
+	return sparse and pressure_coarse_cycles > 0
 
 
 func _effective_vorticity_strength() -> float:
@@ -1025,7 +1095,12 @@ func _dispatch(cl: int, stage: String, variant: int, pc: PackedByteArray, mark :
 	_rd.compute_list_bind_compute_pipeline(cl, _pipelines[stage])
 	_rd.compute_list_bind_uniform_set(cl, _sets[stage][variant], 0)
 	_rd.compute_list_set_push_constant(cl, pc, pc.size())
-	if sparse:
+	if stage == COARSE_SOLVE_STAGE:
+		# The whole coarse system lives in one workgroup's shared memory, and how
+		# many of its unknowns are live is read from the pool's counter inside the
+		# shader — so this is the one dispatch whose size is not the tile count.
+		_rd.compute_list_dispatch(cl, 1, 1, 1)
+	elif sparse:
 		# One workgroup per tile, and the workgroup count lives on the GPU: the
 		# pool's counters double as the dispatch args, so nothing about the fire's
 		# extent ever has to come back to the CPU. The clear stage runs over the
@@ -1056,6 +1131,10 @@ func _push_constant(mode: int, pos: Vector3, radius: float, amount: float) -> Pa
 	pc.encode_float(40, pos.z)
 	pc.encode_float(44, radius)
 	pc.encode_float(48, amount)
+	# Pressure relaxation, read by fire_pressure and fire_press_coarse only.
+	pc.encode_float(52, pressure_sor_omega)
+	pc.encode_float(56, float(_inner_sweeps()))
+	pc.encode_float(60, pressure_coarse_omega)
 	return pc
 
 
@@ -1261,11 +1340,13 @@ func free_render() -> void:
 	if _pool != null:
 		_pool.free_render()
 		_pool = null
-	for buf in [_stats_buf, _config_buf]:
+	for buf in [_stats_buf, _config_buf, _coarse_val_buf, _coarse_idx_buf]:
 		if buf.is_valid():
 			_rd.free_rid(buf)
 	_stats_buf = RID()
 	_config_buf = RID()
+	_coarse_val_buf = RID()
+	_coarse_idx_buf = RID()
 	_config_cache.clear()
 	for key in _tex:
 		if _tex[key].is_valid():
