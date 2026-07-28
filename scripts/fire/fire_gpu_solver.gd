@@ -77,6 +77,14 @@ enum { ADVECTION_MACCORMACK = 0, ADVECTION_SEMI_LAGRANGIAN = 1,
 	ADVECTION_MACCORMACK_SCALARS = 2 }
 enum { VORTICITY_FULL = 0, VORTICITY_REDUCED = 1, VORTICITY_OFF = 2 }
 
+## Every field texture is created with these bits; the fp16 probe below asks the
+## device about the same set.
+const TEX_USAGE := RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
+	| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
+	| RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT \
+	| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
+	| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+
 # =========================================================================
 #  FUEL TABLE — Fire-X Tab. 1, activation energy from Westbrook & Dryer Tab. I
 # =========================================================================
@@ -546,7 +554,7 @@ func init_render() -> void:
 
 	# One source, two builds: the define is part of the string ShaderCache keys on,
 	# so the dense and sparse variants land in separate cache entries by themselves.
-	var preamble := "#version 450\n"
+	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"])
 	_stages = STAGES.duplicate()
 	if sparse:
 		preamble += "#define FIRE_SPARSE\n"
@@ -742,20 +750,19 @@ func _update_groups() -> void:
 
 
 func _create_textures() -> void:
-	var usage := RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
-		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+	var usage := TEX_USAGE
+	var scratch: Dictionary = scratch_formats(_rd)
 
 	var dims := _field_dims()
 
-	var keys_rgba := ["scal_a", "scal_b", "scal2_a", "scal2_b",
-		"scal_fwd", "scal2_fwd", "curl"]
-	for key in keys_rgba:
+	# The advection scratch (scal_fwd, scal2_fwd) keeps the state's precision: fp16
+	# measured slower there and moved the physics, see scratch_formats.
+	for key in ["scal_a", "scal_b", "scal2_a", "scal2_b", "scal_fwd", "scal2_fwd"]:
 		_tex[key] = _rd.texture_create(
 			_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage, dims),
 			RDTextureView.new(), [])
+	_tex["curl"] = _rd.texture_create(
+		_make_format(scratch["four"], usage, dims), RDTextureView.new(), [])
 
 	# Staggered MAC velocity (Fire-X Sec. 5.1, Bridson 2015): one scalar per face
 	# centre instead of a vector per cell centre. A u-face sits between cells i-1
@@ -771,16 +778,23 @@ func _create_textures() -> void:
 				_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, face_dims),
 				RDTextureView.new(), [])
 
-	for key in ["press_a", "press_b", "diverg", "nu_t"]:
+	# diverg is the pressure right-hand side, and fp16 there sets a floor under the
+	# residual the solve can reach, so it stays fp32 with the pressure pair.
+	for key in ["press_a", "press_b", "diverg"]:
 		_tex[key] = _rd.texture_create(
 			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
 			RDTextureView.new(), [])
+	_tex["nu_t"] = _rd.texture_create(
+		_make_format(scratch["one"], usage, dims), RDTextureView.new(), [])
 
-	# P3: Liquid phase coupling (SPH ↔ fire grid). Eq. 18-25.
-	for key in ["liquid_scal", "liquid_vel"]:
-		_tex[key] = _rd.texture_create(
-			_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage, dims),
-			RDTextureView.new(), [])
+	# P3: Liquid phase coupling (SPH ↔ fire grid). Eq. 18-25. liquid_vel is a
+	# per-frame gather from the particles, so it is scratch like the rest;
+	# liquid_scal carries the mass water_return has to give back exactly.
+	_tex["liquid_scal"] = _rd.texture_create(
+		_make_format(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT, usage, dims),
+		RDTextureView.new(), [])
+	_tex["liquid_vel"] = _rd.texture_create(
+		_make_format(scratch["four"], usage, dims), RDTextureView.new(), [])
 
 	_tex["display"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
@@ -807,6 +821,44 @@ func _create_textures() -> void:
 			RDTextureView.new(), [])
 
 	clear_fields()
+
+
+## Half-precision storage for three of the scratch fields (Phase 5). Each one is
+## streamed by a stage that does almost no arithmetic on it, which is the only
+## shape where halving the bytes shows up: measured -21 % on `curl` and -15 % on
+## `evapapply`, -1.6 % on the substep, -18.9 MB of atlas.
+##
+## Only these three. Measured and rejected, with the whole per-field sweep in
+## docs/fire_frame_budget_plan.md:
+##
+##   scal_fwd / scal2_fwd  slower, not faster — advect and maccormack are ALU and
+##     latency bound (Phase 3), so the pack/unpack is not paid for by the traffic.
+##     The 2 K mantissa step at flame temperature also perturbs the MacCormack
+##     correction, which is a difference of two nearly equal quantities.
+##   diverg  caps the pressure solve: the residual floor goes 0.0043 -> 0.0249 at
+##     96 iterations, which is the convergence Phase 2 was spent buying.
+##
+## A shader's format qualifier must match the texture it is bound to, so the
+## choice has to reach both this class and FireWater (which writes liquid_vel) as
+## a define. r16f is a Vulkan *extended* storage format, unlike rgba16f, so both
+## are probed and each falls back to its fp32 form on a device that refuses it.
+static func scratch_formats(rd: RenderingDevice) -> Dictionary:
+	var four := RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+	var four_name := "rgba16f"
+	if not rd.texture_is_format_supported_for_usage(four, TEX_USAGE):
+		four = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
+		four_name = "rgba32f"
+	var one := RenderingDevice.DATA_FORMAT_R16_SFLOAT
+	var one_name := "r16f"
+	if not rd.texture_is_format_supported_for_usage(one, TEX_USAGE):
+		one = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+		one_name = "r32f"
+	return {
+		"four": four,
+		"one": one,
+		"preamble": "#define FMT_CURL %s\n#define FMT_LIQ_VEL %s\n#define FMT_NU_T %s\n"
+			% [four_name, four_name, one_name],
+	}
 
 
 func _make_format(format: int, usage: int, dims: Vector3i) -> RDTextureFormat:

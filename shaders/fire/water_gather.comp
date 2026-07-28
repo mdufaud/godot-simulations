@@ -21,10 +21,11 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
 #endif
 
-// RGBA32F to match the textures allocated in FireGpuSolver (r32f silently
-// discards the temperature channel).
+// Four channels to match the textures allocated in FireGpuSolver (r32f silently
+// discards the temperature channel). liquid_vel is one of that class's scratch
+// fields, so its precision is whatever FireGpuSolver.scratch_formats picked.
 layout(rgba32f, set = 0, binding = 0) uniform restrict writeonly image3D liquid_scal;
-layout(rgba32f, set = 0, binding = 1) uniform restrict writeonly image3D liquid_vel;
+layout(FMT_LIQ_VEL, set = 0, binding = 1) uniform restrict writeonly image3D liquid_vel;
 
 layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
 	uvec4 accum[];

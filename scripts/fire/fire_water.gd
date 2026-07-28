@@ -319,7 +319,7 @@ func sph_tex_width() -> int:
 ## glslang keeps a declared-but-unused resource and the uniform set would then have
 ## to provide it.
 func _compile(name: String, with_common: bool) -> RID:
-	var src := "#version 460\n"
+	var src: String = "#version 460\n" + str(FireGpuSolver.scratch_formats(_rd)["preamble"])
 	if _sparse:
 		src += "#define WATER_SPARSE\n"
 	if with_common:

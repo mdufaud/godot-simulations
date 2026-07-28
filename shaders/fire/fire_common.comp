@@ -50,7 +50,12 @@ layout(r32f, set = 0, binding = 21) uniform restrict image3D w_fwd;
 layout(rgba32f, set = 0, binding = 2) uniform restrict image3D scal_src;
 layout(rgba32f, set = 0, binding = 3) uniform restrict image3D scal_dst;
 layout(rgba32f, set = 0, binding = 5) uniform restrict image3D scal_fwd;
-layout(rgba32f, set = 0, binding = 6) uniform restrict image3D curl_tex;
+// FMT_CURL, FMT_LIQ_VEL and FMT_NU_T are fp16 wherever the device supports the
+// storage format (FireGpuSolver.scratch_formats, which also records why the other
+// scratch fields are not). Each is written and consumed inside the substep that
+// produced it, and the stage that streams it does little arithmetic on it, which
+// is the case where halving the bytes shows up in the timings.
+layout(FMT_CURL, set = 0, binding = 6) uniform restrict image3D curl_tex;
 layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
 layout(r32f, set = 0, binding = 8) uniform restrict image3D press_dst;
 layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
@@ -73,14 +78,14 @@ layout(rgba32f, set = 0, binding = 14) uniform restrict image3D scal2_fwd;
 // The fourth lane of liquid_scal is written by fire_evaporate and read by
 // fire_evapapply; water_gather resets it to zero every frame.
 layout(rgba32f, set = 0, binding = 22) uniform restrict image3D liquid_scal;
-layout(rgba32f, set = 0, binding = 23) uniform restrict image3D liquid_vel;
+layout(FMT_LIQ_VEL, set = 0, binding = 23) uniform restrict image3D liquid_vel;
 
 // NON-PAPER: Smagorinsky sub-grid eddy viscosity [m^2/s] at cell centres, written
 // by fire_strain and read by fire_diffusion. At 0.2 m cells the turbulent
 // entrainment that would dilute a real plume is unresolved, so pure Boussinesq
 // buoyancy keeps accelerating the undiluted hot column into a jet; this closure
 // (FDS's default) supplies the missing mixing.
-layout(r32f, set = 0, binding = 24) uniform restrict image3D nu_t_tex;
+layout(FMT_NU_T, set = 0, binding = 24) uniform restrict image3D nu_t_tex;
 
 // Physical constants, uploaded once per frame. Kept out of the push constant
 // block because the fuel table alone exceeds the 128-byte guaranteed limit.
