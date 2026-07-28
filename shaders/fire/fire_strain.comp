@@ -30,8 +30,9 @@ vec3 cached_strain_velocity(ivec3 offset) {
 }
 #endif
 
-void main() {
-	ivec3 c = cell_coord();
+// Fills the cache but does not synchronise, so a merged stage can put unrelated
+// arithmetic between the loads and the barrier that consumes them.
+void strain_prefetch() {
 #ifdef FIRE_SPARSE
 	ivec3 tile_origin = invocation_vt * 8;
 	for (uint i = gl_LocalInvocationIndex; i < uint(VELOCITY_CACHE_SIZE);
@@ -44,8 +45,10 @@ void main() {
 		strain_v_cache[i] = load_v_src(vc);
 		strain_w_cache[i] = load_w_src(vc);
 	}
-	barrier();
 #endif
+}
+
+void strain_body(ivec3 c) {
 	if (out_of_grid(c)) {
 		return;
 	}
@@ -98,3 +101,14 @@ void main() {
 	float cs_h = params.cell.w * params.cell.x;
 	store_nu_t(c, cs_h * cs_h * sqrt(2.0 * ss));
 }
+
+#ifndef FIRE_MERGED
+void main() {
+	ivec3 c = cell_coord();
+	strain_prefetch();
+#ifdef FIRE_SPARSE
+	barrier();
+#endif
+	strain_body(c);
+}
+#endif

@@ -16,7 +16,7 @@ extends RefCounted
 const SHADER_DIR := "res://shaders/fire/"
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
-	"combustion", "strain", "diffusion", "evaporate", "evapapply", "divergence",
+	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
 	"pressure", "project", "display",
 ]
 ## Sparse-only stage: resets tiles the pool allocated this frame to ambient air
@@ -42,6 +42,11 @@ const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
 ## fire_common.comp). Every other stage reads velocity too rarely to earn the
 ## 12 KB, and curl and strain reach two cells out, which the apron does not cover.
 const VEL_CACHE_STAGES := ["advect", "maccormack"]
+## Stages that are two stages compiled into one dispatch. The parts keep their own
+## files and are concatenated ahead of the merged stage's main, which is what keeps
+## one source of truth for the physics; the parts' standalone mains are compiled
+## out by FIRE_MERGED.
+const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
 ## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
 const WG := Vector3i(8, 8, 4)
 ## Wood emitters the campfire can hold. Each one costs a slot in the config tail
@@ -563,12 +568,18 @@ func init_render() -> void:
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "fire_common.comp")
 	for stage in _stages:
-		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "fire_" + stage + ".comp")
+		var stage_src := ""
 		# The 10^3 velocity apron costs 12 KB of shared memory, so only the two
 		# stages that reconstruct velocity at every cell of their tile get it.
 		var defines := preamble
 		if sparse and stage in VEL_CACHE_STAGES:
 			defines += "#define FIRE_VEL_CACHE\n"
+		if stage in MERGED_PARTS:
+			defines += "#define FIRE_MERGED\n"
+			for part in MERGED_PARTS[stage]:
+				stage_src += FileAccess.get_file_as_string(
+					SHADER_DIR + "fire_" + part + ".comp") + "\n"
+		stage_src += FileAccess.get_file_as_string(SHADER_DIR + "fire_" + stage + ".comp")
 		var spirv := ShaderCache.compile(_rd, "fire_" + stage, defines + "\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("Fire stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
@@ -1092,17 +1103,25 @@ func _substep(cl: int, liquid_active: bool) -> void:
 		# the velocity it corrects lives on faces. Computing it once per cell into
 		# a scratch buffer and scattering costs one dispatch; evaluating it again
 		# per face would repeat the curl-gradient stencil six times per cell.
+		#
+		# The boundary between vorticity and vortapply is load-bearing and these
+		# two must not be merged, however cheap the recompute of the neighbouring
+		# tile's force looks: the force's velocity band reads the field vortapply
+		# writes, and vel_at_cell averages the faces at c and c + 1, so a workgroup
+		# would read a neighbour's velocity while that neighbour updated it. The
+		# merge was built and measured — it is 0.42 ms/substep faster and
+		# nondeterministic, and it stops being either as soon as the race is fixed.
+		# See docs/fire_frame_budget_plan.md, Phase 7.
 		_dispatch(cl, "curl", p, pc)
 		_dispatch(cl, "vorticity", p, pc)
 		_dispatch(cl, "vortapply", p, pc)
 
-	# 18. Combustion, in place.
-	_dispatch(cl, "combustion", p, pc)
-
-	# 19-20. Sub-grid eddy viscosity (NON-PAPER), then diffusion + thermal
-	# radiation. Both stencils; diffusion swaps parity. strain always runs
-	# (writes ~0 when Cs = 0) so a live Cs change never leaves stale nu_t behind.
-	_dispatch(cl, "strain", p, pc)
+	# 18-19. Combustion in place, then the sub-grid eddy viscosity (NON-PAPER), in
+	# one dispatch: the two read and write disjoint fields, so merging them is the
+	# same work with one launch and one barrier fewer. strain always runs (writes
+	# ~0 when Cs = 0) so a live Cs change never leaves stale nu_t behind.
+	_dispatch(cl, "comb_strain", p, pc)
+	# 20. Diffusion + thermal radiation. A stencil, and it swaps parity.
 	_dispatch(cl, "diffusion", p, pc)
 	p = 1 - p
 

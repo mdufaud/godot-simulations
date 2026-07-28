@@ -14,9 +14,11 @@
 // sharp.
 //
 // Everything here is cell-local, so reading and writing in place cannot race.
+//
+// The body is a function rather than main so that the merged combustion+strain
+// stage can call it; nothing in it may contain a barrier, since it returns early.
 
-void main() {
-	ivec3 c = cell_coord();
+void combustion_body(ivec3 c) {
 	if (out_of_grid(c)) {
 		return;
 	}
@@ -147,3 +149,9 @@ void main() {
 	store_scal_src(c, s);
 	store_scal2_src(c, s2);
 }
+
+#ifndef FIRE_MERGED
+void main() {
+	combustion_body(cell_coord());
+}
+#endif
