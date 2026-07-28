@@ -19,6 +19,11 @@
 
 void main() {
 	ivec3 c = cell_coord();
+	// Every backtrace below starts from a reconstructed velocity, and the four
+	// reconstructions read 33 faces per cell. They come from shared memory here
+	// (see load_velocity_cache); the trilinear taps still go to the images,
+	// because they can travel further than a cell.
+	load_velocity_cache();
 	float scale = params.cell.y * params.cell.z; // dt / h, world units -> index
 
 	// One invocation of the whole dispatch clears the run. Written as "first
@@ -38,24 +43,30 @@ void main() {
 #endif
 	}
 
+	// Which of the two fields the correction pass will pick up. Mode 1 is plain
+	// semi-Lagrangian throughout and mode 2 only on the faces, so the velocity
+	// result is final here in both and lands straight in *_dst.
+	bool vel_final = params.dims.w != 0;
+	bool scal_final = params.dims.w == 1;
+
 	float val, lo, hi;
 
 	if (in_u(c)) {
 		SAMPLE_TRI_R(load_u_src, u_src, vec3(c) - vel_at_u_face(c) * scale,
 			u_dims() - ivec3(1), val, lo, hi);
-		if (params.dims.w == 1) store_u_dst(c, val);
+		if (vel_final) store_u_dst(c, val);
 		else store_u_fwd(c, val);
 	}
 	if (in_v(c)) {
 		SAMPLE_TRI_R(load_v_src, v_src, vec3(c) - vel_at_v_face(c) * scale,
 			v_dims() - ivec3(1), val, lo, hi);
-		if (params.dims.w == 1) store_v_dst(c, val);
+		if (vel_final) store_v_dst(c, val);
 		else store_v_fwd(c, val);
 	}
 	if (in_w(c)) {
 		SAMPLE_TRI_R(load_w_src, w_src, vec3(c) - vel_at_w_face(c) * scale,
 			w_dims() - ivec3(1), val, lo, hi);
-		if (params.dims.w == 1) store_w_dst(c, val);
+		if (vel_final) store_w_dst(c, val);
 		else store_w_fwd(c, val);
 	}
 
@@ -63,12 +74,12 @@ void main() {
 		vec3 back = vec3(c) - vel_at_cell(c) * scale;
 		vec4 sval, slo, shi;
 		SAMPLE_TRI(load_scal_src, scal_src, back, sval, slo, shi);
-		if (params.dims.w == 1) store_scal_dst(c, vec4(
+		if (scal_final) store_scal_dst(c, vec4(
 			clamp(sval.x, cfg.thermo.x, cfg.thermo.w),
 			clamp(sval.yzw, vec3(0.0), vec3(1.0))));
 		else store_scal_fwd(c, sval);
 		SAMPLE_TRI(load_scal2_src, scal2_src, back, sval, slo, shi);
-		if (params.dims.w == 1) store_scal2_dst(c, vec4(
+		if (scal_final) store_scal2_dst(c, vec4(
 			clamp(sval.xy, vec2(0.0), vec2(1.0)), max(sval.z, 0.0), sval.w));
 		else store_scal2_fwd(c, sval);
 	}

@@ -35,6 +35,13 @@ const COARSE_SOLVE_STAGE := "press_coarse"
 ## extents and none of them fills the dispatch.
 const FACE_STAGES := ["inject", "advect", "maccormack", "forces", "vortapply",
 	"diffusion", "evapapply", "project"]
+## Sparse-only: stages compiled with the shared-memory velocity apron. Both
+## advection passes reconstruct the velocity at four staggered positions per cell,
+## which is 33 face loads each and the largest single source of traffic in the
+## stage; caching the tile's faces once is measurably cheaper (see
+## fire_common.comp). Every other stage reads velocity too rarely to earn the
+## 12 KB, and curl and strain reach two cells out, which the apron does not cover.
+const VEL_CACHE_STAGES := ["advect", "maccormack"]
 ## Workgroup is 8x8x4; grid dimensions must stay multiples of these.
 const WG := Vector3i(8, 8, 4)
 ## Wood emitters the campfire can hold. Each one costs a slot in the config tail
@@ -58,7 +65,16 @@ enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
 ## its nomenclature gives concentrations in mol/m^3 without mentioning a
 ## conversion, so both readings are offered and compared.
 enum { UNITS_CGS = 0, UNITS_SI_AS_PRINTED = 1 }
-enum { ADVECTION_MACCORMACK = 0, ADVECTION_SEMI_LAGRANGIAN = 1 }
+## ADVECTION_MACCORMACK_SCALARS transports the scalars with the limited
+## second-order scheme and the velocity with plain semi-Lagrangian. The
+## correction pass is the most expensive stage after the projection and half of it
+## is spent on the three face components, where the extra order buys swirl that
+## vorticity confinement is already there to supply; the smearing that MacCormack
+## exists to prevent is visible on the temperature and species fields, which keep
+## it. Appended rather than inserted so the stored preset indices keep meaning
+## what they meant.
+enum { ADVECTION_MACCORMACK = 0, ADVECTION_SEMI_LAGRANGIAN = 1,
+	ADVECTION_MACCORMACK_SCALARS = 2 }
 enum { VORTICITY_FULL = 0, VORTICITY_REDUCED = 1, VORTICITY_OFF = 2 }
 
 # =========================================================================
@@ -233,7 +249,17 @@ var pool_budget := FireTilePool.NSLOTS
 # lowest supported 30 Hz and 0.2 m cells the worst case is ~8.4 cells.
 const TILE_ACTIVITY_THRESHOLD := 1.0 ## fire_display normalises every term to this
 const TILE_HOLD_FRAMES := 8 ## hysteresis, so a flickering front does not thrash
+## The FORWARD radius: up and downwind. The other four directions get one tile
+## less, which is still above that bound (see tile_dilate.comp).
 const TILE_DILATE_RADIUS := 2
+## Pool-pressure relief (see keep_threshold in tile_common.comp). Below this
+## fraction of the budget still free, the keep threshold ramps up to
+## TILE_RELIEF_MAX times its nominal value, so a pool that is running out spends
+## what is left on the tiles with the strongest signal instead of on whichever
+## ones asked first. A flame clears the raised bar by two orders of magnitude, so
+## what it drops is the cold smoke and entrained air at the margin.
+const TILE_RELIEF_FRACTION := 0.25
+const TILE_RELIEF_MAX := 8.0
 ## Virtual tiles inside this world-space box around the emitter are pinned
 ## resident. Without it a fire that walks away frees its own burner and the next
 ## injection lands in an inactive tile and is dropped.
@@ -530,7 +556,12 @@ func init_render() -> void:
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "fire_common.comp")
 	for stage in _stages:
 		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "fire_" + stage + ".comp")
-		var spirv := ShaderCache.compile(_rd, "fire_" + stage, preamble + "\n" + common + "\n" + stage_src)
+		# The 10^3 velocity apron costs 12 KB of shared memory, so only the two
+		# stages that reconstruct velocity at every cell of their tile get it.
+		var defines := preamble
+		if sparse and stage in VEL_CACHE_STAGES:
+			defines += "#define FIRE_VEL_CACHE\n"
+		var spirv := ShaderCache.compile(_rd, "fire_" + stage, defines + "\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("Fire stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return
@@ -980,7 +1011,8 @@ func prepare_topology_render() -> void:
 		_rd.capture_timestamp("fire/topology_start")
 	var tcl := _rd.compute_list_begin()
 	_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD, TILE_HOLD_FRAMES,
-		TILE_DILATE_RADIUS)
+		TILE_DILATE_RADIUS, wind,
+		float(_pool.budget()) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX)
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/topology_end")
@@ -996,7 +1028,7 @@ func _substep(cl: int, liquid_active: bool) -> void:
 	var p := _parity
 
 	_dispatch(cl, "advect", p, pc)
-	if advection_mode == ADVECTION_MACCORMACK:
+	if advection_mode != ADVECTION_SEMI_LAGRANGIAN:
 		_dispatch(cl, "maccormack", p, pc)
 	p = 1 - p
 
@@ -1303,6 +1335,7 @@ func read_pool_stats() -> Dictionary:
 	var c := _pool.read_counts()
 	return {
 		"resident": c[FireTilePool.C_ACTIVE],
+		"cores": c[FireTilePool.C_KEEP],
 		"free": c[FireTilePool.C_FREE],
 		"allocated_this_frame": c[FireTilePool.C_NEW],
 		"exhausted": c[FireTilePool.C_EXHAUST],

@@ -610,12 +610,68 @@ vec3 u_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.5, 0.0, 0.0) * 
 vec3 v_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.5, 0.0) * params.cell.x; }
 vec3 w_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.0, 0.5) * params.cell.x; }
 
+// A 10^3 shared-memory apron over the three face components, for stages that
+// reconstruct velocity at every cell of their tile. Opt-in per stage
+// (FIRE_VEL_CACHE in the preamble), because 12 KB of shared memory is not worth
+// spending on a stage that reads velocity once.
+//
+// Reconstructing the tangential components at a face averages four faces of each
+// other kind, so one call to vel_at_u_face is nine loads and the four calls
+// advection makes per cell are 33 — more traffic than the trilinear taps
+// themselves, and almost all of it re-reading what the neighbouring threads have
+// already read. Reading each of the tile's faces once into shared memory instead
+// makes it 3000 loads for a workgroup of 512 rather than 16896.
+//
+// Ten is exactly the reach: every index vel_at_cell and the three face
+// reconstructions touch is within one cell of the tile, because their stencils
+// are one-sided (c and c + 1, or c - 1 and c) and the domain clamps only narrow
+// that. Nothing else may use these accessors without re-checking that.
+#if defined(FIRE_SPARSE) && defined(FIRE_VEL_CACHE)
+const int VEL_CACHE_SIDE = 10;
+const int VEL_CACHE_SIZE = VEL_CACHE_SIDE * VEL_CACHE_SIDE * VEL_CACHE_SIDE;
+shared float vel_cache_u[VEL_CACHE_SIZE];
+shared float vel_cache_v[VEL_CACHE_SIZE];
+shared float vel_cache_w[VEL_CACHE_SIZE];
+
+// Call once, after cell_coord() has resolved the invocation's tile and before
+// any velocity is read. Ends on a barrier, so it must stay in workgroup-uniform
+// control flow.
+void load_velocity_cache() {
+	ivec3 org = invocation_vt * 8 - ivec3(1);
+	uint threads = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
+	for (uint i = gl_LocalInvocationIndex; i < uint(VEL_CACHE_SIZE); i += threads) {
+		ivec3 c = org + ivec3(int(i) % VEL_CACHE_SIDE,
+			(int(i) / VEL_CACHE_SIDE) % VEL_CACHE_SIDE,
+			int(i) / (VEL_CACHE_SIDE * VEL_CACHE_SIDE));
+		vel_cache_u[i] = load_u_src(c);
+		vel_cache_v[i] = load_v_src(c);
+		vel_cache_w[i] = load_w_src(c);
+	}
+	barrier();
+}
+
+int vel_cache_index(ivec3 c) {
+	ivec3 p = c - invocation_vt * 8 + ivec3(1);
+	return p.x + VEL_CACHE_SIDE * (p.y + VEL_CACHE_SIDE * p.z);
+}
+
+#define VEL_U(p_c) vel_cache_u[vel_cache_index(p_c)]
+#define VEL_V(p_c) vel_cache_v[vel_cache_index(p_c)]
+#define VEL_W(p_c) vel_cache_w[vel_cache_index(p_c)]
+#else
+void load_velocity_cache() {}
+
+#define VEL_U(p_c) load_u_src(p_c)
+#define VEL_V(p_c) load_v_src(p_c)
+#define VEL_W(p_c) load_w_src(p_c)
+#endif
+
 // Velocity reconstructed at a cell centre: the mean of the two opposing faces.
 vec3 vel_at_cell(ivec3 c) {
 	return vec3(
-		0.5 * (load_u_src(c) + load_u_src(c + ivec3(1, 0, 0))),
-		0.5 * (load_v_src(c) + load_v_src(c + ivec3(0, 1, 0))),
-		0.5 * (load_w_src(c) + load_w_src(c + ivec3(0, 0, 1))));
+		0.5 * (VEL_U(c) + VEL_U(c + ivec3(1, 0, 0))),
+		0.5 * (VEL_V(c) + VEL_V(c + ivec3(0, 1, 0))),
+		0.5 * (VEL_W(c) + VEL_W(c + ivec3(0, 0, 1))));
 }
 
 // The full velocity vector at a face centre. The normal component is stored
@@ -626,43 +682,43 @@ vec3 vel_at_cell(ivec3 c) {
 vec3 vel_at_u_face(ivec3 f) {
 	int lo = max(f.x - 1, 0);
 	int hi = min(f.x, params.dims.x - 1);
-	float vv = 0.25 * (load_v_src(ivec3(lo, f.y, f.z))
-		+ load_v_src(ivec3(hi, f.y, f.z))
-		+ load_v_src(ivec3(lo, f.y + 1, f.z))
-		+ load_v_src(ivec3(hi, f.y + 1, f.z)));
-	float ww = 0.25 * (load_w_src(ivec3(lo, f.y, f.z))
-		+ load_w_src(ivec3(hi, f.y, f.z))
-		+ load_w_src(ivec3(lo, f.y, f.z + 1))
-		+ load_w_src(ivec3(hi, f.y, f.z + 1)));
-	return vec3(load_u_src(f), vv, ww);
+	float vv = 0.25 * (VEL_V(ivec3(lo, f.y, f.z))
+		+ VEL_V(ivec3(hi, f.y, f.z))
+		+ VEL_V(ivec3(lo, f.y + 1, f.z))
+		+ VEL_V(ivec3(hi, f.y + 1, f.z)));
+	float ww = 0.25 * (VEL_W(ivec3(lo, f.y, f.z))
+		+ VEL_W(ivec3(hi, f.y, f.z))
+		+ VEL_W(ivec3(lo, f.y, f.z + 1))
+		+ VEL_W(ivec3(hi, f.y, f.z + 1)));
+	return vec3(VEL_U(f), vv, ww);
 }
 
 vec3 vel_at_v_face(ivec3 f) {
 	int lo = max(f.y - 1, 0);
 	int hi = min(f.y, params.dims.y - 1);
-	float uu = 0.25 * (load_u_src(ivec3(f.x, lo, f.z))
-		+ load_u_src(ivec3(f.x, hi, f.z))
-		+ load_u_src(ivec3(f.x + 1, lo, f.z))
-		+ load_u_src(ivec3(f.x + 1, hi, f.z)));
-	float ww = 0.25 * (load_w_src(ivec3(f.x, lo, f.z))
-		+ load_w_src(ivec3(f.x, hi, f.z))
-		+ load_w_src(ivec3(f.x, lo, f.z + 1))
-		+ load_w_src(ivec3(f.x, hi, f.z + 1)));
-	return vec3(uu, load_v_src(f), ww);
+	float uu = 0.25 * (VEL_U(ivec3(f.x, lo, f.z))
+		+ VEL_U(ivec3(f.x, hi, f.z))
+		+ VEL_U(ivec3(f.x + 1, lo, f.z))
+		+ VEL_U(ivec3(f.x + 1, hi, f.z)));
+	float ww = 0.25 * (VEL_W(ivec3(f.x, lo, f.z))
+		+ VEL_W(ivec3(f.x, hi, f.z))
+		+ VEL_W(ivec3(f.x, lo, f.z + 1))
+		+ VEL_W(ivec3(f.x, hi, f.z + 1)));
+	return vec3(uu, VEL_V(f), ww);
 }
 
 vec3 vel_at_w_face(ivec3 f) {
 	int lo = max(f.z - 1, 0);
 	int hi = min(f.z, params.dims.z - 1);
-	float uu = 0.25 * (load_u_src(ivec3(f.x, f.y, lo))
-		+ load_u_src(ivec3(f.x, f.y, hi))
-		+ load_u_src(ivec3(f.x + 1, f.y, lo))
-		+ load_u_src(ivec3(f.x + 1, f.y, hi)));
-	float vv = 0.25 * (load_v_src(ivec3(f.x, f.y, lo))
-		+ load_v_src(ivec3(f.x, f.y, hi))
-		+ load_v_src(ivec3(f.x, f.y + 1, lo))
-		+ load_v_src(ivec3(f.x, f.y + 1, hi)));
-	return vec3(uu, vv, load_w_src(f));
+	float uu = 0.25 * (VEL_U(ivec3(f.x, f.y, lo))
+		+ VEL_U(ivec3(f.x, f.y, hi))
+		+ VEL_U(ivec3(f.x + 1, f.y, lo))
+		+ VEL_U(ivec3(f.x + 1, f.y, hi)));
+	float vv = 0.25 * (VEL_V(ivec3(f.x, f.y, lo))
+		+ VEL_V(ivec3(f.x, f.y, hi))
+		+ VEL_V(ivec3(f.x, f.y + 1, lo))
+		+ VEL_V(ivec3(f.x, f.y + 1, hi)));
+	return vec3(uu, vv, VEL_W(f));
 }
 
 // Divergence of the staggered field at a cell centre. One compact difference per

@@ -35,6 +35,7 @@ const uint C_REQUEST = 1u; // alloc requests appended this frame
 const uint C_FRAME = 2u;   // last frame number, for readback only
 const uint C_EXHAUST = 3u; // cumulative dropped requests
 const uint C_PEAK = 4u;    // reserved for CPU-side peak tracking
+const uint C_KEEP = 5u;    // resident tiles that cleared the keep threshold (cores)
 const uint C_ACTIVE = 6u;  // resident tiles; .x of the active dispatch args
 const uint C_NEW = 9u;     // tiles allocated this frame; .x of the clear args
 
@@ -61,7 +62,29 @@ layout(push_constant, std430) uniform Push {
 	uint dilate_radius;
 	ivec4 pin_lo;
 	ivec4 pin_hi;
+	// Horizontal free-stream wind [m/s]; the only thing that biases the dilation
+	// band on x and z. Buoyancy supplies the y bias and is not a parameter: a fire
+	// plume rises, whatever the settings say.
+	vec4 wind;
+	// Pool-pressure relief. .x is the free-slot count below which the keep
+	// threshold starts rising, .y the factor it reaches at zero free slots.
+	vec4 relief;
 } pc;
+
+// The keep threshold this frame. A saturated pool has to reject SOMETHING, and
+// left alone it rejects whatever asked last — allocation is first-come, so the
+// tile that loses is decided by dispatch order rather than by what is in it.
+// Raising the bar as the pool fills makes that choice on the signal instead: a
+// burning tile reads hundreds of times the threshold (a flame is ~1800 K over a
+// 5 K unit) and never notices, while the cold smoke and entrained air at the
+// margin — which is what the pool actually fills up with — is dropped first.
+//
+// Continuous rather than a cliff, so the pool settles at the occupancy where the
+// bar it implies matches the demand it admits, instead of oscillating around it.
+float keep_threshold() {
+	float relief = clamp(float(counts[C_FREE]) / max(pc.relief.x, 1.0), 0.0, 1.0);
+	return pc.threshold * mix(pc.relief.y, 1.0, relief);
+}
 
 bool tile_pinned(ivec3 vt) {
 	return all(greaterThanEqual(vt, pc.pin_lo.xyz)) && all(lessThanEqual(vt, pc.pin_hi.xyz));

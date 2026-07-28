@@ -1,7 +1,18 @@
-// Pass 2/5. Each kept tile scatters into the (2R+1)^3 box of virtual tiles
-// around it. One workgroup per slot, one thread per neighbour offset (R=2 gives
-// 5x5x5 = 125 threads). This keeps a band of resident tiles ahead of the fire so
-// the plume never touches the active-region boundary.
+// Pass 2/5. Each kept tile scatters into the box of virtual tiles around it. One
+// workgroup per slot, one thread per neighbour offset (R=2 gives a 5x5x5 = 125
+// thread grid). This keeps a band of resident tiles ahead of the fire so the
+// plume never touches the active-region boundary.
+//
+// The box is NOT the symmetric (2R+1)^3 (Phase 4, item 2). A band exists to hold
+// the tiles the fire is about to reach, and a fire does not go everywhere equally:
+// it rises, and it drifts downwind. So the full radius is spent up and downwind
+// and the other four directions get R-1, which is still more than the CFL bound —
+// velocity is clamped to 50 m/s, so at 30 Hz and 0.2 m cells the worst case is
+// ~8.4 cells, or barely more than one tile.
+//
+// Measured, the symmetric band was 2.4x the size of the set of tiles that
+// actually contain fire, i.e. two thirds of the pool was spent on the margin
+// rather than on the simulation.
 //
 //   neighbour already resident  -> refresh its wanted_frame
 //   neighbour inactive          -> reserve it with a CAS and append one alloc
@@ -17,8 +28,23 @@ void main() {
 		return;
 	}
 
+	// Anisotropic band. The shrunk radius is never less than one: a core with no
+	// neighbours at all would have the pressure solve's ghost shell running through
+	// its own faces.
+	const float WIND_EPS = 0.5; // m/s, below this the drift is not worth a tile
+	int r = int(pc.dilate_radius);
+	int r_back = max(r - 1, 1);
+	ivec3 lo = ivec3(-r_back);
+	ivec3 hi = ivec3(r_back);
+	hi.y = r; // buoyancy
+	if (pc.wind.x > WIND_EPS) { hi.x = r; } else if (pc.wind.x < -WIND_EPS) { lo.x = -r; }
+	if (pc.wind.z > WIND_EPS) { hi.z = r; } else if (pc.wind.z < -WIND_EPS) { lo.z = -r; }
+
 	ivec3 vt = vti_to_vt(sm_vti(slot));
-	ivec3 off = ivec3(gl_LocalInvocationID) - ivec3(int(pc.dilate_radius));
+	ivec3 off = ivec3(gl_LocalInvocationID) - ivec3(r);
+	if (any(lessThan(off, lo)) || any(greaterThan(off, hi))) {
+		return;
+	}
 	ivec3 nvt = vt + off;
 	if (any(lessThan(nvt, ivec3(0))) || any(greaterThanEqual(nvt, VTILES))) {
 		return;

@@ -34,6 +34,7 @@ const C_REQUEST := 1
 const C_FRAME := 2
 const C_EXHAUST := 3
 const C_PEAK := 4
+const C_KEEP := 5
 const C_ACTIVE := 6
 const C_NEW := 9
 const COUNTS_WORDS := 12
@@ -265,7 +266,7 @@ func bootstrap(vtis: PackedInt32Array, pin_lo := Vector3i(1, 1, 1),
 func reset_frame_counts(frame: int) -> void:
 	var zero := PackedByteArray()
 	zero.resize(4)
-	for word in [C_ACTIVE, C_REQUEST, C_NEW]:
+	for word in [C_ACTIVE, C_REQUEST, C_NEW, C_KEEP]:
 		_rd.buffer_update(_buf["counts"], word * 4, 4, zero)
 	var f := PackedByteArray()
 	f.resize(4)
@@ -275,9 +276,11 @@ func reset_frame_counts(frame: int) -> void:
 
 ## Record the five topology passes into an open compute list. Barriers between
 ## passes make each one see the previous one's writes.
-func record(cl: int, frame: int, threshold: float, hold_frames: int, dilate_radius: int) -> void:
+func record(cl: int, frame: int, threshold: float, hold_frames: int,
+		dilate_radius: int, wind := Vector3.ZERO, relief_slots := 0.0,
+		relief_max := 1.0) -> void:
 	var pc := PackedByteArray()
-	pc.resize(48)
+	pc.resize(80)
 	pc.encode_u32(0, frame)
 	pc.encode_float(4, threshold)
 	pc.encode_u32(8, hold_frames)
@@ -285,6 +288,9 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int, dilate_radi
 	for i in 3:
 		pc.encode_s32(16 + i * 4, _pin_lo[i])
 		pc.encode_s32(32 + i * 4, _pin_hi[i])
+		pc.encode_float(48 + i * 4, wind[i])
+	pc.encode_float(64, relief_slots)
+	pc.encode_float(68, relief_max)
 
 	var per_slot := ceili(float(_budget) / 64.0)
 	_pass(cl, "mark", _budget, 1, 1, pc)     # one workgroup per slot

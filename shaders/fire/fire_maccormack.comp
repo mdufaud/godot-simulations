@@ -12,11 +12,19 @@
 
 void main() {
 	ivec3 c = cell_coord();
+	// See fire_advect: the forward and backward traces reconstruct the same 33
+	// faces per cell, so the tile's velocity is cached in shared memory first.
+	load_velocity_cache();
 	float scale = params.cell.y * params.cell.z;
+
+	// Mode 2 corrects the scalars only: fire_advect has already written the final
+	// semi-Lagrangian velocity to *_dst, and *_fwd holds nothing to correct
+	// against.
+	bool correct_velocity = params.dims.w == 0;
 
 	float hat, lo, hi, tld, ignore_lo, ignore_hi;
 
-	if (in_u(c)) {
+	if (correct_velocity && in_u(c)) {
 		vec3 step_uv = vel_at_u_face(c) * scale;
 		ivec3 dmax = u_dims() - ivec3(1);
 		SAMPLE_TRI_R(load_u_src, u_src, vec3(c) - step_uv, dmax, hat, lo, hi);
@@ -24,7 +32,7 @@ void main() {
 		float nv = clamp(hat + 0.5 * (load_u_src(c) - tld), lo, hi);
 		store_u_dst(c, nv);
 	}
-	if (in_v(c)) {
+	if (correct_velocity && in_v(c)) {
 		vec3 step_uv = vel_at_v_face(c) * scale;
 		ivec3 dmax = v_dims() - ivec3(1);
 		SAMPLE_TRI_R(load_v_src, v_src, vec3(c) - step_uv, dmax, hat, lo, hi);
@@ -32,7 +40,7 @@ void main() {
 		float nv = clamp(hat + 0.5 * (load_v_src(c) - tld), lo, hi);
 		store_v_dst(c, nv);
 	}
-	if (in_w(c)) {
+	if (correct_velocity && in_w(c)) {
 		vec3 step_uv = vel_at_w_face(c) * scale;
 		ivec3 dmax = w_dims() - ivec3(1);
 		SAMPLE_TRI_R(load_w_src, w_src, vec3(c) - step_uv, dmax, hat, lo, hi);

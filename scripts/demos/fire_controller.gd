@@ -641,6 +641,14 @@ func _pour_water() -> void:
 ## the old one left 0.087 at 64, so every one of these halvings buys accuracy as
 ## well as milliseconds. Reference keeps the paper's 64 (Tab. 3 range 64-128): it
 ## is the control, and there it now costs 23 % more for an 18x lower residual.
+##
+## [code]advection[/code] has a middle rung since Phase 3: mode 2 corrects the
+## scalars with MacCormack and leaves the velocity on plain semi-Lagrangian.
+## Measured at 2048 tiles it is 5.1 ms against 8.8 for the full correction and 0
+## for none, and it holds the plume at 2118 K / 9.07 total reaction where dropping
+## the correction entirely gives 1984 K / 7.05. That is roughly proportional — it
+## is a rung on the ladder, not a free lunch — so it goes where the ladder used to
+## step straight from full MacCormack to none.
 func _preset_values(index: int) -> Dictionary:
 	match index:
 		PerformancePreset.QUALITY:
@@ -656,7 +664,7 @@ func _preset_values(index: int) -> Dictionary:
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
 				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}
 		PerformancePreset.REALTIME_LITE:
-			return {pressure = 16, advection = 0, vorticity_mode = 1,
+			return {pressure = 16, advection = 2, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
@@ -699,7 +707,8 @@ func _auto_values(level: int) -> Dictionary:
 			values.merge({pressure = 32, march_step = 1.5, march_budget = 192,
 				march_distance = 56.0, water_scale = 0.45, render_scale = 0.8}, true)
 		4:
-			values.merge({pressure = 24, vorticity_mode = 1, vorticity_frequency = 2,
+			values.merge({pressure = 24, advection = 2, vorticity_mode = 1,
+				vorticity_frequency = 2,
 				catchup = 2, water_substeps = 12, water_adaptive = true,
 				water_cap = 12288, march_step = 1.75,
 				march_budget = 160, march_distance = 48.0, water_scale = 0.4,
@@ -807,7 +816,7 @@ func _update_preset_status() -> void:
 
 func _set_advection_mode(index: int) -> void:
 	solver.advection_mode = clampi(index, FireGpuSolver.ADVECTION_MACCORMACK,
-		FireGpuSolver.ADVECTION_SEMI_LAGRANGIAN)
+		FireGpuSolver.ADVECTION_MACCORMACK_SCALARS)
 
 
 func _set_simulation_hz(index: int) -> void:
@@ -1012,8 +1021,13 @@ func _update_debug_overlay() -> void:
 			_format_timings(timings) if not timings.is_empty() else "--"],
 	]
 	if solver.sparse:
-		lines.append("pool %d/%d resident | %d free | %d new | %d exhausted" % [
+		# Cores are the tiles that cleared the keep threshold on their own; the rest
+		# are only resident because they fell in some core's dilation band. The split
+		# is what says whether the pool is holding fire or margin.
+		lines.append("pool %d/%d resident (%d core / %d band) | %d free | %d new | %d exhausted" % [
 			int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
+			int(pool.get("cores", 0)),
+			int(pool.get("resident", 0)) - int(pool.get("cores", 0)),
 			int(pool.get("free", 0)), int(pool.get("allocated_this_frame", 0)),
 			int(pool.get("exhausted", 0))])
 		lines.append("proxy (%.1f, %.1f, %.1f) size (%.1f, %.1f, %.1f)" % [
@@ -1220,8 +1234,11 @@ func _setup_ui() -> void:
 	pressure_slider.step = 2.0
 	_register_performance_control("pressure", pressure_slider,
 		func(v: float): solver.pressure_iterations = int(v))
+	# Entry order is the enum order, not the quality order: the third mode was
+	# appended so that a preset storing 0 or 1 keeps meaning what it meant.
 	var advection_option := menu.add_option_button("Advection",
-		["MacCormack", "Semi-Lagrangian"], solver.advection_mode, _set_advection_mode)
+		["MacCormack", "Semi-Lagrangian", "MacCormack (scalars)"],
+		solver.advection_mode, _set_advection_mode)
 	_register_performance_control("advection", advection_option, _set_advection_mode)
 	var vorticity_option := menu.add_option_button("Vorticity mode",
 		["Full", "Reduced", "Off"], solver.vorticity_mode, _set_vorticity_mode)
