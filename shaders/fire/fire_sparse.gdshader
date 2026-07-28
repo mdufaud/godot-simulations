@@ -186,13 +186,21 @@ void fragment() {
 	// to unroll (see march_budget).
 	float t_exit = min(min(t_next.x, t_next.y), t_next.z);
 	float seg_end = min(t_exit, t1);
+	// Without temporal interpolation the previous frame's atlas is never read, so
+	// its indirection fetch and its activity fetch are two texelFetch per tile
+	// step for nothing. Hoisted out of the loop as a uniform-valued flag.
+	bool use_prev = temporal_blend < 0.999;
 	uint current_slot = indir_slot(ti, false);
 	ivec3 current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
-	uint previous_slot = indir_slot(ti, true);
-	ivec3 previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+	uint previous_slot = 0xFFFFFFFFu;
+	ivec3 previous_atlas = ivec3(0);
+	if (use_prev) {
+		previous_slot = indir_slot(ti, true);
+		previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+	}
 	bool resident = current_slot < SLOT_MAX
 		&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
-	resident = resident || (temporal_blend < 0.999 && previous_slot < SLOT_MAX
+	resident = resident || (use_prev && previous_slot < SLOT_MAX
 		&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 
 	for (int i = 0; i < march_budget; i++) {
@@ -201,7 +209,7 @@ void fragment() {
 			vec3 sample_pos = p + volume_center;
 			vec3 virtual_pos = (sample_pos - virtual_origin) / cell_size;
 			vec4 s = sample_virtual(virtual_pos, ti, current_slot, current_atlas, false);
-			if (temporal_blend < 0.999) {
+			if (use_prev) {
 				vec4 previous = sample_virtual(virtual_pos, ti, previous_slot,
 					previous_atlas, true);
 				s = mix(previous, s, temporal_blend);
@@ -238,11 +246,13 @@ void fragment() {
 		seg_end = min(t_exit, t1);
 		current_slot = indir_slot(ti, false);
 		current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
-		previous_slot = indir_slot(ti, true);
-		previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+		if (use_prev) {
+			previous_slot = indir_slot(ti, true);
+			previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+		}
 		resident = current_slot < SLOT_MAX
 			&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
-		resident = resident || (temporal_blend < 0.999 && previous_slot < SLOT_MAX
+		resident = resident || (use_prev && previous_slot < SLOT_MAX
 			&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 		// Skipped tiles cost the sample lattice nothing: the cursor is snapped
 		// forward onto it rather than restarted, so the jitter pattern does not

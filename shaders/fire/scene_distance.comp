@@ -1,0 +1,55 @@
+// Half-resolution scene distance, for the half-res volume pass (Phase 6 item 1).
+//
+// The volume raymarcher truncates every ray at whatever opaque geometry stands
+// behind the pixel. Rendered in a SubViewport it cannot reach the main render's
+// depth buffer — a viewport only ever sees its own — so this runs as a
+// CompositorEffect on the main camera, linearises the resolved depth into a
+// distance from the camera and downsamples it into the texture the SubViewport's
+// raymarch and the upsampling composite both read.
+//
+// FARTHEST of each block, not nearest: with one marched sample per 2x2 the ray
+// has to choose which of the four surfaces it stops at, and stopping at the far
+// one lets the flame bleed a pixel or so over a silhouette, where stopping at the
+// near one would cut a dark halo out of the plume around every occluder. The
+// composite's depth-aware upsample then pulls the edge back to where it belongs
+// on the pixels that have a matching tap.
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D depth_tex;
+layout(r32f, set = 0, binding = 1) uniform restrict writeonly image2D out_dist;
+
+layout(push_constant, std430) uniform Params {
+	mat4 inv_projection;
+	ivec2 out_size;
+	ivec2 depth_size;
+} p;
+
+void main() {
+	ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(o, p.out_size))) {
+		return;
+	}
+
+	// Reversed-Z: the raw depth falls from 1 at the near plane to 0 at the far
+	// one, so the farthest surface in the block is the SMALLEST raw value.
+	ivec2 base = o * 2;
+	float raw = 1.0;
+	for (int dy = 0; dy < 2; dy++) {
+		for (int dx = 0; dx < 2; dx++) {
+			ivec2 t = min(base + ivec2(dx, dy), p.depth_size - ivec2(1));
+			raw = min(raw, texelFetch(depth_tex, t, 0).r);
+		}
+	}
+
+	// NDC -> view space. The camera sits at the view-space origin, so the length
+	// of the view position IS the distance the raymarch measures its t against.
+	// A y flip in this reconstruction would not change that length, which is why
+	// the texture is safe to sample by screen UV whatever the target's handedness.
+	vec2 uv = (vec2(o) + vec2(0.5)) / vec2(p.out_size);
+	vec4 ndc = vec4(uv * 2.0 - 1.0, raw, 1.0);
+	vec4 view = p.inv_projection * ndc;
+	view.xyz /= view.w;
+	imageStore(out_dist, o, vec4(length(view.xyz), 0.0, 0.0, 0.0));
+}

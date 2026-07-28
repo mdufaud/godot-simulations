@@ -13,6 +13,11 @@
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
+// Half-res scene distance published by FireSceneDistance. Only read when the
+// volume is marched in its own SubViewport, whose depth buffer holds nothing but
+// the volume itself (Phase 6 item 1).
+uniform sampler2D scene_distance_tex : filter_nearest;
+uniform bool external_scene_depth = false;
 
 uniform vec3 box_size = vec3(6.4, 9.6, 6.4);
 // Temperature the volume's red channel is normalised against, so the blackbody
@@ -71,6 +76,9 @@ bool box_span(vec3 ray_origin, vec3 ray_dir, vec3 lo, vec3 hi, out float t0, out
 // volume stops at whatever occludes it. Forward+ is reversed-Z: the NDC z is the
 // raw depth in [0,1]. Built-ins are passed in because this is not fragment().
 float scene_depth_distance(vec2 screen_uv, mat4 inv_projection, mat4 inv_view, vec3 camera_world) {
+	if (external_scene_depth) {
+		return texture(scene_distance_tex, screen_uv).r;
+	}
 	float depth_raw = texture(depth_texture, screen_uv).r;
 	vec4 ndc = vec4(screen_uv * 2.0 - 1.0, depth_raw, 1.0);
 	vec4 view_pos = inv_projection * ndc;

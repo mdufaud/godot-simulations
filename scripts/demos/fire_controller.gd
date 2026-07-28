@@ -2,6 +2,7 @@ extends Node3D
 ## Fire Demo Controller — Fire-X combustion, volumetrically raymarched.
 
 const FireWater = preload("res://scripts/fire/fire_water.gd")
+const FireSceneDistance = preload("res://scripts/fire/fire_scene_distance.gd")
 ##
 ## The solver lives entirely in RenderingDevice textures (see FireGpuSolver);
 ## this node queues grid emitters, binds the display volume to the shader and
@@ -56,6 +57,22 @@ const SPARSE_VOLUME_SHADER := "res://shaders/fire/fire_sparse.gdshader"
 
 var fluid_renderer: ScreenSpaceFluidRenderer
 
+# --- Half-resolution volume pass (Phase 6 item 1) ---
+## Visual layer the volume mesh moves to when the half-res pass is on, so the main
+## camera stops drawing it and only the half-res camera does. Bits 2/4/8 belong to
+## ScreenSpaceFluidRenderer's prepasses.
+const LAYER_FIRE_VOLUME := 16
+const VOLUME_UPSAMPLE_SHADER := "res://shaders/fire/fire_volume_upsample.gdshader"
+var _volume_half_res := false
+var _volume_vp: SubViewport
+var _volume_cam: Camera3D
+var _volume_composite: MeshInstance3D
+var _volume_composite_mat: ShaderMaterial
+var _scene_distance: CompositorEffect
+var _scene_distance_tex: Texture2DRD
+var _volume_vp_size := Vector2i.ZERO
+var _external_depth_bound := false
+
 # --- Fuel mode ---
 var gas_mode := true
 var _gas_fuel_index := 0
@@ -100,8 +117,15 @@ const AUTO_MAX_LEVEL := 5
 ## slideshow before the ladder walks down. Auto climbs back up on its own when
 ## frames are fast, so a machine that can afford level 0 loses nothing permanent.
 const AUTO_START_LEVEL := 2
+## Phase 6 item 4. Measured on the heavy scenario at Auto level 5: the main
+## viewport's GPU time is 17.16 ms at 4x, 16.17 at 2x and 14.73 with MSAA off, so
+## anti-aliasing is worth ~2.4 ms — about as much as the whole vorticity stage —
+## and it is pure image quality, which is what a performance ladder is for.
+const MSAA_MODES := [Viewport.MSAA_DISABLED, Viewport.MSAA_2X, Viewport.MSAA_4X]
+const MSAA_NAMES := ["Off", "2x", "4x"]
 
 var _performance_preset := PerformancePreset.AUTO
+var _msaa_entry_mode := -1
 var _performance_controls := {}
 var _preset_status_label: Label
 var _auto_level := 0
@@ -219,6 +243,7 @@ func _ready() -> void:
 			solver.active_tile_args_rid()))
 
 	_setup_fluid_renderer()
+	_setup_half_res_volume()
 	_build_wood_bed()
 	_setup_ui()
 	_set_fuel_mode(false)
@@ -332,6 +357,7 @@ func _process(delta: float) -> void:
 	if water.initialized:
 		fluid_renderer.update(water.sph_position_tex_rid(), water.particles_active)
 
+	_update_half_res_volume()
 	_update_light(stats)
 	_update_ui_stats(stats)
 	_update_debug_overlay()
@@ -340,6 +366,12 @@ func _process(delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	if _msaa_entry_mode >= 0:
+		get_viewport().msaa_3d = _msaa_entry_mode
+	if _scene_distance_tex != null:
+		_scene_distance_tex.texture_rd_rid = RID()
+	if _scene_distance != null:
+		RenderingServer.call_on_render_thread(_scene_distance.free_render)
 	if volume_texture != null:
 		volume_texture.texture_rd_rid = RID()
 	if previous_volume_texture != null:
@@ -550,6 +582,121 @@ func _setup_fluid_renderer() -> void:
 	cm.set_shader_parameter("absorption_scale", 0.15)
 
 
+## Phase 6 item 1: march the volume at half the linear resolution — a quarter of
+## the rays — and put it back on screen with a depth-aware upsample.
+##
+## The volume mesh stays exactly where it is in the world; what moves is which
+## camera is allowed to see it. On its own visual layer the main camera skips it
+## and a half-res SubViewport camera draws it instead, so nothing about the march
+## changes except how many fragments run it. The one thing a SubViewport cannot
+## have is the main render's depth buffer, which is what the ray stops against —
+## FireSceneDistance publishes it as a texture (see that class for the one-frame
+## lag this implies).
+func _setup_half_res_volume() -> void:
+	_volume_vp = SubViewport.new()
+	_volume_vp.own_world_3d = false
+	_volume_vp.transparent_bg = true
+	_volume_vp.use_hdr_2d = true
+	_volume_vp.msaa_3d = Viewport.MSAA_DISABLED
+	_volume_vp.positional_shadow_atlas_size = 0
+	_volume_vp.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_volume_vp.size = Vector2i(2, 2)
+	add_child(_volume_vp)
+	_volume_cam = Camera3D.new()
+	_volume_cam.cull_mask = LAYER_FIRE_VOLUME
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0, 0, 0, 0)
+	_volume_cam.environment = env
+	_volume_vp.add_child(_volume_cam)
+	_volume_cam.current = true
+
+	_volume_composite_mat = ShaderMaterial.new()
+	_volume_composite_mat.shader = load(VOLUME_UPSAMPLE_SHADER)
+	_volume_composite_mat.set_shader_parameter("volume_tex", _volume_vp.get_texture())
+	# Above the water composite (priority 0), which is where the volume mesh's own
+	# render_priority put it.
+	_volume_composite_mat.render_priority = 1
+	var quad := QuadMesh.new()
+	quad.size = Vector2(2.0, 2.0)
+	quad.material = _volume_composite_mat
+	_volume_composite = MeshInstance3D.new()
+	_volume_composite.mesh = quad
+	_volume_composite.custom_aabb = AABB(Vector3(-1e4, -1e4, -1e4), Vector3(2e4, 2e4, 2e4))
+	_volume_composite.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_volume_composite.visible = false
+	add_child(_volume_composite)
+
+	_scene_distance = FireSceneDistance.new()
+	_scene_distance.enabled = false
+	var compositor := Compositor.new()
+	compositor.compositor_effects = [_scene_distance]
+	player.get_camera().compositor = compositor
+
+
+func _set_volume_half_res(on: bool) -> void:
+	if _volume_vp == null:
+		return
+	_volume_half_res = on
+	var cam := player.get_camera()
+	fire_volume.layers = LAYER_FIRE_VOLUME if on else 1
+	cam.cull_mask = (cam.cull_mask & ~LAYER_FIRE_VOLUME) if on \
+		else (cam.cull_mask | LAYER_FIRE_VOLUME)
+	_volume_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if on \
+		else SubViewport.UPDATE_DISABLED
+	_scene_distance.enabled = on
+	if not on:
+		_external_depth_bound = false
+		_set_volume_parameter("external_scene_depth", false)
+		_volume_composite.visible = false
+
+
+## Track the window, the global render scale and the distance texture's RID, all
+## three of which can change under a running demo.
+func _update_half_res_volume() -> void:
+	if not _volume_half_res:
+		return
+	_volume_cam.global_transform = player.get_camera().global_transform
+	_volume_cam.fov = player.get_camera().fov
+	_volume_cam.near = player.get_camera().near
+	_volume_cam.far = player.get_camera().far
+	# Half of what the main viewport actually renders at, not half of the window:
+	# the global render scale already shrinks the main render, and the composite's
+	# upsample assumes the two agree.
+	var vp := get_viewport()
+	var internal := Vector2(vp.size) * vp.scaling_3d_scale
+	var half := Vector2i(maxi(int(internal.x) / 2, 1), maxi(int(internal.y) / 2, 1))
+	if half != _volume_vp_size:
+		_volume_vp_size = half
+		_volume_vp.size = half
+		_volume_composite_mat.set_shader_parameter("low_res_size", Vector2(half))
+	# The effect allocates its texture on the render thread, so the first frames
+	# after the toggle have no distance texture at all. Binding a Texture2DRD that
+	# holds no RD texture yet builds a material uniform set the pipeline rejects
+	# ("Uniforms supplied for set (3) are not the same format"), and marching
+	# against the sampler's white fallback would truncate every ray at 1 m — so
+	# both the parameter and the external-depth switch wait for a live RID.
+	var dist: RID = _scene_distance.output_rid
+	if not dist.is_valid():
+		return
+	if _scene_distance_tex == null:
+		_scene_distance_tex = Texture2DRD.new()
+	if _scene_distance_tex.texture_rd_rid != dist:
+		# Assigning straight over a live RID goes through texture_replace, which frees
+		# the RD texture underneath it — one the effect owns and recycles. Clearing
+		# first only drops the wrapper, which is all that should happen here.
+		_scene_distance_tex.texture_rd_rid = RID()
+		_scene_distance_tex.texture_rd_rid = dist
+		_set_volume_parameter("scene_distance_tex", _scene_distance_tex)
+		_volume_composite_mat.set_shader_parameter("scene_distance_tex",
+			_scene_distance_tex)
+		_external_depth_bound = false
+	if not _external_depth_bound:
+		_external_depth_bound = true
+		_set_volume_parameter("external_scene_depth", true)
+	_volume_composite.visible = fire_volume.visible
+
+
 ## The three water buttons are a radio group: turning one on selects that intensity
 ## and clears the others; turning the active one off stops the jet.
 func _set_water_level(level: int, on: bool) -> void:
@@ -656,31 +803,36 @@ func _preset_values(index: int) -> Dictionary:
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				catchup = 3, water_substeps = 16, water_adaptive = true,
 				water_cap = 16384, march_step = 1.0, march_budget = 280,
-				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0}
+				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0,
+				msaa = 2, volume_half = false}
 		PerformancePreset.BALANCED:
 			return {pressure = 24, advection = 0, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 30, temporal = false,
 				catchup = 2, water_substeps = 14, water_adaptive = true,
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
-				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8}
+				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8,
+				msaa = 1, volume_half = true}
 		PerformancePreset.REALTIME_LITE:
 			return {pressure = 16, advection = 2, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
-				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
+				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65,
+				msaa = 1, volume_half = true}
 		PerformancePreset.PERFORMANCE:
 			return {pressure = 16, advection = 1, vorticity_mode = 2,
 				vorticity_frequency = 4, simulation_hz = 30, temporal = false,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
-				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65}
+				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65,
+				msaa = 0, volume_half = true}
 		_:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				catchup = 4, water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.75, march_budget = 320,
-				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0}
+				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0,
+				msaa = 2, volume_half = false}
 
 
 ## The Auto ladder. Levels 1-3 give up rendering only, 4-5 then reduce the
@@ -702,17 +854,19 @@ func _auto_values(level: int) -> Dictionary:
 				march_distance = 72.0, water_scale = 0.6}, true)
 		2:
 			values.merge({pressure = 32, march_step = 1.25, march_budget = 240,
-				march_distance = 64.0, water_scale = 0.5, render_scale = 0.9}, true)
+				march_distance = 64.0, water_scale = 0.5, render_scale = 0.9,
+				volume_half = true}, true)
 		3:
 			values.merge({pressure = 32, march_step = 1.5, march_budget = 192,
-				march_distance = 56.0, water_scale = 0.45, render_scale = 0.8}, true)
+				march_distance = 56.0, water_scale = 0.45, render_scale = 0.8,
+				msaa = 1, volume_half = true}, true)
 		4:
 			values.merge({pressure = 24, advection = 2, vorticity_mode = 1,
 				vorticity_frequency = 2,
 				catchup = 2, water_substeps = 12, water_adaptive = true,
 				water_cap = 12288, march_step = 1.75,
 				march_budget = 160, march_distance = 48.0, water_scale = 0.4,
-				render_scale = 0.75}, true)
+				render_scale = 0.75, msaa = 1, volume_half = true}, true)
 		5:
 			values = _preset_values(PerformancePreset.PERFORMANCE)
 	return values
@@ -747,6 +901,8 @@ func _apply_performance_values(values: Dictionary) -> void:
 	_set_performance_control("march_distance", values.march_distance)
 	_set_performance_control("water_scale", values.water_scale)
 	_set_performance_control("render_scale", values.render_scale)
+	_set_performance_control("msaa", values.msaa)
+	_set_performance_control("volume_half", values.volume_half)
 
 
 func _set_performance_control(key: String, value: Variant) -> void:
@@ -1296,6 +1452,12 @@ func _setup_ui() -> void:
 		_set_render_scale)
 	render_scale.step = 0.05
 	_register_performance_control("render_scale", render_scale, _set_render_scale)
+	var msaa := menu.add_option_button("Anti-aliasing", MSAA_NAMES,
+		MSAA_MODES.find(get_viewport().msaa_3d), _set_msaa)
+	_register_performance_control("msaa", msaa, _set_msaa)
+	var volume_half := menu.add_toggle("Half-res volume pass", _volume_half_res,
+		_set_volume_half_res)
+	_register_performance_control("volume_half", volume_half, _set_volume_half_res)
 	# Apply the default preset rather than only labelling it. Every slider above was
 	# built with the Reference value baked into its constructor, so a demo that never
 	# applied its own default ran the reference configuration whatever the preset
@@ -1307,3 +1469,13 @@ func _set_render_scale(v: float) -> void:
 	var vp := get_viewport()
 	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
 	vp.scaling_3d_scale = v
+
+
+## MSAA lives on the root viewport, which outlives this demo, so the mode this
+## scene found is remembered and put back in _exit_tree — otherwise a walk through
+## the fire demo would leave every other demo un-antialiased.
+func _set_msaa(index: int) -> void:
+	var vp := get_viewport()
+	if _msaa_entry_mode < 0:
+		_msaa_entry_mode = vp.msaa_3d
+	vp.msaa_3d = MSAA_MODES[clampi(index, 0, MSAA_MODES.size() - 1)]
