@@ -40,6 +40,16 @@ layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
 	ivec4 accum[];  // xyz = Sum u*w [m/s], w unused
 } vscatter;
 
+#ifdef WATER_SPARSE
+// One flag per pool slot, raised for every slot this frame's scatter can reach, so
+// water_tiles can compact them into the gather's dispatch list. Plain stores rather
+// than atomics: every writer stores the same 1u, and the pass that reads them is a
+// separate dispatch behind a barrier.
+layout(std430, set = 0, binding = 5) writeonly restrict buffer TileFlags {
+	uint flags[];
+} tf;
+#endif
+
 // Scalars rather than a vec3 for the origin: std430 aligns a vec3 to 16 bytes,
 // which silently shifts every field after it.
 layout(push_constant, std430) uniform Params {
@@ -102,6 +112,26 @@ void main() {
 
 	ivec3 c_base = clamp(ivec3(p_local / params.cell_size), ivec3(0), dims - 1);
 	int search_rad = int(ceil(params.h_liquid / params.cell_size));
+
+#ifdef WATER_SPARSE
+	// Mark the tiles this particle's support can reach. Its own loop rather than a
+	// store inside the scatter below, because the support is 5^3 cells but spans at
+	// most 2 tiles per axis: 8 iterations instead of 125. Marking a tile whose cells
+	// all end up with zero weight is harmless — the gather writes it the zeros it
+	// would have held anyway.
+	ivec3 t_lo = max(c_base - search_rad, ivec3(0)) >> 3;
+	ivec3 t_hi = min(c_base + search_rad, dims - 1) >> 3;
+	for (int tx = t_lo.x; tx <= t_hi.x; ++tx) {
+		for (int ty = t_lo.y; ty <= t_hi.y; ++ty) {
+			for (int tz = t_lo.z; tz <= t_hi.z; ++tz) {
+				uint slot = imageLoad(tile_indir, ivec3(tx, ty, tz)).r;
+				if (slot < TILE_SLOT_MAX) {
+					tf.flags[slot] = 1u;
+				}
+			}
+		}
+	}
+#endif
 
 	// Pass 1: this particle's own weight sum, for the normalisation.
 	float w_sum = 0.0;

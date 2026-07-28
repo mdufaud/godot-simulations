@@ -239,8 +239,7 @@ func _ready() -> void:
 	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
 	RenderingServer.call_on_render_thread(func() -> void:
 		water.init_render(solver.sim_dims(), solver.cell_size,
-			solver.indirection_rid(), sph_box, solver.active_slots_rid(),
-			solver.active_tile_args_rid()))
+			solver.indirection_rid(), sph_box))
 
 	_setup_fluid_renderer()
 	_setup_half_res_volume()
@@ -1059,8 +1058,7 @@ func _set_quality(index: int) -> void:
 		RenderingServer.call_on_render_thread(func() -> void:
 			water.set_indirection_rid(RID())
 			solver.set_resolution(dims, solver.cell_size, budget)
-			water.set_indirection_rid(solver.indirection_rid(),
-				solver.active_slots_rid(), solver.active_tile_args_rid()))
+			water.set_indirection_rid(solver.indirection_rid()))
 	else:
 		RenderingServer.call_on_render_thread(solver.set_resolution.bind(dims, cell))
 	if not solver.sparse:

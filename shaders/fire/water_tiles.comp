@@ -1,0 +1,57 @@
+// SPARSE ONLY. Builds the compact slot list water_gather is dispatched over.
+//
+// The gather used to run over the fire solver's own active list — every resident
+// tile, 2048 of them once the pool saturates, 1.05 M cells. The droplets occupy a
+// jet and a puddle, a few dozen tiles at most, so almost all of that walk read a
+// zero accumulator and wrote a zero texel. Measured at 1.24 ms (Reference) and
+// 1.33 ms (Performance): near enough identical, which is the signature of a cost
+// set by the tile count rather than by the water.
+//
+// water_scatter now marks the slots it can reach, and this pass compacts them.
+//
+// The carry lane is what makes the shorter list safe. A tile that held water last
+// frame and holds none this frame still has to be visited ONCE, to overwrite its
+// liquid_scal with zeros — otherwise the last frame's water stays on the grid
+// forever. So a slot enters the list when it was touched this frame OR was in the
+// list last frame, and the touch flags are rotated into the carry lane here, after
+// the scatter has written them and before the gather reads the list.
+//
+// A slot the pool hands to a new tile arrives zeroed: fire_clear writes
+// liquid_scal and liquid_vel for every newly allocated tile, so a tile that is
+// never in this list is not carrying a previous tenant's water either.
+
+layout(local_size_x = 256) in;
+
+const uint NSLOTS = 2048u;
+
+// [0 .. NSLOTS)          touched by this frame's scatter
+// [NSLOTS .. 2*NSLOTS)   was in last frame's list
+layout(std430, set = 0, binding = 0) coherent buffer TileFlags {
+	uint flags[];
+} tf;
+
+layout(std430, set = 0, binding = 1) writeonly buffer TileList {
+	uint slots[];
+} tl;
+
+// Reset to (0, 1, 1) from the CPU before this dispatch, so x counts up from zero.
+layout(std430, set = 0, binding = 2) coherent buffer TileArgs {
+	uint args[];
+} ta;
+
+void main() {
+	uint slot = gl_GlobalInvocationID.x;
+	if (slot >= NSLOTS) {
+		return;
+	}
+
+	uint touched = tf.flags[slot];
+	uint carried = tf.flags[NSLOTS + slot];
+	if (touched != 0u || carried != 0u) {
+		uint idx = atomicAdd(ta.args[0], 1u);
+		tl.slots[idx] = slot;
+	}
+
+	tf.flags[NSLOTS + slot] = touched;
+	tf.flags[slot] = 0u;
+}

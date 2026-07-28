@@ -645,14 +645,6 @@ func indirection_rid() -> RID:
 	return _pool.indir_rid() if _pool != null else RID()
 
 
-func active_slots_rid() -> RID:
-	return _pool.active_slots_rid() if _pool != null else RID()
-
-
-func active_tile_args_rid() -> RID:
-	return _pool.active_args_rid() if _pool != null else RID()
-
-
 ## The same volume as a sampled RGBA8 view, for the raymarcher; see
 ## [method FireTilePool.indir_bytes_rid]. Invalid on the dense path.
 func indirection_bytes_rid() -> RID:

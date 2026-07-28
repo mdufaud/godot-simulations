@@ -102,14 +102,17 @@ var _ssbo_vel_scatter := RID()
 var _shader_scatter := RID()
 var _shader_gather := RID()
 var _shader_return := RID()
+var _shader_tiles := RID()
 var _pipeline_scatter := RID()
 var _pipeline_gather := RID()
 var _pipeline_return := RID()
+var _pipeline_tiles := RID()
 ## Indexed by SPH parity: the solver ping-pongs its buffers every sub-step, so each
 ## pass needs a set built against either side rather than one rebuilt per frame.
 var _sets_scatter := [RID(), RID()]
 var _sets_return := [RID(), RID()]
 var _uniform_set_gather := RID()
+var _set_tiles := RID()
 var _cached_scal_rid := RID()
 
 var _grid_dims := Vector3i.ZERO
@@ -124,8 +127,14 @@ var _grid_origin := Vector3.ZERO
 ## pool's indirection volume. See water_common.comp.
 var _sparse := false
 var _indir_tex := RID()
-var _active_slots := RID()
-var _active_tile_args := RID()
+## Sparse only. The gather is dispatched over the tiles the water actually reaches,
+## not over the fire solver's active list: that list saturates the 2048-slot pool
+## while the droplets occupy a jet and a puddle. The scatter raises a flag per slot
+## it touches, water_tiles compacts them into [member _ssbo_tile_list] and counts
+## them into [member _tile_args], and the gather dispatches indirect off that.
+var _ssbo_tile_flags := RID()
+var _ssbo_tile_list := RID()
+var _tile_args := RID()
 ## Extent the accumulators and the gather dispatch cover: the fire box when dense,
 ## the tile atlas when sparse. Never the virtual map, which has 2.1 G cells.
 var _accum_dims := Vector3i.ZERO
@@ -143,6 +152,8 @@ var measured_mass := 0.0
 var mass_error := 0.0
 ## Particles actually inside the fire domain, i.e. the ones the round trip covers.
 var coupled_count := 0
+## Tiles the gather ran over last measured frame, against the pool's 2048 slots.
+var water_tile_count := 0
 ## Droplet spread and peak speed, for the "fall, pile up, do not explode" half of
 ## the P3 criterion.
 var droplet_y_min := 0.0
@@ -163,8 +174,7 @@ const MEASURE_INTERVAL := 30
 ## the world-space extent the droplets themselves are simulated in; leave it zero to
 ## use the fire domain, which is only sensible when that domain is a box.
 func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
-		indir_tex := RID(), sph_box := Vector3.ZERO, active_slots := RID(),
-		active_tile_args := RID()) -> void:
+		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
 	if _rd != null:
 		return
 	_rd = RenderingServer.get_rendering_device()
@@ -177,8 +187,6 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_h_liquid = fire_cell_size * 1.5
 	_sparse = indir_tex.is_valid()
 	_indir_tex = indir_tex
-	_active_slots = active_slots
-	_active_tile_args = active_tile_args
 	var domain := Vector3(fire_grid_dims) * fire_cell_size
 	_grid_origin = Vector3(-0.5 * domain.x, 0.0, -0.5 * domain.z)
 
@@ -206,6 +214,8 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_pipeline_scatter = _rd.compute_pipeline_create(_shader_scatter)
 	_pipeline_gather = _rd.compute_pipeline_create(_shader_gather)
 	_pipeline_return = _rd.compute_pipeline_create(_shader_return)
+	if _sparse:
+		_init_tile_list()
 
 	for parity in 2:
 		var pos: RID = sph.parity_positions_rid(parity)
@@ -218,9 +228,40 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 		]
 		if _sparse:
 			uniforms.append(_image_uniform(4, _indir_tex))
+			uniforms.append(_buffer_uniform(5, _ssbo_tile_flags))
 		_sets_scatter[parity] = _rd.uniform_set_create(uniforms, _shader_scatter, 0)
 
 	initialized = true
+
+
+## Sparse only. Two flag lanes per pool slot — the touches this frame's scatter
+## raises and the list membership carried from last frame — plus the compacted list
+## and the three-word indirect dispatch header it is counted into.
+func _init_tile_list() -> void:
+	var slots: int = FireTilePool.ATLAS_TILES.x * FireTilePool.ATLAS_TILES.y \
+		* FireTilePool.ATLAS_TILES.z
+	var zeros := PackedByteArray()
+	zeros.resize(slots * 2 * 4)
+	_ssbo_tile_flags = _rd.storage_buffer_create(zeros.size(), zeros)
+	_ssbo_tile_list = _rd.storage_buffer_create(slots * 4)
+	_tile_args = _rd.storage_buffer_create(12, _tile_args_reset(),
+		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
+
+	_shader_tiles = _compile("water_tiles", false)
+	if not _shader_tiles.is_valid():
+		return
+	_pipeline_tiles = _rd.compute_pipeline_create(_shader_tiles)
+	_set_tiles = _rd.uniform_set_create([
+		_buffer_uniform(0, _ssbo_tile_flags),
+		_buffer_uniform(1, _ssbo_tile_list),
+		_buffer_uniform(2, _tile_args),
+	], _shader_tiles, 0)
+
+
+## x is the workgroup count water_tiles counts up into, so it has to start from
+## zero every frame; y and z are the constant 1 the gather dispatches at.
+func _tile_args_reset() -> PackedByteArray:
+	return PackedInt32Array([0, 1, 1]).to_byte_array()
 
 
 ## Both domains are centred on the origin in x/z with the floor at y = 0, so a
@@ -643,6 +684,11 @@ func scatter_render() -> void:
 	if profiling:
 		_rd.capture_timestamp("fire_water/scatter_start")
 
+	# Outside the compute list, and before it: the counter water_tiles increments has
+	# to start from zero, and buffer_update cannot run inside a list.
+	if _pipeline_tiles.is_valid():
+		_rd.buffer_update(_tile_args, 0, 12, _tile_args_reset())
+
 	var push := _particle_push()
 	var cl := _rd.compute_list_begin()
 	_rd.compute_list_bind_compute_pipeline(cl, _pipeline_scatter)
@@ -651,6 +697,18 @@ func scatter_render() -> void:
 	_rd.compute_list_dispatch(cl, ceili(float(particles_active) / 256.0), 1, 1)
 	_rd.compute_list_add_barrier(cl)
 	_rd.compute_list_end()
+
+	# A list of its own rather than a second stage of the one above:
+	# compute_list_add_barrier reinstates the saved push constant onto whatever
+	# pipeline is bound after it, and this one declares none.
+	if _pipeline_tiles.is_valid():
+		var tiles_cl := _rd.compute_list_begin()
+		_rd.compute_list_bind_compute_pipeline(tiles_cl, _pipeline_tiles)
+		_rd.compute_list_bind_uniform_set(tiles_cl, _set_tiles, 0)
+		_rd.compute_list_dispatch(tiles_cl, FireTilePool.ATLAS_TILES.x
+			* FireTilePool.ATLAS_TILES.y * FireTilePool.ATLAS_TILES.z / 256, 1, 1)
+		_rd.compute_list_add_barrier(tiles_cl)
+		_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire_water/scatter_end")
 
@@ -678,7 +736,7 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 	_rd.compute_list_bind_uniform_set(cl, _uniform_set_gather, 0)
 	_rd.compute_list_set_push_constant(cl, push, push.size())
 	if _sparse:
-		_rd.compute_list_dispatch_indirect(cl, _active_tile_args, 0)
+		_rd.compute_list_dispatch_indirect(cl, _tile_args, 0)
 	else:
 		_rd.compute_list_dispatch(cl,
 			ceili(float(_accum_dims.x) / 8.0),
@@ -713,6 +771,8 @@ func return_render() -> void:
 	_frame_count += 1
 	if _frame_count % MEASURE_INTERVAL == 0:
 		_measure_particle_mass()
+		if _tile_args.is_valid():
+			water_tile_count = _rd.buffer_get_data(_tile_args, 0, 4).decode_u32(0)
 
 
 func get_coupling_timings() -> Dictionary:
@@ -755,7 +815,7 @@ func _rebuild_texture_sets(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 		_image_uniform(1, liquid_vel_rid),
 		_buffer_uniform(2, _ssbo_scatter),
 		_buffer_uniform(3, _ssbo_vel_scatter),
-	] + ([_buffer_uniform(4, _active_slots)] if _sparse else []), _shader_gather, 0)
+	] + ([_buffer_uniform(4, _ssbo_tile_list)] if _sparse else []), _shader_gather, 0)
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [
 			_buffer_uniform(0, sph.parity_positions_rid(parity)),
@@ -835,8 +895,7 @@ func _free_texture_sets() -> void:
 			_sets_return[parity] = RID()
 
 
-func set_indirection_rid(indir_tex: RID, active_slots := RID(),
-		active_tile_args := RID()) -> void:
+func set_indirection_rid(indir_tex: RID) -> void:
 	if _rd == null or not _sparse:
 		return
 	initialized = false
@@ -846,11 +905,16 @@ func set_indirection_rid(indir_tex: RID, active_slots := RID(),
 			_rd.free_rid(_sets_scatter[parity])
 			_sets_scatter[parity] = RID()
 	_indir_tex = indir_tex
-	_active_slots = active_slots
-	_active_tile_args = active_tile_args
-	if not (_indir_tex.is_valid() and _active_slots.is_valid()
-			and _active_tile_args.is_valid()):
+	if not _indir_tex.is_valid():
 		return
+	# A new pool hands the same slot numbers to different tiles, so the carry lane
+	# from the old one means nothing. Dropping it costs at most one frame of a tile
+	# that was about to be zeroed, and the new pool zeroes its slots in fire_clear.
+	if _ssbo_tile_flags.is_valid():
+		var zeros := PackedByteArray()
+		zeros.resize(FireTilePool.ATLAS_TILES.x * FireTilePool.ATLAS_TILES.y
+			* FireTilePool.ATLAS_TILES.z * 2 * 4)
+		_rd.buffer_update(_ssbo_tile_flags, 0, zeros.size(), zeros)
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [
 			_buffer_uniform(0, sph.parity_positions_rid(parity)),
@@ -858,6 +922,7 @@ func set_indirection_rid(indir_tex: RID, active_slots := RID(),
 			_buffer_uniform(2, _ssbo_scatter),
 			_buffer_uniform(3, _ssbo_vel_scatter),
 			_image_uniform(4, _indir_tex),
+			_buffer_uniform(5, _ssbo_tile_flags),
 		]
 		_sets_scatter[parity] = _rd.uniform_set_create(uniforms, _shader_scatter, 0)
 	_cached_scal_rid = RID()
@@ -871,9 +936,13 @@ func free_render() -> void:
 	for parity in 2:
 		if _sets_scatter[parity].is_valid():
 			_rd.free_rid(_sets_scatter[parity])
-	for rid in [_pipeline_scatter, _pipeline_gather, _pipeline_return,
-			_shader_scatter, _shader_gather, _shader_return,
-			_ssbo_scatter, _ssbo_vel_scatter]:
+	if _set_tiles.is_valid():
+		_rd.free_rid(_set_tiles)
+		_set_tiles = RID()
+	for rid in [_pipeline_scatter, _pipeline_gather, _pipeline_return, _pipeline_tiles,
+			_shader_scatter, _shader_gather, _shader_return, _shader_tiles,
+			_ssbo_scatter, _ssbo_vel_scatter,
+			_ssbo_tile_flags, _ssbo_tile_list, _tile_args]:
 		if rid.is_valid():
 			_rd.free_rid(rid)
 	if sph != null and sph.initialized:

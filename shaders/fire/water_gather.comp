@@ -12,8 +12,19 @@
 // This stage is the same in both builds and needs no indirection of its own: it
 // walks the storage rather than the domain, and the two coordinates coincide. On
 // the sparse path it is simply handed the ATLAS extent instead of the grid extent,
-// which is exactly the set of texels that has an accumulator entry — free slots
-// included, whose entries are zero and whose output no one can reach.
+// which is exactly the set of texels that has an accumulator entry.
+//
+// It does not walk all of that extent though. The slot list below is water_tiles'
+// output — the tiles this frame's scatter reached, plus the ones that were in the
+// list last frame and have to be zeroed once — not the fire solver's active list.
+// Over the fire list this stage cost 1.24 ms at Reference and 1.33 ms at
+// Performance, identical because both saturate the 2048-slot pool while the water
+// only ever occupies a jet and a puddle.
+//
+// The accumulator reset at the bottom is why the shorter list is self-sustaining:
+// scatter can only write a cell whose tile it marked, every marked tile is in this
+// frame's list, so every entry it dirtied is cleared here and the entries outside
+// the list are still zero next frame.
 
 #ifdef WATER_SPARSE
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
@@ -36,9 +47,9 @@ layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
 } vscatter;
 
 #ifdef WATER_SPARSE
-layout(std430, set = 0, binding = 4) readonly restrict buffer ActiveSlots {
+layout(std430, set = 0, binding = 4) readonly restrict buffer WaterSlots {
 	uint data[];
-} active_slots;
+} water_slots;
 #endif
 
 layout(push_constant, std430) uniform Params {
@@ -60,7 +71,7 @@ void main() {
 	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
 	ivec3 c;
 #ifdef WATER_SPARSE
-	uint slot = active_slots.data[gl_WorkGroupID.x];
+	uint slot = water_slots.data[gl_WorkGroupID.x];
 	ivec3 tile = ivec3(
 		int(slot % 16u),
 		int((slot / 16u) % 8u),
