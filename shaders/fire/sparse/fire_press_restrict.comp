@@ -1,4 +1,4 @@
-// SPARSE ONLY. Fine residual -> coarse right-hand side, one unknown per tile.
+// Fine residual -> coarse right-hand side, one unknown per tile.
 //
 // Jacobi and Gauss-Seidel are both local: they move information one cell (or,
 // since the block sweep, one tile) per pass, so the residual of this solve falls

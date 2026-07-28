@@ -51,10 +51,6 @@ var previous_indir_texture: Texture3DRD
 var visual_activity_texture: Texture3DRD
 var previous_visual_activity_texture: Texture3DRD
 var texture_bound := false
-## The sparse build's field is a tile atlas rather than the domain, so it needs a
-## raymarcher that resolves through the pool's indirection volume.
-const SPARSE_VOLUME_SHADER := "res://shaders/fire/fire_sparse.gdshader"
-
 var fluid_renderer: ScreenSpaceFluidRenderer
 
 # --- Half-resolution volume pass (Phase 6 item 1) ---
@@ -97,8 +93,6 @@ const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 ##
 ## Cost is cubic in the inverse: doubling the cell is 8x fewer cells for ~8x less
 ## GPU time, and the pressure loop alone is half of it.
-const QUALITY_CELLS := [0.4, 0.2, 0.1]
-const QUALITY_NAMES := ["Low (32x48x32)", "Medium (64x96x64)", "High (128x192x128)"]
 const POOL_BUDGETS := [1536, 1792, 2048]
 const POOL_QUALITY_NAMES := ["Low (1536 tiles)", "Medium (1792 tiles)", "High (2048 tiles)"]
 
@@ -213,10 +207,6 @@ func _apply_wind() -> void:
 
 func _ready() -> void:
 	solver = FireGpuSolver.new()
-	# Sparse is the default on this branch; --dense selects the dense A/B control. It has to be set
-	# before init_render is queued: it selects the shader variant, the texture
-	# extents and the dispatch mode on the solver, and the raymarcher here.
-	solver.sparse = "--dense" not in OS.get_cmdline_user_args()
 	solver.profiling = debug_info
 	volume_material = fire_volume.material_override as ShaderMaterial
 	if volume_material:
@@ -263,27 +253,26 @@ func _process(delta: float) -> void:
 		if volume_material:
 			volume_material.set_shader_parameter("volume_tex", volume_texture)
 			volume_material.set_shader_parameter("volume_tex_prev", previous_volume_texture)
-			# Sparse: the display field is an atlas of resident tiles, so the shader
-			# also needs the map from virtual tile to atlas slot to read it.
-			if solver.sparse:
-				indir_texture = Texture3DRD.new()
-				indir_texture.texture_rd_rid = solver.indirection_bytes_rid()
-				volume_material.set_shader_parameter("indir_tex", indir_texture)
-				previous_indir_texture = Texture3DRD.new()
-				previous_indir_texture.texture_rd_rid = solver.previous_indirection_bytes_rid()
-				volume_material.set_shader_parameter("indir_tex_prev", previous_indir_texture)
-				visual_activity_texture = Texture3DRD.new()
-				visual_activity_texture.texture_rd_rid = solver.get_texture_rid("visual_activity")
-				volume_material.set_shader_parameter("visual_activity_tex", visual_activity_texture)
-				previous_visual_activity_texture = Texture3DRD.new()
-				previous_visual_activity_texture.texture_rd_rid = \
-					solver.get_previous_visual_activity_tex_rid()
-				volume_material.set_shader_parameter("visual_activity_tex_prev",
-					previous_visual_activity_texture)
+			# The display field is an atlas of resident tiles, so the shader also needs
+			# the map from virtual tile to atlas slot to read it.
+			indir_texture = Texture3DRD.new()
+			indir_texture.texture_rd_rid = solver.indirection_bytes_rid()
+			volume_material.set_shader_parameter("indir_tex", indir_texture)
+			previous_indir_texture = Texture3DRD.new()
+			previous_indir_texture.texture_rd_rid = solver.previous_indirection_bytes_rid()
+			volume_material.set_shader_parameter("indir_tex_prev", previous_indir_texture)
+			visual_activity_texture = Texture3DRD.new()
+			visual_activity_texture.texture_rd_rid = solver.get_texture_rid("visual_activity")
+			volume_material.set_shader_parameter("visual_activity_tex", visual_activity_texture)
+			previous_visual_activity_texture = Texture3DRD.new()
+			previous_visual_activity_texture.texture_rd_rid = \
+				solver.get_previous_visual_activity_tex_rid()
+			volume_material.set_shader_parameter("visual_activity_tex_prev",
+				previous_visual_activity_texture)
 		fire_volume.visible = true
 		texture_bound = true
-	if solver.sparse and volume_material:
-		_set_sparse_volume_proxy(solver.display_clip_box())
+	if volume_material:
+		_set_volume_proxy(solver.display_clip_box())
 
 	# Last frame's reduction, read up front: the wood bed is driven by the per-log
 	# gas temperatures in it, and its emitters have to be uploaded before the
@@ -333,8 +322,7 @@ func _process(delta: float) -> void:
 	RenderingServer.call_on_render_thread(func() -> void:
 		if run_fire:
 			solver.capture_interpolation_state_render()
-			if solver.sparse:
-				solver.prepare_topology_render()
+			solver.prepare_topology_render()
 		else:
 			solver.poll_render()
 		if water.initialized:
@@ -501,22 +489,18 @@ func _drop_log() -> void:
 #  SCENE SETUP
 # =========================================================================
 
-## Point the raymarcher at whichever grid the solver runs on.
+## Point the raymarcher at the grid the solver runs on.
 func _setup_volume_material() -> void:
 	var box := Vector3(solver.sim_dims()) * solver.cell_size
-	if solver.sparse:
-		volume_material.shader = load(SPARSE_VOLUME_SHADER)
-		volume_material.set_shader_parameter("cell_size", solver.cell_size)
-		volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
-		volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
-		volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
-		volume_material.set_shader_parameter("virtual_origin",
-			Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
-		_set_sparse_volume_proxy(solver.display_clip_box())
-	else:
-		volume_material.set_shader_parameter("box_size", box)
-	# The blue reaction core fades over the height of the DENSE domain in both
-	# builds; over the sparse one it would never fade at all.
+	volume_material.set_shader_parameter("cell_size", solver.cell_size)
+	volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
+	volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
+	volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
+	volume_material.set_shader_parameter("virtual_origin",
+		Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
+	_set_volume_proxy(solver.display_clip_box())
+	# The blue reaction core fades over the height of a burner-sized domain; over
+	# the virtual one it would never fade at all.
 	volume_material.set_shader_parameter("blue_height", DOMAIN_SIZE.y)
 	# The volume stores temperature normalised against these, so the shader
 	# needs them to turn the red channel back into kelvins.
@@ -528,7 +512,7 @@ func _setup_volume_material() -> void:
 	fire_volume.visible = false
 
 
-func _set_sparse_volume_proxy(proxy: AABB) -> void:
+func _set_volume_proxy(proxy: AABB) -> void:
 	var extent := proxy.size
 	(fire_volume.mesh as BoxMesh).size = extent
 	fire_volume.position = proxy.position + extent * 0.5
@@ -1025,18 +1009,15 @@ func _set_water_render_scale(value: float) -> void:
 		fluid_renderer.set_render_scale(value)
 
 
-## Swap dense field resolution or sparse pool budget.
+## Swap the tile pool budget.
 ##
 ## The display texture is freed on the render thread, so the binding is dropped
 ## and stepping suspended here, on the main thread, before the rebuild is queued.
 ## [member FireGpuSolver.initialized] comes back true at the end of the rebuild
 ## and [method _process] picks the new texture up on the next frame.
 func _set_quality(index: int) -> void:
-	var cell: float = QUALITY_CELLS[index]
-	var dims := Vector3i((DOMAIN_SIZE / cell).round())
-	var budget: int = POOL_BUDGETS[index] if solver.sparse else 0
-	if (solver.sparse and budget == solver.pool_budget) \
-			or (not solver.sparse and dims == solver.grid_dims):
+	var budget: int = POOL_BUDGETS[index]
+	if budget == solver.pool_budget:
 		return
 
 	solver.initialized = false
@@ -1054,17 +1035,10 @@ func _set_quality(index: int) -> void:
 		previous_visual_activity_texture.texture_rd_rid = RID()
 	fire_volume.visible = false
 	texture_bound = false
-	if solver.sparse:
-		RenderingServer.call_on_render_thread(func() -> void:
-			water.set_indirection_rid(RID())
-			solver.set_resolution(dims, solver.cell_size, budget)
-			water.set_indirection_rid(solver.indirection_rid()))
-	else:
-		RenderingServer.call_on_render_thread(solver.set_resolution.bind(dims, cell))
-	if not solver.sparse:
-		# A log emitter narrower than a couple of cells falls between them and injects
-		# nothing at all on the coarse preset.
-		wood_pile.emit_radius = maxf(1.3, cell * 2.0)
+	RenderingServer.call_on_render_thread(func() -> void:
+		water.set_indirection_rid(RID())
+		solver.set_pool_budget(budget)
+		water.set_indirection_rid(solver.indirection_rid()))
 	solver.reset_clock()
 	_light_fire()
 
@@ -1174,21 +1148,18 @@ func _update_debug_overlay() -> void:
 			"%.2f ms" % timings["total"] if timings.has("total") else "--",
 			_format_timings(timings) if not timings.is_empty() else "--"],
 	]
-	if solver.sparse:
-		# Cores are the tiles that cleared the keep threshold on their own; the rest
-		# are only resident because they fell in some core's dilation band. The split
-		# is what says whether the pool is holding fire or margin.
-		lines.append("pool %d/%d resident (%d core / %d band) | %d free | %d new | %d exhausted" % [
-			int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
-			int(pool.get("cores", 0)),
-			int(pool.get("resident", 0)) - int(pool.get("cores", 0)),
-			int(pool.get("free", 0)), int(pool.get("allocated_this_frame", 0)),
-			int(pool.get("exhausted", 0))])
-		lines.append("proxy (%.1f, %.1f, %.1f) size (%.1f, %.1f, %.1f)" % [
-			proxy.position.x, proxy.position.y, proxy.position.z,
-			proxy.size.x, proxy.size.y, proxy.size.z])
-	else:
-		lines.append("dense %s" % str(solver.grid_dims))
+	# Cores are the tiles that cleared the keep threshold on their own; the rest
+	# are only resident because they fell in some core's dilation band. The split
+	# is what says whether the pool is holding fire or margin.
+	lines.append("pool %d/%d resident (%d core / %d band) | %d free | %d new | %d exhausted" % [
+		int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
+		int(pool.get("cores", 0)),
+		int(pool.get("resident", 0)) - int(pool.get("cores", 0)),
+		int(pool.get("free", 0)), int(pool.get("allocated_this_frame", 0)),
+		int(pool.get("exhausted", 0))])
+	lines.append("proxy (%.1f, %.1f, %.1f) size (%.1f, %.1f, %.1f)" % [
+		proxy.position.x, proxy.position.y, proxy.position.z,
+		proxy.size.x, proxy.size.y, proxy.size.z])
 	lines.append("T %d K | reaction %.3f | div %.4f | ΣY %.4f" % [
 		int(stats["max_temperature"]), stats["total_reaction"],
 		stats["max_divergence"], stats["mass_fraction_sum"]])
@@ -1259,11 +1230,8 @@ func _setup_ui() -> void:
 		PERFORMANCE_PRESET_NAMES, _performance_preset, _set_performance_preset)
 	_preset_status_label = menu.add_label("")
 	_preset_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	var quality_names := POOL_QUALITY_NAMES if solver.sparse else QUALITY_NAMES
-	var quality_index := POOL_BUDGETS.find(solver.pool_budget) if solver.sparse \
-		else QUALITY_CELLS.find(solver.cell_size)
-	menu.add_option_button("Pool budget" if solver.sparse else "Resolution",
-		quality_names, quality_index, _set_quality)
+	menu.add_option_button("Pool budget", POOL_QUALITY_NAMES,
+		POOL_BUDGETS.find(solver.pool_budget), _set_quality)
 
 	menu.add_separator()
 	wood_section = menu.add_section("Wood")

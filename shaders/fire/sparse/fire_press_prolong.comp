@@ -1,4 +1,4 @@
-// SPARSE ONLY. Adds the coarse correction back onto the fine pressure field.
+// Adds the coarse correction back onto the fine pressure field.
 //
 // Piecewise constant: one value per tile, added to all 512 of its cells. That
 // leaves a jump at every tile face, which is high frequency and therefore exactly

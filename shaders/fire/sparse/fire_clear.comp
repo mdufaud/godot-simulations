@@ -1,4 +1,4 @@
-// SPARSE ONLY. Resets the 8^3 block of every tile the pool allocated this frame
+// Resets the 8^3 block of every tile the pool allocated this frame
 // to still ambient air, before any other stage reads it.
 //
 // Slots are recycled, so the atlas block a tile is handed may still hold the

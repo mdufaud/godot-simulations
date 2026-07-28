@@ -55,32 +55,14 @@ void main() {
 	// (gas mode) leaves this a no-op. Only u and w — buoyancy on v must survive so
 	// the plume still rises and leans downwind above the logs.
 	float shelter_decay = exp(-cfg.liquid2.w * dt);
-#ifdef FIRE_SPARSE
-	vec3 amb = ambient_wind(c.y);
-	// With no wind set there is no ambient flow to relax towards, and relaxing
-	// towards zero is a drag — one the dense path does not have, since its own
-	// inflow condition simply never fires. Measured: left unguarded it cost the
-	// still-air plume 3 % of its peak temperature.
-	float relax_base = (wind.x != 0.0 || wind.z != 0.0)
-		? (1.0 - exp(-WIND_RELAX * dt))
-		: 0.0;
-#endif
 
 	if (in_u(c)) {
 		float u = load_u_src(c) * decay;
-#ifdef FIRE_SPARSE
-		// Coolness of the two cells this low-x face separates: any warmth on either
-		// side switches the sponge off, so it never touches the plume or its lean.
-		float t_u = max(load_scal_src(ivec3(max(c.x - 1, 0), c.y, c.z)).x, load_scal_src(c).x);
-		float cool_u = clamp(1.0 - (t_u - t_amb) / RELAX_T_BAND, 0.0, 1.0);
-		u = mix(u, amb.x, relax_base * cool_u);
-#else
 		// Wind enters at the upwind faces; the interior picks it up by advection
 		// rather than being pushed as a body force.
 		if ((wind.x > 0.0 && c.x == 0) || (wind.x < 0.0 && c.x == params.dims.x)) {
 			u = wind.x * wind_profile(c.y);
 		}
-#endif
 		u *= mix(1.0, shelter_decay, wood_shelter(u_face_to_world(c)));
 		store_u_src(c, clamp(u, -50.0, 50.0));
 	}
@@ -104,15 +86,9 @@ void main() {
 
 	if (in_w(c)) {
 		float w = load_w_src(c) * decay;
-#ifdef FIRE_SPARSE
-		float t_w = max(load_scal_src(ivec3(c.x, c.y, max(c.z - 1, 0))).x, load_scal_src(c).x);
-		float cool_w = clamp(1.0 - (t_w - t_amb) / RELAX_T_BAND, 0.0, 1.0);
-		w = mix(w, amb.z, relax_base * cool_w);
-#else
 		if ((wind.z > 0.0 && c.z == 0) || (wind.z < 0.0 && c.z == params.dims.z)) {
 			w = wind.z * wind_profile(c.y);
 		}
-#endif
 		w *= mix(1.0, shelter_decay, wood_shelter(w_face_to_world(c)));
 		store_w_src(c, clamp(w, -50.0, 50.0));
 	}

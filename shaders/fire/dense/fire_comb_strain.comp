@@ -21,8 +21,5 @@ void main() {
 	ivec3 c = cell_coord();
 	strain_prefetch();
 	combustion_body(c);
-#ifdef FIRE_SPARSE
-	barrier();
-#endif
 	strain_body(c);
 }

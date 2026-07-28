@@ -3,11 +3,7 @@
 // The sparse build uses 8^3 so that one workgroup owns exactly one fully
 // resident tile, and is dispatched indirectly over the pool's active tile list —
 // which is why no sparse inner loop needs a bounds check.
-#ifdef FIRE_SPARSE
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
-#else
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
-#endif
 
 // Wood emitter slots, in step with FireGpuSolver.MAX_LOGS. The stats buffer is
 // eleven reduced scalars followed by one probed gas temperature per slot, and
@@ -162,114 +158,9 @@ vec3 ambient_wind(int cy) {
 // what turns one into the other. The dense build declares none of them and every
 // accessor below stays a direct image access.
 // =========================================================================
-#ifdef FIRE_SPARSE
-
-// Mirrors fire_tile_pool.gd, which owns these numbers, and tile_common.comp.
-const ivec3 VTILES = ivec3(256, 64, 256); // 409.6 x 102.4 x 409.6 m at 0.2 m
-const ivec3 ATLAS_TILES = ivec3(16, 8, 16); // 16*8*16 = 2048 slots
-const uint TILE_SLOT_MAX = 0xFFFFFFF0u; // at or above this is a sentinel
-
-layout(r32ui, set = 0, binding = 25) uniform restrict readonly uimage3D tile_indir;
-layout(std430, set = 0, binding = 26) restrict readonly buffer ActiveList {
-	uint active_list[]; // virtual tile indices, one per resident tile
-};
-// The keep signal tile_mark reduces, written by fire_display at the end of each
-// substep. Same slot layout as every other field texture.
-layout(r32f, set = 0, binding = 27) uniform restrict image3D activity_tex;
-layout(std430, set = 0, binding = 28) restrict readonly buffer NewList {
-	uint new_list[]; // tiles allocated this frame, cleared by fire_clear
-};
-layout(std430, set = 0, binding = 30) restrict readonly buffer ActiveSlots {
-	uint active_slots[]; // atlas slot paired with active_list, written by tile_compact
-};
-
-// Two-level pressure solve. The coarse grid is the tile grid itself: one unknown
-// per resident tile, so the whole coarse system is at most NSLOTS equations and
-// fits in one workgroup. fire_press_restrict fills it, fire_press_coarse solves
-// it, fire_press_prolong adds the correction back.
-//
-// The pool's counter buffer, so the coarse pass — the one dispatch in the solver
-// that is not one workgroup per tile — can read how many unknowns there are
-// without the count ever coming back to the CPU.
-layout(std430, set = 0, binding = 31) restrict readonly buffer TileCounts {
-	uint tile_counts[]; // counts[] of tile_common.comp
-};
-layout(std430, set = 0, binding = 32) restrict buffer CoarseVal {
-	float coarse_val[]; // [0, N) right-hand side, [N, 2N) correction
-};
-layout(std430, set = 0, binding = 33) restrict buffer CoarseIdx {
-	// [0, N) face mask per active tile, [N, 2N) slot -> active index,
-	// [2N, 8N) the six coarse neighbours of each active tile
-	uint coarse_idx[];
-};
-
-const uint COARSE_SLOTS = uint(ATLAS_TILES.x * ATLAS_TILES.y * ATLAS_TILES.z);
-const uint COARSE_P_BASE = COARSE_SLOTS;
-const uint COARSE_SLOT_BASE = COARSE_SLOTS;
-const uint COARSE_NB_BASE = 2u * COARSE_SLOTS;
-const uint COARSE_NONE = 0xFFFFFFFFu;
-const uint C_ACTIVE_WORD = 6u; // C_ACTIVE in tile_common.comp
-// A tile is a coarse unknown only when all six of its faces are coupled. Then
-// every one of its 512 cells is solved (solved_cell only ever tests those six
-// faces), which is what makes the aggregated stencil below exact.
-const uint COARSE_INTERIOR = 63u;
-
-ivec3 invocation_vt;
-ivec3 invocation_atlas_origin;
-
-ivec3 tile_of_index(uint vti) {
-	int v = int(vti);
-	return ivec3(v % VTILES.x, (v / VTILES.x) % VTILES.y, v / (VTILES.x * VTILES.y));
-}
-
-// Virtual cell -> atlas texel, or a negative marker when the tile holding it is
-// not resident. This one function is the whole of the sparse mapping; nothing
-// else in the solver ever sees an atlas coordinate.
-ivec3 sparse_texel(ivec3 vc) {
-	if (any(lessThan(vc, ivec3(0)))) {
-		return ivec3(-1);
-	}
-	ivec3 vt = vc >> 3;
-	if (any(greaterThanEqual(vt, VTILES))) {
-		return ivec3(-1);
-	}
-	uint slot = imageLoad(tile_indir, vt).r;
-	if (slot >= TILE_SLOT_MAX) {
-		return ivec3(-1);
-	}
-	int s = int(slot);
-	ivec3 org = ivec3(s % ATLAS_TILES.x, (s / ATLAS_TILES.x) % ATLAS_TILES.y,
-			s / (ATLAS_TILES.x * ATLAS_TILES.y))
-		* 8;
-	return org + (vc & ivec3(7));
-}
-
-ivec3 field_texel(ivec3 vc) {
-	ivec3 vt = vc >> 3;
-	if (all(equal(vt, invocation_vt))) {
-		return invocation_atlas_origin + (vc & ivec3(7));
-	}
-	return sparse_texel(vc);
-}
-
-bool invocation_tile_contains(ivec3 lo, ivec3 hi) {
-	return all(equal(lo >> 3, invocation_vt)) && all(equal(hi >> 3, invocation_vt));
-}
-
-// What a tap outside the resident set reads: still ambient air, at rest, with no
-// pressure. This is the sparse domain's open boundary — a Dirichlet condition on
-// the active surface, which moves with the fire, instead of on a fixed AABB.
-vec4 ambient_scal() { return vec4(cfg.thermo.x, 0.0, 0.233, 0.0); }
-// liquid_scal.a is the Eq. 32 mixing factor, and 1.0 means "dry": a face next to
-// an inactive tile keeps its own velocity.
-vec4 ambient_liquid_scal() { return vec4(0.0, 0.0, 0.0, 1.0); }
-
-bool cell_resident(ivec3 vc) { return sparse_texel(vc).x >= 0; }
-#else
 ivec3 invocation_vt;
 ivec3 invocation_atlas_origin;
 bool invocation_tile_contains(ivec3 lo, ivec3 hi) { return false; }
-#endif
 
 // Whether the pressure Poisson equation is solved at this cell.
 //
@@ -291,96 +182,15 @@ bool invocation_tile_contains(ivec3 lo, ivec3 hi) { return false; }
 // non-singular and gives the plume somewhere to flow out to. The dilation band
 // puts the shell at least two tiles from anything moving, so it lives in still
 // ambient air.
-#ifdef FIRE_SPARSE
-// A neighbour that lies outside the virtual domain is the domain's own wall, not
-// a missing tile: the stencil already handles those correctly (Dirichlet on the
-// sides and top, Neumann on the solid floor), and they need no storage. Only a
-// neighbour that is inside the domain but has no tile makes a cell ghost shell.
-//
-// The floor is why this distinction matters rather than being a formality: every
-// cell at virtual y = 0 has its lower neighbour outside the domain, so treating
-// "no tile" as ghost shell would pin the whole ground row to p = 0 and turn the
-// solid floor the flame sits on into an open sink.
-bool neighbour_ok(ivec3 nb) {
-	if (any(lessThan(nb, ivec3(0))) || any(greaterThanEqual(nb, params.dims.xyz))) {
-		return true;
-	}
-	return cell_resident(nb);
-}
-
-bool solved_cell(ivec3 vc) {
-	// Only a cell on a face of its own tile can have a neighbour in another tile,
-	// so the interior 6^3 of every tile answers without a single lookup.
-	ivec3 lc = vc & ivec3(7);
-	if (lc.x == 0 && !neighbour_ok(vc - ivec3(1, 0, 0))) { return false; }
-	if (lc.x == 7 && !neighbour_ok(vc + ivec3(1, 0, 0))) { return false; }
-	if (lc.y == 0 && !neighbour_ok(vc - ivec3(0, 1, 0))) { return false; }
-	if (lc.y == 7 && !neighbour_ok(vc + ivec3(0, 1, 0))) { return false; }
-	if (lc.z == 0 && !neighbour_ok(vc - ivec3(0, 0, 1))) { return false; }
-	if (lc.z == 7 && !neighbour_ok(vc + ivec3(0, 0, 1))) { return false; }
-	return true;
-}
-
-// The same answer, resolved once per workgroup instead of once per cell.
-//
-// Residency is a property of the tile, not of the cell, and topology only moves
-// between frames — so what solved_cell replies over a whole tile is fixed by six
-// bits, one per face of that tile, and re-deriving them per cell on each of the
-// 64 Jacobi iterations is the same lookup ~1200 times over for nothing.
-//
-// Bit i is set when face i may be coupled across: either the neighbouring cell
-// row lies outside the virtual domain — the domain's own wall, which the stencil
-// already handles as Dirichlet on the sides and top and Neumann on the floor — or
-// it lies in a resident tile. Only "inside the domain but not resident" makes a
-// cell part of the ghost shell. The virtual domain is a whole number of tiles, so
-// a face is entirely in or entirely out of it and the test is per tile.
-//
-// Valid for cells of the invocation's own tile that are inside the grid, which is
-// what the caller guards for.
-uint tile_face_mask() {
-	ivec3 org = invocation_vt * 8;
-	uint m = 0u;
-	if (org.x == 0 || cell_resident(org - ivec3(1, 0, 0))) { m |= 1u; }
-	if (org.x + 8 >= params.dims.x || cell_resident(org + ivec3(8, 0, 0))) { m |= 2u; }
-	if (org.y == 0 || cell_resident(org - ivec3(0, 1, 0))) { m |= 4u; }
-	if (org.y + 8 >= params.dims.y || cell_resident(org + ivec3(0, 8, 0))) { m |= 8u; }
-	if (org.z == 0 || cell_resident(org - ivec3(0, 0, 1))) { m |= 16u; }
-	if (org.z + 8 >= params.dims.z || cell_resident(org + ivec3(0, 0, 8))) { m |= 32u; }
-	return m;
-}
-
-bool solved_cell_masked(ivec3 vc, uint mask) {
-	ivec3 lc = vc & ivec3(7);
-	if (lc.x == 0 && (mask & 1u) == 0u) { return false; }
-	if (lc.x == 7 && (mask & 2u) == 0u) { return false; }
-	if (lc.y == 0 && (mask & 4u) == 0u) { return false; }
-	if (lc.y == 7 && (mask & 8u) == 0u) { return false; }
-	if (lc.z == 0 && (mask & 16u) == 0u) { return false; }
-	if (lc.z == 7 && (mask & 32u) == 0u) { return false; }
-	return true;
-}
-#else
 bool solved_cell(ivec3 c) { return true; }
 uint tile_face_mask() { return 63u; }
 bool solved_cell_masked(ivec3 c, uint mask) { return true; }
-#endif
 
 // The virtual cell this invocation owns. Dense: the dispatch is the grid, so it
 // is the global id. Sparse: the dispatch is the active tile list, so it is this
 // workgroup's tile origin plus the local id.
 ivec3 cell_coord() {
-#ifdef FIRE_SPARSE
-	uint active_index = gl_WorkGroupID.x;
-	invocation_vt = tile_of_index(active_list[active_index]);
-	uint slot = active_slots[active_index];
-	int s = int(slot);
-	invocation_atlas_origin = ivec3(s % ATLAS_TILES.x,
-		(s / ATLAS_TILES.x) % ATLAS_TILES.y,
-		s / (ATLAS_TILES.x * ATLAS_TILES.y)) * 8;
-	return invocation_vt * 8 + ivec3(gl_LocalInvocationID);
-#else
 	return ivec3(gl_GlobalInvocationID);
-#endif
 }
 
 // =========================================================================
@@ -399,40 +209,6 @@ ivec3 cell_coord() {
 // side, so a name like scal_src always means "whatever texture is bound as the
 // current scalar field".
 // =========================================================================
-#ifdef FIRE_SPARSE
-#define DEF_LOAD4(p_fn, p_img, p_ambient) \
-	vec4 p_fn(ivec3 c) { \
-			ivec3 t_ = field_texel(c); \
-		return (t_.x < 0) ? (p_ambient) : imageLoad(p_img, t_); \
-	}
-#define DEF_STORE4(p_fn, p_img) \
-	void p_fn(ivec3 c, vec4 v) { \
-			ivec3 t_ = field_texel(c); \
-		if (t_.x >= 0) { imageStore(p_img, t_, v); } \
-	}
-#define DEF_LOAD1(p_fn, p_img) \
-	float p_fn(ivec3 c) { \
-			ivec3 t_ = field_texel(c); \
-		return (t_.x < 0) ? 0.0 : imageLoad(p_img, t_).r; \
-	}
-#define DEF_STORE1(p_fn, p_img) \
-	void p_fn(ivec3 c, float v) { \
-			ivec3 t_ = field_texel(c); \
-		if (t_.x >= 0) { imageStore(p_img, t_, vec4(v, 0.0, 0.0, 0.0)); } \
-	}
-// A face in a non-resident tile is the open boundary: undisturbed ambient air,
-// which under wind is DRIFTING at the profile, not still. Returning 0 here was the
-// bug that made every downwind tile edge read a half-wind velocity jump and mark
-// itself active — the resident set then marched across the whole map on the wind
-// alone and exhausted the pool (measured: full by frame 60). Only the src velocity
-// component normal to the face carries the drift; v is vertical so its ambient is
-// always 0, and the scratch/pressure fields keep the plain zero-on-miss loader.
-#define DEF_LOAD1_VEL(p_fn, p_img, p_comp) \
-	float p_fn(ivec3 c) { \
-			ivec3 t_ = field_texel(c); \
-		return (t_.x < 0) ? ambient_wind(c.y).p_comp : imageLoad(p_img, t_).r; \
-	}
-#else
 #define DEF_LOAD4(p_fn, p_img, p_ambient) \
 	vec4 p_fn(ivec3 c) { return imageLoad(p_img, c); }
 #define DEF_STORE4(p_fn, p_img) \
@@ -443,7 +219,6 @@ ivec3 cell_coord() {
 	void p_fn(ivec3 c, float v) { imageStore(p_img, c, vec4(v, 0.0, 0.0, 0.0)); }
 #define DEF_LOAD1_VEL(p_fn, p_img, p_comp) \
 	float p_fn(ivec3 c) { return imageLoad(p_img, c).r; }
-#endif
 
 DEF_LOAD4(load_scal_src, scal_src, ambient_scal())
 DEF_STORE4(store_scal_src, scal_src)
@@ -489,10 +264,6 @@ DEF_STORE1(store_w_src, w_src)
 DEF_LOAD1(load_w_fwd, w_fwd)
 DEF_STORE1(store_w_fwd, w_fwd)
 DEF_STORE1(store_w_dst, w_dst)
-
-#ifdef FIRE_SPARSE
-DEF_STORE1(store_activity, activity_tex)
-#endif
 
 ivec3 grid_max() {
 	return params.dims.xyz - ivec3(1);
@@ -591,15 +362,6 @@ float wood_pilot_at(vec3 wp) {
 // build had to write out explicitly. This is also why sparse is not bit-identical
 // to dense: those outer faces are now a Dirichlet condition on a surface that
 // moves with the fire rather than on a fixed AABB.
-#ifdef FIRE_SPARSE
-ivec3 u_dims() { return params.dims.xyz; }
-ivec3 v_dims() { return params.dims.xyz; }
-ivec3 w_dims() { return params.dims.xyz; }
-
-bool in_u(ivec3 f) { return true; }
-bool in_v(ivec3 f) { return true; }
-bool in_w(ivec3 f) { return true; }
-#else
 ivec3 u_dims() { return params.dims.xyz + ivec3(1, 0, 0); }
 ivec3 v_dims() { return params.dims.xyz + ivec3(0, 1, 0); }
 ivec3 w_dims() { return params.dims.xyz + ivec3(0, 0, 1); }
@@ -607,7 +369,6 @@ ivec3 w_dims() { return params.dims.xyz + ivec3(0, 0, 1); }
 bool in_u(ivec3 f) { return all(lessThan(f, u_dims())); }
 bool in_v(ivec3 f) { return all(lessThan(f, v_dims())); }
 bool in_w(ivec3 f) { return all(lessThan(f, w_dims())); }
-#endif
 
 // A face centre in world space. Offset is +0.0 along the normal axis (the face
 // sits on the cell boundary) and +0.5 along the other two.
@@ -631,45 +392,11 @@ vec3 w_face_to_world(ivec3 f) { return cell_to_world(f) - vec3(0.0, 0.0, 0.5) * 
 // reconstructions touch is within one cell of the tile, because their stencils
 // are one-sided (c and c + 1, or c - 1 and c) and the domain clamps only narrow
 // that. Nothing else may use these accessors without re-checking that.
-#if defined(FIRE_SPARSE) && defined(FIRE_VEL_CACHE)
-const int VEL_CACHE_SIDE = 10;
-const int VEL_CACHE_SIZE = VEL_CACHE_SIDE * VEL_CACHE_SIDE * VEL_CACHE_SIDE;
-shared float vel_cache_u[VEL_CACHE_SIZE];
-shared float vel_cache_v[VEL_CACHE_SIZE];
-shared float vel_cache_w[VEL_CACHE_SIZE];
-
-// Call once, after cell_coord() has resolved the invocation's tile and before
-// any velocity is read. Ends on a barrier, so it must stay in workgroup-uniform
-// control flow.
-void load_velocity_cache() {
-	ivec3 org = invocation_vt * 8 - ivec3(1);
-	uint threads = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
-	for (uint i = gl_LocalInvocationIndex; i < uint(VEL_CACHE_SIZE); i += threads) {
-		ivec3 c = org + ivec3(int(i) % VEL_CACHE_SIDE,
-			(int(i) / VEL_CACHE_SIDE) % VEL_CACHE_SIDE,
-			int(i) / (VEL_CACHE_SIDE * VEL_CACHE_SIDE));
-		vel_cache_u[i] = load_u_src(c);
-		vel_cache_v[i] = load_v_src(c);
-		vel_cache_w[i] = load_w_src(c);
-	}
-	barrier();
-}
-
-int vel_cache_index(ivec3 c) {
-	ivec3 p = c - invocation_vt * 8 + ivec3(1);
-	return p.x + VEL_CACHE_SIDE * (p.y + VEL_CACHE_SIDE * p.z);
-}
-
-#define VEL_U(p_c) vel_cache_u[vel_cache_index(p_c)]
-#define VEL_V(p_c) vel_cache_v[vel_cache_index(p_c)]
-#define VEL_W(p_c) vel_cache_w[vel_cache_index(p_c)]
-#else
 void load_velocity_cache() {}
 
 #define VEL_U(p_c) load_u_src(p_c)
 #define VEL_V(p_c) load_v_src(p_c)
 #define VEL_W(p_c) load_w_src(p_c)
-#endif
 
 // Velocity reconstructed at a cell centre: the mean of the two opposing faces.
 vec3 vel_at_cell(ivec3 c) {

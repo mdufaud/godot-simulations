@@ -1,4 +1,4 @@
-// SPARSE ONLY. Solves the tile-level system fire_press_restrict assembled.
+// Solves the tile-level system fire_press_restrict assembled.
 //
 // One unknown per resident tile is at most NSLOTS = 2048 equations, which is
 // small enough that the whole solve is one workgroup with the unknowns in shared

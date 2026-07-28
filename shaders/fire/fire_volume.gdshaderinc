@@ -5,11 +5,9 @@
 //                  B = reaction intensity, A = water vapour
 // ============================================================
 //
-// Two shaders march the same volume: fire.gdshader over the dense box, and
-// fire_sparse.gdshader over the tile atlas the sparse solver writes. Only the
-// march differs — the ray setup, the depth clamp and the emission/absorption
-// model are identical — so everything but the loop lives here and neither shader
-// can drift away from the other's look.
+// fire.gdshader marches the tile atlas the solver writes. Everything but the
+// march loop — the ray setup, the depth clamp and the emission/absorption model —
+// lives here.
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
@@ -31,9 +29,9 @@ uniform float steam_strength : hint_range(0.0, 20.0) = 6.0;
 uniform float steam_absorption : hint_range(0.0, 20.0) = 4.0;
 uniform float blue_strength : hint_range(0.0, 3.0) = 0.7;
 // Height over which the blue reaction core fades out, in metres above the ground.
-// This used to be the box height, which the sparse grid is not: its domain is
-// 102 m tall and every flame base in it would read as blue. Set to the dense
-// domain height by the controller, so both builds keep the same falloff.
+// This used to be the box height, which the virtual grid is not: its domain is
+// 102 m tall and every flame base in it would read as blue. Set to a
+// burner-sized domain height by the controller.
 uniform float blue_height = 19.2;
 uniform float noise_scale : hint_range(0.05, 1.0) = 0.35;
 uniform float scroll_speed : hint_range(0.0, 3.0) = 1.2;

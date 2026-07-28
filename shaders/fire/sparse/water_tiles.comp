@@ -1,4 +1,4 @@
-// SPARSE ONLY. Builds the compact slot list water_gather is dispatched over.
+// Builds the compact slot list water_gather is dispatched over.
 //
 // The gather used to run over the fire solver's own active list — every resident
 // tile, 2048 of them once the pool saturates, 1.05 M cells. The droplets occupy a

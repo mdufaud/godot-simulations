@@ -10,7 +10,6 @@
 // face-averaged velocity — one geometry the solver already carries, and an
 // eddy-viscosity model is a closure, not a conservation law.
 
-#ifdef FIRE_SPARSE
 const int VELOCITY_CACHE_SIDE = 11;
 const int VELOCITY_CACHE_SIZE = VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE * VELOCITY_CACHE_SIDE;
 shared float strain_u_cache[VELOCITY_CACHE_SIZE];
@@ -28,12 +27,10 @@ vec3 cached_strain_velocity(ivec3 offset) {
 		0.5 * (strain_v_cache[strain_cache_index(p)] + strain_v_cache[strain_cache_index(p + ivec3(0, 1, 0))]),
 		0.5 * (strain_w_cache[strain_cache_index(p)] + strain_w_cache[strain_cache_index(p + ivec3(0, 0, 1))]));
 }
-#endif
 
 // Fills the cache but does not synchronise, so a merged stage can put unrelated
 // arithmetic between the loads and the barrier that consumes them.
 void strain_prefetch() {
-#ifdef FIRE_SPARSE
 	ivec3 tile_origin = invocation_vt * 8;
 	for (uint i = gl_LocalInvocationIndex; i < uint(VELOCITY_CACHE_SIZE);
 			i += gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z) {
@@ -45,7 +42,6 @@ void strain_prefetch() {
 		strain_v_cache[i] = load_v_src(vc);
 		strain_w_cache[i] = load_w_src(vc);
 	}
-#endif
 }
 
 void strain_body(ivec3 c) {
@@ -62,7 +58,6 @@ void strain_body(ivec3 c) {
 
 	// Diagonal terms: compact differences across the cell's own faces (exact at
 	// the centre on a MAC grid).
-#ifdef FIRE_SPARSE
 	ivec3 lc = ivec3(gl_LocalInvocationID) + ivec3(1);
 	float sxx = (strain_u_cache[strain_cache_index(lc + ivec3(1, 0, 0))]
 		- strain_u_cache[strain_cache_index(lc)]) * inv_h;
@@ -70,28 +65,14 @@ void strain_body(ivec3 c) {
 		- strain_v_cache[strain_cache_index(lc)]) * inv_h;
 	float szz = (strain_w_cache[strain_cache_index(lc + ivec3(0, 0, 1))]
 		- strain_w_cache[strain_cache_index(lc)]) * inv_h;
-#else
-	float sxx = (load_u_src(c + ivec3(1, 0, 0)) - load_u_src(c)) * inv_h;
-	float syy = (load_v_src(c + ivec3(0, 1, 0)) - load_v_src(c)) * inv_h;
-	float szz = (load_w_src(c + ivec3(0, 0, 1)) - load_w_src(c)) * inv_h;
-#endif
 
 	// Off-diagonal terms: central differences of the face-averaged velocity.
-#ifdef FIRE_SPARSE
 	vec3 px = cached_strain_velocity(ivec3(1, 0, 0));
 	vec3 nx = cached_strain_velocity(ivec3(-1, 0, 0));
 	vec3 py = cached_strain_velocity(ivec3(0, 1, 0));
 	vec3 ny = cached_strain_velocity(ivec3(0, -1, 0));
 	vec3 pz = cached_strain_velocity(ivec3(0, 0, 1));
 	vec3 nz = cached_strain_velocity(ivec3(0, 0, -1));
-#else
-	vec3 px = vel_at_cell(c + ivec3(1, 0, 0));
-	vec3 nx = vel_at_cell(c - ivec3(1, 0, 0));
-	vec3 py = vel_at_cell(c + ivec3(0, 1, 0));
-	vec3 ny = vel_at_cell(c - ivec3(0, 1, 0));
-	vec3 pz = vel_at_cell(c + ivec3(0, 0, 1));
-	vec3 nz = vel_at_cell(c - ivec3(0, 0, 1));
-#endif
 	float sxy = 0.5 * ((px.y - nx.y) + (py.x - ny.x)) * inv_2h;
 	float sxz = 0.5 * ((px.z - nx.z) + (pz.x - nz.x)) * inv_2h;
 	float syz = 0.5 * ((py.z - ny.z) + (pz.y - nz.y)) * inv_2h;
@@ -106,9 +87,7 @@ void strain_body(ivec3 c) {
 void main() {
 	ivec3 c = cell_coord();
 	strain_prefetch();
-#ifdef FIRE_SPARSE
 	barrier();
-#endif
 	strain_body(c);
 }
 #endif

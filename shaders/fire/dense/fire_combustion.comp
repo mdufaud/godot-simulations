@@ -113,7 +113,6 @@ void combustion_body(ivec3 c) {
 	// simulated, or absent — and an absent one already reads as ambient air at
 	// 23.3 % oxygen through the accessors. The resident surface is also two tiles of
 	// dilation away from anything burning, so there is nothing there to relax.
-#ifndef FIRE_SPARSE
 	ivec3 gmax = grid_max();
 	const int BAND = 4;
 	int d_side = min(min(c.x, gmax.x - c.x), min(c.z, gmax.z - c.z));
@@ -130,7 +129,6 @@ void combustion_body(ivec3 c) {
 		s2.y = mix(s2.y, 0.0, rate);
 		s2.w = mix(s2.w, 0.0, rate);
 	}
-#endif
 
 	// NON-PAPER: the steam marker fades on the same timescale a visible plume
 	// disperses. Without it the marker only ever grows, since nothing consumes it,

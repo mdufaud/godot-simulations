@@ -1,0 +1,105 @@
+// Gather SPH liquid properties from the scatter buffer onto the fire grid
+// (Eq. 19-23, Algorithm 1 line 14). For each cell:
+//
+// Eq. 19  rho_lj = Sum m_pi*w_ij / V_cell     (a density, so the field is per-volume)
+// Eq. 20  omega_j = Sum w_ij
+// Eq. 23  T_lj = Sum T_pi*m_pi*w_ij / Sum m_pi*w_ij   (mass weighted)
+//
+// The scatter normalises w_ij per particle, so Sum_j rho_lj*V_cell == Sum_p m_p.
+// The accumulators are reset here; water_return recomputes its own weights from
+// the particle positions and reads this texture, not the SSBO.
+//
+// This stage needs no indirection of its own: it walks the storage rather than
+// the domain, and the two coordinates coincide. It is handed the ATLAS extent
+// instead of the grid extent, which is exactly the set of texels that has an
+// accumulator entry.
+//
+// It does not walk all of that extent though. The slot list below is water_tiles'
+// output — the tiles this frame's scatter reached, plus the ones that were in the
+// list last frame and have to be zeroed once — not the fire solver's active list.
+// Over the fire list this stage cost 1.24 ms at Reference and 1.33 ms at
+// Performance, identical because both saturate the 2048-slot pool while the water
+// only ever occupies a jet and a puddle.
+//
+// The accumulator reset at the bottom is why the shorter list is self-sustaining:
+// scatter can only write a cell whose tile it marked, every marked tile is in this
+// frame's list, so every entry it dirtied is cleared here and the entries outside
+// the list are still zero next frame.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
+
+// Four channels to match the textures allocated in FireGpuSolver (r32f silently
+// discards the temperature channel). liquid_vel is one of that class's scratch
+// fields, so its precision is whatever FireGpuSolver.scratch_formats picked.
+layout(rgba32f, set = 0, binding = 0) uniform restrict writeonly image3D liquid_scal;
+layout(FMT_LIQ_VEL, set = 0, binding = 1) uniform restrict writeonly image3D liquid_vel;
+
+layout(std430, set = 0, binding = 2) coherent buffer ScatterBuf {
+	uvec4 accum[];
+} scatter;
+
+layout(std430, set = 0, binding = 3) coherent buffer VelScatterBuf {
+	ivec4 accum[];  // xyz = Sum u*w
+} vscatter;
+
+layout(std430, set = 0, binding = 4) readonly restrict buffer WaterSlots {
+	uint data[];
+} water_slots;
+
+layout(push_constant, std430) uniform Params {
+	int grid_dim_x;
+	int grid_dim_y;
+	int grid_dim_z;
+	float cell_size;
+} params;
+
+// Must match water_scatter.comp.
+const float SCALE_M = 10000000.0;
+const float SCALE_W = 2000000.0;
+const float SCALE_T = 100000.0;
+const float SCALE_V = 100000.0;
+
+const float AMBIENT_T = 300.0;
+
+void main() {
+	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
+	uint slot = water_slots.data[gl_WorkGroupID.x];
+	ivec3 tile = ivec3(
+		int(slot % 16u),
+		int((slot / 16u) % 8u),
+		int(slot / 128u));
+	ivec3 c = tile * 8 + ivec3(gl_LocalInvocationID);
+	if (any(greaterThanEqual(c, dims))) {
+		return;
+	}
+
+	uint cidx = uint(c.x + c.y * dims.x + c.z * dims.x * dims.y);
+
+	float m_w   = float(scatter.accum[cidx].x) / SCALE_M;  // Sum m*w   [kg]
+	float omega = float(scatter.accum[cidx].y) / SCALE_W;  // Sum w     (Eq. 20)
+	float T_m_w = float(scatter.accum[cidx].z) / SCALE_T;  // Sum T*m*w [K.kg]
+
+	float cell_volume = params.cell_size * params.cell_size * params.cell_size;
+	float rho_l = m_w / cell_volume;
+
+	// Mass weighted, so an empty cell has no temperature to report and falls
+	// back to ambient rather than dividing by zero.
+	float T_l = (m_w > 1e-12) ? (T_m_w / m_w) : AMBIENT_T;
+
+	// Eq. 25: weighted mean droplet velocity. The same omega_j divides it, since
+	// the scattered weights are the normalised ones.
+	vec3 u_l = (omega > 1e-9)
+		? vec3(vscatter.accum[cidx].xyz) / (SCALE_V * omega)
+		: vec3(0.0);
+
+	// omega_j rides in B: water_return divides by it to hand each cell's mass
+	// back out without creating or destroying any (see that shader's header).
+	// A is the evaporation mixing factor rho', written later by fire_evaporate;
+	// zero here is only a placeholder, and a cell that never reaches that stage
+	// is never read for it either.
+	imageStore(liquid_scal, c, vec4(rho_l, T_l, omega, 0.0));
+	imageStore(liquid_vel, c, vec4(u_l, 0.0));
+
+	scatter.accum[cidx] = uvec4(0u);
+	vscatter.accum[cidx] = ivec4(0);
+}

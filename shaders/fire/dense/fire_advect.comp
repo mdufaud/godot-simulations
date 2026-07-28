@@ -34,13 +34,6 @@ void main() {
 		for (int i = 0; i < STATS_WORDS; i++) {
 			stats.data[i] = 0u;
 		}
-#ifdef FIRE_SPARSE
-		// The low corner of the resident-set bounds reduces with atomicMin, so its
-		// accumulator has to start at the top of the range rather than at zero.
-		for (int i = 0; i < 3; i++) {
-			stats.data[STAT_BOUNDS + i] = 0xFFFFFFFFu;
-		}
-#endif
 	}
 
 	// Which of the two fields the correction pass will pick up. Mode 1 is plain

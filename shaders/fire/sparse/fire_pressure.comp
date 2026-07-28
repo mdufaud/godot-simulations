@@ -13,17 +13,15 @@
 // The solver never clears the pressure field, warm-starting each frame from the
 // previous solution — the plume is quasi-steady, so it starts close.
 //
-// Dense: one Jacobi sweep per dispatch, the reference discretisation.
-//
-// Sparse: the 10^3 halo cache is loaded once and then relaxed several times in
-// place before anything is written back, so a dispatch is a block solve rather
-// than a sweep (block-Jacobi / additive Schwarz — the halo is frozen for the
-// duration, which is still a valid smoother because the block diagonal of a
-// weakly diagonally dominant M-matrix is one). Two things come out of that:
-// global passes and barriers drop by the inner sweep count, and the in-place
-// update makes the interior Gauss-Seidel rather than Jacobi. Red-black ordering
-// keeps that deterministic — a cell's six neighbours are all of the other colour,
-// so no thread reads a value another thread is writing — and over-relaxation
+// The 10^3 halo cache is loaded once and then relaxed several times in place
+// before anything is written back, so a dispatch is a block solve rather than a
+// sweep (block-Jacobi / additive Schwarz — the halo is frozen for the duration,
+// which is still a valid smoother because the block diagonal of a weakly
+// diagonally dominant M-matrix is one). Two things come out of that: global
+// passes and barriers drop by the inner sweep count, and the in-place update
+// makes the interior Gauss-Seidel rather than Jacobi. Red-black ordering keeps
+// that deterministic — a cell's six neighbours are all of the other colour, so no
+// thread reads a value another thread is writing — and over-relaxation
 // (omega > 1) then costs nothing on top.
 //
 // Information still only crosses a tile boundary once per dispatch, but it now
@@ -31,7 +29,6 @@
 // cell of propagation per global pass. The long wavelengths that neither ordering
 // reaches are what fire_press_coarse is for.
 
-#ifdef FIRE_SPARSE
 const int PRESSURE_CACHE_SIDE = 10;
 const int PRESSURE_CACHE_SIZE = PRESSURE_CACHE_SIDE * PRESSURE_CACHE_SIDE * PRESSURE_CACHE_SIDE;
 shared float pressure_cache[PRESSURE_CACHE_SIZE];
@@ -47,11 +44,9 @@ int pressure_cache_index(ivec3 p) {
 float cached_pressure(ivec3 offset) {
 	return pressure_cache[pressure_cache_index(ivec3(gl_LocalInvocationID) + ivec3(1) + offset)];
 }
-#endif
 
 void main() {
 	ivec3 c = cell_coord();
-#ifdef FIRE_SPARSE
 	ivec3 tile_origin = invocation_vt * 8;
 	if (gl_LocalInvocationIndex == 0u) {
 		face_ok_mask = tile_face_mask();
@@ -65,10 +60,10 @@ void main() {
 	}
 	barrier();
 
-	// Sparse ghost shell: a cell whose stencil reaches a tile that is not resident
-	// is the boundary, not part of the solve, and carries the same Dirichlet p = 0
-	// the dense build imposes outside its AABB. See solved_cell in fire_common —
-	// leaving these in the solve is what breaks gradient/divergence adjointness.
+	// Ghost shell: a cell whose stencil reaches a tile that is not resident is the
+	// boundary, not part of the solve, and carries a Dirichlet p = 0. See
+	// solved_cell in fire_common — leaving these in the solve is what breaks
+	// gradient/divergence adjointness.
 	//
 	// Nothing may return early here: every invocation has to reach every barrier
 	// below, so the shell is carried through the sweeps as a masked-off thread
@@ -118,28 +113,4 @@ void main() {
 	if (!out_of_grid(c)) {
 		store_press_dst(c, solved ? pressure_cache[self] : 0.0);
 	}
-#else
-	if (out_of_grid(c)) {
-		return;
-	}
-
-	ivec3 gmax = grid_max();
-	float sum = 0.0;
-	float divisor = 5.0; // the five faces that are always open or interior
-
-	sum += (c.x < gmax.x) ? load_press_src(c + ivec3(1, 0, 0)) : 0.0;
-	sum += (c.x > 0) ? load_press_src(c - ivec3(1, 0, 0)) : 0.0;
-	sum += (c.y < gmax.y) ? load_press_src(c + ivec3(0, 1, 0)) : 0.0;
-	sum += (c.z < gmax.z) ? load_press_src(c + ivec3(0, 0, 1)) : 0.0;
-	sum += (c.z > 0) ? load_press_src(c - ivec3(0, 0, 1)) : 0.0;
-
-	// Downward face: interior below row 0, solid at it.
-	if (c.y > 0) {
-		sum += load_press_src(c - ivec3(0, 1, 0));
-		divisor += 1.0;
-	}
-
-	float h = params.cell.x;
-	store_press_dst(c, (sum - h * h * load_diverg(c)) / divisor);
-#endif
 }
