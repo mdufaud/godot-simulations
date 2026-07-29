@@ -1,7 +1,7 @@
 [gd_scene load_steps=9 format=3 uid="uid://grass_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/grass_controller.gd" id="1_controller"]
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="3_orbit_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]

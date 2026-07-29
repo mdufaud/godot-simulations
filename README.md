@@ -53,10 +53,15 @@ scripts/
   autoload/  GameManager — scene registry, settings, scene switching
   demos/     One controller per demo
   ui/        SimMenu — the in-demo settings panel
-  ocean/     OceanSolver (FFT compute), OceanClipmap (mesh builder)
+  camera/    OrbitCamera, FreeFlyCamera
+  core/      Shared compute infrastructure
+  player/    FpsWalker
+  ocean/     OceanSolver, OceanClipmap, cloud deck builder
+  grass/     Grass multimesh builder
+  fractal_3d/ Fractal distance estimator
+  tornado/   Tornado wind field and debris pool
   cloth/ nbody/ sand/ destruction/   Per-simulation solvers
   fluid/     FluidSystem, PBF/SPH solvers, screen-space renderer
-  *.gd       Shared pieces — OrbitCamera, FreeFlyCamera
 shaders/     .gdshader (visual) and .comp (compute) sources
 resources/   Meshes, materials, themes — rocks/ is fetched, not committed
 tools/       Asset fetch script

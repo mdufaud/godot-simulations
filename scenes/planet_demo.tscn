@@ -1,7 +1,7 @@
 [gd_scene load_steps=4 format=3 uid="uid://planet_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/planet_controller.gd" id="1_controller"]
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="2_orbit_camera"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="2_orbit_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
 
 [node name="PlanetDemo" type="Node3D"]

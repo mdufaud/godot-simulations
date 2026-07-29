@@ -41,8 +41,8 @@ const DEMOS: Array[Dictionary] = [
 |-------|------|---------|
 | `GameManager` | `scripts/autoload/game_manager.gd` | Scene switching, settings dict, DEMOS |
 | `SimMenu` | `scripts/ui/sim_menu.gd` | Scrollable panel — sliders, toggles, buttons, progress bars, color pickers |
-| `OrbitCamera` | `scripts/orbit_camera.gd` | Mouse orbital cam — target, distance, pitch, yaw, zoom limits |
-| `FreeFlyCamera` | `scripts/free_fly_camera.gd` | WASD fly cam — DE-based adaptive speed |
+| `OrbitCamera` | `scripts/camera/orbit_camera.gd` | Mouse orbital cam — target, distance, pitch, yaw, zoom limits |
+| `FreeFlyCamera` | `scripts/camera/free_fly_camera.gd` | WASD fly cam — DE-based adaptive speed |
 | `PbfFluidSolver` | `scripts/pbf_fluid_solver.gd` | RD compute — 65K particles, 16 stages |
 | (no class_name) | `scripts/sand/heightfield_sand.gd` | RD compute — heightfield sand, repose-angle relaxation |
 | `ClothSolver` | `scripts/cloth/cloth_solver.gd` | RD compute — XPBD cloth grid, no hash needed |

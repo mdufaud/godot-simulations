@@ -6,7 +6,7 @@ const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
 const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
 const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
-const GrassMultimeshBuilder := preload("res://scripts/grass_multimesh_builder.gd")
+const GrassMultimeshBuilder := preload("res://scripts/grass/grass_multimesh_builder.gd")
 
 const TILE_SIZE := 10.0
 const MAP_RADIUS := 80.0  # Smaller for demo

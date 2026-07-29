@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://scripts/demos/ocean_controller.gd" id="1_controller"]
 [ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="2_theme"]
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="3_orbit_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="4_sim_menu"]
 [ext_resource type="PackedScene" path="res://resources/rocks/namaqualand_cliff_01/namaqualand_cliff_01_2k.gltf" id="5_cliff"]
 [ext_resource type="PackedScene" path="res://resources/rocks/rock_face_02/rock_face_02_2k.gltf" id="6_rockface"]

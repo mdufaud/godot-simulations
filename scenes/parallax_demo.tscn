@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" path="res://scripts/demos/parallax_controller.gd" id="1_controller"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="2_sim_menu"]
-[ext_resource type="Script" path="res://scripts/orbit_camera.gd" id="3_orbit_camera"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="3_orbit_camera"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.15, 0.2, 0.3, 1)

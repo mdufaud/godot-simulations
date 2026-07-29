@@ -34,7 +34,7 @@ const PRESETS := {
 const SPECTRUM_KEYS := [
 	"wind_speed", "wind_direction", "fetch_km", "swell", "spread", "detail", "height_gain",
 ]
-const CloudDeckBuilder := preload("res://scripts/cloud_deck_builder.gd")
+const CloudDeckBuilder := preload("res://scripts/ocean/cloud_deck_builder.gd")
 
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var orbit_cam: OrbitCamera = $CameraPivot

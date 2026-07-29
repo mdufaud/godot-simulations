@@ -1,9 +1,9 @@
 [gd_scene load_steps=24 format=3 uid="uid://tornado_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/tornado_controller.gd" id="1_controller"]
-[ext_resource type="Script" path="res://scripts/free_fly_camera.gd" id="2_free_fly"]
+[ext_resource type="Script" path="res://scripts/camera/free_fly_camera.gd" id="2_free_fly"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
-[ext_resource type="Script" path="res://scripts/demos/tornado_debris_pool.gd" id="4_debris_pool"]
+[ext_resource type="Script" path="res://scripts/tornado/tornado_debris_pool.gd" id="4_debris_pool"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_funnel.gdshader" id="5_funnel_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_dust.gdshader" id="6_dust_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_cloud.gdshader" id="7_cloud_shader"]

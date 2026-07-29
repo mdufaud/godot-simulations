@@ -1,7 +1,7 @@
 extends Node3D
 
 const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
-const TornadoWindField = preload("res://scripts/demos/tornado_wind_field.gd")
+const TornadoWindField = preload("res://scripts/tornado/tornado_wind_field.gd")
 
 const PRESETS := [
 	{name = "Classic EF4", model = TornadoWindField.Model.BURGERS_ROTT, r0 = 45.0, u = 85.0,
