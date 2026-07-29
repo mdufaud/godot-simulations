@@ -1,4 +1,5 @@
 extends Node3D
+const FluidConfig := preload("res://scripts/fluid/fluid_config.gd")
 ## Fluid simulation demo: a single FluidSystem switchable between a PBF and a
 ## dual-density SPH solver (Macklin & Müller 2013 vs SebLague/Clavet) for direct
 ## A/B comparison, plus water/lava and an SPH foam/spray layer. This controller
@@ -45,7 +46,8 @@ func _setup_ui() -> void:
 	menu.add_action_toggle("🌋", "Lava", fluid.mode > 0.5, _on_lava_toggled)
 	menu.add_action("↺", "Reset", func(): fluid.restart())
 	cascade_group = menu.add_group()
-	menu.add_slider("Flow", 0.5, 10.0, fluid.cascade_flow, fluid.set_cascade_flow)
+	menu.add_slider("Flow", FluidConfig.FLOW_MIN, FluidConfig.FLOW_MAX,
+		fluid.cascade_flow, fluid.set_cascade_flow)
 	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Parameters")
@@ -84,9 +86,8 @@ func _setup_ui() -> void:
 	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
 	menu.add_label("Particles")
-	menu.add_button("16k", func(): fluid.set_particle_count(16384))
-	menu.add_button("32k", func(): fluid.set_particle_count(32768))
-	menu.add_button("64k", func(): fluid.set_particle_count(65536))
+	for count in FluidConfig.PARTICLE_COUNTS:
+		menu.add_button("%dk" % int(count / 1000), func(): fluid.set_particle_count(count))
 	_update_scenario_ui()
 
 

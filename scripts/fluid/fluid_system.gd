@@ -1,5 +1,6 @@
 class_name FluidSystem
 extends Node3D
+const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 ## Reusable GPU fluid: a screen-space liquid surface driven by either a PBF or a
 ## dual-density SPH solver (switchable at runtime for A/B comparison), plus an
 ## optional white-particle (foam/spray/bubble) layer. Self-contained — instance it
@@ -24,13 +25,13 @@ const POUR_COOLDOWN_MS := 400
 var method: Method = Method.SPH
 var scenario: Scenario = Scenario.DAM
 var mode := 0.0 # 0 = water, 1 = lava
-var particle_count := 65536
+var particle_count := CONFIG.DEFAULT_PARTICLE_COUNT
 var foam_enabled := true
 var render_scale := 0.5
-var cascade_flow := 1.0
+var cascade_flow := CONFIG.DEFAULT_FLOW
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
-var domain_origin := Vector3(-8.0, 0.0, -8.0)
-var domain_size := Vector3(16.0, 16.0, 16.0)
+var domain_origin := CONFIG.DOMAIN_ORIGIN
+var domain_size := CONFIG.DOMAIN_SIZE
 var seed_origin := Vector3(-7.7, 0.1, -7.7)
 
 # --- Planet mode (SPH only; leave planet_gravity at 0 for the flat-world box). ---
@@ -145,7 +146,7 @@ func set_scenario(value: Scenario) -> void:
 
 
 func set_cascade_flow(value: float) -> void:
-	cascade_flow = clampf(value, 0.5, 10.0)
+	cascade_flow = clampf(value, CONFIG.FLOW_MIN, CONFIG.FLOW_MAX)
 	sph_solver.cascade_flow = cascade_flow
 
 

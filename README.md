@@ -1,6 +1,6 @@
 # Physics Playground
 
-A collection of 16 real-time simulation and rendering demos built in Godot 4.6
+A collection of 15 real-time simulation and rendering demos built in Godot 4.6
 (Forward+ renderer, Jolt physics). Most run their solver on the GPU through
 `RenderingDevice` compute shaders.
 
@@ -31,17 +31,18 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 |------|-----------|
 | SSR Physics Demo | Screen-space reflections + Jolt rigid bodies |
 | FFT Ocean | Tessendorf FFT — JONSWAP/TMA spectrum, Stockham IFFT, 3 cascades, Jacobian foam, clipmap mesh |
-| Fire Simulation | Arrhenius combustion grid + Texture3D raymarch |
+| Fire Simulation | Sparse GPU Arrhenius combustion grid + volume raymarch |
 | N-Body Galaxy | GPU Verlet integration + additive point sprites |
 | Grass Simulation | Multimesh LOD + wind |
 | Parallax Mapping | Cone-relaxed parallax occlusion + per-light self-shadowing |
-| Fluid Simulation (PBF) | 65K-particle GPU position-based fluid + screen-space surfacing |
+| Fluid Simulation | 65K-particle GPU PBF/SPH fluid + screen-space surfacing |
 | 2D Fractal Explorer | 10 fractal types, deep-zoom perturbation, progressive refinement |
 | 3D Fractal Explorer | 7 distance-estimated fractals, sphere tracing |
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
 | Heightfield Sand | GPU heightfield with repose-angle flow, dig/pour/smooth brushes |
 | Cloth in the Wind | GPU XPBD cloth driven by the tornado wind field |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
+| Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
 | Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |
 
 ## Layout
@@ -54,7 +55,8 @@ scripts/
   ui/        SimMenu — the in-demo settings panel
   ocean/     OceanSolver (FFT compute), OceanClipmap (mesh builder)
   cloth/ nbody/ sand/ destruction/   Per-simulation solvers
-  *.gd       Shared pieces — OrbitCamera, FreeFlyCamera, PbfFluidSolver
+  fluid/     FluidSystem, PBF/SPH solvers, screen-space renderer
+  *.gd       Shared pieces — OrbitCamera, FreeFlyCamera
 shaders/     .gdshader (visual) and .comp (compute) sources
 resources/   Meshes, materials, themes — rocks/ is fetched, not committed
 tools/       Asset fetch script

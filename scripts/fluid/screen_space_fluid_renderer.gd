@@ -1,5 +1,6 @@
 class_name ScreenSpaceFluidRenderer
 extends Node3D
+const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 ## Reusable screen-space fluid surface. Given a solver's position texture (xyz =
 ## world pos, w = speed for water / temperature for lava) it reconstructs a smooth
 ## liquid surface: sphere-impostor depth prepass -> separable bilateral depth
@@ -21,11 +22,11 @@ const LAYER_FOAM := 8
 # --- Configuration (set before start()). ---
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
 var particle_count := 0
-var tex_width := 256
+var tex_width := CONFIG.TEX_WIDTH
 var radius := 0.16
 var mode := 0.0 # 0 = water, 1 = lava
 var render_scale := 0.5
-var domain_aabb := AABB(Vector3(-8.0, 0.0, -8.0), Vector3(16.0, 16.0, 16.0))
+var domain_aabb := AABB(CONFIG.DOMAIN_ORIGIN, CONFIG.DOMAIN_SIZE)
 ## Build the foam coverage pass. When false the composite gets a black foam
 ## texture (no coverage) and no foam MultiMesh is allocated.
 var build_foam := false

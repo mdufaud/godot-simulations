@@ -8,10 +8,6 @@ var current_demo: String = ""
 
 # Global settings
 var settings: Dictionary = {
-	# Graphics
-	"ssr_enabled": true,
-	"ssr_max_steps": 96,
-	
 	# N-body demo
 	"nbody_particle_count": 262144,
 	"nbody_self_gravity": false,
@@ -25,20 +21,6 @@ var settings: Dictionary = {
 	# SSR demo
 	"ssr_demo_max_objects": 60,
 	"ssr_demo_spawn_rate": 0.25,
-	"ssr_demo_spawn_enabled": false,
-	
-	# Parallax demo
-	"parallax_height": 0.08,
-	"parallax_min_layers": 8,
-	"parallax_max_layers": 32,
-	"parallax_uv_scale": 2.0,
-	"parallax_normal_strength": 1.0,
-	"parallax_roughness": 0.8,
-	"parallax_shadow_strength": 0.8,
-	"parallax_self_shadow": true,
-	"parallax_computed_normals": false,
-	"parallax_preset": 0,
-	"parallax_mesh": 0,
 	
 	# Planet demo
 	"planet_resolution": 0,  # marching-cubes density grid side; 0 = pick from platform

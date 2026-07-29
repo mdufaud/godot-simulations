@@ -14,6 +14,12 @@ extends RefCounted
 ## rendering thread (RenderingDevice is not thread safe).
 
 const SHADER_DIR := "res://shaders/fire/sparse/"
+const DEFAULT_GRID_DIMS := Vector3i(64, 96, 64)
+const DEFAULT_CELL_SIZE := 0.2
+const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
+const POOL_BUDGETS := [1536, 1792, FireTilePool.NSLOTS]
+const WATER_PARTICLE_COUNT := 16384
+const DEFAULT_LIQUID_DRAIN_RATE := 0.2
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
 	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
@@ -139,8 +145,8 @@ const Y_O2_AIR := 0.233
 ## The fire itself roams the whole virtual domain (see [method sim_dims]); this is
 ## only the box the SPH droplets are given as their own neighbour-grid domain,
 ## 12.8 x 19.2 x 12.8 m at the default cell size.
-var grid_dims := Vector3i(64, 96, 64)
-var cell_size := 0.2 ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
+var grid_dims := DEFAULT_GRID_DIMS
+var cell_size := DEFAULT_CELL_SIZE ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
 
 var fuel_index := 0
 var units_convention := UNITS_CGS
@@ -230,7 +236,7 @@ var water_suppression := 40.0
 ## Owned here so one slider drives it, but applied by water_return.comp through
 ## FireWater.drain_rate: it has to run on frames where the evaporation stage is
 ## skipped, which is where it is the only cleanup left.
-var liquid_drain_rate := 0.2
+var liquid_drain_rate := DEFAULT_LIQUID_DRAIN_RATE
 var evaporation_enabled := true
 
 var display_temperature := 2600.0 ## Renderer normalisation only

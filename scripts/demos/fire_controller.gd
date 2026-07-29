@@ -92,16 +92,12 @@ var _equipped := FireWeapons.Kind.NONE
 ## boulders at r ~ 5-6 m, both outside the old 6.4 m box, and the smoke visibly
 ## piled up against a 9.6 m ceiling. Doubled on every axis so the plume leaves the
 ## domain through open air rather than through a wall.
-const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 ## Cell size per preset. Tab. 3 allows 0.1-10.0 m, and 0.1 is the flame fidelity
 ## the domain was sized around; the coarser two exist because the domain grew 8x
 ## in volume at fixed cell size.
 ##
 ## Cost is cubic in the inverse: doubling the cell is 8x fewer cells for ~8x less
 ## GPU time, and the pressure loop alone is half of it.
-const POOL_BUDGETS := [1536, 1792, 2048]
-const POOL_QUALITY_NAMES := ["Low (1536 tiles)", "Medium (1792 tiles)", "High (2048 tiles)"]
-
 enum PerformancePreset { REFERENCE, QUALITY, BALANCED, REALTIME_LITE, PERFORMANCE, AUTO }
 const PERFORMANCE_PRESET_NAMES := [
 	"Reference", "Quality", "Balanced", "Realtime Lite", "Performance", "Auto"]
@@ -131,7 +127,7 @@ var _preset_status_label: Label
 var _auto_level := 0
 var _auto_hold := 0.0
 var _auto_frame_ms := 16.67
-var _water_particle_cap := 16384
+var _water_particle_cap := FireGpuSolver.WATER_PARTICLE_COUNT
 var _water_particle_cap_applied := -1
 var _water_substeps := 16
 var _water_adaptive_substeps := false
@@ -221,8 +217,9 @@ func _ready() -> void:
 	# enough to keep both a dense in-flight column and a connected floor puddle
 	# alive at once — a smaller budget starves the stream into falling beads.
 	water = FireWater.new()
-	water.particle_count = 16384
+	water.particle_count = FireGpuSolver.WATER_PARTICLE_COUNT
 	water.evaporation_active = solver.evaporation_enabled
+	water.drain_rate = solver.liquid_drain_rate
 	water.profiling = debug_info
 	# Queued as a closure rather than bound: the pool's indirection volume does not
 	# exist until the solver's own queued init_render has run on the render thread,
@@ -521,7 +518,7 @@ func _setup_volume_material() -> void:
 	_set_volume_proxy(solver.display_clip_box())
 	# The blue reaction core fades over the height of a burner-sized domain; over
 	# the virtual one it would never fade at all.
-	volume_material.set_shader_parameter("blue_height", DOMAIN_SIZE.y)
+	volume_material.set_shader_parameter("blue_height", FireGpuSolver.DOMAIN_SIZE.y)
 	# The volume stores temperature normalised against these, so the shader
 	# needs them to turn the red channel back into kelvins.
 	volume_material.set_shader_parameter("ambient_temperature", solver.ambient_temperature)
@@ -555,7 +552,8 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.mode = 0.0
 	fluid_renderer.render_scale = 1.0
 	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
-	fluid_renderer.domain_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * DOMAIN_SIZE, DOMAIN_SIZE)
+	fluid_renderer.domain_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * FireGpuSolver.DOMAIN_SIZE,
+		FireGpuSolver.DOMAIN_SIZE)
 	# Foam deferred: land the clean surface + puddle first.
 	fluid_renderer.build_foam = false
 	add_child(fluid_renderer)
@@ -1060,7 +1058,7 @@ func _set_water_render_scale(value: float) -> void:
 ## [member FireGpuSolver.initialized] comes back true at the end of the rebuild
 ## and [method _process] picks the new texture up on the next frame.
 func _set_quality(index: int) -> void:
-	var budget: int = POOL_BUDGETS[index]
+	var budget: int = FireGpuSolver.POOL_BUDGETS[index]
 	if budget == solver.pool_budget:
 		return
 
@@ -1280,8 +1278,11 @@ func _setup_ui() -> void:
 		PERFORMANCE_PRESET_NAMES, _performance_preset, _set_performance_preset)
 	_preset_status_label = menu.add_label("")
 	_preset_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	menu.add_option_button("Pool budget", POOL_QUALITY_NAMES,
-		POOL_BUDGETS.find(solver.pool_budget), _set_quality)
+	var pool_quality_names: Array[String] = []
+	for budget in FireGpuSolver.POOL_BUDGETS:
+		pool_quality_names.append("%d tiles" % budget)
+	menu.add_option_button("Pool budget", pool_quality_names,
+		FireGpuSolver.POOL_BUDGETS.find(solver.pool_budget), _set_quality)
 
 	menu.add_separator()
 	wood_section = menu.add_section("Wood")
@@ -1387,7 +1388,9 @@ func _setup_ui() -> void:
 	# NON-PAPER: how fast a cold puddle drains away so the fire can recover; 0 keeps
 	# the old behaviour where water pooled forever and half-smothered the flame.
 	menu.add_slider("Water drain (1/s)", 0.0, 1.0, solver.liquid_drain_rate,
-		func(v: float): solver.liquid_drain_rate = v)
+		func(v: float):
+			solver.liquid_drain_rate = v
+			water.drain_rate = v)
 	# Manual overrides cover the gameplay jet presets above.
 	menu.add_slider("Jet velocity (m/s)", 0.0, 20.0, water.jet_velocity,
 		func(v: float): water.jet_velocity = v)

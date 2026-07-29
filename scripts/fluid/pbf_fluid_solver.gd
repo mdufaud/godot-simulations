@@ -1,5 +1,6 @@
 class_name PbfFluidSolver
 extends RefCounted
+const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 
 const SHADER_DIR := "res://shaders/pbf/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"
@@ -11,11 +12,11 @@ const STAGES: Array[String] = [
 ]
 const WG := 256
 
-var particle_count := 65536
-var grid_dims := Vector3i(64, 64, 64)
-var grid_origin := Vector3(-8.0, 0.0, -8.0)
-var cell_size := 0.25
-var h := 0.25
+var particle_count := CONFIG.DEFAULT_PARTICLE_COUNT
+var grid_dims := CONFIG.GRID_DIMS
+var grid_origin := CONFIG.GRID_ORIGIN
+var cell_size := CONFIG.CELL_SIZE
+var h := CONFIG.CELL_SIZE
 var spacing := 0.12
 var epsilon := 100.0
 var scorr_k := 0.001
@@ -26,7 +27,7 @@ var gravity := Vector3(0.0, -9.8, 0.0)
 var solver_iterations := 3
 var mode := 0.0
 
-var tex_width := 256
+var tex_width := CONFIG.TEX_WIDTH
 var initialized := false
 var profiling := false
 
@@ -193,36 +194,9 @@ func _mark(cl: int, name: String) -> int:
 # Render thread. Reads last frame's timestamps: each pbf/* marker closes the
 # segment started by the previous pbf/* marker; repeated names sum across iterations.
 func _read_timings() -> void:
-	var out := {}
-	var prev_time := 0
-	var start_time := 0
-	var in_chain := false
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if not nm.begins_with("pbf/"):
-			continue
-		var t := _rd.get_captured_timestamp_gpu_time(i)
-		if nm == "pbf/start":
-			start_time = t
-			prev_time = t
-			in_chain = true
-			continue
-		if not in_chain:
-			continue
-		var seg := nm.trim_prefix("pbf/")
-		if seg == "end":
-			out["total"] = float(t - start_time) / 1e6
-			if profiling:
-				out["post"] = out.get("post", 0.0) + float(t - prev_time) / 1e6
-			in_chain = false
-		else:
-			out[seg] = out.get(seg, 0.0) + float(t - prev_time) / 1e6
-		prev_time = t
+	var out: Dictionary = CONFIG.read_gpu_timings(_rd, "pbf/", profiling)
 	if out.is_empty():
 		return
-	for key in ["viscosity", "integration", "foam_prepare", "foam_update", "foam_compact"]:
-		if not out.has(key):
-			out[key] = 0.0
 	_timings_mutex.lock()
 	_timings = out
 	_timings_mutex.unlock()

@@ -1,5 +1,6 @@
 class_name FireWater
 extends RefCounted
+const FIRE_CONFIG := preload("res://scripts/fire/fire_gpu_solver.gd")
 ## Water droplet ↔ fire grid coupling for Fire-X (Wrede et al., SIGGRAPH Asia 2025).
 ##
 ## The droplets themselves are an [SphFluidSolver] (Clavet double-density SPH,
@@ -86,7 +87,7 @@ var evaporation_active := false
 ## Mirrors FireGpuSolver.liquid_drain_rate, applied by water_return.comp. Owned by
 ## the solver so one slider drives it, but consumed here because the drain has to
 ## run whether or not the evaporation stage does.
-var drain_rate := 0.2
+var drain_rate := FIRE_CONFIG.DEFAULT_LIQUID_DRAIN_RATE
 ## Simulated seconds the drain covers, i.e. the fire grid's fixed-step clock,
 ## not the frame delta.
 var step_dt := 0.0
