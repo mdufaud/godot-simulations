@@ -18,5 +18,35 @@ void main() {
 		}
 		visc += (velocities.data[j].xyz - vi) * sph_poly6(r2);
 	)
-	velocities.data[i] = vec4(vi + visc * params.sim2.x * params.sim.x, velocities.data[i].w);
+	vec3 v = vi + visc * params.sim2.x * params.sim.x;
+	vec3 p = positions.data[i].xyz + v * params.sim.x;
+	float damp = params.sim2.y;
+	if (planet_mode()) {
+		resolve_planet_collision(p, v, damp);
+		p = clamp_domain(p);
+	} else {
+		if (scene_mode()) {
+			resolve_scene_collisions(p, v, 0.985);
+		}
+		vec3 lo = params.grid_origin.xyz + vec3(0.02);
+		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+		if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * damp; }
+		else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * damp; }
+		if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * damp; }
+		else if (p.y > hi.y) { p.y = hi.y; v.y = -v.y * damp; }
+		if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * damp; }
+		else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * damp; }
+	}
+	float temp = positions.data[i].w;
+	if (params.gravity.w > 0.5) {
+		float surf = clamp(1.0 - densities.data[i] / params.sim.y, 0.0, 1.0);
+		temp = max(temp - params.sim.x * (0.05 + 0.45 * surf), 0.0);
+	}
+	positions.data[i] = vec4(p, temp);
+	velocities.data[i] = vec4(v, velocities.data[i].w);
+	if (params.misc.z == 1) {
+		uint w = uint(params.misc.x);
+		ivec2 texel = ivec2(int(i % w), int(i / w));
+		imageStore(position_tex, texel, vec4(p, mix(length(v), temp, params.gravity.w)));
+	}
 }

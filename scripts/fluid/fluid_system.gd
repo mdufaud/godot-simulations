@@ -15,16 +15,19 @@ extends Node3D
 ## SphFluidSolver and is available in SPH water mode only.
 
 enum Method { PBF, SPH }
+enum Scenario { DAM, CASCADE }
 
 const RADIUS := {Method.PBF: 0.12, Method.SPH: 0.16}
 const POUR_COOLDOWN_MS := 400
 
 # --- Public configuration (set before start(); use the setters afterwards). ---
 var method: Method = Method.SPH
+var scenario: Scenario = Scenario.DAM
 var mode := 0.0 # 0 = water, 1 = lava
 var particle_count := 65536
 var foam_enabled := true
 var render_scale := 0.5
+var cascade_flow := 1.0
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
 var domain_origin := Vector3(-8.0, 0.0, -8.0)
 var domain_size := Vector3(16.0, 16.0, 16.0)
@@ -108,6 +111,8 @@ func _setup_renderer() -> void:
 # --- Runtime control -------------------------------------------------------
 
 func set_method(m: Method) -> void:
+	if scenario == Scenario.CASCADE and m != Method.SPH:
+		return
 	if m == method:
 		return
 	_teardown()
@@ -120,6 +125,28 @@ func set_method(m: Method) -> void:
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
 	RenderingServer.call_on_render_thread(_render_init)
+
+
+func set_scenario(value: Scenario) -> void:
+	if value == scenario:
+		return
+	_teardown()
+	scenario = value
+	if scenario == Scenario.CASCADE:
+		method = Method.SPH
+	active_solver = sph_solver if method == Method.SPH else pbf_solver
+	_radius = RADIUS[method]
+	active_solver.particle_count = particle_count
+	renderer.set_radius(_radius)
+	_configure_solver()
+	renderer.set_foam_visible(_foam_active())
+	active_solver.set_seed_positions(_build_seed())
+	RenderingServer.call_on_render_thread(_render_init)
+
+
+func set_cascade_flow(value: float) -> void:
+	cascade_flow = clampf(value, 0.5, 10.0)
+	sph_solver.cascade_flow = cascade_flow
 
 
 func set_mode(m: float) -> void:
@@ -168,6 +195,8 @@ func set_render_scale(v: float) -> void:
 
 func restart() -> void:
 	_teardown()
+	_pour_cursor = 0
+	_last_pour_ms = -POUR_COOLDOWN_MS
 	active_solver.set_seed_positions(_build_seed())
 	RenderingServer.call_on_render_thread(_render_init)
 
@@ -179,6 +208,13 @@ func set_profiling(on: bool) -> void:
 
 func get_timings() -> Dictionary:
 	return active_solver.get_timings() if active_solver != null else {}
+
+
+func request_validation_stats(result: Dictionary) -> void:
+	if active_solver == null:
+		result["done"] = true
+		return
+	RenderingServer.call_on_render_thread(active_solver.capture_validation_stats.bind(result))
 
 
 func profiled_viewports() -> Array:
@@ -253,6 +289,14 @@ func _configure_solver() -> void:
 	pbf_solver.mode = mode
 	sph_solver.mode = mode
 	sph_solver.foam_enabled = _foam_active()
+	sph_solver.cascade_enabled = scenario == Scenario.CASCADE and not planet_mode()
+	sph_solver.cascade_flow = cascade_flow
+	sph_solver.emitter_origin = Vector3(-3.0, 13.6, 0.0)
+	sph_solver.emitter_velocity = Vector3(0.0, -2.0, 0.0)
+	var obstacles: Array[Dictionary] = []
+	if sph_solver.cascade_enabled:
+		obstacles = cascade_obstacles()
+	sph_solver.set_scene_obstacles(obstacles)
 	if planet_mode():
 		_configure_planet_solver()
 		sph_solver.viscosity_strength = 0.14 if mode < 0.5 else 0.3
@@ -314,7 +358,67 @@ func _build_seed() -> PackedFloat32Array:
 		if renderer != null:
 			renderer.set_visible_count(0)
 		return seed
+	if scenario == Scenario.CASCADE:
+		return _build_cascade_seed()
+	if method == Method.SPH:
+		sph_solver.active_count = -1
 	return _build_dam_seed()
+
+
+func cascade_obstacles() -> Array[Dictionary]:
+	var obstacles: Array[Dictionary] = []
+	_add_ramp(obstacles, Vector3(-2.0, 9.4, 0.0), Vector3(7.0, 0.35, 3.8), -0.30)
+	_add_ramp_stop(obstacles, Vector3(-2.0, 9.4, 0.0), Vector3(7.0, 0.35, 3.8),
+		-0.30, -1.0)
+	_add_ramp(obstacles, Vector3(1.5, 5.0, 0.0), Vector3(8.5, 0.45, 3.8), 0.28)
+	_add_ramp_stop(obstacles, Vector3(1.5, 5.0, 0.0), Vector3(8.5, 0.45, 3.8),
+		0.28, 1.0)
+	obstacles.append(_cascade_box(Vector3(0.0, 0.35, 0.0), Vector3(12.0, 0.5, 7.0)))
+	obstacles.append(_cascade_box(Vector3(-6.0, 2.25, 0.0), Vector3(0.6, 4.3, 7.0)))
+	obstacles.append(_cascade_box(Vector3(6.0, 2.25, 0.0), Vector3(0.6, 4.3, 7.0)))
+	obstacles.append(_cascade_box(Vector3(0.0, 2.25, -3.5), Vector3(12.0, 4.3, 0.6)))
+	obstacles.append(_cascade_box(Vector3(0.0, 1.1, 3.5), Vector3(12.0, 2.0, 0.6)))
+	return obstacles
+
+
+func _add_ramp(obstacles: Array[Dictionary], center: Vector3, size: Vector3,
+		angle: float) -> void:
+	var basis := Basis(Vector3.BACK, angle)
+	obstacles.append({transform = Transform3D(basis, center), size = size, retention = 0.985})
+	for side in [-1.0, 1.0]:
+		var rail_center := center + basis * Vector3(0.0, 0.48, side * (size.z * 0.5 + 0.08))
+		obstacles.append({
+			transform = Transform3D(basis, rail_center),
+			size = Vector3(size.x, 0.8, 0.18),
+			retention = 0.985,
+		})
+
+
+func _cascade_box(center: Vector3, size: Vector3) -> Dictionary:
+	return {transform = Transform3D(Basis.IDENTITY, center), size = size, retention = 0.985}
+
+
+func _add_ramp_stop(obstacles: Array[Dictionary], center: Vector3, size: Vector3,
+		angle: float, side: float) -> void:
+	var basis := Basis(Vector3.BACK, angle)
+	var stop_center := center + basis * Vector3(side * size.x * 0.5, 0.8, 0.0)
+	obstacles.append({
+		transform = Transform3D(basis, stop_center),
+		size = Vector3(0.35, 1.8, size.z),
+		retention = 0.96,
+	})
+
+
+func _build_cascade_seed() -> PackedFloat32Array:
+	var n: int = active_solver.particle_count
+	var seed := PackedFloat32Array()
+	seed.resize(n * 4)
+	for i in n:
+		seed[i * 4 + 3] = mode
+	sph_solver.active_count = 0
+	if renderer != null:
+		renderer.set_visible_count(0)
+	return seed
 
 
 ## Drops a blob of fluid above `point`, taking the next slice of the particle
@@ -419,7 +523,7 @@ func _build_dam_seed() -> PackedFloat32Array:
 func _process(_delta: float) -> void:
 	if active_solver == null or not active_solver.initialized:
 		return
-	var visible: int = sph_solver.live_count() if planet_mode() else active_solver.particle_count
+	var visible: int = sph_solver.live_count() if method == Method.SPH else active_solver.particle_count
 	var foam_rid: RID = sph_solver.get_foam_tex_rid() if method == Method.SPH else RID()
 	renderer.update(active_solver.get_position_tex_rid(), visible, foam_rid)
 	RenderingServer.call_on_render_thread(_render_step.bind(1.0 / 60.0))

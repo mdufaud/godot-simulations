@@ -172,7 +172,9 @@ func step_render(dt: float) -> void:
 	if vorticity_eps > 0.0:
 		_dispatch(cl, "vorticity_omega", pc, n_groups)
 		_dispatch(cl, "vorticity_apply", pc, n_groups)
+		cl = _mark(cl, "pbf/vorticity")
 	_dispatch(cl, "viscosity", pc, n_groups)
+	cl = _mark(cl, "pbf/viscosity")
 	_rd.compute_list_end()
 	_rd.capture_timestamp("pbf/end")
 	_parity = 1 - _parity
@@ -218,6 +220,9 @@ func _read_timings() -> void:
 		prev_time = t
 	if out.is_empty():
 		return
+	for key in ["viscosity", "integration", "foam_prepare", "foam_update", "foam_compact"]:
+		if not out.has(key):
+			out[key] = 0.0
 	_timings_mutex.lock()
 	_timings = out
 	_timings_mutex.unlock()
@@ -229,6 +234,51 @@ func get_timings() -> Dictionary:
 	var copy := _timings.duplicate()
 	_timings_mutex.unlock()
 	return copy
+
+
+func capture_validation_stats(result: Dictionary) -> void:
+	if not initialized:
+		result["done"] = true
+		return
+	var position_key := "positions_a" if _parity == 0 else "positions_b"
+	var positions := _rd.buffer_get_data(_buffers[position_key]).to_float32_array()
+	var velocities := _rd.buffer_get_data(_buffers["velocities"]).to_float32_array()
+	var densities := _rd.buffer_get_data(_buffers["densities"]).to_float32_array()
+	_fill_validation_stats(result, positions, velocities, densities)
+
+
+func _fill_validation_stats(result: Dictionary, positions: PackedFloat32Array,
+		velocities: PackedFloat32Array, densities: PackedFloat32Array) -> void:
+	var invalid := 0
+	var outside := 0
+	var max_speed := 0.0
+	var density_sum := 0.0
+	var density_ratios := PackedFloat32Array()
+	density_ratios.resize(particle_count)
+	var lo := grid_origin - Vector3.ONE * 0.001
+	var hi := grid_origin + Vector3(grid_dims) * cell_size + Vector3.ONE * 0.001
+	for i in particle_count:
+		var p := Vector3(positions[i * 4], positions[i * 4 + 1], positions[i * 4 + 2])
+		var v := Vector3(velocities[i * 4], velocities[i * 4 + 1], velocities[i * 4 + 2])
+		var ratio := densities[i] * _inv_rest_density
+		if not is_finite(p.x) or not is_finite(p.y) or not is_finite(p.z) \
+				or not is_finite(v.x) or not is_finite(v.y) or not is_finite(v.z) \
+				or not is_finite(ratio):
+			invalid += 1
+			continue
+		if p.x < lo.x or p.y < lo.y or p.z < lo.z or p.x > hi.x or p.y > hi.y or p.z > hi.z:
+			outside += 1
+		max_speed = maxf(max_speed, v.length())
+		density_ratios[i] = ratio
+		density_sum += ratio
+	density_ratios.sort()
+	result["particles"] = particle_count
+	result["invalid"] = invalid
+	result["outside"] = outside
+	result["max_speed"] = max_speed
+	result["density_ratio_mean"] = density_sum / float(particle_count)
+	result["density_ratio_p99"] = density_ratios[clampi(int(particle_count * 0.99), 0, particle_count - 1)]
+	result["done"] = true
 
 
 func free_render() -> void:

@@ -11,12 +11,14 @@ const SHARED_GRID_DIR := "res://shaders/fluid/"
 const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back"]
 const STAGES: Array[String] = [
 	"grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back", "grid_scatter",
-	"sph_external", "sph_density", "sph_pressure", "sph_viscosity", "sph_integrate",
-	"foam_update", "foam_compact",
+	"sph_external", "sph_density", "sph_pressure", "sph_viscosity", "sph_emit",
+	"foam_prepare", "foam_update", "foam_compact",
 ]
 const WG := 256
 const FOAM_UBO_SIZE := 96
 const PLANET_UBO_SIZE := 48
+const MAX_SCENE_OBSTACLES := 14
+const SCENE_UBO_SIZE := 1184
 
 var particle_count := 65536
 ## How many of those slots are live. Buffers are always allocated at
@@ -91,6 +93,13 @@ var planet_field_world_size := 0.0
 var planet_skin := 0.1
 var planet_normal_offset := 0.5
 
+var cascade_enabled := false
+var cascade_flow := 1.0
+var cascade_cycle_seconds := 240.0
+var emitter_origin := Vector3(-5.0, 13.6, 0.0)
+var emitter_velocity := Vector3(0.0, -2.0, 0.0)
+var scene_obstacles: Array[Dictionary] = []
+
 var initialized := false
 var profiling := false
 
@@ -103,12 +112,16 @@ var _tex_rid := RID()
 var _foam_tex_rid := RID()
 var _foam_ubo := RID()
 var _planet_ubo := RID()
+var _planet_params_hash := 0
+var _scene_ubo := RID()
 var _planet_sampler := RID()
 ## Bound at binding 18 when planet mode is off, since the shader declares the
 ## sampler unconditionally and every declared binding must be satisfied.
 var _dummy_field := RID()
 var _frame := 0
 var _sim_time := 0.0
+var _emit_cursor := 0
+var _emit_fraction := 0.0
 var _target_density := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
@@ -156,6 +169,10 @@ func set_seed_positions(seed: PackedFloat32Array) -> void:
 	_seed_data = seed
 
 
+func set_scene_obstacles(value: Array[Dictionary]) -> void:
+	scene_obstacles = value
+
+
 ## Teleports a contiguous slice of particle slots to new positions with zero
 ## velocity. Both parities are written, so the caller need not know which buffers
 ## are canonical this sub-step; the next sort re-bins them either way. Because the
@@ -201,6 +218,11 @@ func init_render() -> void:
 	var vec4_bytes := n * 16
 	var zero_vec4 := PackedByteArray()
 	zero_vec4.resize(vec4_bytes)
+	var velocity_seed := PackedFloat32Array()
+	velocity_seed.resize(n * 4)
+	for i in n:
+		velocity_seed[i * 4 + 3] = float(i)
+	var velocity_bytes := velocity_seed.to_byte_array()
 	var zero_f := PackedByteArray()
 	zero_f.resize(n * 4)
 	var zero_cells := PackedByteArray()
@@ -215,8 +237,8 @@ func init_render() -> void:
 
 	_buffers["positions_a"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
 	_buffers["positions_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
-	_buffers["velocities_a"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
-	_buffers["velocities_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["velocities_a"] = _rd.storage_buffer_create(vec4_bytes, velocity_bytes)
+	_buffers["velocities_b"] = _rd.storage_buffer_create(vec4_bytes, velocity_bytes)
 	_buffers["predicted_a"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
 	_buffers["predicted_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["densities"] = _rd.storage_buffer_create(n * 4, zero_f)
@@ -229,14 +251,18 @@ func init_render() -> void:
 	var zero_foam := PackedByteArray()
 	zero_foam.resize(foam_n * 16)
 	var zero_counter := PackedByteArray()
-	zero_counter.resize(8)
+	zero_counter.resize(24)
 	_buffers["foam_pos"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_vel"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_pos_c"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_vel_c"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
-	_buffers["foam_count"] = _rd.storage_buffer_create(8, zero_counter)
+	_buffers["foam_count"] = _rd.storage_buffer_create(24, zero_counter,
+		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
 	_foam_ubo = _rd.uniform_buffer_create(FOAM_UBO_SIZE, _pack_foam_ubo(1.0 / 60.0))
-	_planet_ubo = _rd.uniform_buffer_create(PLANET_UBO_SIZE, _pack_planet_ubo())
+	var planet_bytes := _pack_planet_ubo()
+	_planet_ubo = _rd.uniform_buffer_create(PLANET_UBO_SIZE, planet_bytes)
+	_planet_params_hash = _current_planet_params_hash()
+	_scene_ubo = _rd.uniform_buffer_create(SCENE_UBO_SIZE, _pack_scene_ubo(0, 0))
 	_dummy_field = _create_dummy_field()
 	_planet_sampler = _create_field_sampler()
 
@@ -262,6 +288,14 @@ func init_render() -> void:
 	_build_uniform_sets()
 
 	_parity = 0
+	_frame = 0
+	_sim_time = 0.0
+	_emit_cursor = 0
+	_emit_fraction = 0.0
+	last_substeps = 0
+	_timings_mutex.lock()
+	_timings.clear()
+	_timings_mutex.unlock()
 	initialized = true
 
 
@@ -274,11 +308,11 @@ func _build_uniform_sets() -> void:
 		["positions_a", "velocities_a", "predicted_a", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_b", "velocities_b",
 			"", "predicted_b", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c"],
+			"foam_pos_c", "foam_vel_c", ""],
 		["positions_b", "velocities_b", "predicted_b", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_a", "velocities_a",
 			"", "predicted_a", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c"],
+			"foam_pos_c", "foam_vel_c", ""],
 	]
 	var field: RID = planet_field if planet_field.is_valid() else _dummy_field
 	for stage in _uniform_sets:
@@ -303,6 +337,9 @@ func _build_uniform_sets() -> void:
 					u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 					u.add_id(_planet_sampler)
 					u.add_id(field)
+				elif bi == 21:
+					u.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+					u.add_id(_scene_ubo)
 				else:
 					u.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 					u.add_id(_buffers[order[bi]])
@@ -358,7 +395,26 @@ func step_render(dt: float) -> void:
 	_frame += 1
 	_sim_time += dt
 	_rd.buffer_update(_foam_ubo, 0, FOAM_UBO_SIZE, _pack_foam_ubo(dt))
-	_rd.buffer_update(_planet_ubo, 0, PLANET_UBO_SIZE, _pack_planet_ubo())
+	var emit_count := 0
+	var emit_start := _emit_cursor
+	if cascade_enabled:
+		var cycle := maxf(cascade_cycle_seconds / maxf(cascade_flow, 0.01), 0.1)
+		_emit_fraction += float(particle_count) * dt / cycle
+		emit_count = mini(int(_emit_fraction), particle_count)
+		_emit_fraction -= float(emit_count)
+		if active_count >= 0 and active_count < particle_count:
+			emit_start = active_count
+			emit_count = mini(emit_count, particle_count - active_count)
+			active_count += emit_count
+			_emit_cursor = active_count % particle_count
+		else:
+			emit_count = mini(emit_count, live_count())
+			_emit_cursor = (_emit_cursor + emit_count) % maxi(live_count(), 1)
+	_rd.buffer_update(_scene_ubo, 0, SCENE_UBO_SIZE, _pack_scene_ubo(emit_start, emit_count))
+	var planet_hash := _current_planet_params_hash()
+	if planet_hash != _planet_params_hash:
+		_rd.buffer_update(_planet_ubo, 0, PLANET_UBO_SIZE, _pack_planet_ubo())
+		_planet_params_hash = planet_hash
 	# Nothing poured yet: every stage below would dispatch zero groups, which the
 	# rendering device rejects once per stage per frame.
 	if live_count() == 0:
@@ -366,10 +422,13 @@ func step_render(dt: float) -> void:
 	var n_groups := ceili(float(live_count()) / WG)
 	var cells := _grid_cell_count()
 	var cell_groups := ceili(float(cells) / WG)
-	var foam_groups := ceili(float(foam_cap()) / WG)
 
 	_rd.capture_timestamp("sph/start")
 	var cl := _rd.compute_list_begin()
+	if cascade_enabled and emit_count > 0:
+		var emit_pc := _pack_push_constant(dt_sub, 0, _frame * step_count)
+		_dispatch(cl, "sph_emit", emit_pc, n_groups)
+		cl = _mark(cl, "sph/emit")
 	for s in step_count:
 		var last := s == step_count - 1
 		# Salting the seed per (frame, sub-step) stops every sub-step from
@@ -387,14 +446,16 @@ func step_render(dt: float) -> void:
 		_dispatch(cl, "sph_pressure", pc, n_groups)
 		cl = _mark(cl, "sph/pressure")
 		_dispatch(cl, "sph_viscosity", pc, n_groups)
-		_dispatch(cl, "sph_integrate", pc, n_groups)
-		cl = _mark(cl, "sph/integrate")
+		cl = _mark(cl, "sph/viscosity")
 		# White particles advance once per frame (full dt) against the grid the
 		# last sub-step just built, so this must run before the parity flip.
 		if last and foam_enabled:
-			_dispatch(cl, "foam_update", pc, foam_groups)
-			_dispatch(cl, "foam_compact", pc, foam_groups)
-			cl = _mark(cl, "sph/foam")
+			_dispatch(cl, "foam_prepare", pc, 1)
+			cl = _mark(cl, "sph/foam_prepare")
+			_dispatch_indirect(cl, "foam_update", pc)
+			cl = _mark(cl, "sph/foam_update")
+			_dispatch_indirect(cl, "foam_compact", pc)
+			cl = _mark(cl, "sph/foam_compact")
 		_parity = 1 - _parity
 	_rd.compute_list_end()
 	_rd.capture_timestamp("sph/end")
@@ -437,6 +498,9 @@ func _read_timings() -> void:
 		prev_time = t
 	if out.is_empty():
 		return
+	for key in ["viscosity", "integration", "foam_prepare", "foam_update", "foam_compact"]:
+		if not out.has(key):
+			out[key] = 0.0
 	_timings_mutex.lock()
 	_timings = out
 	_timings_mutex.unlock()
@@ -448,6 +512,61 @@ func get_timings() -> Dictionary:
 	var copy := _timings.duplicate()
 	_timings_mutex.unlock()
 	return copy
+
+
+func capture_validation_stats(result: Dictionary) -> void:
+	if not initialized:
+		result["done"] = true
+		return
+	var position_key := "positions_a" if _parity == 0 else "positions_b"
+	var velocity_key := "velocities_a" if _parity == 0 else "velocities_b"
+	var positions := _rd.buffer_get_data(_buffers[position_key]).to_float32_array()
+	var velocities := _rd.buffer_get_data(_buffers[velocity_key]).to_float32_array()
+	var densities := _rd.buffer_get_data(_buffers["densities"]).to_float32_array()
+	var foam_counts := _rd.buffer_get_data(_buffers["foam_count"]).to_int32_array()
+	_fill_validation_stats(result, positions, velocities, densities, foam_counts)
+
+
+func _fill_validation_stats(result: Dictionary, positions: PackedFloat32Array,
+		velocities: PackedFloat32Array, densities: PackedFloat32Array,
+		foam_counts: PackedInt32Array) -> void:
+	var count := live_count()
+	if count == 0:
+		result.merge({"particles": 0, "invalid": 0, "outside": 0, "max_speed": 0.0,
+			"density_ratio_mean": 0.0, "density_ratio_p99": 0.0, "foam_live": 0,
+			"done": true}, true)
+		return
+	var invalid := 0
+	var outside := 0
+	var max_speed := 0.0
+	var density_sum := 0.0
+	var density_ratios := PackedFloat32Array()
+	density_ratios.resize(count)
+	var lo := grid_origin - Vector3.ONE * 0.001
+	var hi := grid_origin + Vector3(grid_dims) * cell_size + Vector3.ONE * 0.001
+	for i in count:
+		var p := Vector3(positions[i * 4], positions[i * 4 + 1], positions[i * 4 + 2])
+		var v := Vector3(velocities[i * 4], velocities[i * 4 + 1], velocities[i * 4 + 2])
+		var ratio := densities[i] / _target_density
+		if not is_finite(p.x) or not is_finite(p.y) or not is_finite(p.z) \
+				or not is_finite(v.x) or not is_finite(v.y) or not is_finite(v.z) \
+				or not is_finite(ratio):
+			invalid += 1
+			continue
+		if p.x < lo.x or p.y < lo.y or p.z < lo.z or p.x > hi.x or p.y > hi.y or p.z > hi.z:
+			outside += 1
+		max_speed = maxf(max_speed, v.length())
+		density_ratios[i] = ratio
+		density_sum += ratio
+	density_ratios.sort()
+	result["particles"] = count
+	result["invalid"] = invalid
+	result["outside"] = outside
+	result["max_speed"] = max_speed
+	result["density_ratio_mean"] = density_sum / float(count)
+	result["density_ratio_p99"] = density_ratios[clampi(int(count * 0.99), 0, count - 1)]
+	result["foam_live"] = mini(foam_counts[0], foam_cap()) if not foam_counts.is_empty() else 0
+	result["done"] = true
 
 
 func free_render() -> void:
@@ -465,6 +584,8 @@ func free_render() -> void:
 		_rd.free_rid(_foam_ubo)
 	if _planet_ubo.is_valid():
 		_rd.free_rid(_planet_ubo)
+	if _scene_ubo.is_valid():
+		_rd.free_rid(_scene_ubo)
 	if _planet_sampler.is_valid():
 		_rd.free_rid(_planet_sampler)
 	if _dummy_field.is_valid():
@@ -487,6 +608,8 @@ func free_render() -> void:
 	_foam_tex_rid = RID()
 	_foam_ubo = RID()
 	_planet_ubo = RID()
+	_planet_params_hash = 0
+	_scene_ubo = RID()
 	_planet_sampler = RID()
 	_dummy_field = RID()
 
@@ -496,6 +619,14 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, groups: int) -> void
 	_rd.compute_list_bind_uniform_set(cl, _uniform_sets[stage][_parity], 0)
 	_rd.compute_list_set_push_constant(cl, pc, pc.size())
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
+	_rd.compute_list_add_barrier(cl)
+
+
+func _dispatch_indirect(cl: int, stage: String, pc: PackedByteArray) -> void:
+	_rd.compute_list_bind_compute_pipeline(cl, _pipelines[stage])
+	_rd.compute_list_bind_uniform_set(cl, _uniform_sets[stage][_parity], 0)
+	_rd.compute_list_set_push_constant(cl, pc, pc.size())
+	_rd.compute_list_dispatch_indirect(cl, _buffers["foam_count"], 8)
 	_rd.compute_list_add_barrier(cl)
 
 
@@ -581,8 +712,53 @@ func _pack_planet_ubo() -> PackedByteArray:
 	return b
 
 
+func _current_planet_params_hash() -> int:
+	return hash([planet_centre.x, planet_centre.y, planet_centre.z, planet_gravity,
+		planet_field_world_size, planet_skin, planet_normal_offset, planet_mode()])
+
+
 func planet_mode() -> bool:
 	return planet_gravity > 0.0 and planet_field.is_valid()
+
+
+func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
+	var b := PackedByteArray()
+	b.resize(SCENE_UBO_SIZE)
+	b.encode_float(0, emitter_origin.x)
+	b.encode_float(4, emitter_origin.y)
+	b.encode_float(8, emitter_origin.z)
+	b.encode_float(12, mode)
+	b.encode_float(16, emitter_velocity.x)
+	b.encode_float(20, emitter_velocity.y)
+	b.encode_float(24, emitter_velocity.z)
+	b.encode_float(28, 1.0 if cascade_enabled else 0.0)
+	b.encode_float(32, spacing)
+	b.encode_s32(48, emit_start)
+	b.encode_s32(52, emit_count)
+	b.encode_s32(56, live_count())
+	var obstacle_count := mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES)
+	b.encode_s32(60, obstacle_count)
+	for i in obstacle_count:
+		var obstacle: Dictionary = scene_obstacles[i]
+		var inverse: Transform3D = (obstacle.transform as Transform3D).affine_inverse()
+		var columns := [inverse.basis.x, inverse.basis.y, inverse.basis.z]
+		var matrix_offset := 64 + i * 64
+		for column in 3:
+			var v: Vector3 = columns[column]
+			b.encode_float(matrix_offset + column * 16, v.x)
+			b.encode_float(matrix_offset + column * 16 + 4, v.y)
+			b.encode_float(matrix_offset + column * 16 + 8, v.z)
+		b.encode_float(matrix_offset + 48, inverse.origin.x)
+		b.encode_float(matrix_offset + 52, inverse.origin.y)
+		b.encode_float(matrix_offset + 56, inverse.origin.z)
+		b.encode_float(matrix_offset + 60, 1.0)
+		var half_extents: Vector3 = (obstacle.size as Vector3) * 0.5
+		var extents_offset := 960 + i * 16
+		b.encode_float(extents_offset, half_extents.x)
+		b.encode_float(extents_offset + 4, half_extents.y)
+		b.encode_float(extents_offset + 8, half_extents.z)
+		b.encode_float(extents_offset + 12, float(obstacle.get("retention", 0.985)))
+	return b
 
 
 # std140: six 16-byte rows. Mirrors the FoamParams block in sph_common.comp.

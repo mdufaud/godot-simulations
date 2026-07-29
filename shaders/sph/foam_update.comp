@@ -1,4 +1,4 @@
-// One invocation per white-particle slot, once per frame. Gathers the
+// One invocation per live white particle, once per frame. Gathers the
 // surrounding fluid through the solver's grid, classifies the particle by how
 // many fluid neighbours it has, and moves it accordingly (SebLague):
 //   spray  (airborne, few neighbours) - ballistic, quadratic air drag
@@ -79,6 +79,9 @@ void main() {
 		resolve_planet_collision(p, v, bounce);
 		p = clamp_domain(p);
 	} else {
+		if (scene_mode()) {
+			resolve_scene_collisions(p, v, bounce);
+		}
 		vec3 lo = params.grid_origin.xyz + vec3(0.02);
 		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
 		if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * bounce; }

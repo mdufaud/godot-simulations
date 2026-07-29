@@ -12,6 +12,10 @@ extends Node3D
 var fluid: FluidSystem
 var pbf_group: VBoxContainer
 var sph_group: VBoxContainer
+var cascade_group: VBoxContainer
+var scenario_option: OptionButton
+var solver_option: OptionButton
+var cascade_decor: Node3D
 
 var profiler_label: Label
 var _profile_accum := 0.0
@@ -24,6 +28,7 @@ func _ready() -> void:
 	fluid.method = FluidSystem.Method.SPH
 	add_child(fluid)
 	fluid.start()
+	_build_cascade_decor()
 	_setup_ui()
 	_setup_profiler()
 	_apply_env()
@@ -32,9 +37,16 @@ func _ready() -> void:
 func _setup_ui() -> void:
 	_update_title()
 	menu.add_section("Simulation")
-	menu.add_option_button("Solver", ["PBF", "SPH"], fluid.method, _on_method_selected)
+	scenario_option = menu.add_option_button("Preset", ["Dam", "Cascade"], fluid.scenario,
+		_on_scenario_selected)
+	solver_option = menu.add_option_button("Solver", ["PBF", "SPH"], fluid.method,
+		_on_method_selected)
+	menu.add_action("🗺", "Scene", _cycle_scenario)
 	menu.add_action_toggle("🌋", "Lava", fluid.mode > 0.5, _on_lava_toggled)
 	menu.add_action("↺", "Reset", func(): fluid.restart())
+	cascade_group = menu.add_group()
+	menu.add_slider("Flow", 0.5, 10.0, fluid.cascade_flow, fluid.set_cascade_flow)
+	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Parameters")
 
@@ -75,10 +87,13 @@ func _setup_ui() -> void:
 	menu.add_button("16k", func(): fluid.set_particle_count(16384))
 	menu.add_button("32k", func(): fluid.set_particle_count(32768))
 	menu.add_button("64k", func(): fluid.set_particle_count(65536))
+	_update_scenario_ui()
 
 
 func _update_title() -> void:
-	menu.title = "🌊 Fluid Simulation (%s)" % ("SPH" if fluid.method == FluidSystem.Method.SPH else "PBF")
+	var preset := "Cascade" if fluid.scenario == FluidSystem.Scenario.CASCADE else "Dam"
+	menu.title = "🌊 Fluid %s (%s)" % [preset,
+		"SPH" if fluid.method == FluidSystem.Method.SPH else "PBF"]
 
 
 func _update_param_groups() -> void:
@@ -90,6 +105,60 @@ func _on_method_selected(idx: int) -> void:
 	fluid.set_method(idx as FluidSystem.Method)
 	_update_title()
 	_update_param_groups()
+
+
+func _on_scenario_selected(idx: int) -> void:
+	fluid.set_scenario(idx as FluidSystem.Scenario)
+	_update_scenario_ui()
+
+
+func _cycle_scenario() -> void:
+	var next := (scenario_option.selected + 1) % scenario_option.item_count
+	scenario_option.select(next)
+	scenario_option.item_selected.emit(next)
+
+
+func _update_scenario_ui() -> void:
+	var cascade := fluid.scenario == FluidSystem.Scenario.CASCADE
+	solver_option.set_item_disabled(FluidSystem.Method.PBF, cascade)
+	solver_option.select(fluid.method)
+	cascade_group.visible = cascade
+	cascade_decor.visible = cascade
+	var camera_rig: OrbitCamera = $CameraPivot
+	camera_rig.target = Vector3(0.0, 7.0, 0.0) if cascade else Vector3(-2.0, 2.0, -2.0)
+	camera_rig.distance = 30.0 if cascade else 22.0
+	camera_rig.pitch = -22.0 if cascade else -25.0
+	camera_rig.yaw = 10.0 if cascade else 35.0
+	_update_title()
+	_update_param_groups()
+
+
+func _build_cascade_decor() -> void:
+	cascade_decor = Node3D.new()
+	cascade_decor.name = "CascadeDecor"
+	add_child(cascade_decor)
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.42, 0.46, 0.48)
+	material.metallic = 0.12
+	material.roughness = 0.62
+	for obstacle in fluid.cascade_obstacles():
+		var box := BoxMesh.new()
+		box.size = obstacle.size
+		box.material = material
+		var mesh_instance := MeshInstance3D.new()
+		mesh_instance.mesh = box
+		mesh_instance.transform = obstacle.transform
+		cascade_decor.add_child(mesh_instance)
+	var pipe := CylinderMesh.new()
+	pipe.top_radius = 0.38
+	pipe.bottom_radius = 0.38
+	pipe.height = 1.6
+	pipe.material = material
+	var nozzle := MeshInstance3D.new()
+	nozzle.mesh = pipe
+	nozzle.position = Vector3(-3.0, 14.4, 0.0)
+	cascade_decor.add_child(nozzle)
+	cascade_decor.visible = false
 
 
 func _on_lava_toggled(on: bool) -> void:

@@ -78,7 +78,7 @@ layout(std430, set = 0, binding = 13) restrict buffer FoamVel {
 foam_vel;
 
 layout(std430, set = 0, binding = 14) restrict buffer FoamCount {
-	uint data[]; // [0] = live count, [1] = survivor count being built this frame
+	uint data[]; // live, survivors, indirect xyz, previous live count
 }
 foam_count;
 
@@ -123,6 +123,17 @@ layout(std430, set = 0, binding = 20) restrict buffer FoamVelSurvivors {
 	vec4 data[];
 }
 foam_vel_c;
+
+const int MAX_SCENE_OBSTACLES = 14;
+layout(std140, set = 0, binding = 21) uniform SceneParams {
+	vec4 emitter_origin;
+	vec4 emitter_velocity;
+	vec4 emitter_shape;
+	ivec4 counts;
+	mat4 world_to_local[MAX_SCENE_OBSTACLES];
+	vec4 half_extents[MAX_SCENE_OBSTACLES];
+}
+scene;
 
 // Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
 // request, so it can read past the cap for the rest of the frame.
@@ -249,6 +260,31 @@ void resolve_planet_collision(inout vec3 p, inout vec3 v, float friction) {
 		if (dot(v, up) < 0.0) {
 			v -= up * dot(up, v);
 			v *= friction;
+		}
+	}
+}
+
+bool scene_mode() {
+	return scene.emitter_velocity.w > 0.5;
+}
+
+void resolve_scene_collisions(inout vec3 p, inout vec3 v, float retention) {
+	for (int k = 0; k < scene.counts.w; k++) {
+		vec3 local_p = (scene.world_to_local[k] * vec4(p, 1.0)).xyz;
+		vec3 half_size = scene.half_extents[k].xyz;
+		vec3 inside = half_size - abs(local_p);
+		if (any(lessThanEqual(inside, vec3(0.0)))) {
+			continue;
+		}
+		int axis = inside.y < inside.x ? 1 : 0;
+		axis = inside.z < inside[axis] ? 2 : axis;
+		vec3 local_n = vec3(0.0);
+		local_n[axis] = local_p[axis] < 0.0 ? -1.0 : 1.0;
+		vec3 world_n = normalize(transpose(mat3(scene.world_to_local[k])) * local_n);
+		p += world_n * (inside[axis] + 0.02);
+		if (dot(v, world_n) < 0.0) {
+			v -= world_n * dot(v, world_n);
+			v *= min(retention, scene.half_extents[k].w);
 		}
 	}
 }

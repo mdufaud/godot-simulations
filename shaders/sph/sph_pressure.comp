@@ -11,6 +11,7 @@ void main() {
 	vec3 vel_i = velocities.data[i].xyz;
 	vec3 force = vec3(0.0);
 	int neighbours = 0;
+	bool spawn_foam = foam.flags.x == 1 && params.gravity.w <= 0.5;
 	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
 	// converges with its neighbours. High only where fluid slams into itself,
 	// which is exactly where air is entrained and foam is born.
@@ -36,13 +37,15 @@ void main() {
 		force += dir * sph_density_deriv(dst) * shared_p / dj;
 		force += dir * sph_near_density_deriv(dst) * shared_np / nj;
 
-		vec3 rel_v = vel_i - velocities.data[j].xyz;
-		float rel_mag = length(rel_v);
-		vec3 rel_dir = rel_v / max(rel_mag, 1e-6);
-		// 0 when moving apart, up to 2 when moving straight at each other.
-		float converge = 1.0 - dot(rel_dir, -dir);
-		float influence = 1.0 - min(1.0, dst / params.kernel.x);
-		trapped_air += rel_mag * converge * influence;
+		if (spawn_foam) {
+			vec3 rel_v = vel_i - velocities.data[j].xyz;
+			float rel_mag = length(rel_v);
+			vec3 rel_dir = rel_v / max(rel_mag, 1e-6);
+			// 0 when moving apart, up to 2 when moving straight at each other.
+			float converge = 1.0 - dot(rel_dir, -dir);
+			float influence = 1.0 - min(1.0, dst / params.kernel.x);
+			trapped_air += rel_mag * converge * influence;
+		}
 	)
 	vec3 accel = force / max(density, 1e-6);
 	vec3 v = vel_i + accel * params.sim.x;
@@ -54,13 +57,8 @@ void main() {
 
 	// --- Spawn white particles from this fluid particle ---
 	// Water only: in lava the white-particle look makes no sense.
-	if (foam.flags.x != 1 || params.gravity.w > 0.5) {
+	if (!spawn_foam) {
 		return;
-	}
-	// One thread clears the survivor counter that foam_update will fill at the end
-	// of the frame. Safe from here: foam_update runs in a later dispatch.
-	if (i == 0u) {
-		foam_count.data[1] = 0u;
 	}
 	float air_factor = foam.spawn.x * remap01(trapped_air, foam.spawn.y, foam.spawn.z);
 	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);

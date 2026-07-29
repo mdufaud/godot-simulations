@@ -12,6 +12,7 @@ uniform sampler2D fluid_depth_tex : filter_nearest;
 uniform sampler2D thickness_tex : filter_linear;
 // White-particle prepass: R = coverage, G = linear eye depth of the sprite.
 uniform sampler2D foam_tex : filter_linear;
+uniform bool foam_enabled = false;
 
 uniform vec3 absorption = vec3(0.55, 0.18, 0.09);
 uniform float absorption_scale = 0.5;
@@ -99,6 +100,9 @@ vec3 sample_sky(vec3 world_dir, vec3 to_sun, vec3 up_axis) {
 void fragment() {
 	float scene_d = scene_eye_depth(SCREEN_UV, INV_PROJECTION_MATRIX, DEPTH_TEXTURE);
 	vec2 fm = texture(foam_tex, SCREEN_UV).rg;
+	if (!foam_enabled) {
+		fm = vec2(0.0);
+	}
 	float foam = fm.r;
 	float foam_d = fm.g;
 	// Foam behind opaque scene geometry is hidden by it.

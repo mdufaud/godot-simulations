@@ -105,12 +105,13 @@ func set_visible_count(n: int) -> void:
 		mm.visible_instance_count = n
 
 
-## Whether the foam billboards draw. Hiding foam_mmi leaves the foam viewport
-## clearing to black, i.e. no coverage. No-op when build_foam is false.
+## Whether the foam billboards draw. Hiding foam also disables its viewport.
+## No-op when build_foam is false.
 func set_foam_visible(on: bool) -> void:
 	_foam_visible = on
 	if foam_mmi != null:
 		foam_mmi.visible = on and _foam_bound
+	_update_foam_viewport()
 
 
 func set_render_scale(v: float) -> void:
@@ -136,6 +137,7 @@ func rebind() -> void:
 	_foam_bound = false
 	if foam_mmi != null:
 		foam_mmi.visible = false
+	_update_foam_viewport()
 
 
 # --- Per-frame -------------------------------------------------------------
@@ -155,6 +157,7 @@ func update(pos_tex_rid: RID, visible_count: int, foam_tex_rid: RID = RID()) -> 
 		foam_mat.set_shader_parameter("foam_tex", foam_pos_texture)
 		_foam_bound = true
 		foam_mmi.visible = _foam_visible
+		_update_foam_viewport()
 	set_visible_count(visible_count)
 	_set_rendering_active(visible_count > 0)
 	_sync_cams()
@@ -165,12 +168,23 @@ func _set_rendering_active(active: bool) -> void:
 		return
 	_rendering_active = active
 	var mode := SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
-	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp, foam_vp]:
+	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp]:
 		if vp != null:
 			vp.render_target_update_mode = mode
 	depth_mmi.visible = active
 	thick_mmi.visible = active
 	composite_mi.visible = active
+	_update_foam_viewport()
+
+
+func _update_foam_viewport() -> void:
+	if foam_vp == null:
+		return
+	var active := _rendering_active and _foam_visible and _foam_bound
+	foam_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS if active \
+		else SubViewport.UPDATE_DISABLED
+	if composite_mat != null:
+		composite_mat.set_shader_parameter("foam_enabled", active)
 
 
 func _exit_tree() -> void:

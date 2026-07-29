@@ -1,0 +1,31 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w) || !scene_mode() || scene.counts.y <= 0) {
+		return;
+	}
+	uint id = uint(round(velocities_src.data[i].w));
+	uint count = uint(scene.counts.z);
+	uint start = uint(scene.counts.x);
+	uint offset = (id + count - start) % count;
+	if (offset >= uint(scene.counts.y)) {
+		return;
+	}
+	uint layer_width = 4u;
+	uint layer_area = layer_width * layer_width;
+	float spacing = scene.emitter_shape.x;
+	vec3 p = scene.emitter_origin.xyz + vec3(
+		(float(offset % layer_width) - 1.5) * spacing,
+		float(offset / layer_area) * spacing,
+		(float((offset / layer_width) % layer_width) - 1.5) * spacing
+	);
+	vec3 v = scene.emitter_velocity.xyz;
+	positions_src.data[i] = vec4(p, scene.emitter_origin.w);
+	predicted_src.data[i] = vec4(p, 0.0);
+	velocities_src.data[i] = vec4(v, float(id));
+	positions.data[i] = vec4(p, scene.emitter_origin.w);
+	predicted.data[i] = vec4(p, 0.0);
+	velocities.data[i] = vec4(v, float(id));
+	uint w = uint(params.misc.x);
+	ivec2 texel = ivec2(int(i % w), int(i / w));
+	imageStore(position_tex, texel, vec4(p, mix(length(v), scene.emitter_origin.w, params.gravity.w)));
+}

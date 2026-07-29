@@ -2,7 +2,8 @@
 .godot/
 android/
 bin/
-docs/
+docs/*
+!docs/fluid_optimization_plan.md
 .editorconfig
 TODO.md
 
@@ -16,3 +17,5 @@ resources/rocks/
 .reasonix/
 __pycache__/
 tmp/
+
+docs/

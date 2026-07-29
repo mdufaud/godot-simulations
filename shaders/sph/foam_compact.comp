@@ -1,12 +1,11 @@
 // Second half of the white-particle frame (SebLague: WhiteParticlePrepareNextFrame).
 // Copies the survivors foam_update appended back over the live pool, then adopts the
-// survivor count as the new live count. Runs over the whole pool rather than the live
-// run because the render texture has to be cleared past the survivors as well --
-// leaving those texels alone would keep drawing last frame's dead particles forever.
+// survivor count as the new live count. Runs over the previous live range so the tail
+// past the survivors is cleared without walking unused pool capacity.
 void main() {
 	uint s = gl_GlobalInvocationID.x;
 	uint cap = uint(foam.cls.z);
-	if (s >= cap) {
+	if (s >= foam_count.data[5]) {
 		return;
 	}
 	uint survivors = min(cap, foam_count.data[1]);
