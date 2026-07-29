@@ -6,8 +6,7 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## cursor for the UI; click in the viewport recaptures it. No camera roll.
 ## Move: WASD + move_up/move_down, relative to the full look direction, with
 ## acceleration/damping smoothing (anti-nausea, no jerk).
-## If de_query is set, per-frame step length is clamped to half the surface
-## distance (with a floor) so you decelerate near detail but never freeze.
+## If de_query is set, movement is kept outside nearby fractal surfaces.
 
 # --- Look ---
 @export var mouse_sensitivity := 0.15
@@ -20,7 +19,6 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 @export var move_speed := 3.0       # cruise units/sec
 @export var acceleration := 12.0    # ramp toward target velocity
 @export var damping := 8.0          # ramp toward zero on release
-@export var min_step := 0.02        # step floor so a surface never traps us
 
 ## Callable(Vector3) -> float distance estimator, injected by the controller.
 var de_query: Callable
@@ -28,6 +26,7 @@ var de_query: Callable
 var pitch := 0.0
 var yaw := 0.0
 var velocity := Vector3.ZERO
+var motion_intensity := 0.0
 
 var _captured := false
 var _camera: Camera3D
@@ -84,6 +83,7 @@ func _input(event: InputEvent) -> void:
 	# cursor can sit over the menu panel) before _unhandled_input ever fires.
 	if _captured and event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
+		motion_intensity = maxf(motion_intensity, clampf(motion.relative.length() / 24.0, 0.0, 1.0))
 		yaw -= motion.relative.x * mouse_sensitivity
 		pitch = clampf(pitch - motion.relative.y * mouse_sensitivity, min_pitch, max_pitch)
 		_update_transform()
@@ -105,6 +105,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		# finger through the GUI, so it never shows up as unhandled.
 		if event is InputEventScreenDrag:
 			var drag := event as InputEventScreenDrag
+			motion_intensity = maxf(motion_intensity, clampf(drag.relative.length() / 24.0, 0.0, 1.0))
 			yaw -= drag.relative.x * touch_sensitivity
 			pitch = clampf(pitch - drag.relative.y * touch_sensitivity, min_pitch, max_pitch)
 			_update_transform()
@@ -118,6 +119,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(delta: float) -> void:
+	motion_intensity *= exp(-8.0 * delta)
 	var input_dir := Vector3.ZERO
 	if _captured:
 		if Input.is_action_pressed("move_forward"):
@@ -137,14 +139,10 @@ func _process(delta: float) -> void:
 		input_dir.x += _joystick.value.x
 		input_dir.z += _joystick.value.y
 
-	# DE-proportional speed (classic fractal-explorer navigation): fast in open
-	# space, slow crawl near detail. This is what sells the sense of scale —
-	# without it the whole fractal flies past in a second and you feel giant.
 	var speed := move_speed
 	var dist := -1.0
 	if de_query.is_valid():
 		dist = maxf(de_query.call(position) as float, 0.0)
-		speed = move_speed * clampf(dist, 0.05, 5.0)
 
 	var target := Vector3.ZERO
 	if input_dir != Vector3.ZERO:
@@ -152,13 +150,21 @@ func _process(delta: float) -> void:
 		target = (basis * input_dir.limit_length(1.0)) * speed
 
 	var rate := acceleration if target != Vector3.ZERO else damping
-	velocity = velocity.move_toward(target, rate * delta)
+	var previous_velocity := velocity
+	var decay := exp(-rate * delta)
+	velocity = target + (previous_velocity - target) * decay
+	motion_intensity = maxf(motion_intensity,
+		clampf(velocity.length() / maxf(move_speed, 0.001), 0.0, 1.0))
 
-	var step := velocity * delta
+	var step := target * delta + (previous_velocity - target) * (1.0 - decay) / maxf(rate, 1e-6)
 	if dist >= 0.0 and step != Vector3.ZERO:
-		var max_len := maxf(min_step, dist * 0.5)
-		if step.length() > max_len:
-			step = step.normalized() * max_len
+		var midpoint_dist := maxf(de_query.call(position + step * 0.5) as float, 0.0)
+		var endpoint_dist := maxf(de_query.call(position + step) as float, 0.0)
+		var moving_away := midpoint_dist > dist and endpoint_dist > midpoint_dist
+		if not moving_away:
+			var max_len := maxf(dist * 0.35, 0.0001)
+			if step.length() > max_len:
+				step = step.normalized() * max_len
 	position += step
 	_update_transform()
 
@@ -189,6 +195,7 @@ func set_pose(pos: Vector3, new_yaw: float, new_pitch: float) -> void:
 	yaw = new_yaw
 	pitch = clampf(new_pitch, min_pitch, max_pitch)
 	velocity = Vector3.ZERO
+	motion_intensity = 0.0
 	_update_transform()
 
 

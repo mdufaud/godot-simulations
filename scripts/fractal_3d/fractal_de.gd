@@ -1,9 +1,8 @@
 class_name FractalDE
 ## CPU mirror of scene() in shaders/fractal_3d.gdshader (distance only, no trap).
-## Used by FreeFlyCamera for adaptive speed / soft step-clamp.
+## Used by FreeFlyCamera for its soft surface step-clamp.
 ## Do NOT diverge from the GLSL: any DE change in the shader must be echoed here.
-## fractal_type: 0 Pseudo-Kleinian, 1 Apollonian, 2 Menger (infinite),
-##               3 Kleinian (Jos Leys).
+## fractal_type: 0 Apollonian, 1 Menger (infinite), 2 Kleinian (Jos Leys).
 
 const ONE := Vector3(1.0, 1.0, 1.0)
 
@@ -14,32 +13,11 @@ static func evaluate(p: Vector3, params: Dictionary) -> float:
 
 	match fractal_type:
 		0:
-			return _kleinian(p, iterations, params)
-		1:
 			return _apollonian(p, iterations, params)
-		2:
+		1:
 			return _menger(p, iterations)
 		_:
 			return _jos_kleinian(p, iterations, params)
-
-
-static func _kleinian(p: Vector3, iterations: int, params: Dictionary) -> float:
-	var z := p
-	var w := 1.0
-	var csize: Vector3 = params.get("kleinian_csize", Vector3(0.808, 0.808, 1.167))
-	var minrad2: float = params.get("kleinian_minrad2", 0.25)
-
-	for i in range(40):
-		if i >= iterations:
-			break
-		z = z.clamp(-csize, csize) * 2.0 - z
-		var r2 := z.length_squared()
-		var k := maxf(minrad2 / maxf(r2, 1e-9), 1.0)
-		z *= k
-		w *= k
-
-	var rxy := sqrt(z.x * z.x + z.y * z.y)
-	return maxf(rxy - 0.92784, absf(rxy * z.z - 0.5) / maxf(z.length(), 1e-9)) / w
 
 
 static func _apollonian(p: Vector3, iterations: int, params: Dictionary) -> float:

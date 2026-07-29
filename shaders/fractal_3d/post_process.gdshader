@@ -1,8 +1,8 @@
 shader_type canvas_item;
 
-uniform float aberration_strength : hint_range(0.0, 0.02) = 0.0015;
+uniform float aberration_strength : hint_range(0.0, 0.02) = 0.0;
 uniform float vignette_strength : hint_range(0.0, 2.0) = 0.35;
-uniform float grain_strength : hint_range(0.0, 0.2) = 0.015;
+uniform float grain_strength : hint_range(0.0, 0.2) = 0.0;
 
 uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
 
