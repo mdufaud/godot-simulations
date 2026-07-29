@@ -1,4 +1,4 @@
-// Pass 1/5. One workgroup per slot reduces its 8^3 block of the activity image
+// Pass 1/6. One workgroup per slot reduces its 8^3 block of the activity image
 // to a single max, and sets the tile's keep flag if it clears the threshold. A
 // kept tile refreshes its wanted_frame so tile_free spares it and tile_dilate
 // scatters a band around it.

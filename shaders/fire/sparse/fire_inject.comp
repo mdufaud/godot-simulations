@@ -1,7 +1,7 @@
 // Scene interaction with the grid: one dispatch per queued event, the kind
 // arriving in params.dims.w.
 //   1 = fuel emitter, 2 = ignition source, 3 = water spray, 4 = smother,
-//   5 = wood pile
+//   5 = wood pile, 6 = flamethrower
 //
 // Fire-X drives its scenes with grid emitters carrying fuel/oxygen/nitrogen
 // mass fractions and a temperature in the 300-1500 K band (Tab. 3, "Grid
@@ -25,6 +25,13 @@ void add_fuel(inout vec4 s, inout vec4 s2, float amount) {
 	s2.x *= shrink;
 }
 
+float torch_falloff(vec3 p, out float axis_t) {
+	vec3 ab = cfg.torch2.xyz;
+	axis_t = clamp(dot(p - cfg.torch.xyz, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+	float radius = mix(cfg.torch.w, cfg.torch3.x, axis_t);
+	return 1.0 - clamp(distance(p, cfg.torch.xyz + ab * axis_t) / max(radius, 1e-6), 0.0, 1.0);
+}
+
 void main() {
 	ivec3 c = cell_coord();
 	int mode_v = params.dims.w;
@@ -38,6 +45,24 @@ void main() {
 		if (d <= params.event.w && c.y > 0) {
 			float f = (1.0 - d / params.event.w) * params.event2.x;
 			store_v_src(c, load_v_src(c) + f * 3.0);
+		}
+	}
+	if (mode_v == 6) {
+		vec3 axis = cfg.torch2.xyz;
+		vec3 direction = axis / max(length(axis), 1e-6);
+		float blend_rate = clamp(params.cell.y * 8.0, 0.0, 1.0);
+		float axis_t;
+		if (in_u(c)) {
+			float f = torch_falloff(u_face_to_world(c), axis_t);
+			store_u_src(c, mix(load_u_src(c), direction.x * cfg.torch3.z, f * blend_rate));
+		}
+		if (in_v(c)) {
+			float f = torch_falloff(v_face_to_world(c), axis_t);
+			store_v_src(c, mix(load_v_src(c), direction.y * cfg.torch3.z, f * blend_rate));
+		}
+		if (in_w(c)) {
+			float f = torch_falloff(w_face_to_world(c), axis_t);
+			store_w_src(c, mix(load_w_src(c), direction.z * cfg.torch3.z, f * blend_rate));
 		}
 	}
 
@@ -94,6 +119,27 @@ void main() {
 			if (pilot > 0.0 && falloff > 0.25) {
 				s.x = max(s.x, mix(t_amb, pilot, smoothstep(0.25, 0.9, falloff)));
 			}
+		}
+		store_scal_src(c, s);
+		store_scal2_src(c, s2);
+		return;
+	}
+	if (mode_v == 6) {
+		float axis_t;
+		float falloff = torch_falloff(cell_to_world(c), axis_t);
+		if (falloff <= 0.0) {
+			return;
+		}
+		const float Y_TORCH_MAX = 0.10;
+		float add = min(cfg.torch2.w * params.cell.y * falloff,
+			max(Y_TORCH_MAX - s.y, 0.0));
+		s.y += add;
+		float shrink = 1.0 - add;
+		s.z *= shrink;
+		s.w *= shrink;
+		s2.x *= shrink;
+		if (axis_t <= clamp(cfg.torch3.w, 0.0, 1.0)) {
+			s.x = max(s.x, mix(t_amb, cfg.torch3.y, falloff));
 		}
 		store_scal_src(c, s);
 		store_scal2_src(c, s2);

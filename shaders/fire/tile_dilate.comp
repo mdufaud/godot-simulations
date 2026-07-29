@@ -1,4 +1,4 @@
-// Pass 2/5. Each kept tile scatters into the box of virtual tiles around it. One
+// Pass 3/6. Each kept tile scatters into the box of virtual tiles around it. One
 // workgroup per slot, one thread per neighbour offset (R=2 gives a 5x5x5 = 125
 // thread grid). This keeps a band of resident tiles ahead of the fire so the
 // plume never touches the active-region boundary.

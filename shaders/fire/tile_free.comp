@@ -1,4 +1,4 @@
-// Pass 3/5. A resident tile that has not been wanted for hold_frames pushes its
+// Pass 4/6. A resident tile that has not been wanted for hold_frames pushes its
 // slot back onto the free list and clears its indirection entry. Runs before
 // tile_alloc so a slot freed this frame is reusable this frame.
 //

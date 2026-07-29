@@ -75,7 +75,7 @@ var jet_spray_angle := 0.0
 var jet_position := Vector3(2.5, 2.0, 0.0)
 var jet_direction := Vector3(-1.0, -0.6, 0.0)
 ## Radius of the emission disc at the nozzle mouth.
-var jet_nozzle_radius := 0.08
+var jet_nozzle_radius := 0.025
 
 var _jet_accum := 0.0
 var _jet_cursor := 0
@@ -274,58 +274,13 @@ func _init_sph(domain: Vector3) -> void:
 	# Nothing poured yet. active_count is raised by spawn_droplets.
 	sph.active_count = 0
 
-	# Reconciliation against Fire-X Eq. 14 / Tab. 3 (the "verify before copying"
-	# the plan asked for). The solver's state equation is, per sph_pressure.comp,
-	#   pressure      = (rho      - rho_0) * pressure_mult
-	#   near_pressure =  near_rho          * near_pressure_mult
-	# which is exactly Eq. 14 (p_ij = k_s(rho_ij - rho_0), p^near = k^near.rho^near)
-	# in form. The *numbers* still cannot be transcribed, for two reasons:
-	#  1. Kernel normalisation. The paper's density is the bare Clavet sum of
-	#     (1 - r/h)^2; this solver's is a SpikyPow2 kernel carrying a 15/(2.pi.h^5)
-	#     factor, so its rho is ~15/(2.pi.h^3) times larger (~2400x at h = 0.1 m) and
-	#     a matching k_s would be that much smaller. Tab. 3's Stiffness 0.004-0.005
-	#     is defined against the bare sum, not this one.
-	#  2. Integration scheme. Clavet applies the pressure as a position displacement
-	#     (D = dt^2.grad p); this solver applies it as a force through the SPH
-	#     gradient, integrated to velocity. The two are not unit-compatible, so even
-	#     after (1) the coefficients would not line up.
-	# What *does* carry over is the paper's ratio and character: Near Stiffness is
-	# 3-4x the Stiffness (0.01-0.02 vs 0.004-0.005), i.e. short-range incompressibility
-	# dominates so droplets hold their shape instead of interpenetrating. The demo
-	# default 180/12 has the far term dominant, which reads as beads that scatter on
-	# impact. These droplet-only values put the near term on top and add viscous
-	# cohesion so a jet lands as a puddle. They do not touch the shared solver used
-	# by the fluid demos.
-	# Near-dominant still (short-range incompressibility holds the puddle together
-	# rather than letting droplets interpenetrate), but far softer than the 240 that
-	# suited sphere-rendered droplets. A dense stream arriving at 10+ m/s onto an
-	# existing puddle turns that stiffness into an impact explosion — measured
-	# droplets thrown 4 m ABOVE the nozzle — and every airborne fragment renders as
-	# its own glassy ball.
-	# Halving the smoothing length (SPH_H 0.2 -> 0.1) shortened the stable time step
-	# with it, and the solver's default 3 sub-steps did not follow: droplets landing
-	# at ~10 m/s overlapped inside one step, and the pressure force answering that
-	# overlap threw them off at 100-500 m/s, all the way to the domain ceiling. This
-	# is where the "droplets bouncing everywhere in the box" came from — not from the
-	# emitter, which explodes the same way at 100 Hz with 300 particles alive.
-	# Measured at the medium preset: 3 sub-steps -> vmax 120-490 m/s and y_max pinned
-	# at the 19.2 m ceiling; 16 -> vmax < 19 m/s and y_max at the 5 m nozzle, over
-	# 30 s at the full 16384-particle budget. Costs ~8 fps on a 760M.
 	sph.substeps = 16
-	# Softened alongside the sub-step count: at 60/140 the same 16 sub-steps still let
-	# the occasional droplet leave the puddle at 20+ m/s. Halving both keeps the
-	# near-dominant ratio (short-range incompressibility over far-field pressure) that
-	# holds the puddle together while dropping the stiff-force spike at impact.
-	sph.pressure_mult = 30.0
-	sph.near_pressure_mult = 70.0
-	# Clavet's viscosity is a linear/quadratic impulse (Eq. 17, Tab. 3: Linear 0.0,
-	# Quadratic 0.4); this solver's is XSPH velocity smoothing, a different model,
-	# so the number is not the paper's 0.4 either. Raised from the demo's 0.14 for
-	# the cohesion a settling puddle needs; kept under 0.5, where XSPH goes unstable.
-	sph.viscosity_strength = 0.4
+	sph.pressure_mult = 0.0
+	sph.near_pressure_mult = 0.0
+	sph.viscosity_strength = 0.1
 	# Water arrives at the floor fast and should stay there and spread, not bounce:
 	# a lively restitution is what turns the impact ring into flying droplets.
-	sph.collision_damping = 0.6
+	sph.collision_damping = 0.0
 	# Spawn spacing feeds the rest-density estimate; at the droplet smoothing length
 	# it wants to be a fraction of h, not the demo's fixed 0.12 m.
 	sph.spacing = SPH_H * 0.5
@@ -433,20 +388,14 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 	# across the travel makes the emission continuous in space.
 	var span := jet_velocity * move_dt
 
-	# The burst is laid out as ONE disc across the aim -- a slice of stream per frame,
-	# which is what a nozzle actually emits -- on a sunflower lattice.
-	#
-	# It has to be a lattice, not uniform random sampling. At rest density the slice
-	# has no slack at all (count parcels of spacing^3 exactly fill it), so random
-	# placement always produces pairs far closer than the rest spacing, and
-	# near-pressure (240) fires those apart at 20+ m/s: the golf balls flew UP, well
-	# above the nozzle. The sunflower keeps every pair near the ideal separation.
 	const GOLDEN_ANGLE := 2.39996322972865332
+	var lanes := maxi(1, ceili(float(count) * sph.spacing / maxf(span, sph.spacing)))
 	for i in count:
-		var fi := float(i) + 0.5
-		# sqrt keeps the disc evenly covered rather than crowding the centre.
-		var rr := mouth * sqrt(fi / float(count))
-		var ang := fi * GOLDEN_ANGLE
+		var lane := i % lanes
+		var layer := i / lanes
+		var lane_count := ceili(float(count - lane) / float(lanes))
+		var rr := mouth * sqrt((float(lane) + 0.5) / float(lanes))
+		var ang := (float(lane) + 0.5) * GOLDEN_ANGLE
 		var lateral := (side * cos(ang) + up * sin(ang)) * rr
 		# Cone sampling: uniform azimuth, angle scaled by the square root so the
 		# cross-section fills evenly instead of clumping on the axis.
@@ -454,9 +403,8 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 		var theta := half_angle * sqrt(randf())
 		var d := (dir * cos(theta)
 			+ (side * cos(phi) + up * sin(phi)) * sin(theta)).normalized()
-		# Slight axial jitter breaks the rigid lattice without closing any pair up.
-		var p := jet_position + lateral \
-			+ dir * (span * (0.5 + (randf() - 0.5) * 0.3))
+		var axial_phase := (float(layer) + 0.5) / float(lane_count)
+		var p := jet_position + lateral + dir * (span * axial_phase)
 		seed[i * 4 + 0] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z

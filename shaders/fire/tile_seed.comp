@@ -1,0 +1,38 @@
+// Pass 2/6. Request every virtual tile intersected by the active torch capsule.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+void main() {
+	if (pc.seed_active == 0) {
+		return;
+	}
+
+	ivec3 vt = pc.seed_lo + ivec3(gl_GlobalInvocationID);
+	ivec3 seed_hi = ivec3(ceil(max(pc.seed_p0, pc.seed_p1) + vec3(pc.seed_radius)));
+	if (any(lessThan(vt, ivec3(0))) || any(greaterThanEqual(vt, VTILES))
+			|| any(greaterThan(vt, seed_hi))) {
+		return;
+	}
+
+	vec3 ab = pc.seed_p1 - pc.seed_p0;
+	vec3 p = vec3(vt) + vec3(0.5);
+	float t = clamp(dot(p - pc.seed_p0, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+	if (distance(p, pc.seed_p0 + ab * t) > pc.seed_radius) {
+		return;
+	}
+
+	uint cur = imageLoad(indir, vt).r;
+	if (cur < SLOT_MAX) {
+		atomicMax(slot_meta[cur * 4u + 1u], pc.frame);
+	} else if (cur == INACTIVE) {
+		uint prev = imageAtomicCompSwap(indir, vt, INACTIVE, RESERVED);
+		if (prev == INACTIVE) {
+			uint idx = atomicAdd(counts[C_REQUEST], 1u);
+			if (idx < NSLOTS) {
+				alloc_request[idx] = vt_to_vti(vt);
+			} else {
+				imageStore(indir, vt, uvec4(INACTIVE));
+				atomicAdd(counts[C_EXHAUST], 1u);
+			}
+		}
+	}
+}

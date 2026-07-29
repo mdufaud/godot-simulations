@@ -4,8 +4,8 @@ extends RefCounted
 ##
 ## Owns an indirection volume over a virtual tile grid that covers the whole map,
 ## an atlas of [constant NSLOTS] resident tiles, a free-list stack and compact
-## active tile/slot lists. Five compute passes run once per frame — mark, dilate, free,
-## alloc, compact — to keep exactly the tiles that contain fire (plus a dilation
+## active tile/slot lists. Six compute passes run once per frame — mark, seed, dilate,
+## free, alloc, compact — to keep exactly the tiles that contain fire (plus a dilation
 ## band) resident, at cost proportional to the burning volume rather than the map.
 ##
 ## The pool is not yet wired into the simulation stages; that is Phase 4. Here it
@@ -14,7 +14,7 @@ extends RefCounted
 ## device in production.
 
 const SHADER_DIR := "res://shaders/fire/"
-const PASSES: Array[String] = ["mark", "dilate", "free", "alloc", "compact"]
+const PASSES: Array[String] = ["mark", "seed", "dilate", "free", "alloc", "compact"]
 
 ## Resident tiles. 16 x 8 x 16 atlas layout = 128 x 64 x 128 atlas cells.
 const NSLOTS := 2048
@@ -55,6 +55,12 @@ var _owns_activity := false
 var _budget := NSLOTS
 var _pin_lo := Vector3i(1, 1, 1)
 var _pin_hi := Vector3i(0, 0, 0)
+var _seed_active := false
+var _seed_lo := Vector3i.ZERO
+var _seed_hi := Vector3i.ZERO
+var _seed_p0 := Vector3.ZERO
+var _seed_p1 := Vector3.ZERO
+var _seed_radius := 0.0
 
 
 ## Compile the passes and allocate every resource on [param rd]. Returns false on
@@ -274,13 +280,28 @@ func reset_frame_counts(frame: int) -> void:
 	_rd.buffer_update(_buf["counts"], C_FRAME * 4, 4, f)
 
 
-## Record the five topology passes into an open compute list. Barriers between
+func set_seed_capsule(p0: Vector3, p1: Vector3, radius: float) -> void:
+	_seed_p0 = p0
+	_seed_p1 = p1
+	_seed_radius = maxf(radius, 0.0)
+	_seed_lo = Vector3i((p0.min(p1) - Vector3.ONE * _seed_radius).floor()).clamp(
+		Vector3i.ZERO, VTILES - Vector3i.ONE)
+	_seed_hi = Vector3i((p0.max(p1) + Vector3.ONE * _seed_radius).ceil()).clamp(
+		Vector3i.ZERO, VTILES - Vector3i.ONE)
+	_seed_active = _seed_radius > 0.0
+
+
+func clear_seed_capsule() -> void:
+	_seed_active = false
+
+
+## Record the six topology passes into an open compute list. Barriers between
 ## passes make each one see the previous one's writes.
 func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		dilate_radius: int, wind := Vector3.ZERO, relief_slots := 0.0,
 		relief_max := 1.0) -> void:
 	var pc := PackedByteArray()
-	pc.resize(80)
+	pc.resize(128)
 	pc.encode_u32(0, frame)
 	pc.encode_float(4, threshold)
 	pc.encode_u32(8, hold_frames)
@@ -291,9 +312,19 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		pc.encode_float(48 + i * 4, wind[i])
 	pc.encode_float(64, relief_slots)
 	pc.encode_float(68, relief_max)
+	for i in 3:
+		pc.encode_s32(80 + i * 4, _seed_lo[i])
+		pc.encode_float(96 + i * 4, _seed_p0[i])
+		pc.encode_float(112 + i * 4, _seed_p1[i])
+	pc.encode_s32(92, 1 if _seed_active else 0)
+	pc.encode_float(108, _seed_radius)
 
 	var per_slot := ceili(float(_budget) / 64.0)
 	_pass(cl, "mark", _budget, 1, 1, pc)     # one workgroup per slot
+	if _seed_active:
+		var seed_size := _seed_hi - _seed_lo + Vector3i.ONE
+		_pass(cl, "seed", ceili(float(seed_size.x) / 4.0),
+			ceili(float(seed_size.y) / 4.0), ceili(float(seed_size.z) / 4.0), pc)
 	_pass(cl, "dilate", _budget, 1, 1, pc)   # one workgroup per slot
 	_pass(cl, "free", per_slot, 1, 1, pc)
 	_pass(cl, "alloc", NSLOTS, 1, 1, pc)    # one workgroup per possible request

@@ -50,11 +50,11 @@ const MAX_LOGS := 12
 ## fire_common.comp).
 const STAT_BOUNDS := 11 + MAX_LOGS
 const STATS_WORDS := STAT_BOUNDS + 6
-## 12 physical blocks, then the wood tail: (pos, radius) and (rate, -, -, -).
-const CONFIG_VEC4S := 12 + 2 * MAX_LOGS
+## 12 physical blocks, the wood tail, then three torch blocks.
+const CONFIG_VEC4S := 12 + 2 * MAX_LOGS + 3
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
-	EVENT_WOOD = 5 }
+	EVENT_WOOD = 5, EVENT_TORCH = 6 }
 
 ## Concentration units the Arrhenius pre-exponential factor is expressed in.
 ## Westbrook & Dryer Tab. I states "Units are cm-sec-mole-kcal-Kelvins", so the
@@ -235,6 +235,13 @@ var evaporation_enabled := true
 
 var display_temperature := 2600.0 ## Renderer normalisation only
 var reaction_reference := 50.0 ## Renderer normalisation only [mol/(m^3.s)]
+var torch_length := 5.0
+var torch_nozzle_radius := 0.3
+var torch_tip_radius := 0.9
+var torch_rate := 1.5
+var torch_temperature := 1500.0
+var torch_speed := 9.0
+var torch_ignite_fraction := 0.3
 
 ## The fire roams a 409.6 x 102.4 x 409.6 m virtual domain at a cost set by how
 ## much of it is burning, rather than a fixed box at a cost set by the box.
@@ -294,6 +301,15 @@ var _events_mutex := Mutex.new()
 var _wood := PackedFloat32Array()
 var _wood_mutex := Mutex.new()
 var _wood_any := false
+var _torch_position := Vector3.ZERO
+var _torch_direction := Vector3.FORWARD
+var _torch_axis_length := 0.0
+var _torch_seed_p0 := Vector3.ZERO
+var _torch_seed_p1 := Vector3.ZERO
+var _torch_seed_radius := 0.0
+var _torch_any := false
+var _torch_seed_any := false
+var _torch_mutex := Mutex.new()
 var _stats := PackedInt64Array()
 var _stats_mutex := Mutex.new()
 var _stats_pending := false
@@ -439,6 +455,31 @@ func set_wood_emitters(emitters: Array) -> void:
 	_wood = flat
 	_wood_any = count > 0
 	_wood_mutex.unlock()
+
+
+func set_torch(position: Vector3, direction: Vector3, length: float) -> void:
+	_torch_mutex.lock()
+	_torch_position = position
+	_torch_direction = direction.normalized()
+	_torch_axis_length = maxf(length, 0.0)
+	_torch_any = _torch_axis_length > 0.0 and not _torch_direction.is_zero_approx()
+	_torch_mutex.unlock()
+
+
+func set_torch_seed(p0: Vector3, p1: Vector3, radius: float) -> void:
+	_torch_mutex.lock()
+	_torch_seed_p0 = p0
+	_torch_seed_p1 = p1
+	_torch_seed_radius = maxf(radius, 0.0)
+	_torch_seed_any = _torch_seed_radius > 0.0
+	_torch_mutex.unlock()
+
+
+func clear_torch() -> void:
+	_torch_mutex.lock()
+	_torch_any = false
+	_torch_seed_any = false
+	_torch_mutex.unlock()
 
 
 ## Last reduced frame. Safe to call from the main thread.
@@ -961,6 +1002,12 @@ func step_render(step_count: int, liquid_active := false) -> void:
 		if _wood_any:
 			_dispatch(cl, "inject", _parity, _push_constant(EVENT_WOOD,
 				Vector3.ZERO, 1.0, timestep))
+		_torch_mutex.lock()
+		var torch_active := _torch_any
+		_torch_mutex.unlock()
+		if torch_active:
+			_dispatch(cl, "inject", _parity, _push_constant(EVENT_TORCH,
+				Vector3.ZERO, 1.0, timestep))
 		_substep(cl, liquid_active)
 
 	_rd.compute_list_end()
@@ -980,6 +1027,20 @@ func poll_render() -> void:
 func prepare_topology_render() -> void:
 	if not initialized or _topology_prepared:
 		return
+	_torch_mutex.lock()
+	var seed_active := _torch_seed_any
+	var seed_p0 := _torch_seed_p0
+	var seed_p1 := _torch_seed_p1
+	var seed_radius := _torch_seed_radius
+	_torch_mutex.unlock()
+	if seed_active:
+		var dims := sim_dims()
+		var half := Vector3(dims.x, 0.0, dims.z) * cell_size * 0.5
+		var tile_size := cell_size * float(FireTilePool.TILE)
+		_pool.set_seed_capsule((seed_p0 + half) / tile_size,
+			(seed_p1 + half) / tile_size, seed_radius / tile_size)
+	else:
+		_pool.clear_seed_capsule()
 	_upload_config()
 	_frame += 1
 	_pool.reset_frame_counts(_frame)
@@ -1226,6 +1287,22 @@ func _upload_config() -> void:
 	for i in _wood.size():
 		v[48 + i] = _wood[i]
 	_wood_mutex.unlock()
+	var torch_offset := (12 + 2 * MAX_LOGS) * 4
+	_torch_mutex.lock()
+	v[torch_offset + 0] = _torch_position.x
+	v[torch_offset + 1] = _torch_position.y
+	v[torch_offset + 2] = _torch_position.z
+	v[torch_offset + 3] = torch_nozzle_radius
+	var torch_axis := _torch_direction * _torch_axis_length
+	v[torch_offset + 4] = torch_axis.x
+	v[torch_offset + 5] = torch_axis.y
+	v[torch_offset + 6] = torch_axis.z
+	v[torch_offset + 7] = torch_rate
+	v[torch_offset + 8] = torch_tip_radius
+	v[torch_offset + 9] = torch_temperature
+	v[torch_offset + 10] = torch_speed
+	v[torch_offset + 11] = torch_ignite_fraction
+	_torch_mutex.unlock()
 
 	var bytes := v.to_byte_array()
 	if bytes == _config_cache:

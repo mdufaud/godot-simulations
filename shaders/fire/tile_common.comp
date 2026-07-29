@@ -4,7 +4,7 @@
 // the whole map, but only NSLOTS of them are ever resident. An indirection
 // volume maps a virtual tile to its atlas slot; a per-slot metadata buffer, a
 // free-list stack and a compact active list are updated once per frame by the
-// five passes mark -> dilate -> free -> alloc -> compact.
+// six passes mark -> seed -> dilate -> free -> alloc -> compact.
 //
 // The activity image is the keep signal reduced by tile_mark: an R32F atlas in
 // the same slot layout as the field textures, written by fire_display at the end
@@ -69,6 +69,12 @@ layout(push_constant, std430) uniform Push {
 	// Pool-pressure relief. .x is the free-slot count below which the keep
 	// threshold starts rising, .y the factor it reaches at zero free slots.
 	vec4 relief;
+	ivec3 seed_lo;
+	int seed_active;
+	vec3 seed_p0;
+	float seed_radius;
+	vec3 seed_p1;
+	float _seed_pad;
 } pc;
 
 // The keep threshold this frame. A saturated pool has to reject SOMETHING, and

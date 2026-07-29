@@ -1,4 +1,4 @@
-// Pass 4/5. One workgroup per alloc request. The free-list pop is deterministic
+// Pass 5/6. One workgroup per alloc request. The free-list pop is deterministic
 // rather than a racing atomic: every workgroup reads the same stack top fstart
 // (nothing writes C_FREE during this pass), and request gid claims
 // free_list[fstart-1-gid] iff gid < fstart. That cannot underflow, needs no undo

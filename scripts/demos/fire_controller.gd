@@ -11,13 +11,14 @@ const FireSceneDistance = preload("res://scripts/fire/fire_scene_distance.gd")
 ## Fire-X: Wrede et al., ACM TOG 44(6) art. 268 (SIGGRAPH Asia 2025).
 ##
 ## The campfire scene stays visible while fuel switches between the central gas
-## pipe and the wood bed. Water leaves the camera and is aimed by looking.
+## pipe and the wood bed. Water leaves the held weapon and is aimed by looking.
 
 # --- Node references ---
 @onready var fire_volume: MeshInstance3D = $FireVolume
 @onready var spark_particles: GPUParticles3D = $SparkParticles
 @onready var fire_light: OmniLight3D = $FireLight
 @onready var player: FpsWalker = $Player
+@onready var weapons: FireWeapons = $Player/Camera3D/Weapons
 @onready var gas_pipe: Node3D = $Campfire/GasPipe
 @onready var wood_pile: WoodPile = $Campfire/WoodPile
 @onready var menu: SimMenu = $UI/SimMenu
@@ -38,8 +39,10 @@ var wood_bar: ProgressBar
 var wood_label: Label
 var wood_group: VBoxContainer
 var gas_group: VBoxContainer
+var flamethrower_group: VBoxContainer
 var wood_section: Button
 var gas_section: Button
+var flamethrower_section: Button
 
 var solver: FireGpuSolver
 var water: FireWater
@@ -78,6 +81,9 @@ var _mode_button: Button
 var _log_button: Button
 var _gas_reinjection_button: Button
 var _ignite_button: Button
+var _flamethrower_button: Button
+var _flamethrower_firing := false
+var _equipped := FireWeapons.Kind.NONE
 
 # --- Quality presets ---
 ## Physical extent of the simulated box, held constant across presets so the
@@ -162,8 +168,7 @@ var _log_cooldown := 0.0
 ## Each level sets the SPH emitter's frequency, velocity and spray cone; more water
 ## means a wider, faster, denser stream.
 ##
-## Both the hose and the bucket leave the player's camera, so the aim is wherever
-## they are looking rather than a fixed nozzle bolted into the scene.
+## Both the jet and the bucket leave the held weapon and converge on the crosshair.
 var jet_enabled := false
 # Frequency is particles/second, so it doubles as how dense the stream looks; all
 # presets run well past Tab. 3's 100 Hz cap (game feel over the paper's nozzle) so
@@ -178,13 +183,10 @@ var jet_enabled := false
 # and reads as golf balls flung in every direction. The paper prefers the spray for
 # extinguishing, but the laminar stream is the one that looks like water.
 #
-# Rates are 4x what they were when a parcel weighed 0.1 kg; FireWater.DROPLET_MASS
-# is now 0.025 kg, so the delivered kg/s per preset is unchanged and only the
-# rendered density went up.
 const WATER_PRESETS := {
-	1: {"freq": 880.0, "vel": 4.0, "spray": 0.0},   # Light  — thin steady stream, hisses, survives
-	2: {"freq": 1680.0, "vel": 6.0, "spray": 0.0},  # Medium — solid column, big steam, strong knockdown
-	3: {"freq": 2800.0, "vel": 8.0, "spray": 0.0},  # Heavy  — torrent
+	1: {"freq": 420.0, "vel": 9.0, "spray": 0.0, "radius": 0.045},
+	2: {"freq": 720.0, "vel": 12.0, "spray": 35.0, "radius": 0.05},
+	3: {"freq": 1100.0, "vel": 15.0, "spray": 50.0, "radius": 0.055},
 }
 var _water_level := 0
 var _water_buttons := {}
@@ -279,6 +281,16 @@ func _process(delta: float) -> void:
 	# solver steps.
 	var stats := solver.get_stats()
 	var aim := _aim()
+	if _flamethrower_firing and not gas_mode:
+		var muzzle := weapons.muzzle_position()
+		var direction := _weapon_direction(aim, muzzle)
+		solver.set_torch(muzzle, direction, solver.torch_length)
+		solver.set_torch_seed(muzzle, muzzle + direction * solver.torch_length,
+			solver.torch_tip_radius + solver.cell_size * 8.0)
+		weapons.set_firing(true)
+	else:
+		solver.clear_torch()
+		weapons.set_firing(false)
 	var step_count := solver.schedule_steps(delta)
 	var run_fire := step_count > 0
 	var sim_dt := float(step_count) * solver.timestep
@@ -312,7 +324,7 @@ func _process(delta: float) -> void:
 		if _water_particle_cap_applied != _water_particle_cap:
 			_water_particle_cap_applied = _water_particle_cap
 		if jet_enabled:
-			_aim_hose(aim)
+			_aim_weapon(aim)
 	var liquid_scal := solver.get_texture_rid("liquid_scal")
 	var liquid_vel := solver.get_texture_rid("liquid_vel")
 	var water_cap := _water_particle_cap
@@ -437,6 +449,10 @@ func _set_fuel_mode(use_gas: bool) -> void:
 	water.reset_droplets()
 	jet_enabled = false
 	_water_level = 0
+	_flamethrower_firing = false
+	solver.clear_torch()
+	_equip_weapon(FireWeapons.Kind.NONE)
+	weapons.set_firing(false)
 	_smooth_light_energy = 0.0
 	_smooth_light_range = 8.0
 	_light_fire()
@@ -453,11 +469,15 @@ func _refresh_fuel_mode_ui() -> void:
 	_gas_reinjection_button.visible = gas_mode
 	_gas_reinjection_button.set_pressed_no_signal(gas_reinjection_enabled)
 	_ignite_button.visible = gas_mode
+	_flamethrower_button.visible = not gas_mode
+	_flamethrower_button.set_pressed_no_signal(false)
 	for level in _water_buttons:
 		_water_buttons[level].set_pressed_no_signal(false)
 		_water_buttons[level].visible = true
 	wood_group.visible = not gas_mode
 	wood_section.visible = not gas_mode
+	flamethrower_group.visible = not gas_mode
+	flamethrower_section.visible = not gas_mode
 	gas_group.visible = gas_mode
 	gas_section.visible = gas_mode
 	_refresh_wood_label()
@@ -531,11 +551,7 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.camera = player.get_camera()
 	fluid_renderer.particle_count = water.particle_count
 	fluid_renderer.tex_width = water.sph_tex_width()
-	# The SPH rest spacing is ~0.1 m and only a sparse monolayer of droplets ever
-	# lands, so the impostor radius has to be well above the spacing for lone
-	# droplets to fuse into one sheet instead of reconstructing as separate beads.
-	# 0.14 (barely above spacing) still read as beads; 0.24 fuses the puddle.
-	fluid_renderer.radius = 0.24
+	fluid_renderer.radius = 0.05
 	fluid_renderer.mode = 0.0
 	fluid_renderer.render_scale = 1.0
 	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
@@ -545,24 +561,13 @@ func _setup_fluid_renderer() -> void:
 	add_child(fluid_renderer)
 	fluid_renderer.start()
 
-	# The fire volume draws at render_priority 1; keep the water composite below it
-	# so the flame column reads in front of the water at the base. Neither writes
-	# depth, so this priority is what orders the two transparent layers.
 	var cm := fluid_renderer.composite_material()
-	cm.render_priority = 0
-	# Dark night campfire: the default daytime sky reflection would light the water
-	# bright blue. Near-black sky and no sun disc leave refraction + Fresnel rim as
-	# the visible cues.
-	cm.set_shader_parameter("sky_zenith", Color(0.02, 0.03, 0.05))
-	cm.set_shader_parameter("sky_horizon", Color(0.04, 0.05, 0.06))
+	cm.render_priority = 2
+	cm.set_shader_parameter("sky_zenith", Color(0.08, 0.28, 0.5))
+	cm.set_shader_parameter("sky_horizon", Color(0.16, 0.5, 0.8))
 	cm.set_shader_parameter("sun_intensity", 0.0)
-	# The composite is unshaded, so where the body is optically thick it outputs
-	# tint_color directly; the demo default (teal 0.05,0.32,0.42) glows like
-	# antifreeze against the black scene. A shallow campfire puddle should read as
-	# clear water over wet ground, so the tint goes near-black and absorption drops
-	# to keep the thin sheet refractive rather than filling with colour.
-	cm.set_shader_parameter("tint_color", Color(0.015, 0.03, 0.04))
-	cm.set_shader_parameter("absorption_scale", 0.15)
+	cm.set_shader_parameter("tint_color", Color(0.06, 0.38, 0.68))
+	cm.set_shader_parameter("absorption_scale", 0.25)
 
 
 ## Phase 6 item 1: march the volume at half the linear resolution — a quarter of
@@ -687,24 +692,64 @@ func _set_water_level(level: int, on: bool) -> void:
 		if _water_level == level:
 			jet_enabled = false
 			_water_level = 0
+			if _equipped == FireWeapons.Kind.WATER_GUN:
+				_equip_weapon(FireWeapons.Kind.NONE)
 		return
+	_stop_flamethrower()
+	_equip_weapon(FireWeapons.Kind.WATER_GUN)
 	_water_level = level
 	jet_enabled = true
 	var p: Dictionary = WATER_PRESETS[level]
 	water.jet_frequency = p.freq
 	water.jet_velocity = p.vel
 	water.jet_spray_angle = p.spray
+	fluid_renderer.set_radius(p.radius)
 	for lv in _water_buttons:
 		if lv != level:
 			_water_buttons[lv].set_pressed_no_signal(false)
 
 
-## The hose is held, so the nozzle follows the camera every frame. It starts just
-## clear of the near plane: emitting at the eye itself puts the first slice of the
-## stream inside the camera, where the screen-space surface fills the screen.
-func _aim_hose(aim: Dictionary) -> void:
-	water.jet_position = aim["origin"] + aim["direction"] * 1.0
-	water.jet_direction = aim["direction"]
+func _weapon_direction(aim: Dictionary, muzzle: Vector3) -> Vector3:
+	var direction: Vector3 = aim["point"] - muzzle
+	return direction.normalized() if direction.length() > 1.2 else aim["direction"]
+
+
+func _aim_weapon(aim: Dictionary) -> void:
+	var muzzle := weapons.muzzle_position()
+	water.jet_position = muzzle
+	water.jet_direction = _weapon_direction(aim, muzzle)
+
+
+func _equip_weapon(kind: int) -> void:
+	_equipped = kind
+	weapons.equip(kind)
+
+
+func _stop_flamethrower() -> void:
+	_flamethrower_firing = false
+	solver.clear_torch()
+	weapons.set_firing(false)
+	if _flamethrower_button != null:
+		_flamethrower_button.set_pressed_no_signal(false)
+
+
+func _set_flamethrower(on: bool) -> void:
+	if gas_mode:
+		_flamethrower_firing = false
+		return
+	_flamethrower_firing = on
+	if on:
+		jet_enabled = false
+		_water_level = 0
+		for level in _water_buttons:
+			_water_buttons[level].set_pressed_no_signal(false)
+		_equip_weapon(FireWeapons.Kind.FLAMETHROWER)
+		weapons.set_firing(true)
+	else:
+		solver.clear_torch()
+		weapons.set_firing(false)
+		if _equipped == FireWeapons.Kind.FLAMETHROWER:
+			_equip_weapon(FireWeapons.Kind.NONE)
 
 
 func _light_fire() -> void:
@@ -732,10 +777,6 @@ func _ignite_gas() -> void:
 	solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0, 0.5, 0), 1.0, 0.4)
 
 
-## A bucket thrown from where the player stands. The whole particle budget goes at
-## once — the SPH solver has no streaming emitter, so a second throw replaces the
-## first rather than adding to it.
-##
 ## Queued rather than called, because init_render is itself queued: calling
 ## directly would run against a FireWater that has not allocated its buffers yet
 ## and spawn nothing.
@@ -747,11 +788,15 @@ func _pour_water() -> void:
 	# budget in a 0.4 m sphere, whose SPH pressure detonated it into an explosion.
 	# It leaves the player's hands spread over a wide loose volume so the solver
 	# does not blow it apart.
+	_stop_flamethrower()
+	_equip_weapon(FireWeapons.Kind.WATER_GUN)
 	var aim := _aim()
-	var origin: Vector3 = aim["origin"] + aim["direction"] * 1.0
-	var throw: Vector3 = aim["direction"] * 8.0
+	var muzzle := weapons.muzzle_position()
+	var direction := _weapon_direction(aim, muzzle)
+	var origin: Vector3 = muzzle + direction * 1.2
+	var throw: Vector3 = direction * 8.0
 	RenderingServer.call_on_render_thread(water.spawn_droplets.bind(
-		mini(_water_particle_cap, 4000), origin, 0.9, throw))
+		mini(_water_particle_cap, 2000), origin, 0.5, throw))
 
 
 ## Quality knobs per preset.
@@ -1050,6 +1095,12 @@ func _reset_simulation() -> void:
 	RenderingServer.call_on_render_thread(water.clear_droplets)
 	jet_enabled = false
 	_water_level = 0
+	_flamethrower_firing = false
+	solver.clear_torch()
+	_equip_weapon(FireWeapons.Kind.NONE)
+	weapons.set_firing(false)
+	if _flamethrower_button != null:
+		_flamethrower_button.set_pressed_no_signal(false)
 	_bucket_cooldown = 0.0
 	for level in _water_buttons:
 		_water_buttons[level].set_pressed_no_signal(false)
@@ -1248,6 +1299,19 @@ func _setup_ui() -> void:
 	menu.end_group()
 
 	menu.add_separator()
+	flamethrower_section = menu.add_section("Flamethrower")
+	flamethrower_group = menu.add_group()
+	menu.add_slider("Reach (m)", 1.0, 12.0, solver.torch_length,
+		func(v: float): solver.torch_length = v)
+	menu.add_slider("Fuel rate", 0.0, 5.0, solver.torch_rate,
+		func(v: float): solver.torch_rate = v)
+	menu.add_slider("Gas temperature (K)", 300.0, 1500.0, solver.torch_temperature,
+		func(v: float): solver.torch_temperature = v)
+	menu.add_slider("Jet speed (m/s)", 1.0, 20.0, solver.torch_speed,
+		func(v: float): solver.torch_speed = v)
+	menu.end_group()
+
+	menu.add_separator()
 	gas_section = menu.add_section("Gas")
 	gas_group = menu.add_group()
 	var fuel_names := []
@@ -1271,6 +1335,8 @@ func _setup_ui() -> void:
 	_gas_reinjection_button = menu.add_action_toggle("🫧", "Continuous gas", gas_reinjection_enabled,
 		_set_gas_reinjection)
 	_ignite_button = menu.add_action("🔥", "Ignite", _ignite_gas)
+	_flamethrower_button = menu.add_action_toggle("🔥", "Flamethrower", false,
+		_set_flamethrower)
 	var water_icons := ["💧", "💦", "🌊"]
 	for level in [1, 2, 3]:
 		var level_name: String = ["Light", "Med", "Heavy"][level - 1]
@@ -1323,10 +1389,10 @@ func _setup_ui() -> void:
 	# the old behaviour where water pooled forever and half-smothered the flame.
 	menu.add_slider("Water drain (1/s)", 0.0, 1.0, solver.liquid_drain_rate,
 		func(v: float): solver.liquid_drain_rate = v)
-	# Both ranges are Tab. 3's own for the particle emitter.
-	menu.add_slider("Jet velocity (m/s)", 0.0, 10.0, water.jet_velocity,
+	# Manual overrides cover the gameplay jet presets above.
+	menu.add_slider("Jet velocity (m/s)", 0.0, 20.0, water.jet_velocity,
 		func(v: float): water.jet_velocity = v)
-	menu.add_slider("Jet frequency (Hz)", 10.0, 100.0, water.jet_frequency,
+	menu.add_slider("Jet frequency (Hz)", 10.0, 4000.0, water.jet_frequency,
 		func(v: float): water.jet_frequency = v)
 
 	menu.add_separator()

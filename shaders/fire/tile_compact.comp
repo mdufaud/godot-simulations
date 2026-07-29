@@ -1,4 +1,4 @@
-// Pass 5/5. Rebuilds the compact active list the solver dispatches its stages
+// Pass 6/6. Rebuilds the compact active list the solver dispatches its stages
 // over, one workgroup per entry. Matching virtual-tile and atlas-slot arrays let
 // solver stages address their own tile directly.
 //

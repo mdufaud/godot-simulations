@@ -104,6 +104,9 @@ layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
 	// through fire_display's probes.
 	vec4 wood[MAX_LOGS]; // pos.xyz, radius [m]
 	vec4 wood_rate[MAX_LOGS]; // Y_fuel per simulated second, unused.yzw
+	vec4 torch; // pos.xyz, nozzle radius
+	vec4 torch2; // direction * length, fuel rate
+	vec4 torch3; // tip radius, temperature, speed, pilot fraction
 }
 cfg;
 
