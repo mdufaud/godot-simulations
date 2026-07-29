@@ -562,7 +562,7 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.start()
 
 	var cm := fluid_renderer.composite_material()
-	cm.render_priority = 2
+	cm.render_priority = 0
 	cm.set_shader_parameter("sky_zenith", Color(0.08, 0.28, 0.5))
 	cm.set_shader_parameter("sky_horizon", Color(0.16, 0.5, 0.8))
 	cm.set_shader_parameter("sun_intensity", 0.0)
@@ -602,8 +602,7 @@ func _setup_half_res_volume() -> void:
 	_volume_composite_mat = ShaderMaterial.new()
 	_volume_composite_mat.shader = load(VOLUME_UPSAMPLE_SHADER)
 	_volume_composite_mat.set_shader_parameter("volume_tex", _volume_vp.get_texture())
-	# Above the water composite (priority 0), which is where the volume mesh's own
-	# render_priority put it.
+	# Above the water composite, matching the volume mesh's own render priority.
 	_volume_composite_mat.render_priority = 1
 	var quad := QuadMesh.new()
 	quad.size = Vector2(2.0, 2.0)
