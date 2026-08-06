@@ -25,6 +25,7 @@ extends Node3D
 @onready var viewport_guard := ViewportGuard.attach(self)
 
 var solver: FireGpuSolver
+var config: FireConfig = FireConfig.new()
 var water: FireWater
 var presentation: FirePresentation
 var interaction: FireInteraction
@@ -57,7 +58,7 @@ var emitter_radius := 0.8
 var emitter_rate := 0.2
 
 # --- Water simulation budget, pushed into the render-thread closure each frame ---
-var water_particle_cap := FireGpuSolver.WATER_PARTICLE_COUNT
+var water_particle_cap := 16384
 var water_substeps := 16
 var water_adaptive_substeps := false
 
@@ -79,6 +80,8 @@ var _wind_enabled := false
 
 func _ready() -> void:
 	solver = FireGpuSolver.new()
+	solver.config = config
+	water_particle_cap = config.water_particle_count
 	solver.profiling = debug_info
 	RenderingServer.call_on_render_thread(solver.init_render)
 
@@ -87,7 +90,7 @@ func _ready() -> void:
 	# enough to keep both a dense in-flight column and a connected floor puddle
 	# alive at once — a smaller budget starves the stream into falling beads.
 	water = FireWater.new()
-	water.particle_count = FireGpuSolver.WATER_PARTICLE_COUNT
+	water.particle_count = config.water_particle_count
 	water.evaporation_active = solver.evaporation_enabled
 	water.drain_rate = solver.liquid_drain_rate
 	water.profiling = debug_info
@@ -174,8 +177,8 @@ func _process(delta: float) -> void:
 	# P3: water particle↔grid coupling. Algorithm 1 puts the scatter and the gather
 	# both ahead of the grid loop (lines 13-14) so the solver reads the liquid field
 	# built this frame, and the return after it (lines 23-24).
-	var liquid_scal := solver.get_texture_rid("liquid_scal")
-	var liquid_vel := solver.get_texture_rid("liquid_vel")
+	var liquid_scal := solver.get_liquid_scal_tex_rid()
+	var liquid_vel := solver.get_liquid_velocity_tex_rid()
 	var water_cap := water_particle_cap
 	var water_steps := water_substeps
 	var water_adaptive := water_adaptive_substeps

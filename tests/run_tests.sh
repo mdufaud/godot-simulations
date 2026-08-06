@@ -87,6 +87,10 @@ declare -a CPU_SUITES=(
 	"portal_math|res://tests/portal_math_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
+	"fractal_de|res://tests/fractal_de_test.gd"
+	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
+	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
+	"cloth_wind|res://tests/cloth_wind_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do
 	name="${suite%%|*}"
@@ -100,7 +104,7 @@ while (( ${#cpu_pids[@]} > 0 )); do
 done
 
 if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-	failed+=(non_euclidean ui_smoke)
+	failed+=(non_euclidean scene_cycle ui_smoke)
 else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
@@ -125,6 +129,27 @@ else
 		printf 'TEST FAIL non_euclidean: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$non_euclidean_output" >&2
 		failed+=(non_euclidean)
+	fi
+
+	scene_cycle_output="$LOG_DIR/gpu-scene_cycle.stdout.log"
+	scene_cycle_log="$LOG_DIR/gpu-scene_cycle.godot.log"
+	scene_cycle_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS scene_cycle$' "$scene_cycle_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$scene_cycle_log" \
+			-s res://tests/scene_cycle_test.gd || scene_cycle_status=$?
+	if (( scene_cycle_status == 0 )) && grep -q '^TEST PASS scene_cycle$' "$scene_cycle_output"; then
+		printf 'TEST PASS scene_cycle\n'
+	else
+		printf 'TEST FAIL scene_cycle: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$scene_cycle_output" >&2
+		failed+=(scene_cycle)
 	fi
 
 	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \

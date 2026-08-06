@@ -45,6 +45,7 @@ const STORM_TYPES := [
 @onready var _viewport := ViewportGuard.attach(self)
 
 var field := TornadoWindField.new()
+var config: TornadoConfig = TornadoConfig.new()
 var s_amount := 0.15
 var wander_speed := 0.3
 var wander_radius := 120.0
@@ -78,6 +79,19 @@ var _skirt_density := 0.5
 
 
 func _ready() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Tornado config: %s" % config_error)
+		return
+	field.model = config.model
+	field.u_max = config.maximum_wind_mps
+	field.r_core0 = config.core_radius_m
+	field.height = config.height_m
+	field.flare = config.flare
+	field.a_bar = config.radial_inflow
+	s_amount = config.centerline_s_curve
+	wander_speed = config.wander_speed_hz
+	wander_radius = config.wander_radius_m
 	_wander_noise.seed = 1337
 	debris_pool.field = field
 	debris_pool.build_pool(debris_pool.debris_cap)

@@ -247,7 +247,7 @@ func _bind_textures() -> void:
 		_previous_indir_texture.texture_rd_rid = solver.previous_indirection_bytes_rid()
 		volume_material.set_shader_parameter("indir_tex_prev", _previous_indir_texture)
 		_visual_activity_texture = Texture3DRD.new()
-		_visual_activity_texture.texture_rd_rid = solver.get_texture_rid("visual_activity")
+		_visual_activity_texture.texture_rd_rid = solver.get_visual_activity_tex_rid()
 		volume_material.set_shader_parameter("visual_activity_tex", _visual_activity_texture)
 		_previous_visual_activity_texture = Texture3DRD.new()
 		_previous_visual_activity_texture.texture_rd_rid = \
@@ -278,7 +278,7 @@ func _setup_volume_material() -> void:
 	_set_volume_proxy(solver.display_clip_box())
 	# The blue reaction core fades over the height of a burner-sized domain; over
 	# the virtual one it would never fade at all.
-	volume_material.set_shader_parameter("blue_height", FireGpuSolver.DOMAIN_SIZE.y)
+	volume_material.set_shader_parameter("blue_height", solver.dense_domain_size_m().y)
 	# The volume stores temperature normalised against these, so the shader
 	# needs them to turn the red channel back into kelvins.
 	volume_material.set_shader_parameter("ambient_temperature", solver.ambient_temperature)
@@ -312,8 +312,8 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.mode = 0.0
 	fluid_renderer.render_scale = 1.0
 	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
-	fluid_renderer.domain_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * FireGpuSolver.DOMAIN_SIZE,
-		FireGpuSolver.DOMAIN_SIZE)
+	var domain_size := solver.dense_domain_size_m()
+	fluid_renderer.domain_aabb = AABB(Vector3(-0.5, 0.0, -0.5) * domain_size, domain_size)
 	# Foam deferred: land the clean surface + puddle first.
 	fluid_renderer.build_foam = false
 	add_child(fluid_renderer)

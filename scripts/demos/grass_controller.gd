@@ -8,11 +8,19 @@ const HEIGHTMAP_SCALE := 5.0
 @onready var grass: GrassRenderer = GrassRenderer.new()
 @onready var _viewport := ViewportGuard.attach(self)
 
+var config: GrassConfig = GrassConfig.new()
 var density_modifier := 1.0
 var wind_speed := 1.0
 
 
 func _ready() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Grass config: %s" % config_error)
+		return
+	density_modifier = config.density
+	wind_speed = config.wind_speed_mps
+	grass.config = config
 	add_child(grass)
 	grass.build()
 	orbit_cam.target = Vector3.ZERO

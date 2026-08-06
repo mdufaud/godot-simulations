@@ -26,6 +26,7 @@ const PRESETS := [
 @onready var _viewport := ViewportGuard.attach(self)
 
 var solver := OceanSolver.new()
+var config: OceanConfig = OceanConfig.new()
 var surface_mat: ShaderMaterial
 var disp_texture: Texture2DArrayRD
 var norm_texture: Texture2DArrayRD
@@ -47,6 +48,7 @@ var _rng := RandomNumberGenerator.new()
 
 
 func _ready() -> void:
+	solver.config = config
 	solver.map_size = GameManager.get_setting("ocean_map_size", 256)
 	waves.solver = solver
 

@@ -71,6 +71,38 @@ Adding a demo means appending a `{key, title, icon, category, scene}` entry to
 `GameManager.DEMOS`; the menu builds its buttons from that array. See `CLAUDE.md`
 for the architecture every simulation is expected to follow.
 
+## Reusing a core
+
+Reusable simulation code lives under `scripts/<topic>/`. Demo controllers should
+only assemble the core, camera, presentation and `SimMenu`; showcase-only helpers
+may stay under `scripts/demos/<topic>/`. Compute sources are raw `.comp` files, so
+export presets must include `*.comp`. They require the Forward+ renderer with a
+Vulkan-capable device; Compatibility does not provide `RenderingDevice`.
+
+| Topic | Reusable scripts | Required compute sources |
+|---|---|---|
+| SSR | `scripts/ssr/` | — |
+| Ocean | `scripts/ocean/` | `shaders/ocean/*.comp` |
+| Fire | `scripts/fire/` | `shaders/fire/*.comp`, `shaders/fire/sparse/*.comp` |
+| N-Body | `scripts/nbody/` | `shaders/nbody/*.comp` |
+| Grass | `scripts/grass/` | — |
+| Parallax | `scripts/parallax/` | — |
+| Fluid | `scripts/fluid/` | `shaders/fluid/*.comp` |
+| 2D Fractal | `scripts/fractal/` | — |
+| 3D Fractal | `scripts/fractal_3d/` | — |
+| Tornado | `scripts/tornado/` | — |
+| Sand | `scripts/sand/` | `shaders/sand/*.comp` |
+| Cloth | `scripts/cloth/` | `shaders/cloth/*.comp` |
+| Destruction | `scripts/destruction/` | — |
+| Non-Euclidean | `scripts/non_euclidean/` | — |
+| Planet | `scripts/planet/` | `shaders/planet/*.comp` |
+
+For a new host, instantiate the topic core, assign its typed config and scene
+references, call `start()`, forward user parameters through its public API, then
+call `stop()` before freeing it. Pure CPU helpers such as `FractalDE`,
+`VoronoiFracture`, `TornadoWindField` and `ClothWind` have no scene or GPU
+dependency and can be tested headless.
+
 ## Assets
 
 The Poly Haven rock models (`boulder_01`, `rock_face_02`,

@@ -29,6 +29,7 @@ signal density_texture_changed
 
 # Shape parameters. Defaults are Lague's tuned values (Terraform.unity:14246-14258).
 var resolution := 128
+var config: PlanetConfig = PlanetConfig.new()
 var radius := 23.0
 var iso_level := 0.0
 var num_layers := 8
@@ -93,6 +94,13 @@ func _triangle_cap(res: int) -> int:
 
 
 func init_render() -> void:
+	config.resolution = resolution
+	config.radius_m = radius
+	config.max_layers = num_layers
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Planet config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("PlanetGenerator")
 	if _rd == null:
 		return

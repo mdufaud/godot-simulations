@@ -8,6 +8,7 @@ class_name HeightfieldSand extends RefCounted
 const SHADER_DIR := "res://shaders/sand/"
 const TIMESTAMP_PREFIX := "sand/"
 
+var config: SandConfig = SandConfig.new()
 var grid_n := 512
 var world_size := 4.0
 var repose_deg := 33.0
@@ -45,6 +46,15 @@ func set_seed(heights: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
+	config.grid_size = grid_n
+	config.world_size_m = world_size
+	config.repose_angle_deg = repose_deg
+	config.flow_rate = flow_rate
+	config.flow_iterations = iterations
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Sand config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("HeightfieldSand")
 	if _rd == null:
 		return

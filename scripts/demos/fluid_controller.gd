@@ -1,5 +1,4 @@
 extends Node3D
-const FluidConfig := preload("res://scripts/fluid/fluid_config.gd")
 ## Fluid simulation demo: a single FluidSystem switchable between a PBF and a
 ## dual-density SPH solver (Macklin & Müller 2013 vs SebLague/Clavet) for direct
 ## A/B comparison, plus water/lava and an SPH foam/spray layer. This controller
@@ -11,6 +10,7 @@ const FluidConfig := preload("res://scripts/fluid/fluid_config.gd")
 @onready var menu: SimMenu = $UI/SimMenu
 
 var fluid: FluidSystem
+var fluid_config: FluidConfig = FluidConfig.new()
 var pbf_group: VBoxContainer
 var sph_group: VBoxContainer
 var cascade_group: VBoxContainer
@@ -25,6 +25,7 @@ var _profile_accum := 0.0
 func _ready() -> void:
 	main_cam.current = true
 	fluid = FluidSystem.new()
+	fluid.config = fluid_config
 	fluid.camera = main_cam
 	fluid.method = FluidSystem.Method.SPH
 	add_child(fluid)
@@ -46,7 +47,7 @@ func _setup_ui() -> void:
 	menu.add_action_toggle("🌋", "Lava", fluid.mode > 0.5, _on_lava_toggled)
 	menu.add_action("↺", "Reset", func(): fluid.restart())
 	cascade_group = menu.add_group()
-	menu.add_slider("Flow", FluidConfig.FLOW_MIN, FluidConfig.FLOW_MAX,
+	menu.add_slider("Flow", fluid_config.flow_min, fluid_config.flow_max,
 		fluid.cascade_flow, fluid.set_cascade_flow)
 	menu.end_group()
 	menu.add_separator()
@@ -85,7 +86,7 @@ func _setup_ui() -> void:
 	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
 	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
 	menu.add_label("Particles")
-	for count in FluidConfig.PARTICLE_COUNTS:
+	for count in fluid_config.particle_counts:
 		menu.add_button("%dk" % int(count / 1000), func(): fluid.set_particle_count(count))
 	_update_scenario_ui()
 

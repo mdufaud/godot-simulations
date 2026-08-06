@@ -32,6 +32,7 @@ const PRESETS: Array[NBodyPreset] = [
 @onready var _viewport := ViewportGuard.attach(self)
 
 var solver := NBodySolver.new()
+var config: NBodyConfig = NBodyConfig.new()
 var scene_def: NBodySceneDef = SCENE_TYPES[0].new()
 var active_preset: NBodyPreset = PRESETS[0]
 var attractor_list: Array = []
@@ -54,6 +55,7 @@ var _profile_accum := 0.0
 
 
 func _ready() -> void:
+	solver.config = config
 	scene_def = SCENE_TYPES[active_preset.scene_type].new()
 	solver.particle_count = GameManager.get_setting("nbody_particle_count", 262144)
 	solver.tex_width = _tex_width_for(solver.particle_count)

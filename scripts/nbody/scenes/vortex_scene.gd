@@ -42,9 +42,9 @@ func params() -> Array:
 func apply_defaults(solver: NBodySolver) -> void:
 	solver.force_mode = 1
 	solver.respawn_mode = 2
-	solver.param_a = updraft
-	solver.param_b = swirl_speed
-	solver.aux2 = Vector4(turbulence, 0.0, 0.0, 0.0)
+	solver.vortex_updraft_mps = updraft
+	solver.vortex_swirl_mps = swirl_speed
+	solver.vortex_turbulence_mps2 = turbulence
 	# Funnel geometry rides the disk slots (see nbody_common.comp Params).
 	solver.disk_r_min = funnel_radius * 0.15
 	solver.disk_r_max = funnel_radius

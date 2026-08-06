@@ -32,6 +32,7 @@ const REFINE_BAND_ROWS := 256
 const SETTLE_TIME := 0.25
 
 var camera: FractalCamera
+var config: FractalConfig = FractalConfig.new()
 var view_low: SubViewport
 var view_high: SubViewport
 var rect_low: ColorRect
@@ -61,6 +62,10 @@ var _blend_tween: Tween
 
 
 func start() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Fractal config: %s" % config_error)
+		return
 	assert(camera != null, "FractalView: camera is required")
 	assert(view_low != null and view_high != null, "FractalView: both SubViewports are required")
 	assert(rect_low != null and rect_high != null, "FractalView: both pass-1 rects are required")
@@ -123,7 +128,7 @@ func update(delta: float) -> void:
 	match state:
 		State.MOVING:
 			_settle += delta
-			if _settle >= SETTLE_TIME:
+			if _settle >= config.settle_time_s:
 				_begin_refine()
 		State.REFINING:
 			_refine_step()
@@ -148,7 +153,7 @@ func _params_hash() -> int:
 
 
 func _render_preview() -> void:
-	_apply_view_uniforms(_material_low, mini(camera.iterations_full(), INTERACT_ITER_CAP), 1)
+	_apply_view_uniforms(_material_low, mini(camera.iterations_full(), config.interaction_iteration_cap), 1)
 	_material_low.set_shader_parameter("band_y_min", 0)
 	_material_low.set_shader_parameter("band_y_max", 1000000)
 	view_low.render_target_update_mode = SubViewport.UPDATE_ONCE
@@ -163,9 +168,9 @@ func _begin_refine() -> void:
 
 func _refine_step() -> void:
 	_material_high.set_shader_parameter("band_y_min", _refine_row)
-	_material_high.set_shader_parameter("band_y_max", _refine_row + REFINE_BAND_ROWS)
+	_material_high.set_shader_parameter("band_y_max", _refine_row + config.refine_band_rows)
 	view_high.render_target_update_mode = SubViewport.UPDATE_ONCE
-	_refine_row += REFINE_BAND_ROWS
+	_refine_row += config.refine_band_rows
 	if _refine_row >= view_high.size.y:
 		state = State.IDLE
 		_fade_blend_to_high()
@@ -192,7 +197,7 @@ func _fade_blend_to_high() -> void:
 
 func _apply_view_uniforms(material: ShaderMaterial, iterations: int, aa: int) -> void:
 	var zoom := camera.zoom()
-	var perturbed := camera.fractal_type <= 1 and zoom > PERT_ZOOM_THRESHOLD
+	var perturbed := camera.fractal_type <= 1 and zoom > config.perturbation_zoom_threshold
 	if perturbed:
 		_orbit.ensure(camera, julia_re, julia_im, iterations)
 	material.set_shader_parameter("fractal_type", camera.fractal_type)

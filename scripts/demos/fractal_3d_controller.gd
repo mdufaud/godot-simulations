@@ -62,6 +62,7 @@ const PRESETS := {
 }
 
 var _renderer := FractalRenderer.new()
+var config: Fractal3DConfig = Fractal3DConfig.new()
 var _params: Dictionary = {}
 
 var _sliders: Dictionary = {}          # uniform name -> HSlider (for preset sync)
@@ -94,6 +95,12 @@ var _post := {"aberration_strength": 0.0, "vignette_strength": 0.35, "grain_stre
 
 
 func _ready() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Fractal 3D config: %s" % config_error)
+		return
+	_render_scale = config.render_scale
+	_quality_profile = config.quality_profile
 	_renderer.setup(_fractal_box, _post_process)
 	_camera.de_query = _evaluate_de
 
@@ -103,6 +110,10 @@ func _ready() -> void:
 	get_viewport().size_changed.connect(_apply_effective_quality)
 
 	_params = BASE_PARAMS.duplicate(true)
+	_params["iterations"] = config.iterations
+	_params["max_steps"] = config.max_steps
+	_params["max_dist"] = config.max_distance_m
+	_params["epsilon"] = config.epsilon_m
 	_setup_ui()
 	_add_hint_label()
 	_select_fractal(0)

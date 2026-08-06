@@ -14,6 +14,7 @@ const WG := 256
 
 static var _spirv_cache := {}
 
+var config: ClothConfig = ClothConfig.new()
 var grid_w := 96
 var grid_h := 72
 var rest_spacing := 0.06
@@ -83,6 +84,18 @@ func unpin_all_render() -> void:
 
 
 func init_render() -> void:
+	config.grid_width = grid_w
+	config.grid_height = grid_h
+	config.rest_spacing_m = rest_spacing
+	config.iterations = iterations
+	config.substeps = substeps
+	config.gravity_mps2 = gravity
+	config.damping = damping
+	config.drag = drag
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Cloth config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("ClothSolver")
 	if _rd == null:
 		return

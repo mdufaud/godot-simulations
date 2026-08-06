@@ -20,6 +20,7 @@ const PRESETS := [
 @onready var _viewport := ViewportGuard.attach(self)
 
 var solver := HeightfieldSand.new()
+var config: SandConfig = SandConfig.new()
 var view := SandScenery.new()
 var profiler := SimProfiler.new()
 
@@ -39,6 +40,7 @@ var _strength := 1.2
 
 
 func _ready() -> void:
+	solver.config = config
 	solver.grid_n = GameManager.get_setting("sand_grid_n", 512)
 	solver.world_size = WORLD
 

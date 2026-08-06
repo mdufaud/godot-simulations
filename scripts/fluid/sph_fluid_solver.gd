@@ -1,6 +1,5 @@
 class_name SphFluidSolver
 extends RefCounted
-const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 ## GPU dual-density SPH (SebLague / Clavet: density + near-density equation of
 ## state). Shares the PBF solver's dense counting-sort grid, ping-pong reorder,
 ## Texture2DRD bridge and capture_timestamp profiling, but replaces the physics.
@@ -21,15 +20,16 @@ const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
 const SCENE_UBO_SIZE := 1184
 
-var particle_count := CONFIG.DEFAULT_PARTICLE_COUNT
+var config: FluidConfig = FluidConfig.new()
+var particle_count := 65536
 ## How many of those slots are live. Buffers are always allocated at
 ## particle_count; the kernels only ever see the first `active_count`, so a demo
 ## can start empty and fill up as fluid is poured in. -1 means "all of them".
 var active_count := -1
-var grid_dims := CONFIG.GRID_DIMS
-var grid_origin := CONFIG.GRID_ORIGIN
-var cell_size := CONFIG.CELL_SIZE
-var h := CONFIG.CELL_SIZE
+var grid_dims := Vector3i(64, 64, 64)
+var grid_origin := Vector3(-8.0, 0.0, -8.0)
+var cell_size := 0.25
+var h := 0.25
 var spacing := 0.12
 var substeps := 3
 var gravity := Vector3(0.0, -9.8, 0.0)
@@ -46,7 +46,7 @@ var max_substeps := 16
 var stability_speed := 0.0
 var last_substeps := 0
 
-var tex_width := CONFIG.TEX_WIDTH
+var tex_width := 256
 
 # White particles (foam / spray / bubbles). Spawning is driven by the trapped-air
 # metric computed in the pressure pass, so it is part of this solver rather than
@@ -95,7 +95,7 @@ var planet_skin := 0.1
 var planet_normal_offset := 0.5
 
 var cascade_enabled := false
-var cascade_flow := CONFIG.DEFAULT_FLOW
+var cascade_flow := 1.0
 var cascade_cycle_seconds := 240.0
 var emitter_origin := Vector3(-5.0, 13.6, 0.0)
 var emitter_velocity := Vector3(0.0, -2.0, 0.0)
@@ -198,6 +198,16 @@ func respawn_range(from: int, data: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("SPH config: %s" % config_error)
+		return
+	grid_dims = config.grid_dims
+	grid_origin = config.grid_origin
+	cell_size = config.cell_size_m
+	h = config.cell_size_m
+	tex_width = config.texture_width
+	cascade_flow = config.default_flow
 	_rd = GpuPreflight.device("SphFluidSolver")
 	if _rd == null:
 		return
@@ -476,7 +486,7 @@ func _mark(cl: int, name: String) -> int:
 
 # Render thread. Repeated names sum across sub-steps.
 func _read_timings() -> void:
-	var out: Dictionary = CONFIG.read_gpu_timings(_rd, "sph/")
+	var out: Dictionary = GpuTimings.read(_rd, "sph/")
 	if out.is_empty():
 		return
 	_timings_mutex.lock()

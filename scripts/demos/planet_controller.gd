@@ -26,6 +26,7 @@ const PRESETS := [
 @onready var _viewport := ViewportGuard.attach(self)
 
 var generator := PlanetGenerator.new()
+var config: PlanetConfig = PlanetConfig.new()
 
 var sun_yaw := 30.0
 var sun_auto_rotate := false
@@ -51,6 +52,7 @@ func _ready() -> void:
 
 	var stored_resolution: int = GameManager.get_setting("planet_resolution", 0)
 	generator.resolution = stored_resolution if stored_resolution > 0 else (64 if _mobile else 128)
+	generator.config = config
 	generator.density_texture_changed.connect(_on_density_texture_changed)
 
 	orbit_cam.target = Vector3.ZERO

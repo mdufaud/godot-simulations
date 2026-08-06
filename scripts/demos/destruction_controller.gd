@@ -30,6 +30,7 @@ const PROJECTILES := [
 
 var chunk_count := 100
 var fracture_bias := 0.6
+var config: DestructionConfig = DestructionConfig.new()
 
 var walls: Array[FracturedWall] = []
 var launcher := ProjectileLauncher.new()
@@ -40,6 +41,12 @@ var _rebuild_pending := false
 
 
 func _ready() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Destruction config: %s" % config_error)
+		return
+	chunk_count = config.chunk_count
+	fracture_bias = config.fracture_bias
 	orbit_cam.target = Vector3(-1.8, 0.8, -1.5)
 	orbit_cam.distance = 18.0
 	orbit_cam.pitch = -22.0

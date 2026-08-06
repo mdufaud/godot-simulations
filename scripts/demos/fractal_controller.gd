@@ -17,6 +17,7 @@ const DRAG_DEADZONE := 3.0
 
 var _camera := FractalCamera.new()
 var _view := FractalView.new()
+var config: FractalConfig = FractalConfig.new()
 var _autopilot := FractalAutopilot.new(_camera)
 var _menu_builder: FractalMenu
 
@@ -30,6 +31,7 @@ var _prev_pinch_distance := 0.0
 
 
 func _ready() -> void:
+	_view.config = config
 	_view.camera = _camera
 	_view.view_low = _view_low
 	_view.view_high = _view_high

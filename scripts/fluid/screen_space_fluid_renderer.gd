@@ -1,6 +1,5 @@
 class_name ScreenSpaceFluidRenderer
 extends Node3D
-const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 ## Reusable screen-space fluid surface. Given a solver's position texture (xyz =
 ## world pos, w = speed for water / temperature for lava) it reconstructs a smooth
 ## liquid surface: sphere-impostor depth prepass -> separable bilateral depth
@@ -22,11 +21,12 @@ const LAYER_FOAM := 8
 # --- Configuration (set before start()). ---
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
 var particle_count := 0
-var tex_width := CONFIG.TEX_WIDTH
+var config: FluidConfig = FluidConfig.new()
+var tex_width := 256
 var radius := 0.16
 var mode := 0.0 # 0 = water, 1 = lava
 var render_scale := 0.5
-var domain_aabb := AABB(CONFIG.DOMAIN_ORIGIN, CONFIG.DOMAIN_SIZE)
+var domain_aabb := AABB(Vector3(-8.0, 0.0, -8.0), Vector3(16.0, 16.0, 16.0))
 ## Build the foam coverage pass. When false the composite gets a black foam
 ## texture (no coverage) and no foam MultiMesh is allocated.
 var build_foam := false
@@ -64,6 +64,13 @@ var _rendering_active := true
 
 
 func start() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Fluid renderer config: %s" % config_error)
+		return
+	tex_width = config.texture_width
+	if domain_aabb.size == Vector3(16.0, 16.0, 16.0):
+		domain_aabb = AABB(config.domain_origin, config.domain_size_m)
 	assert(camera != null, "ScreenSpaceFluidRenderer.camera must be set before start()")
 	camera.cull_mask = 0xFFFFF & ~(LAYER_DEPTH | LAYER_THICK | LAYER_FOAM)
 	mm = _build_multimesh()

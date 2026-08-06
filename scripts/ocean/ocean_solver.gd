@@ -16,6 +16,7 @@ const GRAVITY := 9.81
 ## damp it as the cascades get finer.
 const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 0.8, 0.55]
 
+var config: OceanConfig = OceanConfig.new()
 var map_size := 256
 ## Pairwise non-commensurate (prime) lengths: integer ratios would tile with a
 ## visible super-period. Sorted large -> small; k-space bands are cut between
@@ -78,6 +79,12 @@ func mark_spectrum_dirty() -> void:
 
 
 func init_render() -> void:
+	config.map_size = map_size
+	config.clipmap_tile_lengths_m = tile_lengths
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Ocean config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("OceanSolver")
 	if _rd == null:
 		return

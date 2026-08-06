@@ -14,6 +14,7 @@ extends Node3D
 @onready var spot_accent: SpotLight3D = $SpotLightAccent
 
 var _info_label: Label
+var config: SsrConfig = SsrConfig.new()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 const SPAWN_HEIGHT := 12.0
@@ -41,10 +42,14 @@ var spawner := RigidBodySpawner.new()
 # ── Lifecycle ────────────────────────────────────────────────────────────────
 
 func _ready() -> void:
-	max_objects = GameManager.get_setting("ssr_demo_max_objects", 200)
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("SSR config: %s" % config_error)
+		return
+	max_objects = GameManager.get_setting("ssr_demo_max_objects", config.max_objects)
 	spawner.roughness_override = roughness_override
 	spawner.metallic_override = metallic_override
-	spawn_timer.wait_time = GameManager.get_setting("ssr_demo_spawn_rate", 0.25)
+	spawn_timer.wait_time = GameManager.get_setting("ssr_demo_spawn_rate", config.spawn_interval_s)
 
 	# Configure orbit camera
 	orbit_cam.target = Vector3.ZERO
@@ -155,7 +160,7 @@ func _cleanup_fallen_objects() -> void:
 		if not is_instance_valid(obj):
 			spawned_objects.remove_at(i)
 			removed = true
-		elif obj.global_position.y < KILL_Y:
+		elif obj.global_position.y < config.kill_height_m:
 			obj.queue_free()
 			spawned_objects.remove_at(i)
 			removed = true
@@ -184,9 +189,9 @@ func spawn_random_shape() -> RigidBody3D:
 	if spawned_objects.size() >= max_objects:
 		return null
 	var body := spawner.spawn(self, Vector3(
-		randf_range(-SPAWN_RADIUS, SPAWN_RADIUS),
-		SPAWN_HEIGHT + randf_range(0.0, 4.0),
-		randf_range(-SPAWN_RADIUS, SPAWN_RADIUS)),
+			randf_range(-config.spawn_radius_m, config.spawn_radius_m),
+			config.spawn_height_m + randf_range(0.0, 4.0),
+			randf_range(-config.spawn_radius_m, config.spawn_radius_m)),
 		Vector3(randf() * TAU, randf() * TAU, randf() * TAU),
 		Vector3(randf_range(-4, 4), randf_range(-4, 4), randf_range(-4, 4)))
 	spawned_objects.append(body)

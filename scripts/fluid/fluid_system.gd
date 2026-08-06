@@ -1,6 +1,5 @@
 class_name FluidSystem
 extends Node3D
-const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 ## Reusable GPU fluid: a screen-space liquid surface driven by either a PBF or a
 ## dual-density SPH solver (switchable at runtime for A/B comparison), plus an
 ## optional white-particle (foam/spray/bubble) layer. Self-contained — instance it
@@ -22,16 +21,18 @@ const RADIUS := {Method.PBF: 0.12, Method.SPH: 0.16}
 const POUR_COOLDOWN_MS := 400
 
 # --- Public configuration (set before start(); use the setters afterwards). ---
+@export var config: FluidConfig = FluidConfig.new()
+
 var method: Method = Method.SPH
 var scenario: Scenario = Scenario.DAM
 var mode := 0.0 # 0 = water, 1 = lava
-var particle_count := CONFIG.DEFAULT_PARTICLE_COUNT
+var particle_count := 65536
 var foam_enabled := true
 var render_scale := 0.5
-var cascade_flow := CONFIG.DEFAULT_FLOW
+var cascade_flow := 1.0
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
-var domain_origin := CONFIG.DOMAIN_ORIGIN
-var domain_size := CONFIG.DOMAIN_SIZE
+var domain_origin := Vector3(-8.0, 0.0, -8.0)
+var domain_size := Vector3(16.0, 16.0, 16.0)
 var seed_origin := Vector3(-7.7, 0.1, -7.7)
 
 # --- Planet mode (SPH only; leave planet_gravity at 0 for the flat-world box). ---
@@ -81,7 +82,18 @@ func _foam_active() -> bool:
 
 
 func start() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Fluid config: %s" % config_error)
+		return
 	assert(camera != null, "FluidSystem.camera must be set before start()")
+	particle_count = config.default_particle_count
+	cascade_flow = config.default_flow
+	domain_origin = config.domain_origin
+	domain_size = config.domain_size_m
+	pbf_solver.config = config
+	sph_solver.config = config
+	renderer = null
 	active_solver = sph_solver if method == Method.SPH else pbf_solver
 	_radius = RADIUS[method]
 	active_solver.particle_count = particle_count
@@ -94,6 +106,7 @@ func start() -> void:
 
 func _setup_renderer() -> void:
 	renderer = ScreenSpaceFluidRenderer.new()
+	renderer.config = config
 	renderer.camera = camera
 	renderer.particle_count = active_solver.particle_count
 	renderer.tex_width = active_solver.tex_width
@@ -146,7 +159,7 @@ func set_scenario(value: Scenario) -> void:
 
 
 func set_cascade_flow(value: float) -> void:
-	cascade_flow = clampf(value, CONFIG.FLOW_MIN, CONFIG.FLOW_MAX)
+	cascade_flow = clampf(value, config.flow_min, config.flow_max)
 	sph_solver.cascade_flow = cascade_flow
 
 

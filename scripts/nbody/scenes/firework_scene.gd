@@ -41,11 +41,12 @@ func params() -> Array:
 
 func apply_defaults(solver: NBodySolver) -> void:
 	solver.force_mode = 2
-	solver.param_a = period
-	solver.param_b = spread
-	solver.aux2 = Vector4(
-		burst_speed * 0.15, gravity_strength, burst_speed, floorf(maxf(rockets, 1.0))
-	)
+	solver.firework_period_s = period
+	solver.firework_spread_m = spread
+	solver.firework_speed_min_mps = burst_speed * 0.15
+	solver.firework_gravity_mps2 = gravity_strength
+	solver.firework_speed_max_mps = burst_speed
+	solver.firework_rocket_groups = floorf(maxf(rockets, 1.0))
 	solver.escape_radius = 1000.0
 	# Unused by the analytic path (it writes the glow channel directly), but keep
 	# them sane for the horizonless status displays.

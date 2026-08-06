@@ -1,6 +1,5 @@
 class_name PbfFluidSolver
 extends RefCounted
-const CONFIG := preload("res://scripts/fluid/fluid_config.gd")
 
 const SHADER_DIR := "res://shaders/pbf/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"
@@ -12,11 +11,12 @@ const STAGES: Array[String] = [
 ]
 const WG := 256
 
-var particle_count := CONFIG.DEFAULT_PARTICLE_COUNT
-var grid_dims := CONFIG.GRID_DIMS
-var grid_origin := CONFIG.GRID_ORIGIN
-var cell_size := CONFIG.CELL_SIZE
-var h := CONFIG.CELL_SIZE
+var config: FluidConfig = FluidConfig.new()
+var particle_count := 65536
+var grid_dims := Vector3i(64, 64, 64)
+var grid_origin := Vector3(-8.0, 0.0, -8.0)
+var cell_size := 0.25
+var h := 0.25
 var spacing := 0.12
 var epsilon := 100.0
 var scorr_k := 0.001
@@ -27,7 +27,7 @@ var gravity := Vector3(0.0, -9.8, 0.0)
 var solver_iterations := 3
 var mode := 0.0
 
-var tex_width := CONFIG.TEX_WIDTH
+var tex_width := 256
 var initialized := false
 var profiling := false
 
@@ -53,6 +53,15 @@ func set_seed_positions(seed: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("PBF config: %s" % config_error)
+		return
+	grid_dims = config.grid_dims
+	grid_origin = config.grid_origin
+	cell_size = config.cell_size_m
+	h = config.cell_size_m
+	tex_width = config.texture_width
 	_rd = GpuPreflight.device("PbfFluidSolver")
 	if _rd == null:
 		return
@@ -196,7 +205,7 @@ func _mark(cl: int, name: String) -> int:
 # Render thread. Reads last frame's timestamps: each pbf/* marker closes the
 # segment started by the previous pbf/* marker; repeated names sum across iterations.
 func _read_timings() -> void:
-	var out: Dictionary = CONFIG.read_gpu_timings(_rd, "pbf/", profiling)
+	var out: Dictionary = GpuTimings.read(_rd, "pbf/", profiling)
 	if out.is_empty():
 		return
 	_timings_mutex.lock()

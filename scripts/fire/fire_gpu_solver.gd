@@ -14,12 +14,7 @@ extends RefCounted
 ## rendering thread (RenderingDevice is not thread safe).
 
 const SHADER_DIR := "res://shaders/fire/sparse/"
-const DEFAULT_GRID_DIMS := Vector3i(64, 96, 64)
-const DEFAULT_CELL_SIZE := 0.2
-const DOMAIN_SIZE := Vector3(12.8, 19.2, 12.8)
 const POOL_BUDGETS := [1536, 1792, FireTilePool.NSLOTS]
-const WATER_PARTICLE_COUNT := 16384
-const DEFAULT_LIQUID_DRAIN_RATE := 0.2
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
 	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
@@ -145,8 +140,9 @@ const Y_O2_AIR := 0.233
 ## The fire itself roams the whole virtual domain (see [method sim_dims]); this is
 ## only the box the SPH droplets are given as their own neighbour-grid domain,
 ## 12.8 x 19.2 x 12.8 m at the default cell size.
-var grid_dims := DEFAULT_GRID_DIMS
-var cell_size := DEFAULT_CELL_SIZE ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
+var config: FireConfig = FireConfig.new()
+var grid_dims := Vector3i(64, 96, 64)
+var cell_size := 0.2 ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0 m
 
 var fuel_index := 0
 var units_convention := UNITS_CGS
@@ -236,7 +232,7 @@ var water_suppression := 40.0
 ## Owned here so one slider drives it, but applied by water_return.comp through
 ## FireWater.drain_rate: it has to run on frames where the evaporation stage is
 ## skipped, which is where it is the only cleanup left.
-var liquid_drain_rate := DEFAULT_LIQUID_DRAIN_RATE
+var liquid_drain_rate := 0.2
 var evaporation_enabled := true
 
 var display_temperature := 2600.0 ## Renderer normalisation only
@@ -329,6 +325,7 @@ var _time_accumulator := 0.0
 
 
 func _init() -> void:
+	liquid_drain_rate = config.liquid_drain_rate_per_s
 	_stats.resize(STATS_WORDS)
 	_wood.resize(MAX_LOGS * 8)
 
@@ -345,14 +342,20 @@ func get_previous_visual_activity_tex_rid() -> RID:
 	return _tex.get("visual_activity_prev", RID())
 
 
+func get_visual_activity_tex_rid() -> RID:
+	return _tex.get("visual_activity", RID())
+
+
+func get_liquid_scal_tex_rid() -> RID:
+	return _tex.get("liquid_scal", RID())
+
+
+func get_liquid_velocity_tex_rid() -> RID:
+	return _tex.get("liquid_vel", RID())
+
+
 func previous_indirection_bytes_rid() -> RID:
 	return _tex.get("indir_prev", RID())
-
-
-## Field texture by name, for the stages that live outside this class (the liquid
-## coupling in FireWater). Invalid until init_render has run on the render thread.
-func get_texture_rid(key: String) -> RID:
-	return _tex.get(key, RID())
 
 
 func current_fuel() -> Dictionary:
@@ -421,13 +424,14 @@ func get_clock_stats() -> Dictionary:
 ## Queue a grid interaction; consumed by the next [method step_render].
 ## Safe to call from the main thread.
 ##
-func push_event(mode: int, position: Vector3, radius: float, amount: float) -> void:
+func push_event(mode: int, position_m: Vector3, radius_m: float,
+		amount_per_step: float) -> void:
 	_events_mutex.lock()
 	# Bounded: the caller queues one emitter event per frame, so an unconsumed
 	# queue means the solver never came up and events would pile up forever.
 	if _events.size() < 64:
-		_events.append({"mode": mode, "pos": position, "radius": radius,
-			"amount": amount})
+		_events.append({"mode": mode, "pos": position_m, "radius": radius_m,
+			"amount": amount_per_step})
 	_events_mutex.unlock()
 
 
@@ -577,6 +581,13 @@ func get_timings() -> Dictionary:
 # =========================================================================
 
 func init_render() -> void:
+	config.dense_grid_dims = grid_dims
+	config.cell_size_m = cell_size
+	config.pool_budget = pool_budget
+	var config_error := config.validate()
+	if config_error != "":
+		push_error("Fire config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("FireGpuSolver")
 	if _rd == null:
 		return
@@ -651,7 +662,15 @@ func init_render() -> void:
 ## against it — and it is the coordinate system anything coupling into the grid
 ## from outside has to bin into (FireWater).
 func sim_dims() -> Vector3i:
-	return FireTilePool.VTILES * FireTilePool.TILE
+	return config.sim_dims_cells()
+
+
+func domain_size_m() -> Vector3:
+	return config.sparse_domain_size_m()
+
+
+func dense_domain_size_m() -> Vector3:
+	return config.dense_domain_size_m()
 
 
 ## The tile pool's indirection volume, for a coupled stage that lives outside this

@@ -9,6 +9,7 @@ const STAGES: Array[String] = ["step_attractors", "force_tiled", "integrate"]
 const WG := 256
 const MAX_ATTRACTORS := 64
 
+var config: NBodyConfig = NBodyConfig.new()
 var particle_count := 262144
 var tex_width := 512
 var dt := 0.004
@@ -30,13 +31,16 @@ var force_mode := 0
 var jet_speed := 3.0
 var axis_dir := Vector3.UP
 var axis_spread := 0.15
-## Mode-specific scalars; land in the shader's aux1.x/y/z (see nbody_common.comp).
 var damping := 0.0
-var param_a := 0.0
-var param_b := 0.0
-## Mode-specific vec4; lands in the shader's aux2.
-var aux2 := Vector4.ZERO
-## Accumulated sim time, pushed by the controller every frame (aux1.w).
+var vortex_updraft_mps := 0.0
+var vortex_swirl_mps := 0.0
+var vortex_turbulence_mps2 := 0.0
+var firework_period_s := 0.0
+var firework_spread_m := 0.0
+var firework_speed_min_mps := 0.0
+var firework_gravity_mps2 := 0.0
+var firework_speed_max_mps := 0.0
+var firework_rocket_groups := 1.0
 var sim_time := 0.0
 
 var initialized := false
@@ -89,6 +93,10 @@ func set_attractors(list: Array) -> void:
 
 
 func init_render() -> void:
+	var config_error := validate()
+	if config_error != "":
+		push_error("N-body config: %s" % config_error)
+		return
 	_rd = GpuPreflight.device("NBodySolver")
 	if _rd == null:
 		return
@@ -277,11 +285,20 @@ func _pack_push_constant() -> PackedByteArray:
 	pc.encode_float(88, axis_dir.z)
 	pc.encode_float(92, axis_spread)
 	pc.encode_float(96, damping)
-	pc.encode_float(100, param_a)
-	pc.encode_float(104, param_b)
+	pc.encode_float(100, vortex_updraft_mps if force_mode == 1 else firework_period_s)
+	pc.encode_float(104, vortex_swirl_mps if force_mode == 1 else firework_spread_m)
 	pc.encode_float(108, sim_time)
-	pc.encode_float(112, aux2.x)
-	pc.encode_float(116, aux2.y)
-	pc.encode_float(120, aux2.z)
-	pc.encode_float(124, aux2.w)
+	pc.encode_float(112, vortex_turbulence_mps2 if force_mode == 1 else firework_speed_min_mps)
+	pc.encode_float(116, 0.0 if force_mode == 1 else firework_gravity_mps2)
+	pc.encode_float(120, 0.0 if force_mode == 1 else firework_speed_max_mps)
+	pc.encode_float(124, 1.0 if force_mode == 1 else firework_rocket_groups)
 	return pc
+
+
+func validate() -> String:
+	config.particle_count = particle_count
+	config.texture_width = tex_width
+	config.self_gravity = self_gravity
+	config.time_step_s = dt
+	config.substeps = substeps
+	return config.validate()
