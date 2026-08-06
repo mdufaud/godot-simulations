@@ -67,8 +67,9 @@ resources/   Meshes, materials, themes — rocks/ is fetched, not committed
 tools/       Asset fetch script
 ```
 
-Adding a demo means appending a `{key, title, icon}` entry to `GameManager.DEMOS`
-and a path to `GameManager.SCENES`; the menu builds its buttons from that array.
+Adding a demo means appending a `{key, title, icon, category, scene}` entry to
+`GameManager.DEMOS`; the menu builds its buttons from that array. See `CLAUDE.md`
+for the architecture every simulation is expected to follow.
 
 ## Assets
 

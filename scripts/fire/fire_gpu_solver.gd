@@ -577,9 +577,8 @@ func get_timings() -> Dictionary:
 # =========================================================================
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("FireGpuSolver")
 	if _rd == null:
-		push_error("Fire solver needs a RenderingDevice (Forward+ or Mobile renderer).")
 		return
 
 	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"])

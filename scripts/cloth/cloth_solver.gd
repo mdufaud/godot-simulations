@@ -83,7 +83,9 @@ func unpin_all_render() -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("ClothSolver")
+	if _rd == null:
+		return
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "cloth_common.comp")
 	for stage in STAGES:
@@ -183,30 +185,7 @@ func _mark(cl: int, name: String) -> int:
 # closes the segment started by the previous one; repeated names sum across
 # iterations.
 func _read_timings() -> void:
-	var out := {}
-	var prev_time := 0
-	var start_time := 0
-	var in_chain := false
-	var prefix := profile_key + "/"
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if not nm.begins_with(prefix):
-			continue
-		var t := _rd.get_captured_timestamp_gpu_time(i)
-		if nm == prefix + "start":
-			start_time = t
-			prev_time = t
-			in_chain = true
-			continue
-		if not in_chain:
-			continue
-		var seg := nm.trim_prefix(prefix)
-		if seg == "end":
-			out["total"] = float(t - start_time) / 1e6
-			in_chain = false
-		else:
-			out[seg] = out.get(seg, 0.0) + float(t - prev_time) / 1e6
-		prev_time = t
+	var out := GpuTimings.read(_rd, profile_key + "/")
 	if out.is_empty():
 		return
 	_timings_mutex.lock()

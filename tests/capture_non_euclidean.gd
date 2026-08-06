@@ -34,7 +34,7 @@ func _run() -> void:
 	(demo.get_node("UI") as CanvasLayer).visible = false
 	player.release_mouse()
 	player.set_physics_process(false)
-	for prop in demo._reserve_props:
+	for prop in demo._reserve.props:
 		(prop as PortalRigidBody3D).visible = false
 	for _frame in 90:
 		await process_frame
@@ -175,7 +175,7 @@ func _test_stair_wrap_continuity() -> bool:
 	for _frame in 4:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_stair_label.png")
-	var radius := float(demo.STAIR_CENTER_RADIUS)
+	var radius := ExhibitStaircase.CENTER_RADIUS
 	var inspection_angle := PI * 1.5
 	var inspection_radial := Vector3(cos(inspection_angle), 0.0, sin(inspection_angle))
 	var inspection_tangent := Vector3(-sin(inspection_angle), 0.0, cos(inspection_angle))
@@ -194,7 +194,7 @@ func _test_stair_wrap_continuity() -> bool:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_stair_look_up.png")
 	player.set_pose(Transform3D(Basis.IDENTITY,
-		stair.to_global(Vector3(0.0, demo.STAIR_WRAP_HEIGHT + 0.13, radius))))
+		stair.to_global(Vector3(0.0, ExhibitStaircase.WRAP_HEIGHT + 0.13, radius))))
 	player.velocity = stair.global_basis.y
 	for _frame in 4:
 		await process_frame
@@ -215,7 +215,7 @@ func _test_stair_wrap_continuity() -> bool:
 	if (stair.get_node("LoopSeal") as Node3D).visible:
 		push_error("STAIR_CORRIDOR_STAYS_SEALED_WHILE_DESCENDING")
 		return false
-	player.set_pose(demo._exhibit_poses[1])
+	player.set_pose(demo._staircase.spawn_pose)
 	for _frame in 4:
 		await process_frame
 	var returned := await _capture("res://tmp/non_euclidean_stair_descended.png")

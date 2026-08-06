@@ -1,4 +1,4 @@
-extends RefCounted
+class_name HeightfieldSand extends RefCounted
 ## GPU heightfield sand: a grid of column heights relaxed toward the angle of
 ## repose every frame (8-neighbour excess-shedding, mass-conserving), plus a
 ## brush pass (dig / pour / smooth). Heights live in an r32f texture pair and
@@ -6,11 +6,7 @@ extends RefCounted
 ## texture the flow steps write.
 
 const SHADER_DIR := "res://shaders/sand/"
-
-const TOOL_NONE := 0
-const TOOL_DIG := 1
-const TOOL_POUR := 2
-const TOOL_SMOOTH := 3
+const TIMESTAMP_PREFIX := "sand/"
 
 var grid_n := 512
 var world_size := 4.0
@@ -18,10 +14,9 @@ var repose_deg := 33.0
 var flow_rate := 0.11
 var iterations := 10
 
-var tool_mode := TOOL_NONE
-var tool_pos := Vector2.ZERO
-var tool_radius := 0.3
-var tool_strength := 1.2
+## What the host sculpts with. Never null; set [member SandBrush.mode] to
+## [constant SandBrush.NONE] to leave the sand alone.
+var brush := SandBrush.new()
 
 var initialized := false
 var profiling := false
@@ -50,7 +45,9 @@ func set_seed(heights: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("HeightfieldSand")
+	if _rd == null:
+		return
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "hf_common.comp")
 	for stage in ["flow", "tool"]:
@@ -108,15 +105,15 @@ func step_render(dt: float) -> void:
 	var iters := iterations + (iterations & 1)
 
 	if profiling:
-		_rd.capture_timestamp("sand/start")
+		_rd.capture_timestamp(TIMESTAMP_PREFIX + "start")
 	var cl := _rd.compute_list_begin()
-	if tool_mode != TOOL_NONE:
+	if not brush.idle():
 		_dispatch(cl, "tool", 0, pc, groups)
 	for i in iters:
 		_dispatch(cl, "flow", i & 1, pc, groups)
 	_rd.compute_list_end()
 	if profiling:
-		_rd.capture_timestamp("sand/end")
+		_rd.capture_timestamp(TIMESTAMP_PREFIX + "end")
 
 
 func _dispatch(cl: int, stage: String, parity: int, pc: PackedByteArray, groups: int) -> void:
@@ -130,16 +127,16 @@ func _dispatch(cl: int, stage: String, parity: int, pc: PackedByteArray, groups:
 func _pack_push_constant(dt: float) -> PackedByteArray:
 	var pc := PackedByteArray()
 	pc.resize(48)
-	pc.encode_float(0, tool_pos.x)
-	pc.encode_float(4, tool_pos.y)
-	pc.encode_float(8, tool_radius)
-	pc.encode_float(12, tool_strength)
+	pc.encode_float(0, brush.pos_m.x)
+	pc.encode_float(4, brush.pos_m.y)
+	pc.encode_float(8, brush.radius_m)
+	pc.encode_float(12, brush.strength)
 	pc.encode_float(16, tan(deg_to_rad(repose_deg)) * cell_size())
 	pc.encode_float(20, flow_rate)
 	pc.encode_float(24, cell_size())
 	pc.encode_float(28, dt)
 	pc.encode_s32(32, grid_n)
-	pc.encode_s32(36, tool_mode)
+	pc.encode_s32(36, brush.mode)
 	pc.encode_s32(40, 0)
 	pc.encode_s32(44, 0)
 	return pc
@@ -147,15 +144,12 @@ func _pack_push_constant(dt: float) -> PackedByteArray:
 
 # Render thread; reads last frame's pair of timestamps.
 func _read_timings() -> void:
-	var start_time := 0
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if nm == "sand/start":
-			start_time = _rd.get_captured_timestamp_gpu_time(i)
-		elif nm == "sand/end":
-			_timings_mutex.lock()
-			_timings["total"] = float(_rd.get_captured_timestamp_gpu_time(i) - start_time) / 1e6
-			_timings_mutex.unlock()
+	var parsed := GpuTimings.read(_rd, TIMESTAMP_PREFIX)
+	if parsed.is_empty():
+		return
+	_timings_mutex.lock()
+	_timings = parsed
+	_timings_mutex.unlock()
 
 
 func get_timings() -> Dictionary:

@@ -17,12 +17,23 @@ static var SCENE_TYPES: Array = [
 	VortexScene, FireworkScene,
 ]
 
+const PRESETS: Array[NBodyPreset] = [
+	preload("res://resources/nbody/presets/black_hole.tres"),
+	preload("res://resources/nbody/presets/pulsar.tres"),
+	preload("res://resources/nbody/presets/collision.tres"),
+	preload("res://resources/nbody/presets/rings.tres"),
+	preload("res://resources/nbody/presets/vortex.tres"),
+	preload("res://resources/nbody/presets/firework.tres"),
+]
+
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var horizon: MeshInstance3D = $EventHorizon
 @onready var orbit_cam: OrbitCamera = $CameraPivot
+@onready var _viewport := ViewportGuard.attach(self)
 
 var solver := NBodySolver.new()
-var scene_def: NBodySceneDef
+var scene_def: NBodySceneDef = SCENE_TYPES[0].new()
+var active_preset: NBodyPreset = PRESETS[0]
 var attractor_list: Array = []
 var horizon_nodes: Array[MeshInstance3D] = []
 var time_scale := 1.0
@@ -43,7 +54,7 @@ var _profile_accum := 0.0
 
 
 func _ready() -> void:
-	scene_def = SCENE_TYPES[0].new()
+	scene_def = SCENE_TYPES[active_preset.scene_type].new()
 	solver.particle_count = GameManager.get_setting("nbody_particle_count", 262144)
 	solver.tex_width = _tex_width_for(solver.particle_count)
 	solver.self_gravity = GameManager.get_setting("nbody_self_gravity", false)
@@ -155,8 +166,8 @@ func _teardown_solver() -> void:
 
 func _setup_ui() -> void:
 	var titles := []
-	for scene_type in SCENE_TYPES:
-		titles.append(scene_type.new().title())
+	for preset in PRESETS:
+		titles.append(preset.display_name)
 
 	menu.add_section("Scene")
 	menu.add_option_button("Preset", titles, 0, _on_scene_selected)
@@ -175,9 +186,9 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Render")
-	star_size_slider = menu.add_slider("Star size", 0.02, 0.3, scene_def.star_size(),
+	star_size_slider = menu.add_slider("Star size", 0.02, 0.3, active_preset.star_size,
 		func(v): star_mat.set_shader_parameter("sprite_size", v))
-	brightness_slider = menu.add_slider("Brightness", 0.1, 3.0, scene_def.brightness(),
+	brightness_slider = menu.add_slider("Brightness", 0.1, 3.0, active_preset.brightness,
 		func(v): star_mat.set_shader_parameter("brightness", v))
 	menu.add_separator()
 
@@ -192,9 +203,7 @@ func _setup_ui() -> void:
 
 
 func _set_render_scale(v: float) -> void:
-	var vp := get_viewport()
-	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	vp.scaling_3d_scale = v
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, v)
 
 
 func _setup_profiler() -> void:
@@ -253,12 +262,13 @@ func _on_param_drag_ended(changed: bool) -> void:
 # Setting a slider's value fires its value_changed callback, which pushes the
 # shader parameter — no separate material update needed.
 func _on_scene_selected(idx: int) -> void:
-	scene_def = SCENE_TYPES[idx].new()
+	active_preset = PRESETS[idx]
+	scene_def = SCENE_TYPES[active_preset.scene_type].new()
 	_build_scene_params()
-	star_size_slider.value = scene_def.star_size()
-	brightness_slider.value = scene_def.brightness()
-	if scene_def.view_distance() > 0.0:
-		orbit_cam.distance = scene_def.view_distance()
+	star_size_slider.value = active_preset.star_size
+	brightness_slider.value = active_preset.brightness
+	if active_preset.view_distance > 0.0:
+		orbit_cam.distance = active_preset.view_distance
 	_restart()
 
 

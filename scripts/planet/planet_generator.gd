@@ -19,6 +19,14 @@ const TABLE_TRIANGULATION_BASE := 512
 
 enum State { IDLE, GPU, CPU, READY }
 
+## The density field behind [method density_texture] has been rewritten. Emitted from
+## [method poll] on the main thread, on the frame the mesh becomes available.
+##
+## Every generation rewrites the field, and a resolution change frees the texture and
+## allocates a new one, so anything sampling it must rebuild its uniform sets here
+## rather than caching the RID.
+signal density_texture_changed
+
 # Shape parameters. Defaults are Lague's tuned values (Terraform.unity:14246-14258).
 var resolution := 128
 var radius := 23.0
@@ -85,9 +93,8 @@ func _triangle_cap(res: int) -> int:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("PlanetGenerator")
 	if _rd == null:
-		push_error("Planet: no RenderingDevice (Compatibility renderer or headless?)")
 		return
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "planet_common.comp")
@@ -285,6 +292,7 @@ func poll() -> bool:
 				_thread = null
 			last_generate_ms = float(Time.get_ticks_usec() - _start_usec) / 1000.0
 			_set_state(State.IDLE)
+			density_texture_changed.emit()
 			return true
 		_:
 			return false

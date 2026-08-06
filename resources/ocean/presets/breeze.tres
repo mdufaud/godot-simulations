@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="OceanPreset" format=3 uid="uid://ocean_preset_breeze"]
+
+[ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Breeze"
+wind_speed_mps = 11.0
+fetch_km = 120.0
+swell = 0.8
+spread = 0.2
+choppiness = 1.15
+height_gain = 1.0
+whitecap = 0.82
+foam_amount = 3.5
+storm_mood = 0.15

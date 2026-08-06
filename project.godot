@@ -73,23 +73,7 @@ toggle_debug={
 
 [rendering]
 
-rendering_device/driver.windows="vulkan"
 renderer/rendering_method.mobile="forward_plus"
 textures/vram_compression/import_etc2_astc=true
 anti_aliasing/quality/msaa_3d=2
 environment/screen_space_reflection/half_size=false
-
-[shader_globals]
-
-heightmap={
-"type": "sampler2D",
-"value": ""
-}
-heightmap_scale={
-"type": "float",
-"value": 5.0
-}
-player_position={
-"type": "vec3",
-"value": Vector3(0, 0, 0)
-}

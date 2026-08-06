@@ -17,6 +17,7 @@ const RECYCLE_AGE := 25.0
 enum Variant { CRATE, ROCK, PLANK, TREE }
 
 var field: TornadoWindField
+var renderer: TornadoRenderer
 var debris_cap := 200
 var spawn_rate := 4.0
 var throw_speed := 45.0
@@ -264,6 +265,7 @@ func scatter_props(fraction := 0.6) -> void:
 		_unpark(i, Transform3D(basis, pos), Vector3.ZERO, Vector3.ZERO)
 
 
+## Queue a throw from a world-space position along a world-space direction.
 func queue_throw(from: Vector3, dir: Vector3) -> void:
 	_throw_queue.append({from = from, dir = dir})
 
@@ -271,6 +273,8 @@ func queue_throw(from: Vector3, dir: Vector3) -> void:
 func _physics_process(delta: float) -> void:
 	if field == null:
 		return
+	if renderer != null:
+		renderer.push_wind(field)
 
 	# ── throw queue ──
 	for t in _throw_queue:

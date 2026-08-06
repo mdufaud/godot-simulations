@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="PlanetPreset" format=3 uid="uid://planet_preset_verdant"]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Verdant"
+radius_m = 23.0
+layer_count = 7
+lacunarity = 1.9
+persistence = 0.5
+noise_scale = 2.2
+noise_strength = 1.6
+noise_offset = 0.1
+col_flat = Color(0.32, 0.52, 0.24, 1)
+col_flat_deep = Color(0.16, 0.3, 0.18, 1)
+col_steep = Color(0.4, 0.36, 0.3, 1)
+col_steep_deep = Color(0.2, 0.19, 0.18, 1)
+col_ambient = Color(0.3, 0.36, 0.4, 1)
+height_bands = 7.0
+height_min_m = 20.0
+height_max_m = 27.0
+wavelengths_nm = Vector3(700, 530, 440)
+scattering_strength = 22.0

@@ -198,7 +198,9 @@ func respawn_range(from: int, data: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("SphFluidSolver")
+	if _rd == null:
+		return
 	_target_density = _compute_rest_density()
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")

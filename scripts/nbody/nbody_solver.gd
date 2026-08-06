@@ -89,7 +89,9 @@ func set_attractors(list: Array) -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("NBodySolver")
+	if _rd == null:
+		return
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "nbody_common.comp")
 	for stage in STAGES:
@@ -197,32 +199,9 @@ func _mark(cl: int, name: String) -> int:
 	return _rd.compute_list_begin()
 
 
-# Render thread. Reads last frame's timestamps: each nbody/* marker closes the
-# segment started by the previous one; repeated names sum across substeps.
+# Render thread. Reads last frame's timestamps.
 func _read_timings() -> void:
-	var out := {}
-	var prev_time := 0
-	var start_time := 0
-	var in_chain := false
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if not nm.begins_with("nbody/"):
-			continue
-		var t := _rd.get_captured_timestamp_gpu_time(i)
-		if nm == "nbody/start":
-			start_time = t
-			prev_time = t
-			in_chain = true
-			continue
-		if not in_chain:
-			continue
-		var seg := nm.trim_prefix("nbody/")
-		if seg == "end":
-			out["total"] = float(t - start_time) / 1e6
-			in_chain = false
-		else:
-			out[seg] = out.get(seg, 0.0) + float(t - prev_time) / 1e6
-		prev_time = t
+	var out := GpuTimings.read(_rd, "nbody/")
 	if out.is_empty():
 		return
 	_timings_mutex.lock()

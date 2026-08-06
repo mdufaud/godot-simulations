@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ParallaxConfig" format=3 uid="uid://parallax_preset_cobblestone"]
+
+[ext_resource type="Script" path="res://scripts/parallax/parallax_config.gd" id="1_config"]
+
+[resource]
+script = ExtResource("1_config")
+display_name = "🪨 Cobblestone"
+surface = 2
+height_scale = 0.04
+min_layer_count = 12
+max_layer_count = 48
+uv_scale = 2.5
+normal_strength = 1.0
+roughness = 0.9
+shadow_strength = 0.9

@@ -3,19 +3,15 @@
 android/
 bin/
 docs/*
-!docs/fluid_optimization_plan.md
 .editorconfig
 TODO.md
 
 # Third-party binary assets (Poly Haven downloads), fetched separately
-resources/forest/
-resources/materials/
-resources/rocks/
+resources/
 
 .codex
 .claude
 .reasonix/
 __pycache__/
 tmp/
-
-docs/
+CLAUDE.md

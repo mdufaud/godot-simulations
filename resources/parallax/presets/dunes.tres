@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ParallaxConfig" format=3 uid="uid://parallax_preset_dunes"]
+
+[ext_resource type="Script" path="res://scripts/parallax/parallax_config.gd" id="1_config"]
+
+[resource]
+script = ExtResource("1_config")
+display_name = "🏜️ Dunes"
+surface = 3
+height_scale = 0.08
+min_layer_count = 8
+max_layer_count = 40
+uv_scale = 1.5
+normal_strength = 0.8
+roughness = 0.95
+shadow_strength = 0.6

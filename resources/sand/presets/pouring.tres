@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="SandPreset" format=3 uid="uid://sand_preset_pouring"]
+
+[ext_resource type="Script" path="res://scripts/sand/sand_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Pouring"
+default_tool = 2
+walls_visible = true
+terrain = 0
+base_height_m = 0.02
+camera_target_m = Vector3(0, 0.5, 0)
+camera_distance_m = 5.0
+auto_pour_radius_m = 0.9
+auto_pour_rate_rad_s = 0.5
+auto_pour_strength = 1.8

@@ -2,103 +2,45 @@ extends Node3D
 ## Contact Refinement Parallax Occlusion Mapping demo
 ## State-of-the-art CRPOM with self-shadowing and multiple surface presets
 
+const PRESETS := [
+	preload("res://resources/parallax/presets/rock.tres"),
+	preload("res://resources/parallax/presets/bricks.tres"),
+	preload("res://resources/parallax/presets/cobblestone.tres"),
+	preload("res://resources/parallax/presets/dunes.tres"),
+]
+
+const MIN_DISTANCE := 1.5
+const MAX_DISTANCE := 12.0
+
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var parallax_mesh: MeshInstance3D = $ParallaxSurface
 @onready var parallax_mesh_cube: MeshInstance3D = $ParallaxCube
 
-# Slider references so preset selection can drive them.
-var _height_slider: HSlider
-var _min_layers_slider: HSlider
-var _max_layers_slider: HSlider
-var _uv_scale_slider: HSlider
-var _normal_slider: HSlider
-var _roughness_slider: HSlider
-var _shadow_slider: HSlider
-var _mode_option: OptionButton
-var _preset_option: OptionButton
-var _mesh_option: OptionButton
-
 var parallax_material: ShaderMaterial
-var _tex_cache := {}
 
-# Settings
-var display_mode := 2 # 0=flat, 1=normal map only, 2=POM
-var height_scale := 0.04
-var min_layers := 8
-var max_layers := 32
-var uv_scale := 2.0
-var normal_strength := 1.0
-var roughness_val := 0.8
-var shadow_strength := 0.8
-var self_shadow_enabled := true
-var computed_normals := false
-var current_preset := 0
-var current_mesh := 0 # 0=plane, 1=cube
-
-# Camera controls
-const MIN_DISTANCE := 1.5
-const MAX_DISTANCE := 12.0
-
-const TEX_SIZE := 1024
-
-# ─── Surface Preset Definitions ──────────────────
-# Each preset defines noise params for height, albedo, and normals + defaults
-
-enum Preset { ROCK, BRICKS, COBBLESTONE, DUNES }
-
-const PRESET_NAMES := ["🪨 Rock", "🧱 Bricks", "🪨 Cobblestone", "🏜️ Dunes"]
-
-# height_scale values account for the uv_scale factor applied in the shader
-# (apparent depth is world-constant: depth ≈ height_scale × plane size)
-const PRESET_DEFAULTS := {
-	Preset.ROCK: {
-		"height_scale": 0.04,
-		"min_layers": 8,
-		"max_layers": 32,
-		"uv_scale": 2.0,
-		"roughness": 0.85,
-		"normal_strength": 1.0,
-		"shadow_strength": 0.8,
-	},
-	Preset.BRICKS: {
-		"height_scale": 0.02,
-		"min_layers": 8,
-		"max_layers": 48,
-		"uv_scale": 3.0,
-		"roughness": 0.75,
-		"normal_strength": 1.2,
-		"shadow_strength": 1.0,
-	},
-	Preset.COBBLESTONE: {
-		"height_scale": 0.04,
-		"min_layers": 12,
-		"max_layers": 48,
-		"uv_scale": 2.5,
-		"roughness": 0.9,
-		"normal_strength": 1.0,
-		"shadow_strength": 0.9,
-	},
-	Preset.DUNES: {
-		"height_scale": 0.08,
-		"min_layers": 8,
-		"max_layers": 40,
-		"uv_scale": 1.5,
-		"roughness": 0.95,
-		"normal_strength": 0.8,
-		"shadow_strength": 0.6,
-	},
-}
+var _settings := ParallaxConfig.new()
+var _textures := ParallaxTextureFactory.new()
+var _menu_builder: ParallaxMenu
+var _current_mesh := 0 # 0=plane, 1=cube
 
 
 func _ready() -> void:
-	_setup_material()
-	_build_menu()
-	# Restore saved values as-is; presets only apply on explicit selection
-	_generate_textures_for_preset(current_preset)
-	_apply_shader_settings()
+	parallax_material = ShaderMaterial.new()
+	parallax_material.shader = preload("res://shaders/parallax/parallax.gdshader")
 
-	# Configure orbit camera
+	_menu_builder = ParallaxMenu.new(_settings, _apply_settings, _on_preset_selected,
+		_on_mesh_selected)
+	_menu_builder.build(menu, _preset_names())
+
+	var error := _settings.validate()
+	if error != "":
+		push_error("Parallax settings: %s" % error)
+
+	# Restore saved values as-is; presets only apply on explicit selection
+	_apply_surface_textures()
+	_apply_settings()
+
 	orbit_cam.distance = 4.0
 	orbit_cam.pitch = -35.0
 	orbit_cam.yaw = 45.0
@@ -108,400 +50,40 @@ func _ready() -> void:
 	orbit_cam.zoom_speed = 0.3
 
 
-func _setup_material() -> void:
-	parallax_material = ShaderMaterial.new()
-	parallax_material.shader = preload("res://shaders/parallax/parallax.gdshader")
+func _preset_names() -> Array:
+	var names := []
+	for preset in PRESETS:
+		names.append((preset as ParallaxConfig).display_name)
+	return names
 
 
-func _build_menu() -> void:
-	menu.title = "🪨 Parallax Mapping"
-
-	menu.add_section("Surface")
-	_mode_option = menu.add_option_button("Render Mode",
-		["Flat (no relief)", "Normal Map Only", "Parallax (POM)"], display_mode, _on_render_mode_selected)
-	_preset_option = menu.add_option_button("Preset", PRESET_NAMES, current_preset, _on_preset_selected)
-	_mesh_option = menu.add_option_button("Mesh", ["Plane", "Cube"], current_mesh, _on_mesh_selected)
-
-	menu.add_section("Relief")
-	_height_slider = menu.add_slider("Height", 0.005, 0.4, 0.04, _on_height_changed)
-	_min_layers_slider = menu.add_slider("Min Layers", 4.0, 64.0, 8.0, _on_min_layers_changed)
-	_max_layers_slider = menu.add_slider("Max Layers", 8.0, 128.0, 32.0, _on_max_layers_changed)
-	_uv_scale_slider = menu.add_slider("UV Scale", 0.5, 8.0, 2.0, _on_uv_scale_changed)
-	_normal_slider = menu.add_slider("Normal Strength", 0.0, 2.0, 1.0, _on_normal_strength_changed)
-	_roughness_slider = menu.add_slider("Roughness", 0.0, 1.0, 0.8, _on_roughness_changed)
-
-	menu.add_section("Shadow")
-	_shadow_slider = menu.add_slider("Shadow Strength", 0.0, 2.0, 0.8, _on_shadow_strength_changed)
-
-	# Flipping relief on and off is the comparison this demo exists for.
-	menu.add_action("🪨", "Relief", func(): _cycle(_mode_option))
-	menu.add_action("🎨", "Preset", func(): _cycle(_preset_option))
-	menu.add_action("🧊", "Mesh", func(): _cycle(_mesh_option))
-
-	menu.add_debug_toggle("🌑", "Self-shadowing", true, _on_self_shadow_toggled)
-	menu.add_debug_toggle("🧭", "Heightmap normals", false, _on_computed_normals_toggled)
+func _on_preset_selected(index: int) -> void:
+	_settings.adopt_surface(PRESETS[index] as ParallaxConfig)
+	_menu_builder.sync_sliders()
+	_apply_surface_textures()
+	_apply_settings()
 
 
-## Steps a panel dropdown from the action strip; emitting keeps it persisted and in sync.
-func _cycle(option: OptionButton) -> void:
-	if option == null:
-		return
-	var next := (option.selected + 1) % option.item_count
-	option.select(next)
-	option.item_selected.emit(next)
+func _on_mesh_selected(index: int) -> void:
+	_current_mesh = index
+	_update_mesh_visibility()
+
+
+func _apply_surface_textures() -> void:
+	var maps := _textures.maps_for(_settings.surface)
+	parallax_material.set_shader_parameter("texture_albedo", maps.albedo)
+	parallax_material.set_shader_parameter("texture_normal", maps.normal)
+	parallax_material.set_shader_parameter("texture_height", maps.height)
+	_update_mesh_visibility()
+
+
+func _apply_settings() -> void:
+	_settings.apply_to(parallax_material)
 
 
 func _update_mesh_visibility() -> void:
-	parallax_mesh.visible = (current_mesh == 0)
-	parallax_mesh_cube.visible = (current_mesh == 1)
+	parallax_mesh.visible = (_current_mesh == 0)
+	parallax_mesh_cube.visible = (_current_mesh == 1)
 
-	var active_mesh := parallax_mesh if current_mesh == 0 else parallax_mesh_cube
+	var active_mesh := parallax_mesh if _current_mesh == 0 else parallax_mesh_cube
 	active_mesh.set_surface_override_material(0, parallax_material)
-
-
-# ─── Preset System ────────────────────────────────
-
-func _apply_preset(preset_idx: int) -> void:
-	current_preset = preset_idx
-
-	# Driving the sliders re-fires their callbacks (updates vars + shader + persist).
-	var defaults: Dictionary = PRESET_DEFAULTS[preset_idx]
-	_height_slider.value = defaults["height_scale"]
-	_min_layers_slider.value = defaults["min_layers"]
-	_max_layers_slider.value = defaults["max_layers"]
-	_uv_scale_slider.value = defaults["uv_scale"]
-	_normal_slider.value = defaults["normal_strength"]
-	_roughness_slider.value = defaults["roughness"]
-	_shadow_slider.value = defaults["shadow_strength"]
-
-	_generate_textures_for_preset(preset_idx)
-	_apply_shader_settings()
-
-
-func _generate_textures_for_preset(preset_idx: int) -> void:
-	if not _tex_cache.has(preset_idx):
-		_tex_cache[preset_idx] = _build_preset_maps(preset_idx)
-
-	var maps: Array = _tex_cache[preset_idx]
-	parallax_material.set_shader_parameter("texture_albedo", maps[0])
-	parallax_material.set_shader_parameter("texture_normal", maps[1])
-	parallax_material.set_shader_parameter("texture_height", maps[2])
-
-	# Apply material to active mesh
-	_update_mesh_visibility()
-
-
-func _build_preset_maps(preset_idx: int) -> Array:
-	match preset_idx:
-		Preset.BRICKS:
-			return _create_brick_maps()
-		Preset.COBBLESTONE:
-			return _noise_maps(_create_cobble_albedo(), _cobble_height_noise(), true, 12.0)
-		Preset.DUNES:
-			return _noise_maps(_create_dune_albedo(), _dune_height_noise(), false, 8.0)
-		_:
-			return _noise_maps(_create_rock_albedo(), _rock_height_noise(), true, 10.0)
-
-
-# Normal map is derived from the SAME noise (and same invert) as the height map,
-# so lighting cues match the parallax displacement.
-func _noise_maps(albedo: Texture2D, height_noise: FastNoiseLite, inv: bool, bump: float) -> Array:
-	var height_tex := NoiseTexture2D.new()
-	height_tex.noise = height_noise
-	height_tex.width = TEX_SIZE
-	height_tex.height = TEX_SIZE
-	height_tex.seamless = true
-	height_tex.invert = inv
-
-	var normal_tex := NoiseTexture2D.new()
-	normal_tex.noise = height_noise
-	normal_tex.width = TEX_SIZE
-	normal_tex.height = TEX_SIZE
-	normal_tex.seamless = true
-	normal_tex.invert = inv
-	normal_tex.as_normal_map = true
-	normal_tex.bump_strength = bump
-
-	return [albedo, normal_tex, height_tex]
-
-
-func _apply_shader_settings() -> void:
-	if not parallax_material:
-		return
-	parallax_material.set_shader_parameter("display_mode", display_mode)
-	parallax_material.set_shader_parameter("height_scale", height_scale)
-	parallax_material.set_shader_parameter("min_layers", min_layers)
-	parallax_material.set_shader_parameter("max_layers", max_layers)
-	parallax_material.set_shader_parameter("uv_scale", uv_scale)
-	parallax_material.set_shader_parameter("normal_strength", normal_strength)
-	parallax_material.set_shader_parameter("roughness", roughness_val)
-	parallax_material.set_shader_parameter("shadow_strength", shadow_strength)
-	parallax_material.set_shader_parameter("self_shadow_enabled", self_shadow_enabled)
-	parallax_material.set_shader_parameter("use_computed_normals", computed_normals)
-
-
-# ─── Rock Preset ──────────────────────────────────
-
-func _create_rock_albedo() -> NoiseTexture2D:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
-	noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
-	noise.frequency = 0.02
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 3
-	noise.fractal_lacunarity = 2.0
-	noise.fractal_gain = 0.5
-
-	var tex := NoiseTexture2D.new()
-	tex.noise = noise
-	tex.width = TEX_SIZE
-	tex.height = TEX_SIZE
-	tex.seamless = true
-	tex.color_ramp = _gradient([0.0, 0.25, 0.5, 0.7, 1.0], [
-		Color(0.2, 0.18, 0.16),
-		Color(0.3, 0.27, 0.24),
-		Color(0.42, 0.38, 0.34),
-		Color(0.36, 0.32, 0.28),
-		Color(0.48, 0.45, 0.42),
-	])
-	return tex
-
-
-func _rock_height_noise() -> FastNoiseLite:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
-	noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
-	noise.frequency = 0.018
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.4
-	return noise
-
-
-# ─── Brick Preset ─────────────────────────────────
-# Real brick grid generated pixel-by-pixel: straight mortar lines give hard
-# silhouettes that make the parallax offset clearly visible (unlike noise).
-
-@warning_ignore("integer_division")
-func _create_brick_maps() -> Array:
-	var size := 512
-	var cols := 4
-	var rows := 8
-	var brick_w := size / cols
-	var brick_h := size / rows
-	var mortar_px := 3
-	var bevel_px := 6
-
-	var detail := FastNoiseLite.new()
-	detail.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	detail.frequency = 0.06
-
-	var height_img := Image.create(size, size, false, Image.FORMAT_RGB8)
-	var albedo_img := Image.create(size, size, false, Image.FORMAT_RGB8)
-
-	var mortar_color := Color(0.62, 0.6, 0.57)
-	var brick_colors: Array[Color] = [
-		Color(0.55, 0.26, 0.16),
-		Color(0.62, 0.32, 0.2),
-		Color(0.48, 0.22, 0.14),
-		Color(0.58, 0.3, 0.22),
-	]
-
-	for y in size:
-		var row := y / brick_h
-		var py := y % brick_h
-		for x in size:
-			# Alternate rows are offset by half a brick; wraps seamlessly
-			# because size is divisible by brick_w
-			var xs := x + (brick_w / 2 if row % 2 == 1 else 0)
-			var col := xs / brick_w
-			var px := xs % brick_w
-			var dx := mini(px, brick_w - 1 - px)
-			var dy := mini(py, brick_h - 1 - py)
-			var d := mini(dx, dy)
-
-			var n := detail.get_noise_2d(x, y) * 0.5 + 0.5
-			var h := clampf(float(d - mortar_px) / float(bevel_px), 0.0, 1.0)
-			h *= 0.85 + 0.15 * n
-			height_img.set_pixel(x, y, Color(h, h, h))
-
-			if d <= mortar_px:
-				albedo_img.set_pixel(x, y, mortar_color.darkened(0.15 * n))
-			else:
-				var brick_col: Color = brick_colors[(row * 7 + col * 3) % brick_colors.size()]
-				albedo_img.set_pixel(x, y, brick_col.darkened(0.2 * (1.0 - n)))
-
-	var normal_img: Image = height_img.duplicate()
-	normal_img.bump_map_to_normal_map(6.0)
-
-	albedo_img.generate_mipmaps()
-	normal_img.generate_mipmaps()
-	height_img.generate_mipmaps()
-
-	return [
-		ImageTexture.create_from_image(albedo_img),
-		ImageTexture.create_from_image(normal_img),
-		ImageTexture.create_from_image(height_img),
-	]
-
-
-# ─── Cobblestone Preset ───────────────────────────
-
-func _create_cobble_albedo() -> NoiseTexture2D:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_HYBRID
-	noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
-	noise.frequency = 0.025
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.4
-
-	var tex := NoiseTexture2D.new()
-	tex.noise = noise
-	tex.width = TEX_SIZE
-	tex.height = TEX_SIZE
-	tex.seamless = true
-	tex.color_ramp = _gradient([0.0, 0.3, 0.55, 0.75, 1.0], [
-		Color(0.3, 0.3, 0.3),
-		Color(0.4, 0.39, 0.38),
-		Color(0.5, 0.49, 0.47),
-		Color(0.45, 0.44, 0.42),
-		Color(0.55, 0.54, 0.52),
-	])
-	return tex
-
-
-func _cobble_height_noise() -> FastNoiseLite:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_HYBRID
-	noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
-	noise.frequency = 0.025
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.3
-	return noise
-
-
-# ─── Dune / Sand Preset ──────────────────────────
-
-func _create_dune_albedo() -> NoiseTexture2D:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	noise.frequency = 0.012
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 3
-	noise.fractal_gain = 0.5
-	noise.domain_warp_enabled = true
-	noise.domain_warp_amplitude = 30.0
-	noise.domain_warp_frequency = 0.008
-
-	var tex := NoiseTexture2D.new()
-	tex.noise = noise
-	tex.width = TEX_SIZE
-	tex.height = TEX_SIZE
-	tex.seamless = true
-	tex.color_ramp = _gradient([0.0, 0.3, 0.6, 0.8, 1.0], [
-		Color(0.65, 0.52, 0.35),
-		Color(0.72, 0.58, 0.4),
-		Color(0.78, 0.65, 0.45),
-		Color(0.74, 0.6, 0.42),
-		Color(0.82, 0.7, 0.5),
-	])
-	return tex
-
-
-func _dune_height_noise() -> FastNoiseLite:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
-	noise.frequency = 0.012
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 4
-	noise.fractal_gain = 0.45
-	noise.domain_warp_enabled = true
-	noise.domain_warp_amplitude = 30.0
-	noise.domain_warp_frequency = 0.008
-	return noise
-
-
-# ─── Utility ─────────────────────────────────────
-
-func _gradient(offsets: Array, colors: Array) -> Gradient:
-	var g := Gradient.new()
-	var off_pf := PackedFloat32Array()
-	var col_pf := PackedColorArray()
-	for o in offsets:
-		off_pf.append(o)
-	for c in colors:
-		col_pf.append(c)
-	g.offsets = off_pf
-	g.colors = col_pf
-	return g
-
-
-# ─── UI Callbacks ─────────────────────────────────
-
-func _on_preset_selected(idx: int) -> void:
-	_apply_preset(idx)
-
-
-func _on_mesh_selected(idx: int) -> void:
-	current_mesh = idx
-	_update_mesh_visibility()
-
-
-func _on_height_changed(value: float) -> void:
-	height_scale = value
-	_apply_shader_settings()
-
-
-func _on_min_layers_changed(value: float) -> void:
-	min_layers = int(value)
-	if min_layers > max_layers:
-		_max_layers_slider.value = value
-	_apply_shader_settings()
-
-
-func _on_max_layers_changed(value: float) -> void:
-	max_layers = int(value)
-	if max_layers < min_layers:
-		_min_layers_slider.value = value
-	_apply_shader_settings()
-
-
-func _on_render_mode_selected(idx: int) -> void:
-	display_mode = idx
-	_apply_shader_settings()
-
-
-func _on_uv_scale_changed(value: float) -> void:
-	uv_scale = value
-	_apply_shader_settings()
-
-
-func _on_normal_strength_changed(value: float) -> void:
-	normal_strength = value
-	_apply_shader_settings()
-
-
-func _on_roughness_changed(value: float) -> void:
-	roughness_val = value
-	_apply_shader_settings()
-
-
-func _on_shadow_strength_changed(value: float) -> void:
-	shadow_strength = value
-	_apply_shader_settings()
-
-
-func _on_self_shadow_toggled(pressed: bool) -> void:
-	self_shadow_enabled = pressed
-	_apply_shader_settings()
-
-
-func _on_computed_normals_toggled(pressed: bool) -> void:
-	computed_normals = pressed
-	_apply_shader_settings()

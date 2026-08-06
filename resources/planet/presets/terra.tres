@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="PlanetPreset" format=3 uid="uid://planet_preset_terra"]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Terra"
+radius_m = 23.0
+layer_count = 8
+lacunarity = 1.48
+persistence = 0.68
+noise_scale = 2.86
+noise_strength = 2.41
+noise_offset = -0.28
+col_flat = Color(0.67, 0.465, 0.281, 1)
+col_flat_deep = Color(0.434, 0.18, 0.166, 1)
+col_steep = Color(0.368, 0.27, 0.227, 1)
+col_steep_deep = Color(0.208, 0.153, 0.179, 1)
+col_ambient = Color(0.5, 0.39, 0.389, 1)
+height_bands = 5.2
+height_min_m = 16.2
+height_max_m = 28.3
+wavelengths_nm = Vector3(700, 530, 460)
+scattering_strength = 20.3

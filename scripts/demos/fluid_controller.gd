@@ -53,30 +53,29 @@ func _setup_ui() -> void:
 	menu.add_section("Parameters")
 
 	pbf_group = menu.add_group()
-	var pbf := fluid.pbf_solver
-	menu.add_slider("Viscosity", 0.0, 0.5, pbf.xsph_c, func(v): pbf.xsph_c = v)
-	menu.add_slider("Vorticity", 0.0, 0.1, pbf.vorticity_eps, func(v): pbf.vorticity_eps = v)
-	menu.add_slider("Cohesion", 0.0, 0.01, pbf.scorr_k, func(v): pbf.scorr_k = v)
-	menu.add_slider("Iterations", 1.0, 6.0, float(pbf.solver_iterations),
-		func(v): pbf.solver_iterations = int(round(v)))
+	menu.add_slider("Viscosity", 0.0, 0.5, fluid.get_pbf_viscosity(), fluid.set_pbf_viscosity)
+	menu.add_slider("Vorticity", 0.0, 0.1, fluid.get_pbf_vorticity(), fluid.set_pbf_vorticity)
+	menu.add_slider("Cohesion", 0.0, 0.01, fluid.get_pbf_cohesion(), fluid.set_pbf_cohesion)
+	menu.add_slider("Iterations", 1.0, 6.0, float(fluid.get_pbf_iterations()),
+		fluid.set_pbf_iterations)
 	menu.end_group()
 
 	sph_group = menu.add_group()
-	var sph := fluid.sph_solver
-	menu.add_slider("Pressure", 50.0, 600.0, sph.pressure_mult, func(v): sph.pressure_mult = v)
-	menu.add_slider("Near pressure", 0.0, 80.0, sph.near_pressure_mult,
-		func(v): sph.near_pressure_mult = v)
-	menu.add_slider("Viscosity", 0.0, 0.4, sph.viscosity_strength,
-		func(v): sph.viscosity_strength = v)
-	menu.add_slider("Bounce", 0.0, 0.95, sph.collision_damping, func(v): sph.collision_damping = v)
-	menu.add_slider("Sub-steps", 1.0, 6.0, float(sph.substeps),
-		func(v): sph.substeps = int(round(v)))
-	menu.add_slider("Foam amount", 0.0, 300.0, sph.foam_spawn_rate,
-		func(v): sph.foam_spawn_rate = v)
-	menu.add_slider("Foam threshold", 0.5, 12.0, sph.foam_trapped_min,
-		func(v): sph.foam_trapped_min = v)
-	menu.add_slider("Foam life", 2.0, 30.0, sph.foam_life_max,
-		func(v): sph.foam_life_max = v)
+	menu.add_slider("Pressure", 50.0, 600.0, fluid.get_sph_pressure(), fluid.set_sph_pressure)
+	menu.add_slider("Near pressure", 0.0, 80.0, fluid.get_sph_near_pressure(),
+		fluid.set_sph_near_pressure)
+	menu.add_slider("Viscosity", 0.0, 0.4, fluid.get_sph_viscosity(),
+		fluid.set_sph_viscosity)
+	menu.add_slider("Bounce", 0.0, 0.95, fluid.get_sph_bounce(),
+		fluid.set_sph_bounce)
+	menu.add_slider("Sub-steps", 1.0, 6.0, float(fluid.get_sph_substeps()),
+		fluid.set_sph_substeps)
+	menu.add_slider("Foam amount", 0.0, 300.0, fluid.get_sph_foam_amount(),
+		fluid.set_sph_foam_amount)
+	menu.add_slider("Foam threshold", 0.5, 12.0, fluid.get_sph_foam_threshold(),
+		fluid.set_sph_foam_threshold)
+	menu.add_slider("Foam life", 2.0, 30.0, fluid.get_sph_foam_life(),
+		fluid.set_sph_foam_life)
 	menu.end_group()
 	_update_param_groups()
 

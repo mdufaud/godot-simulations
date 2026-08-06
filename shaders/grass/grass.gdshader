@@ -1,9 +1,11 @@
 shader_type spatial;
 render_mode cull_disabled, ensure_correct_normals;
 
-global uniform sampler2D heightmap : filter_linear, repeat_enable;
-global uniform float heightmap_scale;
-global uniform vec3 player_position;
+group_uniforms Terrain;
+uniform sampler2D heightmap : filter_linear, repeat_enable;
+uniform float heightmap_scale = 5.0;
+// World-space point the grass bends away from (the camera focus in the demo).
+uniform vec3 crush_center;
 
 group_uniforms GrassProperties;
 uniform float clumping_factor : hint_range(0.0, 1.0) = 0.5;
@@ -75,12 +77,15 @@ void vertex() {
 
 	// --- WIND ---
 	float heightmap_offset = (texture(heightmap, NODE_POSITION_WORLD.xz / vec2(textureSize(heightmap, 0))).x - 0.5) * heightmap_scale;
-	float player_distance = length(player_position - (NODE_POSITION_WORLD + vec3(0, heightmap_offset, 0)));
-	float crushed_factor = min(player_distance*player_distance*1.2, 1.0);
+	float crush_distance = length(crush_center - (NODE_POSITION_WORLD + vec3(0, heightmap_offset, 0)));
+	float crushed_factor = min(crush_distance*crush_distance*1.2, 1.0);
 
+	// Noise is sampled at a scale inversely proportional to the wind speed, so the
+	// divisor is floored: wind_speed reaches 0 through the UI slider.
+	float wind_scale = max(wind_speed, 0.01);
 	float turn_angle_base = (mix(-0.15, 0.15, hash0) + clump2*clumping_factor)*TAU;
-	float wind_direction = texture(wind_noise, NODE_POSITION_WORLD.zx*0.005/wind_speed + TIME*0.005*wind_speed).x*TAU;
-	float wind_strength = mix(0.25, 1.0, texture(wind_noise, NODE_POSITION_WORLD.xz*0.025/wind_speed + TIME*0.05).x)*crushed_factor;
+	float wind_direction = texture(wind_noise, NODE_POSITION_WORLD.zx*0.005/wind_scale + TIME*0.005*wind_speed).x*TAU;
+	float wind_strength = mix(0.25, 1.0, texture(wind_noise, NODE_POSITION_WORLD.xz*0.025/wind_scale + TIME*0.05).x)*crushed_factor;
 	wind_strength *= wind_strength;
 	wind_strength *= mix(0.6, 0.7, hash1) * wind_speed;
 	mat3 grass_rotate = rotate_y(mix(turn_angle_base, wind_direction, wind_strength));
@@ -88,7 +93,7 @@ void vertex() {
 	float bend_angle_base = mix(0.12, 0.25, hash1 + height_offset*0.1)*PI*height_factor;
 	// We sample wind noise identically to strength, but with a time offset based on
 	// the height to simulate the turbulence as the grass blade shakes from the wind.
-	float wind_strength_turbulence = mix(0.25, 1.0, texture(wind_noise, NODE_POSITION_WORLD.xz*0.025/wind_speed + (TIME + height_factor*height_factor*0.25)*0.05).x);
+	float wind_strength_turbulence = mix(0.25, 1.0, texture(wind_noise, NODE_POSITION_WORLD.xz*0.025/wind_scale + (TIME + height_factor*height_factor*0.25)*0.05).x);
 	wind_strength_turbulence *= wind_strength_turbulence;
 	wind_strength_turbulence *= mix(0.16, 0.25*hash0, clump1)*PI * min(wind_speed, 1.0);
 	mat3 grass_bend = rotate_x(mix(0.45*PI, bend_angle_base + wind_strength_turbulence, crushed_factor));

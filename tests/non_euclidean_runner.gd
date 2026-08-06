@@ -110,8 +110,8 @@ func _test_portal_traversal(player: NonEuclideanPlayer, source: Portal3D,
 
 func _test_rigid_body_traversal(demo: Node3D, source: Portal3D,
 		destination: Portal3D) -> void:
-	demo._reset_reserve_props()
-	var crate := demo._reserve_props[0] as PortalRigidBody3D
+	demo._reserve.reset()
+	var crate := demo._reserve.props[0] as PortalRigidBody3D
 	var launch_velocity := -source.get_normal() * 20.0
 	crate.global_transform = Transform3D(Basis.IDENTITY,
 		source.to_global(Vector3(0.0, -1.2, -0.1)))
@@ -128,7 +128,7 @@ func _test_rigid_body_traversal(demo: Node3D, source: Portal3D,
 		"crate did not arrive in impossible interior")
 	_check(crate.linear_velocity.normalized().dot(source.map_vector(launch_velocity).normalized()) >= 0.999,
 		"crate velocity was not mapped")
-	demo._reset_reserve_props()
+	demo._reserve.reset()
 
 
 func _test_staircase(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) -> void:
@@ -164,7 +164,7 @@ func _test_staircase(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	_check(corridor_position.z < 7.0 and corridor_position.y >= 0.87,
 		"ground-floor corridor does not lead safely into the staircase")
 	player.set_pose(Transform3D(Basis.IDENTITY,
-		stair.to_global(Vector3(0.0, 0.95, demo.STAIR_CENTER_RADIUS))))
+		stair.to_global(Vector3(0.0, 0.95, ExhibitStaircase.CENTER_RADIUS))))
 	var walk_start := stair.to_local(player.global_position)
 	for _frame in 180:
 		Input.action_press("move_forward")
@@ -179,26 +179,26 @@ func _test_staircase(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	_check(walk_end.y > walk_start.y + 2.0, "player cannot walk up helical staircase")
 	_check(walk_radius > 2.0 and walk_radius < 4.6,
 		"player escaped the enclosed helical staircase")
-	var phase := Vector3(0.0, demo.STAIR_WRAP_HEIGHT + 0.13, demo.STAIR_CENTER_RADIUS)
+	var phase := Vector3(0.0, ExhibitStaircase.WRAP_HEIGHT + 0.13, ExhibitStaircase.CENTER_RADIUS)
 	player.global_position = stair.to_global(phase)
 	player.velocity = stair.global_basis.y
 	demo._physics_process(0.0)
 	var wrapped := stair.to_local(player.global_position)
-	_check(absf(wrapped.y - (phase.y - demo.STAIR_PERIOD)) <= 0.00001,
+	_check(absf(wrapped.y - (phase.y - ExhibitStaircase.PERIOD)) <= 0.00001,
 		"stair ascent did not recycle one exact period")
 	_check(Vector2(wrapped.x, wrapped.z).distance_to(Vector2(phase.x, phase.z)) <= 0.00001,
 		"stair recycling changed horizontal position")
 	_check(loop_seal.visible, "ground-floor corridor repeats on upper loops")
-	_check(absf(ground_level.position.y + demo.STAIR_PERIOD) <= 0.00001,
+	_check(absf(ground_level.position.y + ExhibitStaircase.PERIOD) <= 0.00001,
 		"ground floor moved relative to player during recycling")
 	for _index in 100:
 		player.global_position = stair.to_global(phase)
 		player.velocity = stair.global_basis.y
 		demo._physics_process(0.0)
 		wrapped = stair.to_local(player.global_position)
-		_check(absf(wrapped.y - (phase.y - demo.STAIR_PERIOD)) <= 0.00001,
+		_check(absf(wrapped.y - (phase.y - ExhibitStaircase.PERIOD)) <= 0.00001,
 			"stair period accumulated drift")
-	_check(absf(ground_level.position.y + 101.0 * demo.STAIR_PERIOD) <= 0.00001,
+	_check(absf(ground_level.position.y + 101.0 * ExhibitStaircase.PERIOD) <= 0.00001,
 		"ground floor does not preserve perceived ascent distance")
 	player.global_position = stair.to_global(Vector3(phase.x, 4.0, phase.z))
 	player.velocity = Vector3.ZERO

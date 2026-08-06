@@ -5,25 +5,44 @@ extends Node
 ## a finger would (emulated touch through Input) and asserts the options panel opens
 ## and closes again. Catches the class of regression where a demo overlay, a layout
 ## change or a mouse_filter covers the always-on controls on mobile.
+##
+## Then frees the demo and asserts the root viewport's global render state came back:
+## render scaling, MSAA and TAA outlive the scene that changed them, so a demo that
+## forgets to restore them silently degrades every demo loaded after it (ViewportGuard).
 
 const SETTLE_FRAMES := 120
+## Frames the hover and the panel animation are each given to land.
+const HOVER_TRIES := 20
+const TOGGLE_TRIES := 30
 
 var _demo := ""
 var _frames := 0
 var _done := false
 var _failures: Array[String] = []
+var _demo_root: Node = null
+var _entry_state := {}
 
 
 func _ready() -> void:
 	var args := OS.get_cmdline_user_args()
-	if args.is_empty() or not GameManager.SCENES.has(args[0]):
+	var scene := "" if args.is_empty() else GameManager.demo_scene(args[0])
+	if scene.is_empty():
 		printerr("usage: godot res://tests/ui_smoke.tscn -- <demo_key>")
 		get_tree().quit(2)
 		return
 	_demo = args[0]
 	GameManager.current_demo = _demo
-	var packed: PackedScene = load(GameManager.SCENES[_demo])
-	get_tree().root.add_child.call_deferred(packed.instantiate())
+	_entry_state = _viewport_state()
+	var packed: PackedScene = load(scene)
+	_demo_root = packed.instantiate()
+	# A controller that fails to parse is dropped silently: the scene still
+	# instantiates, SimMenu still answers taps, and the test would pass on a demo
+	# that does nothing.
+	if _demo_root.get_script() == null:
+		_fail("scene root has no script (parse error in the controller?)")
+		_report()
+		return
+	get_tree().root.add_child.call_deferred(_demo_root)
 
 
 func _process(_delta: float) -> void:
@@ -46,7 +65,32 @@ func _run() -> void:
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), true, "gear opens panel")
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false, "gear closes panel")
+	await _check_viewport_restored()
 	_report()
+
+
+## Frees the demo and compares the root viewport against what it looked like before.
+func _check_viewport_restored() -> void:
+	if _demo_root == null:
+		return
+	_demo_root.queue_free()
+	_demo_root = null
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var now := _viewport_state()
+	for key in _entry_state:
+		if now[key] != _entry_state[key]:
+			_fail("viewport %s leaked: %s -> %s" % [key, _entry_state[key], now[key]])
+
+
+func _viewport_state() -> Dictionary:
+	var vp := get_tree().root
+	return {
+		scaling_3d_mode = vp.scaling_3d_mode,
+		scaling_3d_scale = vp.scaling_3d_scale,
+		msaa_3d = vp.msaa_3d,
+		use_taa = vp.use_taa,
+	}
 
 
 ## Taps [param button] and asserts the panel ends up in [param want_open].
@@ -59,11 +103,17 @@ func _check_toggle(menu: SimMenu, button: Button, want_open: bool, what: String)
 	var pos: Vector2 = viewport.get_final_transform() * (rect.position + rect.size * 0.5)
 
 	# Hover first: a covering Control shows up here before the tap is even sent.
+	# Retried, because the window flag changes above can re-map the window and drop
+	# the hover for a frame — one miss is not a covered button.
 	var motion := InputEventMouseMotion.new()
 	motion.position = rect.position + rect.size * 0.5
-	viewport.push_input(motion, true)
-	await get_tree().process_frame
-	var hovered := viewport.gui_get_hovered_control()
+	var hovered: Control = null
+	for attempt in HOVER_TRIES:
+		viewport.push_input(motion, true)
+		await get_tree().process_frame
+		hovered = viewport.gui_get_hovered_control()
+		if hovered == button:
+			break
 	if hovered != button:
 		_fail("%s: tap point covered by %s" % [
 			what, hovered.get_path() if hovered != null else "<nothing>",
@@ -80,8 +130,12 @@ func _check_toggle(menu: SimMenu, button: Button, want_open: bool, what: String)
 		await get_tree().process_frame
 		await get_tree().process_frame
 
-	if menu.is_panel_open() != want_open:
-		_fail("%s: panel is %s" % [what, "open" if menu.is_panel_open() else "closed"])
+	# The panel toggles through an animation, so give it a few frames to land.
+	for attempt in TOGGLE_TRIES:
+		if menu.is_panel_open() == want_open:
+			return
+		await get_tree().process_frame
+	_fail("%s: panel is %s" % [what, "open" if menu.is_panel_open() else "closed"])
 
 
 func _find_sim_menu(node: Node) -> SimMenu:

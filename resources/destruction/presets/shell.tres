@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="ProjectilePreset" format=3 uid="uid://destruction_projectile_shell"]
+
+[ext_resource type="Script" path="res://scripts/destruction/projectile_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Explosive shell"
+mass_kg = 7.0
+radius_m = 0.16
+speed_mps = 26.0
+blast_radius_m = 3.2
+blast_impulse = 62.0
+explodes = true
+color = Color(0.3, 0.28, 0.26, 1)
+metallic = 0.6
+roughness = 0.4
+emission = Color(0.6, 0.27, 0.06, 0.6)

@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="WallPreset" format=3 uid="uid://destruction_wall_stone"]
+
+[ext_resource type="Script" path="res://scripts/destruction/wall_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Stone"
+surface = 3
+size_m = Vector3(5, 4.4, 1)
+position_m = Vector3(1.6, 0, -5.4)
+yaw_deg = -14.0
+density_kg_m3 = 2700.0
+toughness = 14.0
+count_scale = 0.7

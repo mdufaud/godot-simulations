@@ -1,0 +1,50 @@
+MIT License
+
+Copyright (c) 2026 Maxence Dufaud
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party components
+
+This license covers the original code of this repository only. Portions of the
+project are derived from, or bundled with, third-party work that remains under
+its own license. Summary:
+
+- Godot Engine — MIT — Godot contributors, Juan Linietsky, Ariel Manzur
+- Jolt Physics — MIT — Jorrit Rouwe
+- Fluid-Planet (planet, marching cubes, parts of SPH) — MIT — Sebastian Lague
+  https://github.com/SebLague/Fluid-Planet
+- GodotGrass (grass system and shader) — MIT — 2Retr0
+  https://github.com/2Retr0/GodotGrass
+- webgl-noise simplex noise — MIT — Ashima Arts, Stefan Gustavson;
+  NoiseShader port — MIT — Keijiro Takahashi
+- Contact-refinement parallax mapping — CC0 — LiveTrower; related technique
+  from O3DE / Andrea Riccardi — Apache-2.0
+- Parallax self-shadowing excerpt — CC BY-SA 4.0 — Stack Overflow contribution
+  (share-alike; this excerpt is not relicensed under MIT)
+- Hash functions in grass and ocean shaders — MIT — nimitz (Shadertoy)
+- Poly Haven rock models and materials (downloaded, not stored in this
+  repository) — CC0 — https://polyhaven.com/license
+- icon.svg resembles the Godot logo — CC BY 4.0 — Andrea Calabró
+
+Scientific publications implemented by this project (Fire-X, Westbrook-Dryer,
+Tessendorf, Macklin & Müller, Clavet, XPBD, and others) are cited, not
+relicensed; NIST SRD thermochemical coefficients remain subject to NIST terms.

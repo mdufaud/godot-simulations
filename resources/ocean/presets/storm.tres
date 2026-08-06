@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="OceanPreset" format=3 uid="uid://ocean_preset_storm"]
+
+[ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Storm"
+wind_speed_mps = 33.0
+fetch_km = 300.0
+swell = 1.0
+spread = 0.08
+choppiness = 1.5
+height_gain = 1.7
+whitecap = 0.9
+foam_amount = 6.0
+storm_mood = 1.0

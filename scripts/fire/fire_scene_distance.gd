@@ -41,7 +41,7 @@ func _init() -> void:
 
 
 func _init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("FireSceneDistance")
 	if _rd == null:
 		return
 	var src := FileAccess.get_file_as_string(SHADER_PATH)

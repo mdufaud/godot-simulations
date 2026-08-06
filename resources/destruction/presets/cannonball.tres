@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="ProjectilePreset" format=3 uid="uid://destruction_projectile_cannonball"]
+
+[ext_resource type="Script" path="res://scripts/destruction/projectile_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Cannonball"
+mass_kg = 12.0
+radius_m = 0.22
+speed_mps = 30.0
+blast_radius_m = 1.4
+blast_impulse = 26.0
+explodes = false
+color = Color(0.15, 0.15, 0.17, 1)
+metallic = 0.9
+roughness = 0.25
+emission = Color(0, 0, 0, 1)

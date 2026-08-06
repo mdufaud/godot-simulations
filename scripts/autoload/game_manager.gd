@@ -26,24 +26,7 @@ var settings: Dictionary = {
 	"planet_resolution": 0,  # marching-cubes density grid side; 0 = pick from platform
 }
 
-const SCENES := {
-	"main_menu": "res://scenes/main_menu.tscn",
-	"ssr_demo": "res://scenes/ssr_demo.tscn",
-	"ocean_demo": "res://scenes/ocean_demo.tscn",
-	"fire_demo": "res://scenes/fire_demo.tscn",
-	"nbody_demo": "res://scenes/nbody_demo.tscn",
-	"grass_demo": "res://scenes/grass_demo.tscn",
-	"parallax_demo": "res://scenes/parallax_demo.tscn",
-	"fluid_demo": "res://scenes/fluid_demo.tscn",
-	"fractal_demo": "res://scenes/fractal_demo.tscn",
-	"fractal_3d_demo": "res://scenes/fractal_3d_demo.tscn",
-	"tornado_demo": "res://scenes/tornado_demo.tscn",
-	"sand_demo": "res://scenes/sand_demo.tscn",
-	"cloth_demo": "res://scenes/cloth_demo.tscn",
-	"destruction_demo": "res://scenes/destruction_demo.tscn",
-	"non_euclidean_demo": "res://scenes/non_euclidean_demo.tscn",
-	"planet_demo": "res://scenes/planet_demo.tscn",
-}
+const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
 
 ## Ordered list of categories shown on the main menu accordion.
 const CATEGORIES: Array[Dictionary] = [
@@ -53,24 +36,39 @@ const CATEGORIES: Array[Dictionary] = [
 	{key = "other",     title = "Others",           icon = "🎨"},
 ]
 
-## Ordered list of demos shown on the main menu.
-## To add a new demo, just append a {key, title, icon, category} entry here.
+## Ordered list of demos shown on the main menu, and the single demo registry.
+## To add a new demo, just append a {key, title, icon, category, scene} entry here.
 const DEMOS: Array[Dictionary] = [
-	{key = "ssr_demo",      title = "Screen space reflection",     icon = "🔮", category = "rigid"},
-	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓", category = "fluids"},
-	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles"},
-	{key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌", category = "particles"},
-	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿", category = "other"},
-	{key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨", category = "other"},
-	{key = "fluid_demo",    title = "Fluid Simulation",      icon = "💧", category = "fluids"},
-	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠", category = "other"},
-	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊", category = "other"},
-	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️", category = "particles"},
-	{key = "sand_demo",     title = "Heightfield Sand", icon = "🏖️", category = "particles"},
-	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid"},
-	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid"},
-	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪", category = "other"},
-	{key = "planet_demo",   title = "Procedural Planet",    icon = "🪐", category = "other"},
+	{key = "ssr_demo",      title = "Screen space reflection",     icon = "🔮", category = "rigid",
+		scene = "res://scenes/ssr_demo.tscn"},
+	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓", category = "fluids",
+		scene = "res://scenes/ocean_demo.tscn"},
+	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles",
+		scene = "res://scenes/fire_demo.tscn"},
+	{key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌", category = "particles",
+		scene = "res://scenes/nbody_demo.tscn"},
+	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿", category = "other",
+		scene = "res://scenes/grass_demo.tscn"},
+	{key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨", category = "other",
+		scene = "res://scenes/parallax_demo.tscn"},
+	{key = "fluid_demo",    title = "Fluid Simulation",      icon = "💧", category = "fluids",
+		scene = "res://scenes/fluid_demo.tscn"},
+	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠", category = "other",
+		scene = "res://scenes/fractal_demo.tscn"},
+	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊", category = "other",
+		scene = "res://scenes/fractal_3d_demo.tscn"},
+	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️", category = "particles",
+		scene = "res://scenes/tornado_demo.tscn"},
+	{key = "sand_demo",     title = "Heightfield Sand", icon = "🏖️", category = "particles",
+		scene = "res://scenes/sand_demo.tscn"},
+	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid",
+		scene = "res://scenes/cloth_demo.tscn"},
+	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid",
+		scene = "res://scenes/destruction_demo.tscn"},
+	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪", category = "other",
+		scene = "res://scenes/non_euclidean_demo.tscn"},
+	{key = "planet_demo",   title = "Procedural Planet",    icon = "🪐", category = "other",
+		scene = "res://scenes/planet_demo.tscn"},
 ]
 
 
@@ -78,18 +76,27 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 
 
+## Scene path for a demo key, or "" when the key is not registered.
+static func demo_scene(demo_name: String) -> String:
+	for demo in DEMOS:
+		if demo.key == demo_name:
+			return demo.scene
+	return ""
+
+
 func load_demo(demo_name: String) -> void:
-	if not SCENES.has(demo_name):
+	var scene := demo_scene(demo_name)
+	if scene.is_empty():
 		push_error("Unknown demo: %s" % demo_name)
 		return
-	
+
 	current_demo = demo_name
-	get_tree().change_scene_to_file(SCENES[demo_name])
+	get_tree().change_scene_to_file(scene)
 
 
 func go_to_menu() -> void:
 	current_demo = ""
-	get_tree().change_scene_to_file(SCENES["main_menu"])
+	get_tree().change_scene_to_file(MAIN_MENU_SCENE)
 
 
 func get_setting(key: String, default = null):

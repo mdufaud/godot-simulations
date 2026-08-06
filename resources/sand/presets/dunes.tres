@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="SandPreset" format=3 uid="uid://sand_preset_dunes"]
+
+[ext_resource type="Script" path="res://scripts/sand/sand_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Dunes"
+default_tool = 3
+walls_visible = false
+terrain = 1
+base_height_m = 0.12
+dune_amplitude_m = 0.45
+dune_frequency = 0.55
+dune_octaves = 4
+dune_seed = 7
+camera_target_m = Vector3(0, 0.35, 0)
+camera_distance_m = 5.5
+auto_pour_radius_m = 0.0

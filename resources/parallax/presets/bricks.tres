@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ParallaxConfig" format=3 uid="uid://parallax_preset_bricks"]
+
+[ext_resource type="Script" path="res://scripts/parallax/parallax_config.gd" id="1_config"]
+
+[resource]
+script = ExtResource("1_config")
+display_name = "🧱 Bricks"
+surface = 1
+height_scale = 0.02
+min_layer_count = 8
+max_layer_count = 48
+uv_scale = 3.0
+normal_strength = 1.2
+roughness = 0.75
+shadow_strength = 1.0

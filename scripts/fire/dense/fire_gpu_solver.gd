@@ -551,9 +551,8 @@ func get_timings() -> Dictionary:
 # =========================================================================
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("FireGpuSolver (dense)")
 	if _rd == null:
-		push_error("Fire solver needs a RenderingDevice (Forward+ or Mobile renderer).")
 		return
 
 	# One source, two builds: the define is part of the string ShaderCache keys on,

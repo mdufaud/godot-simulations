@@ -19,9 +19,8 @@ var _uniform_set := RID()
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("AtmosphereLut")
 	if _rd == null:
-		push_error("Atmosphere LUT: no RenderingDevice")
 		return
 
 	var spirv := ShaderCache.compile(_rd, "atmosphere_lut", FileAccess.get_file_as_string(SHADER_PATH))

@@ -19,31 +19,7 @@ static func fill_timing_defaults(timings: Dictionary) -> void:
 			timings[key] = 0.0
 
 static func read_gpu_timings(rd, prefix: String, include_post: bool = false) -> Dictionary:
-	var out: Dictionary = {}
-	var prev_time := 0
-	var start_time := 0
-	var in_chain := false
-	for i in rd.get_captured_timestamps_count():
-		var name: String = rd.get_captured_timestamp_name(i)
-		if not name.begins_with(prefix):
-			continue
-		var timestamp: int = rd.get_captured_timestamp_gpu_time(i)
-		if name == prefix + "start":
-			start_time = timestamp
-			prev_time = timestamp
-			in_chain = true
-			continue
-		if not in_chain:
-			continue
-		var segment := name.trim_prefix(prefix)
-		if segment == "end":
-			out["total"] = float(timestamp - start_time) / 1e6
-			if include_post:
-				out["post"] = out.get("post", 0.0) + float(timestamp - prev_time) / 1e6
-			in_chain = false
-		else:
-			out[segment] = out.get(segment, 0.0) + float(timestamp - prev_time) / 1e6
-		prev_time = timestamp
+	var out := GpuTimings.read(rd, prefix, include_post)
 	if not out.is_empty():
 		fill_timing_defaults(out)
 	return out

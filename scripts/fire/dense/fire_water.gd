@@ -176,7 +176,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
 	if _rd != null:
 		return
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("FireWater (dense)")
 	if _rd == null:
 		return
 

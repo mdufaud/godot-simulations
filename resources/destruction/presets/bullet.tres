@@ -1,0 +1,17 @@
+[gd_resource type="Resource" script_class="ProjectilePreset" format=3 uid="uid://destruction_projectile_bullet"]
+
+[ext_resource type="Script" path="res://scripts/destruction/projectile_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Bullet"
+mass_kg = 0.4
+radius_m = 0.06
+speed_mps = 95.0
+blast_radius_m = 0.7
+blast_impulse = 13.0
+explodes = false
+color = Color(0.75, 0.7, 0.45, 1)
+metallic = 0.9
+roughness = 0.25
+emission = Color(0, 0, 0, 1)

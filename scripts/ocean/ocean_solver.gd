@@ -78,7 +78,9 @@ func mark_spectrum_dirty() -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("OceanSolver")
+	if _rd == null:
+		return
 
 	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n\n" % [
 		map_size, map_size,

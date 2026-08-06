@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ParallaxConfig" format=3 uid="uid://parallax_preset_rock"]
+
+[ext_resource type="Script" path="res://scripts/parallax/parallax_config.gd" id="1_config"]
+
+[resource]
+script = ExtResource("1_config")
+display_name = "🪨 Rock"
+surface = 0
+height_scale = 0.04
+min_layer_count = 8
+max_layer_count = 32
+uv_scale = 2.0
+normal_strength = 1.0
+roughness = 0.85
+shadow_strength = 0.8

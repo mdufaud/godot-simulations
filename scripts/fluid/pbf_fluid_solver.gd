@@ -53,7 +53,9 @@ func set_seed_positions(seed: PackedFloat32Array) -> void:
 
 
 func init_render() -> void:
-	_rd = RenderingServer.get_rendering_device()
+	_rd = GpuPreflight.device("PbfFluidSolver")
+	if _rd == null:
+		return
 	_inv_rest_density = 1.0 / _compute_rest_density()
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "pbf_common.comp")

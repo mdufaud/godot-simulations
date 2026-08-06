@@ -207,6 +207,102 @@ func set_profiling(on: bool) -> void:
 	sph_solver.profiling = on
 
 
+func set_pbf_viscosity(value: float) -> void:
+	pbf_solver.xsph_c = value
+
+
+func get_pbf_viscosity() -> float:
+	return pbf_solver.xsph_c
+
+
+func set_pbf_vorticity(value: float) -> void:
+	pbf_solver.vorticity_eps = value
+
+
+func get_pbf_vorticity() -> float:
+	return pbf_solver.vorticity_eps
+
+
+func set_pbf_cohesion(value: float) -> void:
+	pbf_solver.scorr_k = value
+
+
+func get_pbf_cohesion() -> float:
+	return pbf_solver.scorr_k
+
+
+func set_pbf_iterations(value: float) -> void:
+	pbf_solver.solver_iterations = int(round(value))
+
+
+func get_pbf_iterations() -> int:
+	return pbf_solver.solver_iterations
+
+
+func set_sph_pressure(value: float) -> void:
+	sph_solver.pressure_mult = value
+
+
+func get_sph_pressure() -> float:
+	return sph_solver.pressure_mult
+
+
+func set_sph_near_pressure(value: float) -> void:
+	sph_solver.near_pressure_mult = value
+
+
+func get_sph_near_pressure() -> float:
+	return sph_solver.near_pressure_mult
+
+
+func set_sph_viscosity(value: float) -> void:
+	sph_solver.viscosity_strength = value
+
+
+func get_sph_viscosity() -> float:
+	return sph_solver.viscosity_strength
+
+
+func set_sph_bounce(value: float) -> void:
+	sph_solver.collision_damping = value
+
+
+func get_sph_bounce() -> float:
+	return sph_solver.collision_damping
+
+
+func set_sph_substeps(value: float) -> void:
+	sph_solver.substeps = int(round(value))
+
+
+func get_sph_substeps() -> int:
+	return sph_solver.substeps
+
+
+func set_sph_foam_amount(value: float) -> void:
+	sph_solver.foam_spawn_rate = value
+
+
+func get_sph_foam_amount() -> float:
+	return sph_solver.foam_spawn_rate
+
+
+func set_sph_foam_threshold(value: float) -> void:
+	sph_solver.foam_trapped_min = value
+
+
+func get_sph_foam_threshold() -> float:
+	return sph_solver.foam_trapped_min
+
+
+func set_sph_foam_life(value: float) -> void:
+	sph_solver.foam_life_max = value
+
+
+func get_sph_foam_life() -> float:
+	return sph_solver.foam_life_max
+
+
 func get_timings() -> Dictionary:
 	return active_solver.get_timings() if active_solver != null else {}
 
@@ -531,9 +627,17 @@ func _process(_delta: float) -> void:
 
 
 func _teardown() -> void:
-	renderer.rebind()
+	if renderer != null:
+		renderer.rebind()
 	RenderingServer.call_on_render_thread(_render_free)
+
+
+func stop() -> void:
+	if active_solver == null:
+		return
+	_teardown()
+	active_solver = null
 
 
 func _exit_tree() -> void:
-	RenderingServer.call_on_render_thread(_render_free)
+	stop()

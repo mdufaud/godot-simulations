@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="PlanetPreset" format=3 uid="uid://planet_preset_glacier"]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Glacier"
+radius_m = 24.0
+layer_count = 8
+lacunarity = 2.1
+persistence = 0.55
+noise_scale = 3.6
+noise_strength = 1.8
+noise_offset = 0.0
+col_flat = Color(0.86, 0.92, 0.97, 1)
+col_flat_deep = Color(0.42, 0.58, 0.72, 1)
+col_steep = Color(0.55, 0.62, 0.7, 1)
+col_steep_deep = Color(0.22, 0.3, 0.42, 1)
+col_ambient = Color(0.42, 0.5, 0.6, 1)
+height_bands = 9.0
+height_min_m = 20.0
+height_max_m = 29.0
+wavelengths_nm = Vector3(640, 540, 470)
+scattering_strength = 26.0

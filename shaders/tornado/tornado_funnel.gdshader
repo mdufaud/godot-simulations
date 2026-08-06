@@ -9,7 +9,7 @@ uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
 
 uniform vec3 box_size = vec3(200.0, 550.0, 200.0);
-uniform int steps : hint_range(16, 96) = 48;
+uniform int steps : hint_range(16, 96) = 96;
 uniform float dust_density : hint_range(0.0, 2.0) = 1.0;
 uniform float darkness : hint_range(0.0, 1.0) = 0.55;
 uniform float skirt_density : hint_range(0.0, 2.0) = 1.0;
@@ -93,8 +93,12 @@ float funnel_density(vec3 wp, out float skirt_w, out float turb_out) {
 	float wall = exp(-pow((rw - 0.85) / 0.25, 2.0));
 	float fill = 0.1 * (1.0 - smoothstep(0.0, 1.0, r_bar));
 	float body = (wall + fill) * smoothstep(0.0, 0.06, y01);
-	// Slight top fade only — the cloud deck hides the junction.
-	body *= 1.0 - 0.5 * smoothstep(0.94, 1.0, y01);
+	if (storm_type == 1) {
+		float helix_phase = 3.0 * ang - 0.055 * wp.y - 1.8 * TIME * swirl_sign + 1.4 * (n - 0.5);
+		body *= 0.55 + 0.45 * smoothstep(-0.65, 0.75, sin(helix_phase));
+	}
+	// Fade into the cloud deck instead of exposing the volume box's flat cap.
+	body *= 1.0 - smoothstep(0.9, 1.0, y01);
 
 	// ── Ground skirt: dust churned FROM the ground — dense at y=0, exponential
 	// falloff upward. The density slider SPREADS the apron outward (low and wide,
@@ -164,19 +168,32 @@ void fragment() {
 		discard;
 	}
 
-	float ds = (t1 - t0) / float(steps);
-	float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))) + TIME * 0.61);
-	float t = t0 + ds * jitter;
+	float nominal_step = (t1 - t0) / float(steps);
+	float min_step = max(1.0, 0.03 * r_core0);
+	float max_step = max(min_step, 3.0 * nominal_step);
+	float t = t0;
 
 	vec3 col = vec3(0.0);
 	float trans = 1.0;
 	vec3 sun_xz = normalize(vec3(sun_dir.x, 0.0, sun_dir.z));
 
 	for (int i = 0; i < steps; i++) {
-		if (t > t1) {
+		vec3 probe_wp = cam_obj + ray_dir * t + model_origin;
+		vec3 probe_cs = tw_centerline(probe_wp.y);
+		float probe_rc = tw_core_radius(probe_wp.y);
+		float probe_r = length(probe_wp.xz - probe_cs.xz);
+		float shell_clearance = max(abs(probe_r - 0.85 * probe_rc) - 0.38 * probe_rc, 0.0);
+		float step_size = clamp(0.45 * shell_clearance, min_step, max_step);
+		if (probe_wp.y < 0.28 * funnel_height
+				&& probe_r < (3.2 + 1.2 * skirt_density) * r_core0) {
+			step_size = min(step_size, max(min_step, 0.06 * r_core0));
+		}
+		float t_next = min(t + step_size, t1);
+		float segment_ds = t_next - t;
+		if (segment_ds <= 0.0) {
 			break;
 		}
-		vec3 p = cam_obj + ray_dir * t;
+		vec3 p = cam_obj + ray_dir * (0.5 * (t + t_next));
 		vec3 wp = p + model_origin;
 
 		// Empty-space skip outside the wall and above the skirt band.
@@ -187,7 +204,7 @@ void fragment() {
 		if ((above_skirt && rr > 1.6 * rcs)
 				|| (!above_skirt && rr > (3.2 + 1.2 * skirt_density) * r_core0)
 				|| wp.y > funnel_height) {
-			t += ds * 2.0;
+			t = t_next;
 			continue;
 		}
 
@@ -196,7 +213,7 @@ void fragment() {
 		float dens = funnel_density(wp, skirt_w, turb);
 		if (dens > 0.003) {
 			// Specials read lighter/denser: water and plasma are translucent media.
-			float sigma_mul = storm_type == 1 ? 1.35 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
+			float sigma_mul = storm_type == 1 ? 0.85 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
 			// Skirt medium is thinner than the wall: flying debris must silhouette through it.
 			float sk_pre = clamp(skirt_w / max(dens, 1e-3), 0.0, 1.0);
 			sigma_mul *= mix(1.0, 0.5, sk_pre);
@@ -213,10 +230,10 @@ void fragment() {
 			if (storm_type == 1) {
 				// Fire whirl: blackbody by "heat" = turbulence, hotter at the base;
 				// the skirt is a burning ground pool.
-				float fheat = clamp(heat + skirt_ratio * 0.12, 0.0, 0.8);
+				float fheat = clamp(heat + skirt_ratio * 0.06, 0.0, 0.72);
 				float t_k = 600.0 + 1250.0 * (1.0 - 0.7 * y01) * fheat;
-				scat = fire_ramp(t_k) * (0.08 + 0.85 * heat * heat * (1.0 - 0.5 * y01) + 0.08 * skirt_ratio)
-					+ alb * sun_face * vert * 0.25;
+				scat = fire_ramp(t_k) * (0.025 + 0.38 * heat * heat * (1.0 - 0.5 * y01) + 0.035 * skirt_ratio)
+					+ alb * sun_face * vert * 0.12;
 			} else if (storm_type == 2) {
 				// Waterspout: dark sea core, turbulent streaks whipped into foam;
 				// the skirt is a churning foam wall.
@@ -252,14 +269,14 @@ void fragment() {
 			vec3 dfl = wp - flash_pos;
 			scat += flash_color * flash_intensity * exp(-dot(dfl, dfl) / (flash_radius * flash_radius));
 
-			float absorb = exp(-sigma * ds);
+			float absorb = exp(-sigma * segment_ds);
 			col += trans * scat * (1.0 - absorb);
 			trans *= absorb;
 			if (trans < 0.01) {
 				break;
 			}
 		}
-		t += ds;
+		t = t_next;
 	}
 
 	float alpha = 1.0 - trans;

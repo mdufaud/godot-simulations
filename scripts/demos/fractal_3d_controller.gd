@@ -9,6 +9,7 @@ extends Node3D
 @onready var _camera: FreeFlyCamera = $FreeFlyCamera
 @onready var _menu: SimMenu = $UI/SimMenu
 @onready var _post_process: ColorRect = $PostProcess/ColorRect
+@onready var _viewport := ViewportGuard.attach(self)
 
 const FRACTAL_NAMES := ["Apollonian", "Menger infini", "Kleinian de Jos Leys"]
 const PALETTE_NAMES := ["Nacre", "Rainbow", "Fire", "Ocean", "Gold"]
@@ -60,8 +61,7 @@ const PRESETS := {
 	],
 }
 
-var _material: ShaderMaterial
-var _post_material: ShaderMaterial
+var _renderer := FractalRenderer.new()
 var _params: Dictionary = {}
 
 var _sliders: Dictionary = {}          # uniform name -> HSlider (for preset sync)
@@ -94,16 +94,12 @@ var _post := {"aberration_strength": 0.0, "vignette_strength": 0.35, "grain_stre
 
 
 func _ready() -> void:
-	_material = _fractal_box.get_active_material(0) as ShaderMaterial
-	if not _material:
-		_material = _fractal_box.material_override as ShaderMaterial
-	_post_material = _post_process.material as ShaderMaterial
+	_renderer.setup(_fractal_box, _post_process)
 	_camera.de_query = _evaluate_de
 
 	# FSR remains available for manual/adaptive scaling; maximum quality uses
 	# native resolution. UI/post-process always stay at native resolution.
-	get_viewport().scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	get_viewport().scaling_3d_scale = _render_scale
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, _render_scale)
 	get_viewport().size_changed.connect(_apply_effective_quality)
 
 	_params = BASE_PARAMS.duplicate(true)
@@ -319,10 +315,7 @@ func _set_fov(v: float) -> void:
 
 
 func _push() -> void:
-	for key in _params:
-		if key == "iterations" or key == "max_steps":
-			continue
-		_material.set_shader_parameter(key, _params[key])
+	_renderer.push_params(_params)
 	_apply_effective_quality()
 
 
@@ -438,17 +431,9 @@ func _raise_quality() -> void:
 
 
 func _apply_effective_quality() -> void:
-	if not _material:
-		return
-	_material.set_shader_parameter("iterations", _effective_iterations)
-	_material.set_shader_parameter("max_steps", _effective_steps)
 	var profile: Dictionary = QUALITY_PROFILES[_quality_profile]
-	_material.set_shader_parameter("ao_samples", int(profile["ao_samples"]) if _adaptive else 5)
-	_material.set_shader_parameter("pixel_tolerance", float(profile["pixel_tolerance"]) if _adaptive else 0.08)
-	get_viewport().scaling_3d_scale = _effective_scale
-	var internal_height := maxf(get_viewport().get_visible_rect().size.y * _effective_scale, 1.0)
-	var pixel_angle := 2.0 * tan(deg_to_rad(_camera.fov) * 0.5) / internal_height
-	_material.set_shader_parameter("pixel_angle", pixel_angle)
+	_renderer.apply_quality(get_viewport(), _viewport, _effective_scale, _effective_steps,
+		_effective_iterations, profile, _adaptive, _camera.fov)
 	_update_quality_label()
 
 
@@ -473,6 +458,4 @@ func _set_post_enabled(on: bool) -> void:
 
 
 func _apply_post() -> void:
-	var f := 1.0 if _post_enabled else 0.0
-	for key in _post:
-		_post_material.set_shader_parameter(key, _post[key] * f)
+	_renderer.set_post(_post, _post_enabled)

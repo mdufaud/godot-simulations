@@ -42,6 +42,7 @@ const STORM_TYPES := [
 @onready var flash_rect: ColorRect = $UI/FlashRect
 @onready var menu = $UI/SimMenu
 @onready var debris_pool: TornadoDebrisPool = $DebrisPool
+@onready var _viewport := ViewportGuard.attach(self)
 
 var field := TornadoWindField.new()
 var s_amount := 0.15
@@ -58,7 +59,7 @@ var _wander_noise := FastNoiseLite.new()
 var _debris_bar: ProgressBar
 var _funnel_mat: ShaderMaterial
 var _cloud_mat: ShaderMaterial
-var _wind_mats: Array[ShaderMaterial] = []
+var _renderer := TornadoRenderer.new()
 var _sliders := {}
 var _model_btn: OptionButton
 var _rng := RandomNumberGenerator.new()
@@ -83,19 +84,18 @@ func _ready() -> void:
 	debris_pool.scatter_props()
 	_funnel_mat = funnel_volume.material_override
 	_cloud_mat = cloud_deck.material_override
+	_renderer.setup(_funnel_mat, _cloud_mat, [
+		dust_particles.process_material as ShaderMaterial,
+		skirt_particles.process_material as ShaderMaterial,
+	])
+	debris_pool.renderer = _renderer
 	var sun: Vector3 = -($DirectionalLight3D as DirectionalLight3D).global_basis.z
 	_funnel_mat.set_shader_parameter("sun_dir", sun)
 	_cloud_mat.set_shader_parameter("sun_dir", sun)
-	_wind_mats = [
-		_funnel_mat,
-		_cloud_mat,
-		dust_particles.process_material,
-		skirt_particles.process_material,
-	]
 	_make_bolt()
 	_set_storm_color(storm_color)
 	_update_funnel_bounds()
-	cam_rig.set_pose(Vector3(0.0, 1.8, 380.0), 0.0, 12.0)
+	cam_rig.set_pose(Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
 	_set_render_scale(0.75)
 	_setup_ui()
 
@@ -124,7 +124,6 @@ func _process(delta: float) -> void:
 		field.update_centerline(_time * 0.05, s_amount, _wander_noise)
 		field.bake_wind_grid()
 		tornado_node.position = field.base_pos
-	_push_wind_uniforms()
 	_update_lightning(delta)
 	if _debris_bar:
 		_debris_bar.value = debris_pool.active_count
@@ -147,19 +146,6 @@ func _update_funnel_bounds() -> void:
 	funnel_volume.position = Vector3(0.0, field.height * 0.5, 0.0)
 	_funnel_mat.set_shader_parameter("box_size", size)
 	cloud_deck.position = Vector3(0.0, field.height, 0.0)
-
-
-func _push_wind_uniforms() -> void:
-	for mat: ShaderMaterial in _wind_mats:
-		mat.set_shader_parameter("wind_model", field.model)
-		mat.set_shader_parameter("u_max", field.u_max)
-		mat.set_shader_parameter("r_core0", field.r_core0)
-		mat.set_shader_parameter("funnel_height", field.height)
-		mat.set_shader_parameter("flare", field.flare)
-		mat.set_shader_parameter("a_bar", field.a_bar)
-		mat.set_shader_parameter("swirl_sign", field.swirl_sign)
-		mat.set_shader_parameter("centerline", field.get_shader_centerline())
-		mat.set_shader_parameter("sullivan_curve", field.get_sullivan_texture())
 
 
 # ── Lightning ────────────────────────────────────────────────────────────────
@@ -259,7 +245,14 @@ func _apply_preset(idx: int) -> void:
 	_update_funnel_bounds()
 	dust_particles.restart()
 	skirt_particles.restart()
-	cam_rig.set_pose(Vector3(0.0, 1.8, maxf(6.0 * field.r_core0, 380.0)), 0.0, 12.0)
+	cam_rig.set_pose(Vector3(0.0, 1.8,
+		_camera_distance(maxf(6.0 * field.r_core0, 380.0))), 0.0, 12.0)
+
+
+func _camera_distance(base_distance: float) -> float:
+	var window_size := DisplayServer.window_get_size()
+	var aspect := float(window_size.x) / maxf(float(window_size.y), 1.0)
+	return base_distance * maxf(1.0, (16.0 / 9.0) / aspect)
 
 
 func _set_storm_color(col: Color) -> void:
@@ -379,7 +372,7 @@ func _setup_ui() -> void:
 
 	menu.add_section("Performance")
 	menu.add_slider("Render scale", 0.4, 1.0, 0.75, _set_render_scale)
-	menu.add_slider("Raymarch steps", 16.0, 96.0, 48.0,
+	menu.add_slider("Raymarch steps", 16.0, 96.0, 96.0,
 		func(v: float) -> void: _funnel_mat.set_shader_parameter("steps", int(v)))
 	menu.add_button("Dust 4k", func() -> void: _set_dust_amount(4000))
 	menu.add_button("Dust 14k", func() -> void: _set_dust_amount(14000))
@@ -387,9 +380,7 @@ func _setup_ui() -> void:
 
 
 func _set_render_scale(v: float) -> void:
-	var vp := get_viewport()
-	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR
-	vp.scaling_3d_scale = v
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, v)
 
 
 func _set_dust_amount(n: int) -> void:

@@ -36,6 +36,13 @@ var _section_body: Control = null
 ## Section under which widget values are stored. Defaults to the running demo key.
 @export var persist_id: String = ""
 
+## Scene the Back button loads. Empty falls back to the GameManager autoload.
+@export_file("*.tscn") var back_scene: String = ""
+
+## The UserSettings autoload, looked up once. Null when the project does not have it,
+## in which case widget values simply do not persist.
+var _settings: Node = null
+
 ## persist key -> {node, cb, kind, default}. Keys are "<section>/<label>".
 var _entries: Dictionary = {}
 var _section: String = "General"
@@ -148,8 +155,10 @@ func _ready() -> void:
 	_layout_action_lane.call_deferred()
 	get_viewport().size_changed.connect(_layout_panel)
 	get_viewport().size_changed.connect(_layout_action_lane)
-	if persist_id.is_empty():
-		persist_id = GameManager.current_demo
+	_settings = get_node_or_null("/root/UserSettings")
+	var manager := get_node_or_null("/root/GameManager")
+	if persist_id.is_empty() and manager != null:
+		persist_id = str(manager.current_demo)
 	if persist_id.is_empty():
 		var current_scene := get_tree().current_scene
 		if current_scene != null:
@@ -166,11 +175,24 @@ func _restore_all() -> void:
 
 
 func _restore_one(key: String) -> void:
-	if not UserSettings.has_sim_value(persist_id, key):
+	if _settings == null or not _settings.has_sim_value(persist_id, key):
 		return
-	var stored: Variant = UserSettings.get_sim_value(persist_id, key, null)
+	var stored: Variant = _settings.get_sim_value(persist_id, key, null)
 	var entry: Dictionary = _entries[key]
 	_apply_value(entry, stored)
+
+
+# --- Persistence (no-ops without the UserSettings autoload) ---------------------
+
+func _persist(key: String, value: Variant) -> void:
+	if _settings != null:
+		_settings.set_sim_value(persist_id, key, value)
+
+
+func _persisted(key: String, default_val: Variant) -> Variant:
+	if _settings == null:
+		return default_val
+	return _settings.get_sim_value(persist_id, key, default_val)
 
 
 ## Push a value into a widget, re-emitting so the callback runs (mirrors the kinds).
@@ -298,7 +320,14 @@ func is_panel_open() -> bool:
 
 
 func _on_back_pressed() -> void:
-	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
+	if not back_scene.is_empty():
+		get_tree().change_scene_to_file(back_scene)
+		return
+	var manager := get_node_or_null("/root/GameManager")
+	if manager == null:
+		push_error("SimMenu: nowhere to go back to (set back_scene, or add the GameManager autoload)")
+		return
+	manager.go_to_menu()
 
 
 # --- Factory reset -------------------------------------------------------------
@@ -318,7 +347,8 @@ func _do_reset() -> void:
 		var entry: Dictionary = _entries[key]
 		_apply_value(entry, entry.default)
 	# Wipe persisted values last, after the per-widget writes triggered above.
-	UserSettings.clear_sim(persist_id)
+	if _settings != null:
+		_settings.clear_sim(persist_id)
 
 
 # --- Sections & layout ---------------------------------------------------------
@@ -329,7 +359,7 @@ func add_section(text: String) -> Button:
 	_section = text
 	_current = null
 	var open_key := "__open/" + text
-	var open := bool(UserSettings.get_sim_value(persist_id, open_key, false))
+	var open := bool(_persisted(open_key, false))
 
 	var header := Button.new()
 	header.toggle_mode = true
@@ -354,7 +384,7 @@ func add_section(text: String) -> Button:
 	header.toggled.connect(func(on: bool) -> void:
 		body.visible = on
 		header.text = ("▾ " if on else "▸ ") + text
-		UserSettings.set_sim_value(persist_id, open_key, on)
+		_persist(open_key, on)
 	)
 	return header
 
@@ -409,7 +439,7 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	)
 	var key := _register(label_text, slider, cb, "slider", default_val)
 	slider.value_changed.connect(func(value: float) -> void:
-		UserSettings.set_sim_value(persist_id, key, value)
+		_persist(key, value)
 	)
 	return slider
 
@@ -425,7 +455,7 @@ func add_toggle(label_text: String, default_val: bool, cb: Callable) -> CheckBut
 	_host().add_child(toggle)
 	var key := _register(label_text, toggle, cb, "toggle", default_val)
 	toggle.toggled.connect(func(on: bool) -> void:
-		UserSettings.set_sim_value(persist_id, key, on)
+		_persist(key, on)
 	)
 	return toggle
 
@@ -448,7 +478,7 @@ func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Call
 	var key := _register(tooltip, button, cb, "toggle", default_val)
 	_section = prev_section
 	button.toggled.connect(func(on: bool) -> void:
-		UserSettings.set_sim_value(persist_id, key, on)
+		_persist(key, on)
 	)
 	_layout_action_lane.call_deferred()
 	return button
@@ -544,7 +574,7 @@ func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> C
 	picker.color_changed.connect(cb)
 	var key := _register(label_text, picker, cb, "color", default_val)
 	picker.color_changed.connect(func(color: Color) -> void:
-		UserSettings.set_sim_value(persist_id, key, color)
+		_persist(key, color)
 	)
 	return picker
 
@@ -597,6 +627,6 @@ func add_option_button(label_text: String, items: Array, default_idx: int, cb: C
 	hbox.add_child(option)
 	var key := _register(label_text, option, cb, "option", default_idx)
 	option.item_selected.connect(func(index: int) -> void:
-		UserSettings.set_sim_value(persist_id, key, index)
+		_persist(key, index)
 	)
 	return option
