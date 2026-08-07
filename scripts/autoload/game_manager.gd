@@ -65,6 +65,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/cloth_demo.tscn"},
 	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid",
 		scene = "res://scenes/destruction_demo.tscn"},
+	{key = "ambient_fluid_demo", title = "Ambient Fluid Rigid Body", icon = "🍃", category = "rigid",
+		scene = "res://scenes/ambient_fluid_demo.tscn"},
 	{key = "non_euclidean_demo", title = "Non-Euclidean Lab", icon = "🚪", category = "other",
 		scene = "res://scenes/non_euclidean_demo.tscn"},
 	{key = "planet_demo",   title = "Procedural Planet",    icon = "🪐", category = "other",

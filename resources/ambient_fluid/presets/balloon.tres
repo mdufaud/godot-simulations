@@ -1,0 +1,12 @@
+[gd_resource type="Resource" script_class="AmbientFluidConfig" format=3]
+
+[ext_resource type="Script" path="res://scripts/ambient_fluid/ambient_fluid_config.gd" id="1_config"]
+
+[resource]
+script = ExtResource("1_config")
+fluid_density_kg_m3 = 1.204
+dynamic_viscosity_pa_s = 1.81e-05
+separation_angle_rad = 1.5708
+body_density_kg_m3 = 0.6
+initial_velocity_m_s = Vector3(0, 0, 0)
+initial_spin_rad_s = Vector3(0, 0, 0)

@@ -59,6 +59,8 @@ func _run() -> void:
 		_fail("no SimMenu in scene tree")
 		_report()
 		return
+	if _demo == "ambient_fluid_demo":
+		await _check_ambient_fluid_actions(menu)
 
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
@@ -146,6 +148,44 @@ func _find_sim_menu(node: Node) -> SimMenu:
 		if found != null:
 			return found
 	return null
+
+
+func _check_ambient_fluid_actions(menu: SimMenu) -> void:
+	var action_bar := menu.get_node_or_null("BottomRight/ActionBar") as GridContainer
+	if action_bar == null:
+		_fail("ambient fluid action bar missing")
+		return
+	var buttons := {}
+	for child in action_bar.get_children():
+		if child is Button and child.visible:
+			buttons[child.tooltip_text] = child
+	for expected in ["Next Fluid", "Throw", "Drop Mix", "Reset", "Clear"]:
+		if not buttons.has(expected):
+			_fail("ambient fluid action missing: %s" % expected)
+	if _failures.size() > 0:
+		return
+	var initial_count: int = _demo_root.bodies.size()
+	var initial_fluid: int = _demo_root._medium_index
+	buttons["Next Fluid"].pressed.emit()
+	await get_tree().physics_frame
+	if _demo_root._medium_index != (initial_fluid + 1) % 5:
+		_fail("ambient fluid next action did not change fluid")
+	buttons.Throw.pressed.emit()
+	await get_tree().physics_frame
+	if _demo_root.bodies.size() != initial_count + 1:
+		_fail("ambient fluid throw action did not spawn one object")
+	buttons["Drop Mix"].pressed.emit()
+	await get_tree().physics_frame
+	if _demo_root.bodies.size() != initial_count + 5:
+		_fail("ambient fluid drop mix action did not spawn four objects")
+	buttons.Clear.pressed.emit()
+	await get_tree().process_frame
+	if not _demo_root.bodies.is_empty():
+		_fail("ambient fluid clear action did not remove objects")
+	buttons.Reset.pressed.emit()
+	await get_tree().physics_frame
+	if _demo_root.bodies.size() != 4:
+		_fail("ambient fluid reset action did not restore buoyancy set")
 
 
 func _fail(message: String) -> void:

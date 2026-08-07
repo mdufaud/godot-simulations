@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="AmbientFluidProfile3D" format=3]
+
+[ext_resource type="Script" path="res://scripts/ambient_fluid/ambient_fluid_profile_3d.gd" id="1_profile"]
+
+[resource]
+script = ExtResource("1_profile")
+format_version = 1
+source_mesh_hash = "analytic_icosphere_l0_radius_1m"
+reference_density_kg_m3 = 998.0
+volume_m3 = 4.18879020478639
+center_of_volume_m = Vector3(0, 0, 0)

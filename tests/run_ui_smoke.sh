@@ -26,7 +26,7 @@ LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 DEMOS=(
 	ssr_demo ocean_demo fire_demo nbody_demo grass_demo parallax_demo
 	fluid_demo fractal_demo fractal_3d_demo tornado_demo sand_demo
-	cloth_demo destruction_demo non_euclidean_demo planet_demo
+	cloth_demo destruction_demo ambient_fluid_demo non_euclidean_demo planet_demo
 )
 if [[ $# -gt 0 ]]; then
 	DEMOS=("$@")
