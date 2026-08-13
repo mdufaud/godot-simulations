@@ -1,0 +1,12 @@
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = display_coordinate(pixel);
+	imageStore(coords_dst, pixel, vec4(coordinate, 0.0, 0.0));
+	imageStore(displacement_dst, pixel, vec4(0.0));
+}

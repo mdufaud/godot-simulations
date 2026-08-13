@@ -1,0 +1,69 @@
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = load_coordinate(pixel);
+	vec2 direction = params.line.zw;
+	float direction_length = length(direction);
+	if (direction_length <= 1.0e-30) {
+		imageStore(coords_dst, pixel, vec4(coordinate, 0.0, 0.0));
+		imageStore(displacement_dst, pixel, imageLoad(displacement_src, source_pixel(pixel)));
+		return;
+	}
+	direction /= direction_length;
+	vec2 perpendicular = vec2(-direction.y, direction.x);
+	vec2 drift = vec2(0.0);
+	float line_epsilon = params.segment.y > 1.0e-30 ? params.segment.y : params.field.x;
+	float phase = params.segment.x;
+	int operation_type = int(round(params.operation.x));
+	int line_count = max(int(round(params.operation.z)), 1);
+	int max_lines = min(line_count, 256);
+	bool periodic_comb = operation_type == 1 && params.operation.w <= 1.0e-6
+			&& params.operation.y > 1.0e-30;
+	float periodic_offset = 0.0;
+	if (periodic_comb) {
+		periodic_offset = round((dot(coordinate - params.line.xy, perpendicular)
+				- phase) / params.operation.y) * params.operation.y;
+	}
+	for (int line_index = 0; line_index < 256; line_index++) {
+		if (line_index >= max_lines) {
+			break;
+		}
+		float offset = float(line_index) - 0.5 * float(max_lines - 1);
+		if (operation_type == 1) {
+			float noise = (hash11(float(line_index) + params.operation.w) * 2.0 - 1.0)
+					* params.operation.w;
+			offset = offset * params.operation.y + noise;
+		} else {
+			offset = 0.0;
+		}
+		offset += phase;
+		if (periodic_comb) {
+			offset += periodic_offset;
+		}
+		vec2 origin = params.line.xy + perpendicular * offset;
+		float extent_weight = line_extent_weight(coordinate, origin, direction,
+				line_epsilon, params.field.z, params.segment.zw);
+		if (slip_enabled()) {
+			drift += slip_line_velocity(coordinate, origin, direction, line_epsilon)
+					* extent_weight;
+		} else {
+			drift += line_velocity(coordinate, origin, direction, line_epsilon)
+					* extent_weight;
+		}
+	}
+	if (operation_type == 1) {
+		drift += drift_compensation(direction, line_epsilon);
+	}
+	vec2 mapped = periodic_wrap(coordinate + drift);
+	vec2 source_coordinate = display_coordinate(pixel);
+	vec2 displacement = periodic_optimized()
+			? mapped - source_coordinate
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + drift;
+	imageStore(coords_dst, pixel, vec4(mapped, 0.0, 0.0));
+	imageStore(displacement_dst, pixel, vec4(periodic_wrap(displacement), 0.0, 0.0));
+}

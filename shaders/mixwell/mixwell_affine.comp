@@ -1,0 +1,26 @@
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = load_coordinate(pixel);
+	vec2 mapped = coordinate;
+	const int substeps = 8;
+	const float dt = 1.0 / float(substeps);
+	for (int step = 0; step < substeps; step++) {
+		vec2 first = affine_velocity(mapped, params.line.xy, params.line.z,
+			params.field.x, params.field.z, params.line.w);
+		vec2 midpoint = mapped + first * (0.5 * dt);
+		mapped += affine_velocity(midpoint, params.line.xy, params.line.z,
+			params.field.x, params.field.z, params.line.w) * dt;
+	}
+	mapped = periodic_wrap(mapped);
+	vec2 displacement = periodic_optimized()
+			? mapped - display_coordinate(pixel)
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + periodic_delta(mapped, coordinate);
+	imageStore(coords_dst, pixel, vec4(mapped, 0.0, 0.0));
+	imageStore(displacement_dst, pixel, vec4(displacement, 0.0, 0.0));
+}

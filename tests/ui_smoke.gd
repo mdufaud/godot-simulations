@@ -61,6 +61,8 @@ func _run() -> void:
 		return
 	if _demo == "ambient_fluid_demo":
 		await _check_ambient_fluid_actions(menu)
+	if _demo == "mixwell_demo":
+		await _check_mixwell_periodic()
 
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
@@ -69,6 +71,106 @@ func _run() -> void:
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false, "gear closes panel")
 	await _check_viewport_restored()
 	_report()
+
+
+func _check_mixwell_periodic() -> void:
+	_demo_root._select_official_example(0)
+	var press := InputEventScreenTouch.new()
+	press.index = 0
+	press.pressed = true
+	press.position = Vector2(720.0, 420.0)
+	Input.parse_input_event(press)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
+	var drag := InputEventScreenDrag.new()
+	drag.index = 0
+	drag.position = Vector2(1280.0, 560.0)
+	drag.relative = Vector2(560.0, 140.0)
+	Input.parse_input_event(drag)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
+	var release := InputEventScreenTouch.new()
+	release.index = 0
+	release.pressed = false
+	release.position = drag.position
+	Input.parse_input_event(release)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
+	if _demo_root.solver.get_segment_count() < 2:
+		_fail("Mixwell canvas drag did not create a continuous freehand path")
+	_demo_root._select_official_example(3)
+	if _demo_root.solver.get_preset_id() != 6 or _demo_root.source_mode != 3:
+		_fail("Mixwell BirdWing control did not select its published preset and source")
+	_demo_root._previous_official_pass()
+	if _demo_root.solver.get_pattern_step() < 0:
+		_fail("Mixwell previous-pass control did not change the rendered construction")
+	_demo_root._restart_official_example()
+	var birdwing_passes: int = _demo_root.solver.get_pattern_operation_count()
+	var canvas_size: Vector2 = _demo_root.size
+	await _mixwell_touch_drag(canvas_size * Vector2(0.35, 0.55),
+			canvas_size * Vector2(0.52, 0.42))
+	if _demo_root.solver.get_preset_id() != 6 or _demo_root.source_mode != 3:
+		_fail("Mixwell canvas click reset BirdWing to the first example")
+	var first_stroke_passes: int = _demo_root.solver.get_pattern_operation_count()
+	if _demo_root.strokes.size() != 1 or first_stroke_passes <= birdwing_passes + 1:
+		_fail("Mixwell first stroke replaced the selected published construction")
+	await _mixwell_touch_drag(canvas_size * Vector2(0.48, 0.62),
+			canvas_size * Vector2(0.64, 0.48))
+	if _demo_root.strokes.size() != 2 \
+			or _demo_root.solver.get_pattern_operation_count() <= first_stroke_passes:
+		_fail("Mixwell second stroke did not retain the first stroke")
+	_demo_root._select_official_example(0)
+	_demo_root._set_profiling(true)
+	_demo_root.solver.set_boundary_mode(MixwellConfig.BoundaryMode.PERIODIC)
+	_demo_root._request_reset()
+	var timings: Dictionary = {}
+	for _frame in 120:
+		await get_tree().process_frame
+		timings = _demo_root.solver.get_timings()
+		if timings.has("init") and timings.has("accumulate"):
+			break
+	if _demo_root.solver.get_active_boundary_mode() != MixwellConfig.BoundaryMode.PERIODIC:
+		_fail("periodic path did not pass fullscreen A/B validation")
+	if not timings.has("init") or not timings.has("accumulate"):
+		_fail("Mixwell GPU profiling missed init or accumulation stage")
+	_demo_root.solver.set_preset(9)
+	_demo_root.solver.set_boundary_mode(MixwellConfig.BoundaryMode.SLIP_WALLS)
+	_demo_root._request_reset()
+	for _frame in 8:
+		await get_tree().process_frame
+	if _demo_root.solver.get_preset_id() != 9 \
+			or _demo_root.solver.get_active_boundary_mode() != MixwellConfig.BoundaryMode.SLIP_WALLS:
+		_fail("Mixwell affine or slip-wall smoke path did not activate")
+	_demo_root.solver.set_preset(10)
+	_demo_root._request_reset()
+	for _frame in 8:
+		await get_tree().process_frame
+	if _demo_root.solver.get_preset_id() != 10:
+		_fail("Mixwell Pinch extension did not activate")
+
+
+func _mixwell_touch_drag(start: Vector2, finish: Vector2) -> void:
+	var press := InputEventScreenTouch.new()
+	press.index = 0
+	press.pressed = true
+	press.position = start
+	Input.parse_input_event(press)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
+	var drag := InputEventScreenDrag.new()
+	drag.index = 0
+	drag.position = finish
+	drag.relative = finish - start
+	Input.parse_input_event(drag)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
+	var release := InputEventScreenTouch.new()
+	release.index = 0
+	release.pressed = false
+	release.position = finish
+	Input.parse_input_event(release)
+	Input.flush_buffered_events()
+	await get_tree().process_frame
 
 
 ## Frees the demo and compares the root viewport against what it looked like before.

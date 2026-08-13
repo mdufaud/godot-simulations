@@ -1,0 +1,223 @@
+[gd_scene load_steps=8 format=3 uid="uid://mixwell_demo_scene"]
+
+[ext_resource type="Script" path="res://scripts/demos/mixwell_controller.gd" id="1_controller"]
+[ext_resource type="Shader" path="res://shaders/mixwell/mixwell_display.gdshader" id="2_display_shader"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
+[ext_resource type="Theme" path="res://resources/themes/main_theme.tres" id="4_theme"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_display"]
+shader = ExtResource("2_display_shader")
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_guide"]
+bg_color = Color(0.018, 0.02, 0.025, 0.9)
+border_width_left = 2
+border_color = Color(0.92, 0.92, 0.9, 0.65)
+corner_radius_top_left = 10
+corner_radius_top_right = 10
+corner_radius_bottom_right = 10
+corner_radius_bottom_left = 10
+content_margin_left = 18.0
+content_margin_top = 14.0
+content_margin_right = 18.0
+content_margin_bottom = 14.0
+
+[sub_resource type="StyleBoxFlat" id="StyleBoxFlat_controls"]
+bg_color = Color(0.018, 0.02, 0.025, 0.95)
+border_width_top = 1
+border_width_left = 1
+border_width_bottom = 1
+border_width_right = 1
+border_color = Color(0.45, 0.46, 0.48, 0.7)
+corner_radius_top_left = 12
+corner_radius_top_right = 12
+corner_radius_bottom_right = 12
+corner_radius_bottom_left = 12
+content_margin_left = 16.0
+content_margin_top = 12.0
+content_margin_right = 16.0
+content_margin_bottom = 12.0
+
+[node name="MixwellDemo" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_controller")
+
+[node name="Display" type="ColorRect" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+material = SubResource("ShaderMaterial_display")
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="Experience" type="Control" parent="UI"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme = ExtResource("4_theme")
+
+[node name="StrokePreview" type="Line2D" parent="UI/Experience"]
+width = 7.0
+default_color = Color(0.55, 0.94, 1, 0.95)
+joint_mode = 2
+begin_cap_mode = 2
+end_cap_mode = 2
+antialiased = true
+
+[node name="Guide" type="PanelContainer" parent="UI/Experience"]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.025
+anchor_top = 0.025
+anchor_right = 0.72
+anchor_bottom = 0.15
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_guide")
+
+[node name="Text" type="VBoxContainer" parent="UI/Experience/Guide"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="Title" type="Label" parent="UI/Experience/Guide/Text"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.96, 0.95, 0.91, 1)
+theme_override_font_sizes/font_size = 18
+text = "FIG. 21 · SINGLE BRUSH"
+
+[node name="Explanation" type="Label" parent="UI/Experience/Guide/Text"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 16
+text = ""
+autowrap_mode = 2
+
+[node name="BeforeLabel" type="Label" parent="UI/Experience"]
+visible = false
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.16
+anchor_top = 0.22
+anchor_right = 0.34
+anchor_bottom = 0.28
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.8)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 22
+text = "SOURCE"
+horizontal_alignment = 1
+
+[node name="AfterLabel" type="Label" parent="UI/Experience"]
+visible = false
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.66
+anchor_top = 0.22
+anchor_right = 0.84
+anchor_bottom = 0.28
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.8)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 22
+text = "AFTER FLOW"
+horizontal_alignment = 1
+
+[node name="Divider" type="ColorRect" parent="UI/Experience"]
+visible = false
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.5
+anchor_top = 0.21
+anchor_right = 0.5
+anchor_bottom = 0.75
+offset_left = -1.0
+offset_right = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 1, 1, 0.72)
+
+[node name="Controls" type="PanelContainer" parent="UI/Experience"]
+layout_mode = 1
+anchors_preset = -1
+anchor_left = 0.16
+anchor_top = 0.84
+anchor_right = 0.84
+anchor_bottom = 0.975
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_styles/panel = SubResource("StyleBoxFlat_controls")
+
+[node name="VBox" type="VBoxContainer" parent="UI/Experience/Controls"]
+layout_mode = 2
+theme_override_constants/separation = 7
+
+[node name="StepSummary" type="Label" parent="UI/Experience/Controls/VBox"]
+layout_mode = 2
+theme_override_font_sizes/font_size = 18
+text = "Pattern complete"
+horizontal_alignment = 1
+
+[node name="Progress" type="ProgressBar" parent="UI/Experience/Controls/VBox"]
+visible = false
+custom_minimum_size = Vector2(0, 8)
+layout_mode = 2
+show_percentage = false
+
+[node name="Actions" type="HBoxContainer" parent="UI/Experience/Controls/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+alignment = 1
+
+[node name="Example" type="OptionButton" parent="UI/Experience/Controls/VBox/Actions"]
+custom_minimum_size = Vector2(230, 42)
+layout_mode = 2
+
+[node name="Previous" type="Button" parent="UI/Experience/Controls/VBox/Actions"]
+custom_minimum_size = Vector2(120, 42)
+layout_mode = 2
+text = "Previous pass"
+
+[node name="Next" type="Button" parent="UI/Experience/Controls/VBox/Actions"]
+custom_minimum_size = Vector2(100, 42)
+layout_mode = 2
+text = "Next pass"
+
+[node name="Restart" type="Button" parent="UI/Experience/Controls/VBox/Actions"]
+custom_minimum_size = Vector2(90, 42)
+layout_mode = 2
+text = "Restart"
+
+[node name="Undo" type="Button" parent="UI/Experience/Controls/VBox/Actions"]
+custom_minimum_size = Vector2(80, 42)
+layout_mode = 2
+text = "Undo"
+
+[node name="Hint" type="Label" parent="UI/Experience/Controls/VBox"]
+visible = false
+layout_mode = 2
+theme_override_colors/font_color = Color(0.76, 0.8, 0.86, 1)
+theme_override_font_sizes/font_size = 14
+text = "Replay the construction one pass at a time, or draw directly on the canvas."
+horizontal_alignment = 1
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
+title = "🌀 Mixwell 2D Mixing"

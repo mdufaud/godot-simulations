@@ -93,6 +93,7 @@ declare -a CPU_SUITES=(
 	"fire_clock|res://tests/fire_clock_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
+	"mixwell|res://tests/mixwell_test.gd"
 	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
 	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
 	"cloth_wind|res://tests/cloth_wind_test.gd"
@@ -165,6 +166,9 @@ else
 		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \
 		"$SCRIPT_DIR/run_ui_smoke.sh"; then
 		failed+=(ui_smoke)
+	fi
+	if ! GODOT="$GODOT" "$SCRIPT_DIR/run_mixwell_capture.sh"; then
+		failed+=(mixwell_capture)
 	fi
 fi
 

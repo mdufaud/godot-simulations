@@ -1,0 +1,74 @@
+layout(std430, set = 0, binding = 8) readonly buffer SegmentBuffer {
+	vec4 segment_data[];
+};
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 initial_coordinate = load_coordinate(pixel);
+	vec2 coordinate = initial_coordinate;
+	vec2 operation_period = params.segment.zw;
+	vec2 relative_period = operation_period.x > 1.0e-30 ? operation_period
+			: (periodic_enabled() ? params.periodic.xy : vec2(0.0));
+	int segment_count = clamp(int(round(params.operation.z)), 1, 256);
+	int segment_base = max(int(round(params.operation.w)), 0);
+	for (int segment_index = 0; segment_index < 256; segment_index++) {
+		if (segment_index >= segment_count) {
+			break;
+		}
+		int buffer_index = (segment_base + segment_index) * 2;
+		vec4 encoded = segment_data[buffer_index];
+		float epsilon = segment_data[buffer_index + 1].x;
+		vec2 start = encoded.xy;
+		vec2 end = encoded.zw;
+		float influence = operation_period.x > 1.0e-30
+				? operation_segment_influence(coordinate, start, end, epsilon,
+						params.field.z, operation_period)
+				: slip_segment_influence(coordinate, start, end, epsilon, params.field.z);
+		if (influence <= 0.0) {
+			continue;
+		}
+		vec2 segment_delta = start - end;
+		float remaining = length(segment_delta);
+		if (remaining <= 1.0e-30) {
+			continue;
+		}
+		vec2 direction = segment_delta / remaining;
+		vec2 position = end;
+		vec2 relative = operation_delta_with_period(coordinate, position,
+				relative_period);
+		float initial_length = remaining;
+		for (int step_index = 0; step_index < 8192; step_index++) {
+			if (remaining <= max(1.0e-12, initial_length * 1.0e-14)) {
+				break;
+			}
+			float relative_length = length(relative);
+			float step_length = min(remaining, params.field.y * max(epsilon, relative_length));
+			vec2 midpoint_relative = relative + slip_segment_velocity(
+				relative, position, direction, epsilon)
+					* step_length * 0.5;
+			vec2 delta_relative = slip_segment_velocity(
+				midpoint_relative, position, direction, epsilon);
+			relative += delta_relative * step_length;
+			position += direction * step_length;
+			remaining -= step_length;
+		}
+		vec2 mapped = operation_period.x > 1.0e-30
+				? coordinate + operation_delta_with_period(position + relative,
+						coordinate, operation_period)
+				: periodic_wrap(position + relative);
+		coordinate = periodic_wrap(mix(coordinate, mapped, influence));
+	}
+	imageStore(coords_dst, pixel, vec4(coordinate, 0.0, 0.0));
+	vec2 drift = coordinate - initial_coordinate;
+	vec2 displacement = periodic_optimized()
+			? coordinate - display_coordinate(pixel)
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + drift;
+	imageStore(displacement_dst, pixel, vec4(periodic_wrap(displacement), 0.0, 0.0));
+}

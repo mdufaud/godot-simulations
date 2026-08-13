@@ -1,0 +1,15 @@
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = load_coordinate(pixel);
+	vec3 result = pigment(coordinate, params.dims.w);
+	vec3 source = pigment(display_coordinate(pixel), params.dims.w);
+	imageStore(sample_image, pixel, vec4(result, 1.0));
+	imageStore(source_image, pixel, vec4(source, 1.0));
+	imageStore(diagnostic_image, pixel, vec4(0.0));
+}

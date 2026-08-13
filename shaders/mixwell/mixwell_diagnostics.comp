@@ -1,0 +1,87 @@
+layout(std430, set = 0, binding = 8) readonly buffer DiagnosticOperations {
+	vec4 values[];
+} diagnostic_operations;
+
+layout(r8ui, set = 0, binding = 9) restrict uniform uimage2D diagnostic_zone;
+
+
+float diagnostic_nearest_distance(vec2 coordinate) {
+	float nearest = 1.0e30;
+	uint operation_count = min(uint(max(params.diagnostic.y, 0.0)), 256u);
+	for (uint operation_index = 0u; operation_index < operation_count; operation_index++) {
+		uint base = operation_index * 4u;
+		vec4 header = diagnostic_operations.values[base];
+		vec4 origin_direction = diagnostic_operations.values[base + 1u];
+		vec4 segment = diagnostic_operations.values[base + 2u];
+		vec4 extra = diagnostic_operations.values[base + 3u];
+		int operation_type = int(round(header.x));
+		if (operation_type == 2) {
+			nearest = min(nearest, operation_segment_sdf(coordinate,
+					segment.xy, segment.zw, extra.xy));
+			continue;
+		}
+		if (length(origin_direction.zw) <= 1.0e-30) {
+			continue;
+		}
+		vec2 direction = normalize(origin_direction.zw);
+		vec2 perpendicular = vec2(-direction.y, direction.x);
+		int line_count = max(int(round(extra.y)), 1);
+		for (int line_index = 0; line_index < line_count; line_index++) {
+			float offset = (float(line_index) - 0.5 * float(line_count - 1)) * extra.x;
+			if (extra.z != 0.0) {
+				offset += (hash11(float(line_index) + extra.z) * 2.0 - 1.0) * extra.z;
+			}
+			vec2 line_origin = origin_direction.xy + perpendicular * (offset + extra.w);
+			nearest = min(nearest, abs(dot(coordinate - line_origin, perpendicular)));
+		}
+	}
+	return nearest;
+}
+
+
+uint diagnostic_zone_for_pixel(ivec2 pixel, vec2 coordinate) {
+	if (pixel.x <= 0 || pixel.y <= 0 || pixel.x >= params.dims.x - 1
+			|| pixel.y >= params.dims.y - 1) {
+		return slip_enabled() ? 4u : 3u;
+	}
+	float nearest = diagnostic_nearest_distance(coordinate);
+	float epsilon = max(params.field.x, 1.0e-6);
+	if (nearest < epsilon * 0.5) {
+		return 1u;
+	}
+	if (nearest <= epsilon * params.field.z) {
+		return 2u;
+	}
+	return 0u;
+}
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = load_coordinate(pixel);
+	vec2 source_coordinate = display_coordinate(pixel);
+	ivec2 left_pixel = periodic_pixel(pixel, ivec2(-1, 0));
+	ivec2 right_pixel = periodic_pixel(pixel, ivec2(1, 0));
+	ivec2 down_pixel = periodic_pixel(pixel, ivec2(0, -1));
+	ivec2 up_pixel = periodic_pixel(pixel, ivec2(0, 1));
+	vec2 dx = periodic_delta(load_coordinate(right_pixel), load_coordinate(left_pixel));
+	vec2 dy = periodic_delta(load_coordinate(up_pixel), load_coordinate(down_pixel));
+	float x_span = periodic_enabled() ? 2.0 : float(max(right_pixel.x - left_pixel.x, 1));
+	float y_span = periodic_enabled() ? 2.0 : float(max(up_pixel.y - down_pixel.y, 1));
+	dx /= x_span;
+	dy /= y_span;
+	float aspect = float(params.dims.x) / float(params.dims.y);
+	float reference_area = (2.0 * aspect / float(params.dims.x))
+			* (2.0 / float(params.dims.y));
+	float area = (dx.x * dy.y - dx.y * dy.x) / max(reference_area, 1.0e-30);
+	vec2 displacement = periodic_delta(coordinate, source_coordinate);
+	uint zone = diagnostic_zone_for_pixel(pixel, source_coordinate);
+	imageStore(diagnostic_image, pixel, vec4(displacement, length(displacement), area - 1.0));
+	imageStore(diagnostic_zone, pixel, uvec4(zone, 0u, 0u, 0u));
+}

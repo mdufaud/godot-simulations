@@ -1,0 +1,107 @@
+layout(r8ui, set = 0, binding = 8) readonly uniform uimage2D diagnostic_zone;
+layout(rgba16f, set = 0, binding = 9) readonly uniform image2D convergence_image;
+
+layout(std430, set = 0, binding = 10) buffer DiagnosticReduction {
+	float values[];
+} diagnostic_reduction;
+
+shared float area_sum_shared[256];
+shared float area_max_shared[256];
+shared float convergence_sum_shared[256];
+shared float convergence_max_shared[256];
+shared float category_sum_shared[5][256];
+shared uint category_count_shared[5][256];
+shared uint area_hist_shared[16][256];
+shared uint convergence_hist_shared[16][256];
+
+
+uint metric_bin(float value, float scale) {
+	return uint(clamp(int(floor(max(value, 0.0) * scale)), 0, 15));
+}
+
+
+void main() {
+	uint local_index = gl_LocalInvocationID.x;
+	uint index = gl_GlobalInvocationID.x;
+	uint count = uint(params.dims.x * params.dims.y);
+	bool valid = index < count;
+	ivec2 pixel = ivec2(0);
+	if (valid) {
+		pixel = ivec2(int(index) % params.dims.x, int(index) / params.dims.x);
+	}
+	float area_error = 0.0;
+	float convergence_squared = 0.0;
+	float convergence_error = 0.0;
+	uint zone = 0u;
+	if (valid) {
+		area_error = abs(imageLoad(diagnostic_image, pixel).w);
+		zone = min(imageLoad(diagnostic_zone, pixel).r, 4u);
+		if (params.dims.z > 0) {
+			vec3 difference = imageLoad(convergence_image, pixel).rgb;
+			convergence_squared = dot(difference, difference);
+			convergence_error = sqrt(convergence_squared);
+		}
+	}
+	area_sum_shared[local_index] = area_error;
+	area_max_shared[local_index] = area_error;
+	convergence_sum_shared[local_index] = convergence_squared;
+	convergence_max_shared[local_index] = convergence_error;
+	for (uint category = 0u; category < 5u; category++) {
+		category_sum_shared[category][local_index] =
+				valid && zone == category ? area_error : 0.0;
+		category_count_shared[category][local_index] = valid && zone == category ? 1u : 0u;
+	}
+	for (uint bin = 0u; bin < 16u; bin++) {
+		area_hist_shared[bin][local_index] = 0u;
+		convergence_hist_shared[bin][local_index] = 0u;
+	}
+	barrier();
+	if (valid) {
+		atomicAdd(area_hist_shared[metric_bin(area_error, max(params.diagnostic.z, 1.0))][local_index], 1u);
+		atomicAdd(convergence_hist_shared[metric_bin(convergence_error,
+				max(params.diagnostic.w, 1.0))][local_index], 1u);
+	}
+	barrier();
+	for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+		if (local_index < stride) {
+			area_sum_shared[local_index] += area_sum_shared[local_index + stride];
+			area_max_shared[local_index] = max(area_max_shared[local_index],
+					area_max_shared[local_index + stride]);
+			convergence_sum_shared[local_index] +=
+					convergence_sum_shared[local_index + stride];
+			convergence_max_shared[local_index] = max(convergence_max_shared[local_index],
+					convergence_max_shared[local_index + stride]);
+		}
+		barrier();
+	}
+	if (local_index != 0u) {
+		return;
+	}
+	uint output_base = gl_WorkGroupID.x * 48u;
+	diagnostic_reduction.values[output_base] = area_sum_shared[0];
+	diagnostic_reduction.values[output_base + 1u] = area_max_shared[0];
+	diagnostic_reduction.values[output_base + 2u] = convergence_sum_shared[0];
+	diagnostic_reduction.values[output_base + 3u] = convergence_max_shared[0];
+	for (uint category = 0u; category < 5u; category++) {
+		float category_sum = 0.0;
+		uint category_count = 0u;
+		for (uint lane = 0u; lane < 256u; lane++) {
+			category_sum += category_sum_shared[category][lane];
+			category_count += category_count_shared[category][lane];
+		}
+		diagnostic_reduction.values[output_base + 4u + category] = category_sum;
+		diagnostic_reduction.values[output_base + 9u + category] = float(category_count);
+	}
+	for (uint bin = 0u; bin < 16u; bin++) {
+		uint area_count = 0u;
+		uint convergence_count = 0u;
+		for (uint lane = 0u; lane < 256u; lane++) {
+			area_count += area_hist_shared[bin][lane];
+			convergence_count += convergence_hist_shared[bin][lane];
+		}
+		diagnostic_reduction.values[output_base + 14u + bin] = float(area_count);
+		diagnostic_reduction.values[output_base + 30u + bin] = float(convergence_count);
+	}
+	diagnostic_reduction.values[output_base + 46u] = 0.0;
+	diagnostic_reduction.values[output_base + 47u] = 0.0;
+}

@@ -1,0 +1,518 @@
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(rg32f, set = 0, binding = 0) restrict uniform image2D coords_src;
+layout(rg32f, set = 0, binding = 1) restrict uniform image2D coords_dst;
+layout(rg32f, set = 0, binding = 2) restrict uniform image2D displacement_src;
+layout(rg32f, set = 0, binding = 3) restrict uniform image2D displacement_dst;
+layout(rgba16f, set = 0, binding = 4) restrict uniform image2D sample_image;
+layout(rgba16f, set = 0, binding = 5) restrict uniform image2D accumulation;
+layout(rgba16f, set = 0, binding = 6) restrict uniform image2D source_image;
+layout(rgba16f, set = 0, binding = 7) restrict uniform image2D diagnostic_image;
+
+layout(push_constant, std430) uniform Params {
+	ivec4 dims;
+	vec4 field;
+	vec4 line;
+	vec4 segment;
+	vec4 periodic;
+	vec4 operation;
+	ivec4 domain;
+	vec4 diagnostic;
+} params;
+
+
+vec2 r2_sample(uint sample_index);
+
+
+float xi_series(float eta) {
+	float y = sqrt(eta * eta + 0.002 * 0.002);
+	float value;
+	if (y < 0.8220844420096408) {
+		float y2 = y * y;
+		float y4 = y2 * y2;
+		float y6 = y4 * y2;
+		float y8 = y4 * y4;
+		value = -0.039720771 - 0.16369764 * y2 + 0.0076619254 * y4
+				- 0.00096477622 * y6 + 0.00015811568 * y8;
+		value += (0.5 + 0.09375 * y2 - 0.0073242188 * y4
+				+ 0.0010681152 * y6 - 0.00018775463 * y8) * log(y);
+	} else if (y <= 6.50416858646776) {
+		float g = y - 2.3;
+		float g2 = g * g;
+		float g3 = g2 * g;
+		float g4 = g3 * g;
+		float g5 = g4 * g;
+		float g6 = g5 * g;
+		float numerator = -0.0413839 - 0.0937878 * g - 0.043355 * g2
+				- 0.0068946 * g3 + 1.77539e-6 * g4 - 1.01973e-7 * g5;
+		float denominator = 1.0 + 3.26035 * g + 3.66495 * g2 + 2.08615 * g3
+				+ 0.665761 * g4 + 0.115772 * g5 + 0.00875686 * g6;
+		value = numerator / denominator;
+	} else {
+		float y2 = y * y;
+		float y3 = y2 * y;
+		float y5 = y3 * y2;
+		float y7 = y5 * y2;
+		float y9 = y7 * y2;
+		float y11 = y9 * y2;
+		value = -3.141592653589793 / 256.0
+				* (64.0 / y3 - 192.0 / y5 + 600.0 / y7 - 1960.0 / y9
+				+ 6615.0 / y11);
+	}
+	return 2.0 * value;
+}
+
+
+vec2 kernel_mul(vec2 relative, vec2 displacement, float epsilon) {
+	float radius_squared = dot(relative, relative);
+	if (radius_squared <= 1.0e-30) {
+		return displacement;
+	}
+	float radius = sqrt(radius_squared);
+	float epsilon_squared = epsilon * epsilon;
+	float radius_epsilon = sqrt(radius_squared + epsilon_squared);
+	float radius_epsilon_cubed = radius_epsilon * radius_epsilon * radius_epsilon;
+	float a = 1.0 - radius * (radius_squared + 2.0 * epsilon_squared)
+			/ radius_epsilon_cubed;
+	float b = epsilon_squared / (radius * radius_epsilon_cubed);
+	float radial_projection = dot(relative, displacement);
+	return a * displacement + b * relative * radial_projection;
+}
+
+
+vec2 body_kernel_mul(vec2 relative, vec2 displacement, float epsilon) {
+	return kernel_mul(relative, displacement, epsilon) - displacement;
+}
+
+
+bool periodic_enabled() {
+	return params.periodic.z > 0.5 && params.periodic.z < 1.5;
+}
+
+
+bool slip_enabled() {
+	return params.periodic.z > 1.5;
+}
+
+
+bool periodic_optimized() {
+	return periodic_enabled() && params.periodic.w > 0.5;
+}
+
+
+ivec2 work_dims() {
+	return max(params.domain.xy, ivec2(1));
+}
+
+
+ivec2 previous_dims() {
+	return max(params.domain.zw, ivec2(1));
+}
+
+
+ivec2 work_pixel(uint index) {
+	ivec2 dims = work_dims();
+	return ivec2(int(index) % dims.x, int(index) / dims.x);
+}
+
+
+vec2 display_coordinate(ivec2 pixel) {
+	vec2 jitter = r2_sample(uint(max(params.dims.z, 0)));
+	vec2 aspect = vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+	return (vec2(pixel) + jitter) / vec2(params.dims.xy) * 2.0 * aspect - aspect;
+}
+
+
+ivec2 source_pixel(ivec2 pixel) {
+	ivec2 result = pixel;
+	if (!periodic_optimized()) {
+		return clamp(result, ivec2(0), params.dims.xy - ivec2(1));
+	}
+	ivec2 dims = previous_dims();
+	result.x = (result.x % dims.x + dims.x) % dims.x;
+	result.y = (result.y % dims.y + dims.y) % dims.y;
+	return result;
+}
+
+
+vec2 load_coordinate(ivec2 pixel) {
+	if (!periodic_optimized()) {
+		return imageLoad(coords_src, source_pixel(pixel)).xy;
+	}
+	return display_coordinate(pixel) + imageLoad(displacement_src, source_pixel(pixel)).xy;
+}
+
+
+vec2 periodic_wrap(vec2 value) {
+	if (!periodic_enabled() || periodic_optimized()) {
+		return value;
+	}
+	vec2 period = max(params.periodic.xy, vec2(1.0e-6));
+	return mod(value + period * 0.5, period) - period * 0.5;
+}
+
+
+vec2 periodic_delta_with_period(vec2 a, vec2 b, vec2 period) {
+	vec2 delta = a - b;
+	if (periodic_enabled()) {
+		vec2 safe_period = max(period, vec2(1.0e-6));
+		delta -= safe_period * round(delta / safe_period);
+	}
+	return delta;
+}
+
+
+vec2 periodic_delta(vec2 a, vec2 b) {
+	return periodic_delta_with_period(a, b, params.periodic.xy);
+}
+
+
+vec2 operation_delta_with_period(vec2 a, vec2 b, vec2 period) {
+	vec2 delta = a - b;
+	if (period.x > 1.0e-30 || period.y > 1.0e-30) {
+		vec2 safe_period = max(period, vec2(1.0e-6));
+		delta -= safe_period * round(delta / safe_period);
+	}
+	return delta;
+}
+
+
+ivec2 periodic_pixel(ivec2 pixel, ivec2 offset) {
+	ivec2 result = pixel + offset;
+	if (!periodic_enabled()) {
+		return clamp(result, ivec2(0), params.dims.xy - ivec2(1));
+	}
+	result.x = (result.x % params.dims.x + params.dims.x) % params.dims.x;
+	result.y = (result.y % params.dims.y + params.dims.y) % params.dims.y;
+	return result;
+}
+
+
+vec2 drift_compensation(vec2 direction, float epsilon) {
+	float pitch = params.operation.y;
+	if (pitch <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	int mode = int(round(params.field.w));
+	float amount = 0.0;
+	if (mode == 2) {
+		amount = -3.141592653589793 * epsilon * epsilon / pitch;
+	} else if (mode == 1) {
+		float h = pitch / epsilon;
+		amount = epsilon * (-37.7829 + 1.01689 * h)
+				/ (1.09635 + h * (12.2129 + h * (1.59101 + h)));
+	}
+	float direction_length = length(direction);
+	if (direction_length <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	return direction / direction_length * amount;
+}
+
+
+vec2 boundary_half_extent() {
+	return vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+}
+
+
+vec2 mirror_point(vec2 value, ivec2 image) {
+	vec2 half_extent = boundary_half_extent();
+	vec2 result = value;
+	if (image.x != 0) {
+		result.x = 2.0 * float(image.x) * half_extent.x - value.x;
+	}
+	if (image.y != 0) {
+		result.y = 2.0 * float(image.y) * half_extent.y - value.y;
+	}
+	return result;
+}
+
+
+vec2 mirror_vector(vec2 value, ivec2 image) {
+	return vec2(image.x != 0 ? -value.x : value.x,
+		image.y != 0 ? -value.y : value.y);
+}
+
+
+mat2 reflection_matrix(ivec2 image) {
+	return mat2(
+		vec2(image.x != 0 ? -1.0 : 1.0, 0.0),
+		vec2(0.0, image.y != 0 ? -1.0 : 1.0));
+}
+
+
+mat2 kernel_matrix(vec2 relative, float epsilon) {
+	float radius_squared = dot(relative, relative);
+	if (radius_squared <= 1.0e-30) {
+		return mat2(1.0);
+	}
+	float radius = sqrt(radius_squared);
+	float epsilon_squared = epsilon * epsilon;
+	float radius_epsilon = sqrt(radius_squared + epsilon_squared);
+	float radius_epsilon_cubed = radius_epsilon * radius_epsilon * radius_epsilon;
+	float a = 1.0 - radius * (radius_squared + 2.0 * epsilon_squared)
+			/ radius_epsilon_cubed;
+	float b = epsilon_squared / (radius * radius_epsilon_cubed);
+	return mat2(
+		vec2(a + b * relative.x * relative.x, b * relative.x * relative.y),
+		vec2(b * relative.y * relative.x, a + b * relative.y * relative.y));
+}
+
+
+vec2 line_velocity(vec2 point, vec2 origin, vec2 direction, float epsilon) {
+	float direction_length = length(direction);
+	if (direction_length <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	vec2 unit_direction = direction / direction_length;
+	vec2 perpendicular = vec2(-unit_direction.y, unit_direction.x);
+	float eta = dot(point - origin, perpendicular) / epsilon;
+	return unit_direction * epsilon * xi_series(eta);
+}
+
+
+float line_extent_weight(vec2 point, vec2 origin, vec2 direction, float epsilon,
+		float cutoff_gamma, vec2 extent) {
+	if (abs(extent.x) <= 1.0e-30 && abs(extent.y) <= 1.0e-30) {
+		return 1.0;
+	}
+	float low = min(extent.x, extent.y);
+	float high = max(extent.x, extent.y);
+	float distance = max(epsilon * cutoff_gamma, epsilon);
+	vec2 unit_direction = normalize(direction);
+	float along = dot(point - origin, unit_direction);
+	return smoothstep(low - distance, low, along)
+			* (1.0 - smoothstep(high, high + distance, along));
+}
+
+
+vec2 slip_line_velocity(vec2 point, vec2 origin, vec2 direction, float epsilon) {
+	vec2 result = line_velocity(point, origin, direction, epsilon);
+	if (slip_enabled()) {
+		const ivec2 edge_left = ivec2(-1, 0);
+		const ivec2 edge_right = ivec2(1, 0);
+		const ivec2 edge_bottom = ivec2(0, -1);
+		const ivec2 edge_top = ivec2(0, 1);
+		const ivec2 corner_lb = ivec2(-1, -1);
+		const ivec2 corner_lt = ivec2(-1, 1);
+		const ivec2 corner_rb = ivec2(1, -1);
+		const ivec2 corner_rt = ivec2(1, 1);
+		const ivec2 images[8] = ivec2[8](edge_left, edge_right, edge_bottom, edge_top,
+			corner_lb, corner_lt, corner_rb, corner_rt);
+		for (int image_index = 0; image_index < 8; image_index++) {
+			ivec2 image = images[image_index];
+			result += reflection_matrix(image) * line_velocity(point,
+				mirror_point(origin, image), mirror_vector(direction, image), epsilon);
+		}
+	}
+	return result;
+}
+
+
+vec2 slip_segment_velocity(vec2 relative, vec2 endpoint, vec2 direction,
+		float epsilon) {
+	if (!slip_enabled()) {
+		return body_kernel_mul(relative, direction, epsilon);
+	}
+	const ivec2 images[8] = ivec2[8](
+		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
+	mat2 calibration = kernel_matrix(vec2(0.0), epsilon);
+	for (int image_index = 0; image_index < 8; image_index++) {
+		ivec2 image = images[image_index];
+		mat2 h = reflection_matrix(image);
+		calibration += kernel_matrix(endpoint - mirror_point(endpoint, image), epsilon) * h;
+	}
+	vec2 calibrated_direction = inverse(calibration) * direction;
+	vec2 point = endpoint + relative;
+	vec2 result = body_kernel_mul(relative, calibrated_direction, epsilon);
+	for (int image_index = 0; image_index < 8; image_index++) {
+		ivec2 image = images[image_index];
+		vec2 image_end = mirror_point(endpoint, image);
+		result += kernel_matrix(point - image_end, epsilon) * reflection_matrix(image) \
+				* calibrated_direction;
+	}
+	return result;
+}
+
+
+float segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
+		float cutoff_gamma);
+
+
+float slip_segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
+		float cutoff_gamma) {
+	float influence = segment_influence(point, start, end, epsilon, cutoff_gamma);
+	if (!slip_enabled()) {
+		return influence;
+	}
+	const ivec2 images[8] = ivec2[8](
+		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
+	for (int image_index = 0; image_index < 8; image_index++) {
+		ivec2 image = images[image_index];
+		influence = max(influence, segment_influence(
+			point, mirror_point(start, image),
+			mirror_point(end, image), epsilon, cutoff_gamma));
+	}
+	return influence;
+}
+
+
+vec2 affine_field(vec2 relative, float strength, float radius, float kind,
+		mat2 coefficient) {
+	float distance = length(relative);
+	if (distance <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	float epsilon_squared = radius * radius;
+	float radius_epsilon = sqrt(distance * distance + epsilon_squared);
+	float radius_epsilon_3 = radius_epsilon * radius_epsilon * radius_epsilon;
+	float radius_epsilon_5 = radius_epsilon_3 * radius_epsilon * radius_epsilon;
+	float a_prime = epsilon_squared * (distance * distance - 2.0 * epsilon_squared)
+			/ radius_epsilon_5;
+	float b_prime = -epsilon_squared * (4.0 * distance * distance + epsilon_squared)
+			/ (distance * distance * radius_epsilon_5);
+	float b = epsilon_squared / (distance * radius_epsilon_3);
+	vec2 f_relative = coefficient * relative;
+	vec2 f_transpose_relative = transpose(coefficient) * relative;
+	float trace = coefficient[0][0] + coefficient[1][1];
+	return strength * radius * (a_prime / distance * f_relative
+			+ b_prime / distance * dot(relative, f_relative) * relative
+			+ b * f_transpose_relative + b * trace * relative);
+}
+
+
+vec2 affine_base_velocity(vec2 point, vec2 centre, float strength, float radius,
+		float _cutoff_gamma, float kind) {
+	mat2 coefficient = kind < 0.5
+		? mat2(vec2(0.0, 1.0), vec2(-1.0, 0.0))
+		: mat2(vec2(-1.0, 0.0), vec2(0.0, 1.0));
+	return affine_field(point - centre, strength, radius, kind, coefficient);
+}
+
+
+vec2 affine_velocity(vec2 point, vec2 centre, float strength, float radius,
+		float _cutoff_gamma, float kind) {
+	mat2 coefficient = kind < 0.5
+		? mat2(vec2(0.0, 1.0), vec2(-1.0, 0.0))
+		: mat2(vec2(-1.0, 0.0), vec2(0.0, 1.0));
+	vec2 result = affine_field(point - centre, strength, radius, kind, coefficient);
+	if (!slip_enabled()) {
+		return result;
+	}
+	const ivec2 images[8] = ivec2[8](
+		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
+	for (int image_index = 0; image_index < 8; image_index++) {
+		ivec2 image = images[image_index];
+		mat2 h = reflection_matrix(image);
+		result += affine_field(point - mirror_point(centre, image), strength, radius,
+				kind, h * coefficient * h);
+	}
+	return result;
+}
+
+
+float segment_sdf(vec2 point, vec2 start, vec2 end) {
+	vec2 edge = periodic_delta(end, start);
+	float edge_length_squared = dot(edge, edge);
+	if (edge_length_squared <= 1.0e-30) {
+		return length(periodic_delta(point, start));
+	}
+	vec2 relative = periodic_delta(point, start);
+	float parameter = clamp(dot(relative, edge) / edge_length_squared, 0.0, 1.0);
+	return length(periodic_delta(point, start + edge * parameter));
+}
+
+
+float operation_segment_sdf(vec2 point, vec2 start, vec2 end, vec2 period) {
+	vec2 edge = operation_delta_with_period(end, start, period);
+	float edge_length_squared = dot(edge, edge);
+	if (edge_length_squared <= 1.0e-30) {
+		return length(operation_delta_with_period(point, start, period));
+	}
+	vec2 relative = operation_delta_with_period(point, start, period);
+	float parameter = clamp(dot(relative, edge) / edge_length_squared, 0.0, 1.0);
+	return length(operation_delta_with_period(point, start + edge * parameter, period));
+}
+
+
+float operation_segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
+		float cutoff_gamma, vec2 period) {
+	float cutoff = max(epsilon * cutoff_gamma, epsilon);
+	float distance_to_segment = operation_segment_sdf(point, start, end, period);
+	return 1.0 - smoothstep(0.0, cutoff, distance_to_segment);
+}
+
+
+float segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
+		float cutoff_gamma) {
+	float cutoff = max(epsilon * cutoff_gamma, epsilon);
+	float distance_to_segment = segment_sdf(point, start, end);
+	return 1.0 - smoothstep(0.0, cutoff, distance_to_segment);
+}
+
+
+vec2 r2_sample(uint sample_index) {
+	const vec2 step = vec2(0.7548776662466927, 0.5698402909980532);
+	return fract(vec2(0.5) + float(sample_index) * step);
+}
+
+
+float hash11(float value) {
+	return fract(sin(value * 127.1 + 311.7) * 43758.5453123);
+}
+
+
+vec2 jittered_coordinate(ivec2 pixel) {
+	return display_coordinate(pixel);
+}
+
+
+vec3 pigment(vec2 coordinate, int source_mode) {
+	float aspect = float(params.dims.x) / float(params.dims.y);
+	vec2 uv = clamp(coordinate / vec2(aspect, 1.0) * 0.5 + 0.5, 0.0, 1.0);
+	const vec3 black = vec3(0.006, 0.008, 0.012);
+	const vec3 navy = vec3(0.012, 0.075, 0.19);
+	const vec3 blue = vec3(0.02, 0.26, 0.57);
+	const vec3 cyan = vec3(0.24, 0.67, 0.83);
+	const vec3 white = vec3(0.93, 0.94, 0.91);
+	const vec3 orange = vec3(0.95, 0.31, 0.055);
+	const vec3 pale_orange = vec3(1.0, 0.67, 0.12);
+	const vec3 olive = vec3(0.20, 0.37, 0.025);
+	const vec3 green = vec3(0.38, 0.68, 0.025);
+	const vec3 lime = vec3(0.69, 0.88, 0.055);
+	if (source_mode == 0) {
+		int band = int(floor(uv.y * 24.0)) % 6;
+		vec3 colours[6] = vec3[6](black, blue, cyan, white, orange, navy);
+		return colours[band];
+	}
+	if (source_mode == 1) {
+		ivec2 cell = ivec2(floor(uv * vec2(12.0, 8.0)));
+		int tile = (cell.x + cell.y) % 3;
+		return tile == 0 ? black : (tile == 1 ? white : vec3(0.72, 0.015, 0.02));
+	}
+	if (source_mode == 2) {
+		float radius = length((uv - 0.5) * vec2(aspect, 1.0));
+		if (radius > 0.285) return black;
+		if (radius > 0.235) return navy;
+		if (radius > 0.185) return blue;
+		if (radius > 0.135) return cyan;
+		if (radius > 0.082) return white;
+		vec2 tracer = (uv - vec2(0.458, 0.5)) * vec2(aspect, 1.0);
+		return length(tracer) < 0.029 ? orange : white;
+	}
+	vec2 repeat_uv = vec2(fract(uv.x * 6.0) - 0.5, uv.y);
+	float green_drop = length(vec2(repeat_uv.x / 0.46, (repeat_uv.y - 0.5) / 0.25));
+	float top_orange = length(vec2(repeat_uv.x / 0.49, repeat_uv.y / 0.22));
+	float bottom_orange = length(vec2(repeat_uv.x / 0.49, (repeat_uv.y - 1.0) / 0.22));
+	float orange_drop = min(top_orange, bottom_orange);
+	if (green_drop < 0.36) return lime;
+	if (green_drop < 0.68) return green;
+	if (green_drop < 1.0) return olive;
+	if (orange_drop < 0.38) return pale_orange;
+	if (orange_drop < 0.72) return orange;
+	if (orange_drop < 1.0) return vec3(0.56, 0.10, 0.015);
+	return black;
+}

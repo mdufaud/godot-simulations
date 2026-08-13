@@ -1,0 +1,18 @@
+layout(rgba16f, set = 0, binding = 8) restrict uniform image2D convergence_image;
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	float sample_number = float(params.dims.z + 1);
+	vec4 previous = imageLoad(accumulation, pixel);
+	vec4 current = imageLoad(sample_image, pixel);
+	vec3 difference = current.rgb - previous.rgb;
+	imageStore(convergence_image, pixel, vec4(difference, length(difference)));
+	imageStore(accumulation, pixel, mix(previous, current, 1.0 / sample_number));
+}
