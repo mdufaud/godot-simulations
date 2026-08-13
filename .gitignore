@@ -11,6 +11,10 @@ resources/*
 !resources/
 !resources/ambient_fluid/
 !resources/ambient_fluid/**
+!resources/ocean/
+resources/ocean/*
+!resources/ocean/foam_pattern.png
+!resources/ocean/foam_breakup.png
 
 .codex
 .claude

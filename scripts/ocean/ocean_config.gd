@@ -1,9 +1,9 @@
 class_name OceanConfig extends Resource
 
-@export_range(8, 2048, 1) var map_size: int = 256
+@export_range(8, 2048, 1) var map_size: int = 512
 @export var clipmap_tile_lengths_m: PackedFloat32Array = PackedFloat32Array([1013.0, 127.0, 17.0])
-@export_range(1, 32, 1) var clipmap_levels: int = 7
-@export_range(0.001, 100.0, 0.001) var finest_cell_m: float = 0.5
+@export_range(1, 32, 1) var clipmap_levels: int = 8
+@export_range(0.001, 100.0, 0.001) var finest_cell_m: float = 0.25
 
 
 func validate() -> String:

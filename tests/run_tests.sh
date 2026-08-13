@@ -110,7 +110,7 @@ while (( ${#cpu_pids[@]} > 0 )); do
 done
 
 if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-	failed+=(non_euclidean scene_cycle ui_smoke)
+	failed+=(non_euclidean ocean_fft scene_cycle ui_smoke)
 else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
@@ -135,6 +135,27 @@ else
 		printf 'TEST FAIL non_euclidean: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$non_euclidean_output" >&2
 		failed+=(non_euclidean)
+	fi
+
+	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
+	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
+	ocean_fft_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$ocean_fft_log" \
+			-s res://tests/ocean_fft_test.gd || ocean_fft_status=$?
+	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
+		printf 'TEST PASS ocean_fft\n'
+	else
+		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$ocean_fft_output" >&2
+		failed+=(ocean_fft)
 	fi
 
 	scene_cycle_output="$LOG_DIR/gpu-scene_cycle.stdout.log"

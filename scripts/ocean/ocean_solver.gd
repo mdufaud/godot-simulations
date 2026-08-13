@@ -8,7 +8,8 @@ extends RefCounted
 
 const SHADER_DIR := "res://shaders/ocean/"
 const STAGES: Array[String] = [
-	"spectrum_init", "spectrum_evolve", "fft_butterfly", "fft", "transpose", "map_assemble",
+	"spectrum_init", "spectrum_init_art_directed", "spectrum_evolve", "fft_butterfly", "fft",
+	"transpose", "map_assemble",
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
@@ -16,13 +17,16 @@ const GRAVITY := 9.81
 ## damp it as the cascades get finer.
 const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 0.8, 0.55]
 
+enum Backend { JONSWAP_TMA, SEA_OF_THIEVES_INSPIRED_FFT }
+
 var config: OceanConfig = OceanConfig.new()
-var map_size := 256
+var map_size := 512
 ## Pairwise non-commensurate (prime) lengths: integer ratios would tile with a
 ## visible super-period. Sorted large -> small; k-space bands are cut between
 ## them. Cascade 0 must hold the spectral peak: storm winds put lambda_p near
 ## 500 m, so the big tile has to exceed that or storms lose their swell.
 var tile_lengths: PackedFloat32Array = PackedFloat32Array([1013.0, 127.0, 17.0])
+var backend: Backend = Backend.SEA_OF_THIEVES_INSPIRED_FFT
 var wind_speed := 11.0
 var wind_direction := 0.0
 var fetch_km := 120.0
@@ -31,12 +35,21 @@ var swell := 0.8
 var spread := 0.2
 var detail := 1.0
 var choppiness := 1.15
+var long_wave_height_m := 2.6
+var long_wave_length_m := 48.0
+var wind_wave_height_m := 0.8
+var wind_wave_length_m := 7.5
+var ripple_strength := 0.9
+var crosswind_ratio := 0.14
+var crest_bias := 0.08
+var crest_gain := 2.4
 ## Master wave height multiplier, applied k-weighted in spectrum_init (swell
 ## boost, e-fold at 60 m): short wavelets keep physical steepness even at 5x.
 ## Changing it requires mark_spectrum_dirty().
 var height_gain := 1.0
 var whitecap := 0.82
 var foam_amount := 3.5
+var foam_persistence := 5.0
 ## Accumulated sim time, pushed by the controller every frame.
 var sim_time := 0.0
 ## Update one cascade per frame round-robin instead of all of them.
@@ -69,6 +82,13 @@ func get_displacement_tex_rid() -> RID:
 
 func get_normal_tex_rid() -> RID:
 	return _normal_tex
+
+
+func set_backend(value: Backend) -> void:
+	if backend == value:
+		return
+	backend = value
+	mark_spectrum_dirty()
 
 
 ## Sea-state params changed: regenerate the initial spectra (cheap, one 256²
@@ -152,7 +172,8 @@ func step_render(delta: float) -> void:
 	# rates so accumulation/decay equilibrium stays frame-rate independent.
 	var eff_delta := delta * (float(num_cascades()) if amortize else 1.0)
 	var grow_rate := eff_delta * foam_amount * 7.5
-	var decay_rate := eff_delta * maxf(0.5, 10.0 - foam_amount) * 1.15
+	var decay_rate := eff_delta * maxf(0.5, 10.0 - foam_amount) * 1.15 \
+		* 5.0 / maxf(foam_persistence, 0.05)
 
 	var g16 := map_size / 16
 	var g32 := map_size / 32
@@ -164,7 +185,9 @@ func step_render(delta: float) -> void:
 	for i in cascade_list:
 		var pc := _pack_push_constant(i, grow_rate, decay_rate)
 		if _cascade_dirty[i]:
-			_dispatch(cl, "spectrum_init", pc, g16, g16, 1)
+			var init_stage := "spectrum_init_art_directed" \
+				if backend == Backend.SEA_OF_THIEVES_INSPIRED_FFT else "spectrum_init"
+			_dispatch(cl, init_stage, pc, g16, g16, 1)
 			_cascade_dirty[i] = false
 		_dispatch(cl, "spectrum_evolve", pc, g16, g16, 1)
 		cl = _mark(cl, "ocean/spectrum")
@@ -263,7 +286,7 @@ func _pack_push_constant(cascade: int, grow_rate: float, decay_rate: float) -> P
 	var eff_chop := choppiness * CHOP_PER_CASCADE[cascade]
 
 	var pc := PackedByteArray()
-	pc.resize(96)
+	pc.resize(128)
 	pc.encode_float(0, tile_lengths[cascade])
 	pc.encode_float(4, alpha)
 	pc.encode_float(8, omega_p)
@@ -283,8 +306,16 @@ func _pack_push_constant(cascade: int, grow_rate: float, decay_rate: float) -> P
 	pc.encode_s32(64, cascade)
 	pc.encode_s32(68, 1000 + cascade * 7919)
 	pc.encode_s32(72, 31337 + cascade * 104729)
-	pc.encode_s32(76, 0)
+	pc.encode_s32(76, int(backend))
 	pc.encode_float(80, height_gain)
+	pc.encode_float(84, long_wave_height_m)
+	pc.encode_float(88, long_wave_length_m)
+	pc.encode_float(92, wind_wave_height_m)
+	pc.encode_float(96, wind_wave_length_m)
+	pc.encode_float(100, ripple_strength)
+	pc.encode_float(104, crosswind_ratio)
+	pc.encode_float(108, crest_gain)
+	pc.encode_float(112, crest_bias)
 	return pc
 
 

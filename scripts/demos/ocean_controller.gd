@@ -4,10 +4,9 @@ extends Node3D
 ## the finest cell so the sampling lattice never swims), bridges the compute
 ## textures into the surface material and wires the rest together.
 
-const CELL0 := 0.5
-const RING_LEVELS := 7
 const SKIRT_RADIUS := 9000.0
 const MAX_CRATES := 8
+const OceanSpraySystem := preload("res://scripts/ocean/ocean_spray.gd")
 
 const PRESETS := [
 	preload("res://resources/ocean/presets/calm.tres"),
@@ -21,6 +20,8 @@ const PRESETS := [
 @onready var sun: DirectionalLight3D = $Sun
 @onready var world_env: WorldEnvironment = $WorldEnvironment
 @onready var ocean_mesh: MeshInstance3D = $Ocean
+@onready var main_camera: Camera3D = $CameraPivot/Camera3D
+@onready var rocks: Node3D = $Rocks
 @onready var underwater_layer: CanvasLayer = $UnderwaterLayer
 @onready var underwater_tint: ColorRect = $UnderwaterLayer/Tint
 @onready var _viewport := ViewportGuard.attach(self)
@@ -38,6 +39,8 @@ var sun_azimuth := 140.0
 var waves := OceanHeightSampler.new()
 var storm := OceanStorm.new()
 var profiler := SimProfiler.new()
+var foam_window := OceanFoamWindow.new()
+var spray := OceanSpraySystem.new()
 
 var _menu_builder := OceanMenu.new()
 var _sim_time := 0.0
@@ -49,7 +52,7 @@ var _rng := RandomNumberGenerator.new()
 
 func _ready() -> void:
 	solver.config = config
-	solver.map_size = GameManager.get_setting("ocean_map_size", 256)
+	solver.map_size = config.map_size
 	waves.solver = solver
 
 	orbit_cam.target = Vector3(0, 2, 0)
@@ -74,12 +77,20 @@ func _ready() -> void:
 	storm.world_env = world_env
 	storm.overlay_layer = underwater_layer
 	storm.build(self)
+	add_child(foam_window)
+	foam_window.build(surface_mat, main_camera, rocks)
+	add_child(spray)
+	set_backend(solver.backend)
 
 	profiler.lines_provider = _profiler_lines
-	profiler.enabled_changed.connect(func(on: bool): solver.profiling = on)
+	profiler.enabled_changed.connect(func(on: bool):
+		solver.profiling = on
+		foam_window.set_profiling(on)
+	)
 	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
 
 	_setup_ui()
+	apply_preset(1)
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 
@@ -106,10 +117,16 @@ func _process(delta: float) -> void:
 	if cam != null:
 		var p := cam.global_position
 		ocean_mesh.global_position = Vector3(
-			snappedf(p.x, CELL0 * 2.0), 0.0, snappedf(p.z, CELL0 * 2.0)
+			snappedf(p.x, config.finest_cell_m * 2.0), 0.0,
+			snappedf(p.z, config.finest_cell_m * 2.0)
 		)
 		waves.poll(delta)
 		_update_underwater(p)
+		foam_window.update(delta, p)
+		surface_mat.set_shader_parameter("storm_mood", storm.current_mood())
+		surface_mat.set_shader_parameter("wind_direction", Vector2(
+			sin(solver.wind_direction), cos(solver.wind_direction)))
+		spray.update_state(p, storm.current_mood(), _sim_time)
 
 	RenderingServer.call_on_render_thread(solver.step_render.bind(delta * step_scale))
 	profiler.poll(delta)
@@ -125,6 +142,13 @@ func apply_preset(index: int) -> void:
 	# the unquantised values rather than whatever the sliders snapped to.
 	_menu_builder.sync_to_preset(preset)
 	preset.apply_to(solver)
+	surface_mat.set_shader_parameter("water_color", preset.deep_color)
+	surface_mat.set_shader_parameter("color_shallow", preset.subsurface_color)
+	surface_mat.set_shader_parameter("foam_color", preset.foam_color)
+	surface_mat.set_shader_parameter("roughness_base", preset.roughness)
+	surface_mat.set_shader_parameter("sun_path_width", preset.sun_glitter_size)
+	surface_mat.set_shader_parameter("sun_glitter_strength", preset.sun_glitter_intensity)
+	set_spray_amount(preset.spray_amount)
 	solver.mark_spectrum_dirty()
 
 
@@ -134,6 +158,18 @@ func set_time_scale(value: float) -> void:
 
 func set_frozen(on: bool) -> void:
 	_frozen = on
+
+
+func set_backend(value: int) -> void:
+	solver.set_backend(value)
+	var styled := value == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT
+	surface_mat.set_shader_parameter("style_mode", 1 if styled else 0)
+	foam_window.set_enabled(styled)
+	spray.set_enabled(styled)
+
+
+func set_spray_amount(value: float) -> void:
+	spray.amount = value
 
 
 func set_render_scale(value: float) -> void:
@@ -176,6 +212,7 @@ func throw_crate() -> void:
 		_rng.randf_range(-2.0, 2.0), _rng.randf_range(-2.0, 2.0), _rng.randf_range(-2.0, 2.0)
 	)
 	_crates.append(crate)
+	foam_window.track_body(crate)
 	if _crates.size() > MAX_CRATES:
 		_crates.pop_front().queue_free()
 
@@ -188,7 +225,8 @@ func clear_crates() -> void:
 
 
 func _setup_ocean_mesh() -> void:
-	ocean_mesh.mesh = OceanClipmap.build(CELL0, RING_LEVELS, SKIRT_RADIUS)
+	ocean_mesh.mesh = OceanClipmap.build(
+		config.finest_cell_m, config.clipmap_levels, SKIRT_RADIUS)
 	# GPU-displaced vertices invalidate the flat mesh AABB: cover the domain.
 	ocean_mesh.custom_aabb = AABB(
 		Vector3(-SKIRT_RADIUS, -60.0, -SKIRT_RADIUS),
@@ -202,6 +240,17 @@ func _setup_ocean_mesh() -> void:
 		scales.append(Vector4(inv, inv, 1.0, 1.0))
 	surface_mat.set_shader_parameter("map_scales", scales)
 	surface_mat.set_shader_parameter("num_cascades", solver.num_cascades())
+	surface_mat.set_shader_parameter("foam_pattern",
+		load("res://resources/ocean/foam_pattern.png"))
+	surface_mat.set_shader_parameter("foam_breakup",
+		load("res://resources/ocean/foam_breakup.png"))
+	surface_mat.set_shader_parameter("clipmap_cell", config.finest_cell_m)
+	surface_mat.set_shader_parameter("clipmap_half_extent",
+		config.finest_cell_m * OceanClipmap.GRID * 0.5)
+	surface_mat.set_shader_parameter("clipmap_ring_levels", float(config.clipmap_levels))
+	surface_mat.set_shader_parameter("sun_direction", sun.global_transform.basis.z.normalized())
+	surface_mat.set_shader_parameter("sun_disk_radius",
+		deg_to_rad(sun.light_angular_distance) * 0.5)
 	ocean_mesh.material_override = surface_mat
 
 
@@ -217,6 +266,8 @@ func _setup_ui() -> void:
 
 func _apply_sun() -> void:
 	sun.rotation_degrees = Vector3(-sun_elevation, sun_azimuth, 0.0)
+	if surface_mat != null:
+		surface_mat.set_shader_parameter("sun_direction", sun.global_transform.basis.z.normalized())
 
 
 func _bind_textures() -> void:
@@ -226,29 +277,38 @@ func _bind_textures() -> void:
 	norm_texture.texture_rd_rid = solver.get_normal_tex_rid()
 	surface_mat.set_shader_parameter("displacements", disp_texture)
 	surface_mat.set_shader_parameter("normals", norm_texture)
+	foam_window.bind_ocean(disp_texture, solver.tile_lengths)
+	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera)
 	texture_bound = true
 
 
 ## Dropping the RIDs before the solver frees them keeps the Texture2DArrayRD
 ## wrappers from pointing at dead GPU memory for a frame.
 func _release_textures() -> void:
+	foam_window.release_ocean()
 	if disp_texture != null:
 		disp_texture.texture_rd_rid = RID()
 	if norm_texture != null:
 		norm_texture.texture_rd_rid = RID()
+	spray.release_textures()
 	texture_bound = false
 
 
 ## Solver stage timings, under the overlay's frame line.
 func _profiler_lines() -> PackedStringArray:
 	var t := solver.get_timings()
-	var lines := PackedStringArray()
+	var backend_name := "Sea of Thieves-inspired FFT" \
+		if solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT else "JONSWAP/TMA"
+	var lines := PackedStringArray(["backend %s" % backend_name])
 	if t.has("total"):
 		lines.append("sim GPU %.2f ms" % t["total"])
 	if t.has("spectrum"):
 		lines.append("  spectrum %.2f | fft %.2f | assemble %.2f" % [
 			t.get("spectrum", 0.0), t.get("fft", 0.0), t.get("assemble", 0.0),
 		])
+	var foam_gpu := foam_window.get_gpu_time()
+	if foam_gpu > 0.0:
+		lines.append("foam GPU %.2f ms" % foam_gpu)
 	return lines
 
 

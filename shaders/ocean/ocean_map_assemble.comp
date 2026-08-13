@@ -37,10 +37,17 @@ void main() {
     float foam = imageLoad(normal_map, ivec3(id, cascade)).a;
     foam *= exp(-params.foam_p.z);
     foam = clamp(foam + folding * params.foam_p.y, 0.0, 1.0);
+    float compression = max(0.0, 1.0 - jacobian);
+    float crest = smoothstep(params.art_b.x,
+        params.art_b.x + 1.0 / max(params.art_a.w, 0.01), compression);
 
-    // Gradient corrected for horizontal compression of the choppy waves.
-    vec2 gradient = vec2(dhy_dx, dhy_dz) / (1.0 + abs(vec2(dhx_dx, dhz_dz)));
+    float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);
+    vec2 gradient = vec2(
+        ((1.0 + dhz_dz) * dhy_dx - dhz_dx * dhy_dz) / safe_jacobian,
+        ((1.0 + dhx_dx) * dhy_dz - dhz_dx * dhy_dx) / safe_jacobian
+    );
+    gradient = clamp(gradient, vec2(-4.0), vec2(4.0));
 
     imageStore(displacement_map, ivec3(id, cascade), vec4(hx, hy, hz, 0.0));
-    imageStore(normal_map, ivec3(id, cascade), vec4(gradient, dhx_dx, foam));
+    imageStore(normal_map, ivec3(id, cascade), vec4(gradient, crest, foam));
 }

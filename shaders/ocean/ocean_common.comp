@@ -26,8 +26,10 @@ layout(push_constant, std430) uniform Params {
     vec4 spectrum_b; // 16: wind_dir_rad, depth, swell, detail
     vec4 spectrum_c; // 32: spread, k_min, k_max, choppiness
     vec4 foam_p;     // 48: whitecap, grow_rate, decay_rate, time
-    ivec4 misc;      // 64: cascade_index, seed_x, seed_y, unused
-    vec4 gains;      // 80: height_gain, unused x3
+    ivec4 misc;      // 64: cascade_index, seed_x, seed_y, backend
+    vec4 gains;      // 80: height_gain, long height, long wavelength, wind height
+    vec4 art_a;      // 96: wind wavelength, ripple strength, crosswind, crest gain
+    vec4 art_b;      // 112: crest bias, unused x3
 } params;
 
 // Half 0: spectrum_evolve output / FFT input; half 1: FFT output. Parameter

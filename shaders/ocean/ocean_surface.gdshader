@@ -22,10 +22,26 @@ uniform float roughness_base : hint_range(0.0, 1.0) = 0.2;
 uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 uniform float foam_strength : hint_range(0.0, 3.0) = 1.0;
 uniform float sss_strength : hint_range(0.0, 3.0) = 1.0;
+uniform int style_mode = 0;
+uniform vec3 sun_direction = vec3(0.0, 1.0, 0.0);
+uniform vec2 wind_direction = vec2(0.0, 1.0);
+uniform float sun_disk_radius = 0.00436;
+uniform float sun_path_width = 0.009;
+uniform float sun_glitter_strength = 0.7;
+uniform float storm_mood = 0.15;
+uniform float clipmap_cell = 0.25;
+uniform float clipmap_half_extent = 8.0;
+uniform float clipmap_ring_levels = 8.0;
+uniform int debug_view = 0;
 uniform int num_cascades = 3;
 uniform vec4 map_scales[MAX_CASCADES]; // xy = uv scale (1/tile), z = displacement scale, w = normal scale
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
+uniform sampler2D foam_pattern : filter_linear_mipmap, repeat_enable, hint_default_white;
+uniform sampler2D foam_breakup : filter_linear_mipmap, repeat_enable, hint_default_white;
+uniform sampler2D interaction_foam : filter_linear, repeat_disable, hint_default_black;
+uniform vec2 interaction_center = vec2(0.0);
+uniform float interaction_size = 128.0;
 
 uniform sampler2D depth_texture : hint_depth_texture, filter_linear;
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
@@ -40,6 +56,8 @@ varying vec2 world_uv;
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
+varying float crest_factor;
+varying float glitter_factor;
 
 void vertex() {
 	// Geomorph (GPU Gems 2 ch. 2): the outer 30% of every clipmap level slides
@@ -47,14 +65,15 @@ void vertex() {
 	// boundary sample the displacement at identical world positions and cracks
 	// are zero by construction. Distance fades alone cannot do this: metre-tall
 	// gaps opened wherever storm swell met coarse cells, rendering as dark
-	// triangular fins. Constants mirror OceanClipmap (cell0 0.5, half-extent
-	// 16*2^k, 8 levels); level 7 never morphs - the skirt shares its lattice.
+	// triangular fins.
 	vec2 mesh_center = MODEL_MATRIX[3].xz;
 	vec2 p = VERTEX.xz - mesh_center;
 	float cheb = max(abs(p.x), abs(p.y));
-	float k = clamp(ceil(log2(max(cheb, 1.0) / 16.0) - 0.001), 0.0, 7.0);
-	float cell = 0.5 * exp2(k);
-	float morph = k < 6.5 ? smoothstep(0.7, 1.0, cheb / (16.0 * exp2(k))) : 0.0;
+	float k = clamp(ceil(log2(max(cheb, 1.0) / clipmap_half_extent) - 0.001),
+		0.0, clipmap_ring_levels);
+	float cell = clipmap_cell * exp2(k);
+	float morph = k < clipmap_ring_levels - 0.5
+		? smoothstep(0.7, 1.0, cheb / (clipmap_half_extent * exp2(k))) : 0.0;
 	vec2 grid = p / cell;
 	VERTEX.xz = mesh_center + mix(p, (grid - mod(grid, 2.0)) * cell, morph);
 
@@ -122,29 +141,42 @@ vec4 texture_bicubic(in sampler2DArray sampler, in vec3 uvw) {
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = length(VERTEX);
-
-	// gradient.xy = surface slope, gradient.z = accumulated Jacobian foam.
-	// Slopes fade per cascade like the vertex displacement: the swell cascade
-	// keeps texturing the sea (and the flat skirt) out to the horizon, the fine
-	// cascades die early so their sub-pixel detail never shimmers.
-	vec3 gradient = vec3(0.0);
+	vec2 gradient = vec2(0.0);
+	float peak_mask = 0.0;
+	float foam_history = 0.0;
 	for (int i = 0; i < num_cascades; i++) {
 		vec4 scales = map_scales[i];
 		vec3 coords = vec3(world_uv * scales.xy, float(i));
-		float ppm = map_size * min(scales.x, scales.y); // texels per meter
 		float tile = 1.0 / max(scales.x, 1e-6);
-		float n_fade = mix(0.015, normal_strength, exp(-dist * 0.4 / tile));
-		gradient += mix(texture_bicubic(normals, coords), texture(normals, coords),
-			min(1.0, ppm * 0.1)).xyw * vec3(scales.ww * n_fade, 1.0);
+		float cascade_fade = exp(-dist * 0.32 / tile);
+		float far_filter = smoothstep(tile * 0.8, tile * 2.8, dist);
+		vec4 normal_sample = mix(texture(normals, coords), texture_bicubic(normals, coords), far_filter);
+		gradient += normal_sample.xy * scales.w * normal_strength * max(cascade_fade, 0.025);
+		peak_mask = max(peak_mask, normal_sample.z * max(cascade_fade, 0.08));
+		foam_history += normal_sample.w;
 	}
+	crest_factor = clamp(peak_mask, 0.0, 1.0);
 
-	// Break the flat Jacobian foam patches with two octaves of animated value
-	// noise so whitecaps read as churned texture instead of white blobs.
+	vec2 wind = normalize(wind_direction);
+	vec2 across = vec2(-wind.y, wind.x);
+	vec2 foam_uv = vec2(dot(world_uv, across) * 0.018, dot(world_uv, wind) * 0.055);
+	float filament = texture(foam_pattern, foam_uv + vec2(TIME * 0.006, -TIME * 0.011)).r;
+	float breakup = texture(foam_breakup, world_uv * 0.19 - wind * TIME * 0.018).r;
 	float foam_noise = value_noise(world_uv * 1.7 + vec2(TIME * 0.35)) * 0.6
 		+ value_noise(world_uv * 6.3 - vec2(TIME * 0.5)) * 0.4;
-	float foam_amount_px = gradient.z * 0.75 * foam_strength;
-	foam_factor = smoothstep(0.15, 1.1, foam_amount_px * mix(0.7, 1.3, foam_noise))
-		* exp(-dist * 0.0015);
+	float foam_source = foam_history * 0.75 * foam_strength;
+	float ocean_foam = smoothstep(0.15, 1.1,
+		foam_source * mix(0.7, 1.3, foam_noise));
+	foam_factor = ocean_foam * exp(-dist * 0.0015);
+	if (style_mode == 1) {
+		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
+		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
+			* step(interaction_uv.x, 1.0) * step(interaction_uv.y, 1.0);
+		float interaction = texture(interaction_foam, interaction_uv).r * inside;
+		foam_factor = max(foam_factor, interaction * mix(0.65, 1.0, breakup));
+	}
+	glitter_factor = mix(0.16, 1.4, smoothstep(0.28, 0.82, breakup))
+		* mix(0.72, 1.18, filament);
 
 	vec3 world_normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
 	NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
@@ -160,14 +192,16 @@ void fragment() {
 	// the underside path, whose down-pointing normal kills the diffuse and the
 	// fresnel -> long black bands and black sawtooth at the horizon.
 	if (!camera_underwater) {
-		// Roughness-compensated Schlick fresnel (Atlas).
 		fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0 * exp(-2.69 * roughness_base))
 			/ (1.0 + 22.7 * pow(roughness_base, 1.5)), 1.0, REFLECTANCE);
-
-		// Guarded screen-space refraction + Beer absorption, only meaningful
-		// where geometry sits close beneath the surface (rocks). Open ocean
-		// stays opaque.
-		vec3 base_color = water_color.rgb;
+		vec3 sun_view = normalize((VIEW_MATRIX * vec4(sun_direction, 0.0)).xyz);
+		float view_angle = 1.0 - max(dot(VIEW, NORMAL), 0.0);
+		float backlight = pow(max(dot(VIEW, -sun_view), 0.0), 2.0);
+		float crest_scatter = crest_factor * (0.42 + 0.28 * view_angle + 0.55 * backlight);
+		float slope_scatter = clamp((1.0 - world_normal.y) * 0.72 + view_angle * 0.06,
+			0.0, 0.2);
+		float face_scatter = clamp(0.045 + slope_scatter + crest_scatter, 0.0, 1.0);
+		vec3 base_color = mix(water_color.rgb, color_shallow.rgb * 1.18, face_scatter);
 		if (scene_depth < 12.0) {
 			vec2 ref_uv = SCREEN_UV + NORMAL.xy * refraction_strength / max(dist * 0.2, 1.0);
 			ref_uv = clamp(ref_uv, vec2(0.001), vec2(0.999));
@@ -186,15 +220,32 @@ void fragment() {
 			base_color = mix(screen_color * dye, base_color, depth_blend);
 		}
 
-		// Contact foam where the water meets emerged geometry (rocks): a
-		// narrow churned band, noise-broken so it reads as wash, not ice.
 		float shore = 1.0 - smoothstep(0.0, 1.3, scene_depth);
-		float shore_foam = shore * shore * smoothstep(0.25, 0.9, foam_noise + shore * 0.35)
+		float shore_foam = shore * shore * smoothstep(0.18, 0.76, breakup + shore * 0.35)
 			* exp(-dist * 0.02);
 		foam_factor = max(foam_factor, min(shore_foam, 0.6));
 
 		ROUGHNESS = (1.0 - fresnel) * foam_factor + roughness_base;
 		ALBEDO = mix(base_color, foam_color.rgb, foam_factor);
+		EMISSION = color_shallow.rgb * crest_scatter * 0.08 * (1.0 - foam_factor);
+		if (debug_view == 1) {
+			ALBEDO = vec3(0.38);
+			EMISSION = vec3(0.0);
+			ROUGHNESS = 0.8;
+			foam_factor = 0.0;
+		} else if (debug_view == 2) {
+			ALBEDO = world_normal * 0.5 + 0.5;
+			EMISSION = ALBEDO * 0.4;
+			ROUGHNESS = 1.0;
+		} else if (debug_view == 3) {
+			ALBEDO = vec3(crest_factor);
+			EMISSION = ALBEDO;
+			ROUGHNESS = 1.0;
+		} else if (debug_view == 4) {
+			ALBEDO = vec3(foam_factor);
+			EMISSION = ALBEDO;
+			ROUGHNESS = 1.0;
+		}
 	} else {
 		// Viewer submerged: every fragment is the underside of the interface —
 		// refracted view of the air above, grazing angles falling into total
@@ -205,12 +256,20 @@ void fragment() {
 		ref_uv = clamp(ref_uv, vec2(0.001), vec2(0.999));
 		vec3 above = textureLod(screen_texture, ref_uv, 0.0).rgb;
 		float tir = 1.0 - smoothstep(0.35, 0.65, ndv);
+		if (style_mode == 1) {
+			float critical_cos = sqrt(1.0 - 1.0 / (1.333 * 1.333));
+			float snell_window = smoothstep(critical_cos - 0.035, critical_cos + 0.035, ndv);
+			above = mix(color_shallow.rgb * 0.18,
+				above * vec3(0.58, 0.82, 1.0), snell_window);
+			tir = 1.0 - snell_window;
+		}
 		foam_factor *= 0.8; // folded crests are breaking water: show the churn
 		fresnel = 0.0;      // no sun glints through the interface
 		ALBEDO = mix(mix(above * color_shallow.rgb * 1.5, color_shallow.rgb * 0.6, tir),
 			foam_color.rgb * 0.85, foam_factor);
 		ROUGHNESS = 0.2;
 		SPECULAR = 0.1;
+		EMISSION = vec3(0.0);
 	}
 }
 
@@ -227,7 +286,16 @@ float ggx_distribution(float cos_theta, float alpha) {
 }
 
 void light() {
-	vec3 halfway = normalize(LIGHT + VIEW);
+	vec3 area_light = LIGHT;
+	if (style_mode == 1) {
+		vec3 reflection_ray = reflect(-VIEW, NORMAL);
+		vec3 center_to_ray = dot(LIGHT, reflection_ray) * reflection_ray - LIGHT;
+		float center_distance = length(center_to_ray);
+		float area_radius = sun_disk_radius + sun_path_width;
+		area_light = normalize(LIGHT + center_to_ray
+			* clamp(sin(area_radius) / max(center_distance, 1e-5), 0.0, 1.0));
+	}
+	vec3 halfway = normalize(area_light + VIEW);
 	float dot_nl = max(dot(NORMAL, LIGHT), 2e-5);
 	float dot_nv = max(dot(NORMAL, VIEW), 2e-5);
 
@@ -236,14 +304,12 @@ void light() {
 	float d_ggx = ggx_distribution(max(dot(NORMAL, halfway), 0.0), roughness_base);
 	float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
 	SPECULAR_LIGHT += fresnel * d_ggx * geometric_attenuation / (4.0 * dot_nv + 0.1)
-		* ATTENUATION * LIGHT_COLOR / PI;
+		* ATTENUATION * LIGHT_COLOR / PI * glitter_factor * sun_glitter_strength;
 
-	// Subsurface scattering through wave flanks reads greener than the body.
 	const vec3 sss_modifier = vec3(0.9, 1.15, 0.85);
-	float sss_height = sss_strength * max(0.0, wave_height + 2.5)
-		* pow(max(dot(LIGHT, -VIEW), 0.0), 4.0) * pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 3.0);
-	float sss_near = 0.5 * pow(dot_nv, 2.0);
-	float lambertian = 0.5 * dot_nl;
-	DIFFUSE_LIGHT += mix((sss_height + sss_near) * sss_modifier / (1.0 + light_mask) + vec3(lambertian),
+	float sss_height = sss_strength * crest_factor * pow(max(dot(LIGHT, -VIEW), 0.0), 3.0)
+		* pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 2.0);
+	float lambertian = 0.42 * dot_nl;
+	DIFFUSE_LIGHT += mix(sss_height * sss_modifier / (1.0 + light_mask) + vec3(lambertian),
 		foam_color.rgb, foam_factor) * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR / PI;
 }

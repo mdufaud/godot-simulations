@@ -16,7 +16,10 @@ void main() {
     vec2 k_unit = k_vec / k;
 
     vec4 h0 = imageLoad(spectrum_tex, ivec3(id, cascade)); // xy=h0(k), zw=conj(h0(-k))
-    vec2 modulation = exp_complex(dispersion_relation(k, params.spectrum_b.y) * t);
+    const float loop_period = 200.0;
+    float omega_step = 2.0 * PI / loop_period;
+    float omega = round(dispersion_relation(k, params.spectrum_b.y) / omega_step) * omega_step;
+    vec2 modulation = exp_complex(omega * mod(t, loop_period));
     // h respects the complex conjugation property.
     vec2 h = mul_complex(h0.xy, modulation) + mul_complex(h0.zw, conj_complex(modulation));
     vec2 h_inv = vec2(-h.y, h.x);

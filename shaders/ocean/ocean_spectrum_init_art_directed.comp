@@ -1,0 +1,55 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+float log_band(float k, float wavelength, float width) {
+    float k_peak = 2.0 * PI / max(wavelength, 0.05);
+    float x = log(max(k / k_peak, 1e-6)) / width;
+    return exp(-0.5 * x * x);
+}
+
+float directional_lobe(vec2 k_dir, vec2 direction, float focus, float crosswind) {
+    float forward = max(dot(k_dir, direction), 0.0);
+    float backward = max(dot(k_dir, -direction), 0.0);
+    vec2 side = vec2(-direction.y, direction.x);
+    float lateral = pow(abs(dot(k_dir, side)), focus * 0.65);
+    return pow(forward, focus) + pow(backward, focus) * 0.035 + lateral * crosswind;
+}
+
+vec2 spectrum_amplitude(ivec2 id) {
+    float dk = 2.0 * PI / params.spectrum_a.x;
+    vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * dk;
+    float k = length(k_vec);
+    if (k < max(params.spectrum_c.y, 1e-5) || k >= params.spectrum_c.z) {
+        return vec2(0.0);
+    }
+
+    vec2 k_dir = k_vec / k;
+    vec2 wind_dir = vec2(sin(params.spectrum_b.x), cos(params.spectrum_b.x));
+    float crosswind = clamp(params.art_a.z, 0.0, 0.65);
+    float long_dir = directional_lobe(k_dir, wind_dir, 10.0, crosswind * 0.35);
+    float wind_dir_energy = directional_lobe(k_dir, wind_dir, 5.0, crosswind);
+    float ripple_dir = directional_lobe(k_dir, wind_dir, 2.6, crosswind * 1.6);
+
+    float long_band = log_band(k, params.gains.z, 0.44);
+    float wind_band = log_band(k, params.art_a.x, 0.38);
+    float ripple_band = log_band(k, 0.72, 0.58);
+    float long_energy = params.gains.y * params.gains.y * long_band * long_dir * 1.15;
+    float wind_energy = params.gains.w * params.gains.w * wind_band * wind_dir_energy * 550.0;
+    float ripple_energy = params.art_a.y * params.art_a.y * ripple_band * ripple_dir * 12000.0;
+
+    float largest_wave = params.gains.z * 0.45;
+    float small_damping = 0.10;
+    float phillips = exp(-1.0 / max(k * k * largest_wave * largest_wave, 1e-8))
+        * exp(-k * k * small_damping * small_damping) / max(k * k * k * k, 1e-8);
+    float spectrum = 2.2e-8 * phillips * (long_energy + wind_energy + ripple_energy);
+
+    vec2 u = hash2(uvec2(id + ivec2(params.misc.y, params.misc.z)));
+    float gain = 1.0 + (params.gains.x - 1.0) * exp(-k * 9.549);
+    return gaussian_pair(u) * sqrt(max(spectrum, 0.0) * 0.5) * gain;
+}
+
+void main() {
+    ivec2 id0 = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 id1 = (ivec2(MAP_SIZE_I) - id0) % ivec2(MAP_SIZE_I);
+    imageStore(spectrum_tex, ivec3(id0, params.misc.x),
+        vec4(spectrum_amplitude(id0), conj_complex(spectrum_amplitude(id1))));
+}

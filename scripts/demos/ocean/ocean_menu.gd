@@ -16,14 +16,27 @@ var profiler: SimProfiler
 var host: Node
 
 var _preset_option: OptionButton
+var _spectral_group: VBoxContainer
+var _art_group: VBoxContainer
 var _wind_speed: HSlider
 var _fetch: HSlider
 var _swell: HSlider
 var _spread: HSlider
 var _choppiness: HSlider
 var _height_gain: HSlider
+var _long_height: HSlider
+var _long_length: HSlider
+var _wind_height: HSlider
+var _wind_length: HSlider
+var _ripple_strength: HSlider
+var _crosswind_ratio: HSlider
+var _crest_bias: HSlider
+var _crest_gain: HSlider
 var _whitecap: HSlider
 var _foam_amount: HSlider
+var _foam_persistence: HSlider
+var _spray_amount: HSlider
+var _sun_glitter_intensity: HSlider
 var _mood: HSlider
 var _updating := false
 
@@ -36,11 +49,14 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 		names.append(typed.display_name)
 
 	menu.add_section("Sea state")
+	menu.add_option_button("Backend", ["JONSWAP / TMA", "Sea of Thieves-inspired FFT"],
+		solver.backend, _backend_selected)
 	_preset_option = menu.add_option_button("Preset", names, 1, host.apply_preset)
-	_wind_speed = _spectrum_slider(menu, "Wind speed (m/s)", 0.5, 35.0, solver.wind_speed,
-		func(v: float): solver.wind_speed = v)
 	_spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
 		func(v: float): solver.wind_direction = v)
+	_spectral_group = menu.add_group()
+	_wind_speed = _spectrum_slider(menu, "Wind speed (m/s)", 0.5, 35.0, solver.wind_speed,
+		func(v: float): solver.wind_speed = v)
 	_fetch = _spectrum_slider(menu, "Fetch (km)", 5.0, 1000.0, solver.fetch_km,
 		func(v: float): solver.fetch_km = v)
 	_swell = _spectrum_slider(menu, "Swell", 0.0, 2.0, solver.swell,
@@ -49,6 +65,22 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 		func(v: float): solver.spread = v)
 	_spectrum_slider(menu, "Detail", 0.5, 1.0, solver.detail,
 		func(v: float): solver.detail = v)
+	menu.end_group()
+	_art_group = menu.add_group()
+	_long_height = _spectrum_slider(menu, "Long wave height (m)", 0.0, 10.0,
+		solver.long_wave_height_m, func(v: float): solver.long_wave_height_m = v)
+	_long_length = _spectrum_slider(menu, "Long wavelength (m)", 5.0, 200.0,
+		solver.long_wave_length_m, func(v: float): solver.long_wave_length_m = v)
+	_wind_height = _spectrum_slider(menu, "Wind wave height (m)", 0.0, 5.0,
+		solver.wind_wave_height_m, func(v: float): solver.wind_wave_height_m = v)
+	_wind_length = _spectrum_slider(menu, "Wind wavelength (m)", 1.0, 30.0,
+		solver.wind_wave_length_m, func(v: float): solver.wind_wave_length_m = v)
+	_ripple_strength = _spectrum_slider(menu, "Ripple strength", 0.0, 3.0,
+		solver.ripple_strength, func(v: float): solver.ripple_strength = v)
+	_crosswind_ratio = _spectrum_slider(menu, "Crosswind energy", 0.0, 0.65,
+		solver.crosswind_ratio, func(v: float): solver.crosswind_ratio = v)
+	menu.end_group()
+	_update_backend_visibility()
 	menu.add_separator()
 
 	menu.add_section("Waves")
@@ -56,6 +88,10 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 		func(v: float): solver.choppiness = v)
 	_height_gain = _spectrum_slider(menu, "Wave height", 0.0, 5.0, solver.height_gain,
 		func(v: float): solver.height_gain = v)
+	_crest_bias = menu.add_slider("Crest threshold", 0.0, 0.8, solver.crest_bias,
+		func(v: float): solver.crest_bias = v)
+	_crest_gain = menu.add_slider("Crest gain", 0.1, 8.0, solver.crest_gain,
+		func(v: float): solver.crest_gain = v)
 	menu.add_slider("Time scale", 0.0, 2.0, time_scale, host.set_time_scale)
 	menu.add_separator()
 
@@ -69,8 +105,13 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 		func(v: float): solver.whitecap = v)
 	_foam_amount = menu.add_slider("Foam amount", 0.0, 10.0, solver.foam_amount,
 		func(v: float): solver.foam_amount = v)
+	_foam_persistence = menu.add_slider("Foam persistence", 0.1, 15.0,
+		solver.foam_persistence, func(v: float): solver.foam_persistence = v)
+	_spray_amount = menu.add_slider("Spray amount", 0.0, 2.0, 0.1, host.set_spray_amount)
 	menu.add_slider("Foam strength", 0.0, 3.0, 1.0,
 		func(v: float): surface_mat.set_shader_parameter("foam_strength", v))
+	_sun_glitter_intensity = menu.add_slider("Sun glitter intensity", 0.0, 2.0, 0.7,
+		func(v: float): surface_mat.set_shader_parameter("sun_glitter_strength", v))
 	menu.add_separator()
 
 	menu.add_section("Environment")
@@ -104,8 +145,19 @@ func sync_to_preset(preset: OceanPreset) -> void:
 	_spread.value = preset.spread
 	_choppiness.value = preset.choppiness
 	_height_gain.value = preset.height_gain
+	_long_height.value = preset.long_wave_height_m
+	_long_length.value = preset.long_wave_length_m
+	_wind_height.value = preset.wind_wave_height_m
+	_wind_length.value = preset.wind_wave_length_m
+	_ripple_strength.value = preset.ripple_strength
+	_crosswind_ratio.value = preset.crosswind_ratio
+	_crest_bias.value = preset.crest_bias
+	_crest_gain.value = preset.crest_gain
 	_whitecap.value = preset.whitecap
 	_foam_amount.value = preset.foam_amount
+	_foam_persistence.value = preset.foam_persistence
+	_spray_amount.value = preset.spray_amount
+	_sun_glitter_intensity.value = preset.sun_glitter_intensity
 	_mood.value = preset.storm_mood
 	_updating = false
 
@@ -117,6 +169,18 @@ func cycle_preset() -> void:
 	var next := (_preset_option.selected + 1) % _preset_option.item_count
 	_preset_option.select(next)
 	_preset_option.item_selected.emit(next)
+
+
+func _backend_selected(index: int) -> void:
+	host.set_backend(index)
+	_update_backend_visibility()
+
+
+func _update_backend_visibility() -> void:
+	if _spectral_group != null:
+		_spectral_group.visible = solver.backend == OceanSolver.Backend.JONSWAP_TMA
+	if _art_group != null:
+		_art_group.visible = solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT
 
 
 ## Spectrum-shaping sliders flip the dirty flag: regeneration is one cheap

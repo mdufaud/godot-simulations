@@ -79,11 +79,11 @@ func build(host: Node3D) -> void:
 func update(delta: float, camera: Camera3D) -> void:
 	_mood = move_toward(_mood, mood_target, delta * 0.25)
 	_cloud_mat.set_shader_parameter("cover", _mood)
-	sun.light_energy = lerpf(1.6, 0.45, _mood)
+	sun.light_energy = lerpf(1.9, 0.52, _mood)
 	sun.light_color = Color(1, 0.98, 0.95).lerp(Color(0.72, 0.78, 0.9), _mood)
 	# Darken the sky itself (it drives ambient + reflections): black-storm feel.
 	var sky_mat: PhysicalSkyMaterial = world_env.environment.sky.sky_material
-	sky_mat.energy_multiplier = lerpf(1.0, 0.35, _mood)
+	sky_mat.energy_multiplier = lerpf(1.45, 0.45, _mood)
 	# Storm light is an overcast dome, not a dimmed clear sky. Wave faces point
 	# at the viewer (measured NdotV ~0.5), so they show albedo, not reflection:
 	# with only the dimmed PhysicalSky left the sea goes black under a cloud
@@ -91,7 +91,7 @@ func update(delta: float, camera: Camera3D) -> void:
 	# keeps it readable. sky_contribution 1.0 ignores ambient_light_color, so
 	# this is a no-op at mood 0.
 	world_env.environment.ambient_light_sky_contribution = lerpf(1.0, 0.2, _mood)
-	world_env.environment.tonemap_exposure = lerpf(1.2, 1.05, _mood)
+	world_env.environment.tonemap_exposure = lerpf(1.3, 1.08, _mood)
 	surface_fog_density = lerpf(0.0004, 0.0006, _mood)
 	# Storm murk must approach the SEA tone (~0.06 lum), not a sky grey: fog on
 	# the sea at 1-2 km blends 50%+, and anything brighter than the water reads
@@ -117,6 +117,10 @@ func update(delta: float, camera: Camera3D) -> void:
 	_cloud_mat.set_shader_parameter("flash_pos", _pos)
 	_flash_rect.color.a = _energy * _energy * 0.3
 	_bolt.visible = _energy > 0.55
+
+
+func current_mood() -> float:
+	return _mood
 
 
 func _trigger(camera: Camera3D) -> void:

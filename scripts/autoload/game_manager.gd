@@ -16,7 +16,7 @@ var settings: Dictionary = {
 	"sand_grid_n": 512,
 
 	# Ocean demo
-	"ocean_map_size": 256,
+	"ocean_map_size": 512,
 
 	# SSR demo
 	"ssr_demo_max_objects": 60,
