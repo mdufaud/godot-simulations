@@ -1,7 +1,6 @@
 extends Node3D
 ## FFT ocean demo. OceanSolver keeps the whole Tessendorf pipeline on the GPU;
-## this controller owns the clipmap mesh that follows the camera (snapped to
-## the finest cell so the sampling lattice never swims), bridges the compute
+## this controller owns the clipmap mesh that follows the camera, bridges the compute
 ## textures into the surface material and wires the rest together.
 
 const SKIRT_RADIUS := 9000.0
@@ -112,20 +111,19 @@ func _process(delta: float) -> void:
 	var cam := get_viewport().get_camera_3d()
 	storm.update(delta, cam)
 
-	# World-space UVs anchor the wave field to the world; snapping only keeps
-	# the near-field sampling lattice aligned (no vertex swimming).
+	# World-space UVs anchor the wave field to the world. Continuous recentering
+	# avoids a whole clipmap lattice changing triangles on the same frame.
 	if cam != null:
 		var p := cam.global_position
-		ocean_mesh.global_position = Vector3(
-			snappedf(p.x, config.finest_cell_m * 2.0), 0.0,
-			snappedf(p.z, config.finest_cell_m * 2.0)
-		)
+		ocean_mesh.global_position = Vector3(p.x, 0.0, p.z)
 		waves.poll(delta)
 		_update_underwater(p)
 		foam_window.update(delta, p)
 		surface_mat.set_shader_parameter("storm_mood", storm.current_mood())
 		surface_mat.set_shader_parameter("wind_direction", Vector2(
 			sin(solver.wind_direction), cos(solver.wind_direction)))
+		surface_mat.set_shader_parameter("cascade_wavelengths", Vector3(
+			solver.long_wave_length_m, solver.wind_wave_length_m, 0.72))
 		spray.update_state(p, storm.current_mood(), _sim_time)
 
 	RenderingServer.call_on_render_thread(solver.step_render.bind(delta * step_scale))
@@ -248,6 +246,8 @@ func _setup_ocean_mesh() -> void:
 	surface_mat.set_shader_parameter("clipmap_half_extent",
 		config.finest_cell_m * OceanClipmap.GRID * 0.5)
 	surface_mat.set_shader_parameter("clipmap_ring_levels", float(config.clipmap_levels))
+	surface_mat.set_shader_parameter("cascade_wavelengths", Vector3(
+		solver.long_wave_length_m, solver.wind_wave_length_m, 0.72))
 	surface_mat.set_shader_parameter("sun_direction", sun.global_transform.basis.z.normalized())
 	surface_mat.set_shader_parameter("sun_disk_radius",
 		deg_to_rad(sun.light_angular_distance) * 0.5)

@@ -32,6 +32,7 @@ uniform float storm_mood = 0.15;
 uniform float clipmap_cell = 0.25;
 uniform float clipmap_half_extent = 8.0;
 uniform float clipmap_ring_levels = 8.0;
+uniform vec3 cascade_wavelengths = vec3(48.0, 7.5, 0.72);
 uniform int debug_view = 0;
 uniform int num_cascades = 3;
 uniform vec4 map_scales[MAX_CASCADES]; // xy = uv scale (1/tile), z = displacement scale, w = normal scale
@@ -58,6 +59,12 @@ varying float foam_factor;
 varying float fresnel;
 varying float crest_factor;
 varying float glitter_factor;
+varying float filtered_roughness;
+
+float cascade_wavelength(int index) {
+	return index == 0 ? cascade_wavelengths.x
+		: (index == 1 ? cascade_wavelengths.y : cascade_wavelengths.z);
+}
 
 void vertex() {
 	// Geomorph (GPU Gems 2 ch. 2): the outer 30% of every clipmap level slides
@@ -88,8 +95,11 @@ void vertex() {
 		vec4 scales = map_scales[i];
 		float tile = 1.0 / max(scales.x, 1e-6);
 		float fade = min(exp(-(dist - max(tile * 0.7, 60.0)) * 2.5 / max(tile, 80.0)), 1.0);
+		float wavelength = cascade_wavelength(i);
+		float geometry_filter = 1.0 - smoothstep(wavelength * 0.22,
+			wavelength * 0.48, cell);
 		displacement += textureLod(displacements, vec3(world_uv * scales.xy, float(i)), 0.0).xyz
-			* scales.z * fade;
+			* scales.z * fade * geometry_filter;
 	}
 	VERTEX += displacement;
 	wave_height = displacement.y;
@@ -138,22 +148,44 @@ vec4 texture_bicubic(in sampler2DArray sampler, in vec3 uvw) {
 		mix(texture(sampler, vec3(h.yz, uvw.z)), texture(sampler, vec3(h.xz, uvw.z)), w.x), w.y);
 }
 
+vec4 texture_pixel_filtered(in sampler2DArray sampler, in vec3 uvw,
+		in vec2 uv_dx, in vec2 uv_dy) {
+	vec2 x = uv_dx * 0.35;
+	vec2 y = uv_dy * 0.35;
+	return (texture(sampler, vec3(uvw.xy + x + y, uvw.z))
+		+ texture(sampler, vec3(uvw.xy + x - y, uvw.z))
+		+ texture(sampler, vec3(uvw.xy - x + y, uvw.z))
+		+ texture(sampler, vec3(uvw.xy - x - y, uvw.z))) * 0.25;
+}
+
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = length(VERTEX);
 	vec2 gradient = vec2(0.0);
 	float peak_mask = 0.0;
 	float foam_history = 0.0;
+	vec2 world_dx = dFdx(world_uv);
+	vec2 world_dy = dFdy(world_uv);
+	float pixel_footprint = max(length(world_dx), length(world_dy));
 	for (int i = 0; i < num_cascades; i++) {
 		vec4 scales = map_scales[i];
 		vec3 coords = vec3(world_uv * scales.xy, float(i));
 		float tile = 1.0 / max(scales.x, 1e-6);
 		float cascade_fade = exp(-dist * 0.32 / tile);
-		float far_filter = smoothstep(tile * 0.8, tile * 2.8, dist);
-		vec4 normal_sample = mix(texture(normals, coords), texture_bicubic(normals, coords), far_filter);
-		gradient += normal_sample.xy * scales.w * normal_strength * max(cascade_fade, 0.025);
-		peak_mask = max(peak_mask, normal_sample.z * max(cascade_fade, 0.08));
-		foam_history += normal_sample.w;
+		float texel_size = tile / map_size;
+		float minification = smoothstep(texel_size, texel_size * 4.0, pixel_footprint);
+		vec4 magnified = texture_bicubic(normals, coords);
+		vec4 minified = texture_pixel_filtered(normals, coords,
+			world_dx * scales.xy, world_dy * scales.xy);
+		vec4 normal_sample = mix(magnified, minified, minification);
+		float wavelength = cascade_wavelength(i);
+		float detail_filter = 1.0 - smoothstep(wavelength * 0.22,
+			wavelength * 0.55, pixel_footprint);
+		gradient += normal_sample.xy * scales.w * normal_strength
+			* max(cascade_fade, 0.025) * detail_filter;
+		peak_mask = max(peak_mask, normal_sample.z * max(cascade_fade, 0.08)
+			* detail_filter);
+		foam_history += normal_sample.w * detail_filter;
 	}
 	crest_factor = clamp(peak_mask, 0.0, 1.0);
 
@@ -179,6 +211,12 @@ void fragment() {
 		* mix(0.72, 1.18, filament);
 
 	vec3 world_normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
+	vec3 normal_dx = dFdx(world_normal);
+	vec3 normal_dy = dFdy(world_normal);
+	float normal_variance = min(0.5 * (dot(normal_dx, normal_dx)
+		+ dot(normal_dy, normal_dy)), 1.0);
+	filtered_roughness = clamp(sqrt(roughness_base * roughness_base
+		+ normal_variance * 0.18), roughness_base, 0.65);
 	NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
 
 	float depth_raw = texture(depth_texture, SCREEN_UV).r;
@@ -192,8 +230,9 @@ void fragment() {
 	// the underside path, whose down-pointing normal kills the diffuse and the
 	// fresnel -> long black bands and black sawtooth at the horizon.
 	if (!camera_underwater) {
-		fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0 * exp(-2.69 * roughness_base))
-			/ (1.0 + 22.7 * pow(roughness_base, 1.5)), 1.0, REFLECTANCE);
+		fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0),
+			5.0 * exp(-2.69 * filtered_roughness))
+			/ (1.0 + 22.7 * pow(filtered_roughness, 1.5)), 1.0, REFLECTANCE);
 		vec3 sun_view = normalize((VIEW_MATRIX * vec4(sun_direction, 0.0)).xyz);
 		float view_angle = 1.0 - max(dot(VIEW, NORMAL), 0.0);
 		float backlight = pow(max(dot(VIEW, -sun_view), 0.0), 2.0);
@@ -225,7 +264,7 @@ void fragment() {
 			* exp(-dist * 0.02);
 		foam_factor = max(foam_factor, min(shore_foam, 0.6));
 
-		ROUGHNESS = (1.0 - fresnel) * foam_factor + roughness_base;
+		ROUGHNESS = min((1.0 - fresnel) * foam_factor + filtered_roughness, 1.0);
 		ALBEDO = mix(base_color, foam_color.rgb, foam_factor);
 		EMISSION = color_shallow.rgb * crest_scatter * 0.08 * (1.0 - foam_factor);
 		if (debug_view == 1) {
@@ -299,9 +338,9 @@ void light() {
 	float dot_nl = max(dot(NORMAL, LIGHT), 2e-5);
 	float dot_nv = max(dot(NORMAL, VIEW), 2e-5);
 
-	float light_mask = smith_masking_shadowing(dot_nl, roughness_base);
-	float view_mask = smith_masking_shadowing(dot_nv, roughness_base);
-	float d_ggx = ggx_distribution(max(dot(NORMAL, halfway), 0.0), roughness_base);
+	float light_mask = smith_masking_shadowing(dot_nl, filtered_roughness);
+	float view_mask = smith_masking_shadowing(dot_nv, filtered_roughness);
+	float d_ggx = ggx_distribution(max(dot(NORMAL, halfway), 0.0), filtered_roughness);
 	float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
 	SPECULAR_LIGHT += fresnel * d_ggx * geometric_attenuation / (4.0 * dot_nv + 0.1)
 		* ATTENUATION * LIGHT_COLOR / PI * glitter_factor * sun_glitter_strength;
