@@ -40,11 +40,15 @@ var _whitecap: HSlider
 var _foam_amount: HSlider
 var _foam_persistence: HSlider
 var _spray_amount: HSlider
+var _foam_strength: HSlider
 var _sun_glitter_intensity: HSlider
 var _mood: HSlider
 var _sun_elevation: HSlider
 var _sun_azimuth: HSlider
 var _updating := false
+## Set once the user moves "Foam strength": presets stop overwriting it from
+## then on (docs/ocean_foam_injection_fix.md §5.3).
+var _foam_strength_override := false
 
 
 func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, sun_azimuth: float,
@@ -120,8 +124,10 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	_foam_persistence = menu.add_slider("Foam persistence", 0.1, 15.0,
 		solver.foam_persistence, func(v: float): solver.foam_persistence = v)
 	_spray_amount = menu.add_slider("Spray amount", 0.0, 2.0, 0.1, host.set_spray_amount)
-	menu.add_slider("Foam strength", 0.0, 3.0, 1.0,
-		func(v: float): surface_mat.set_shader_parameter("foam_strength", v))
+	_foam_strength = menu.add_slider("Foam strength", 0.0, 3.0, 1.0,
+		func(v: float):
+			_foam_strength_override = true
+			surface_mat.set_shader_parameter("foam_strength", v))
 	menu.add_separator()
 
 	menu.add_section("Environment")
@@ -188,6 +194,16 @@ func sync_to_look(look: OceanLookPreset) -> void:
 	_sun_elevation.set_value_no_signal(look.sun_elevation)
 	_sun_azimuth.set_value_no_signal(look.sun_azimuth)
 	_sun_glitter_intensity.set_value_no_signal(look.sun_glitter_strength)
+
+
+## Push the preset-derived foam strength to the slider and report whether the
+## host should apply it. Once the user has touched "Foam strength" the slider is
+## an override: the value keeps running but presets no longer rewrite it.
+func sync_foam_strength(value: float) -> bool:
+	if _foam_strength == null or _foam_strength_override:
+		return false
+	_foam_strength.set_value_no_signal(value)
+	return true
 
 
 ## Emitting item_selected keeps the panel dropdown and the persisted value in sync.

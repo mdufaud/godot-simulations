@@ -192,8 +192,11 @@ func apply_preset(index: int) -> void:
 func _sync_foam_material_strength() -> void:
 	if surface_mat == null:
 		return
-	surface_mat.set_shader_parameter("foam_strength",
-		clampf(0.2 + solver.foam_amount * 0.24, 0.2, 2.0))
+	# The panel slider owns "foam_strength" once the user touches it; until then
+	# presets drive the derived value (docs/ocean_foam_injection_fix.md §5.3).
+	var derived := clampf(0.2 + solver.foam_amount * 0.24, 0.2, 2.0)
+	if _menu_builder.sync_foam_strength(derived):
+		surface_mat.set_shader_parameter("foam_strength", derived)
 
 
 func apply_look(index: int) -> void:

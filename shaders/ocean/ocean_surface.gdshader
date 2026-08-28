@@ -326,15 +326,28 @@ void fragment() {
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
 		* micro_distance_fade * micro_pixel_fade * style_micro_strength * micro_corridor;
 	gradient += wind * micro_slope.x + across * micro_slope.y;
+	vec2 wave_gradient = gradient;
 	float persistent_foam = clamp(foam_history * foam_strength * 6.0, 0.0, 1.0);
 	float fresh_foam = clamp(foam_fresh * foam_strength * 3.0, 0.0, 1.0);
 	float foam_coverage = max(persistent_foam, fresh_foam);
+	// Canon SoT: the carve is layered and domain-warped, not one static tile —
+	// two octaves at mismatched scales/speeds plus a slow warp give scalloped
+	// edges and detached flecks instead of smooth blobs.
+	vec2 foam_warp = (vec2(
+		texture(foam_breakup, wind_uv * 0.011 + vec2(TIME * 0.008, -TIME * 0.003)).r,
+		texture(foam_breakup, wind_uv * 0.017 + vec2(-TIME * 0.006, TIME * 0.004)).r)
+		- 0.5) * 0.18;
 	vec2 foam_detail_uv = (wind_uv - vec2(TIME * 0.25, TIME * 0.06))
-		* vec2(1.0 / 120.0, 1.0 / 72.0);
+		* vec2(1.0 / 120.0, 1.0 / 72.0) + foam_warp;
 	vec2 foam_detail_dx = dFdx(foam_detail_uv);
 	vec2 foam_detail_dy = dFdy(foam_detail_uv);
-	float foam_detail = textureGrad(foam_breakup, foam_detail_uv,
+	float foam_detail_a = textureGrad(foam_breakup, foam_detail_uv,
 		foam_detail_dx, foam_detail_dy).r;
+	vec2 foam_detail_uv2 = (wind_uv - vec2(TIME * 0.12, TIME * 0.035))
+		* vec2(1.0 / 43.0, 1.0 / 29.0) + foam_warp;
+	float foam_detail_b = textureGrad(foam_breakup, foam_detail_uv2,
+		dFdx(foam_detail_uv2), dFdy(foam_detail_uv2)).r;
+	float foam_detail = mix(foam_detail_a, foam_detail_b, 0.45);
 	foam_factor = smoothstep(1.0 - foam_coverage,
 		1.12 - foam_coverage, foam_detail) * exp(-dist * 0.0012);
 	float foam_detail_x = textureGrad(foam_breakup,
@@ -358,6 +371,11 @@ void fragment() {
 			}
 		}
 	}
+	// Canon SoT/Crest: foam replaces the wave normal toward up — a whitecap is
+	// aerated churn, not tilted water. The breakup relief added above survives;
+	// only the wave gradient fades under the foam.
+	gradient = mix(wave_gradient, gradient,
+		1.0 - clamp(foam_factor * 0.75, 0.0, 0.8));
 	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
 	// decoupling specularity from detail keeps the sun path bright without
 	// dragging micro normals back behind a corridor gate.
@@ -424,12 +442,13 @@ void fragment() {
 			: crest_factor * (0.42 + 0.28 * view_angle + 0.55 * backlight);
 		float weather_mix = style_mode == 1
 			? smoothstep(0.25, 0.9, storm_mood) : 0.0;
-		vec3 deep_water = style_mode == 1
-			? mix(vec3(0.105, 0.27, 0.26), vec3(0.075, 0.19, 0.19),
-				weather_mix * 0.35) : water_color.rgb;
-		vec3 shallow_water = style_mode == 1
-			? mix(vec3(0.24, 0.46, 0.38), vec3(0.19, 0.34, 0.30),
-				weather_mix * 0.25) : color_shallow.rgb;
+		// Fix 3: the look drives the water body in the stylized path too — the
+		// hardcoded teals ignored deep/shallow colors and made golden_hour's
+		// turquoise unfixable from its .tres. weather_mix only darkens for
+		// storm (it is already 0 outside style_mode 1).
+		vec3 deep_water = mix(water_color.rgb, water_color.rgb * 0.72, weather_mix);
+		vec3 shallow_water = mix(color_shallow.rgb, color_shallow.rgb * 0.72,
+			weather_mix);
 		float flank_strength = style_mode == 1 ? 0.50 : 0.36;
 		float flank_mix = clamp(0.025 + flank_band * flank_strength,
 			0.025, 0.60);
@@ -506,9 +525,13 @@ void fragment() {
 			clamp(foam_factor * 1.05, 0.0, 1.0));
 		// P1-A'.1 (loi L4): storm foam is GREY (reference luma ~0.40), golden
 		// hour foam is warm — the environment drives the tint, mood ramps it.
+		// Canon SoT: the grey also ramps per pixel with the trail's accumulated
+		// age (persistent minus fresh), so old trails read greyer than fresh
+		// patches in every weather, not only under storm_mood.
 		vec3 ambient_gray = mix(foam_color.rgb, sky_zenith, 0.52);
+		float trail_age = clamp(persistent_foam * 1.25 - fresh_foam, 0.0, 1.0);
 		vec3 persistent_tint = mix(foam_color.rgb * 0.68, ambient_gray * 0.88,
-			smoothstep(0.25, 0.9, storm_mood));
+			max(smoothstep(0.25, 0.9, storm_mood), trail_age * 0.7));
 		vec3 fresh_tint = foam_color.rgb * 1.12;
 		vec3 foam_tint = mix(persistent_tint, fresh_tint,
 			clamp(fresh_ratio * 0.92, 0.0, 1.0));
