@@ -330,36 +330,31 @@ void fragment() {
 	float persistent_foam = clamp(foam_history * foam_strength * 6.0, 0.0, 1.0);
 	float fresh_foam = clamp(foam_fresh * foam_strength * 3.0, 0.0, 1.0);
 	float foam_coverage = max(persistent_foam, fresh_foam);
-	// Canon SoT: the carve is layered and domain-warped, not one static tile —
-	// two octaves at mismatched scales/speeds plus a slow warp give scalloped
-	// edges and detached flecks instead of smooth blobs.
-	vec2 foam_warp = (vec2(
-		texture(foam_breakup, wind_uv * 0.011 + vec2(TIME * 0.008, -TIME * 0.003)).r,
-		texture(foam_breakup, wind_uv * 0.017 + vec2(-TIME * 0.006, TIME * 0.004)).r)
-		- 0.5) * 0.18;
-	vec2 foam_detail_uv = (wind_uv - vec2(TIME * 0.25, TIME * 0.06))
-		* vec2(1.0 / 120.0, 1.0 / 72.0) + foam_warp;
-	vec2 foam_detail_dx = dFdx(foam_detail_uv);
-	vec2 foam_detail_dy = dFdy(foam_detail_uv);
-	float foam_detail_a = textureGrad(foam_breakup, foam_detail_uv,
-		foam_detail_dx, foam_detail_dy).r;
-	vec2 foam_detail_uv2 = (wind_uv - vec2(TIME * 0.12, TIME * 0.035))
-		* vec2(1.0 / 43.0, 1.0 / 29.0) + foam_warp;
-	float foam_detail_b = textureGrad(foam_breakup, foam_detail_uv2,
-		dFdx(foam_detail_uv2), dFdy(foam_detail_uv2)).r;
-	float foam_detail = mix(foam_detail_a, foam_detail_b, 0.45);
-	foam_factor = smoothstep(1.0 - foam_coverage,
-		1.12 - foam_coverage, foam_detail) * exp(-dist * 0.0012);
-	float foam_detail_x = textureGrad(foam_breakup,
-		foam_detail_uv + vec2(0.002, 0.0), foam_detail_dx, foam_detail_dy).r;
-	float foam_detail_y = textureGrad(foam_breakup,
-		foam_detail_uv + vec2(0.0, 0.002), foam_detail_dx, foam_detail_dy).r;
-	vec2 foam_relief = vec2(foam_detail - foam_detail_x,
-		foam_detail - foam_detail_y) * foam_factor;
+	// Canon SoT/Crest: the breakup texture SOFT-MODULATES the foam density, it
+	// does not binary-carve it. The source PNG is per-texel grain: thresholding
+	// it paints one white dot per bright texel at close range (the "salt"
+	// look), so the mip chain is biased into soft clouds and a wide ramp keeps
+	// foam_factor continuous — coverage gates, pattern only modulates.
+	vec2 foam_warp_m = (vec2(
+		texture(foam_breakup, wind_uv * 0.011 + vec2(TIME * 0.008, -TIME * 0.003), 2.0).r,
+		texture(foam_breakup, wind_uv * 0.017 + vec2(-TIME * 0.006, TIME * 0.004), 2.0).r)
+		- 0.5) * 3.0;
+	vec2 foam_octave_a = (wind_uv + foam_warp_m - vec2(TIME * 0.25, TIME * 0.06))
+		* vec2(1.0 / 120.0, 1.0 / 72.0);
+	vec2 foam_octave_b = (wind_uv + foam_warp_m - vec2(TIME * 0.12, TIME * 0.035))
+		* vec2(1.0 / 43.0, 1.0 / 29.0);
+	float foam_pattern = mix(texture(foam_breakup, foam_octave_a, 2.0).r,
+		texture(foam_breakup, foam_octave_b, 2.5).r, 0.5);
+	foam_factor = smoothstep(0.05, 0.85,
+		foam_coverage * mix(0.35, 1.25, foam_pattern)) * exp(-dist * 0.0012);
+	float foam_detail_x = texture(foam_breakup, foam_octave_a + vec2(0.02, 0.0), 2.0).r;
+	float foam_detail_y = texture(foam_breakup, foam_octave_a + vec2(0.0, 0.02), 2.0).r;
+	vec2 foam_relief = vec2(foam_pattern - foam_detail_x,
+		foam_pattern - foam_detail_y) * foam_factor;
 	gradient += (wind * foam_relief.x + across * foam_relief.y) * 1.4;
 	vec2 breakup_uv = world_uv * 0.08 - wind * TIME * 0.003;
-	float breakup = textureGrad(foam_breakup, breakup_uv,
-		dFdx(breakup_uv), dFdy(breakup_uv)).r;
+	// Same mip bias: shore/interaction breakup must stay soft clouds, not grain.
+	float breakup = texture(foam_breakup, breakup_uv, 2.0).r;
 	if (style_mode == 1 && foam_feedback_enabled) {
 		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
 		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
