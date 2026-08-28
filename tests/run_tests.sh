@@ -94,6 +94,7 @@ declare -a CPU_SUITES=(
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
 	"mixwell|res://tests/mixwell_test.gd"
+	"gpu_timing_store|res://tests/gpu_timing_store_test.gd"
 	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
 	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
 	"cloth_wind|res://tests/cloth_wind_test.gd"

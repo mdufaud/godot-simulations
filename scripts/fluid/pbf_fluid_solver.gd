@@ -40,8 +40,7 @@ var _tex_rid := RID()
 var _inv_rest_density := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
-var _timings := {}
-var _timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 
 
 func get_position_tex_rid() -> RID:
@@ -208,17 +207,12 @@ func _read_timings() -> void:
 	var out: Dictionary = GpuTimings.read(_rd, "pbf/", profiling)
 	if out.is_empty():
 		return
-	_timings_mutex.lock()
-	_timings = out
-	_timings_mutex.unlock()
+	_timing_store.publish(out)
 
 
 # Main thread. GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var copy := _timings.duplicate()
-	_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()
 
 
 func capture_validation_stats(result: Dictionary) -> void:

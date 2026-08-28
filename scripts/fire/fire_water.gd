@@ -60,8 +60,7 @@ var particle_count := 1024
 var particle_cap := 1024
 var particles_active := 0
 var profiling := false
-var _coupling_timings := {}
-var _coupling_timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 
 # --- Nozzle, Fire-X Tab. 3 "Particle Emitter Parameter" ---
 ## Droplets emitted per second. Tab. 3 "Frequency", range 10-100 Hz.
@@ -707,10 +706,7 @@ func return_render() -> void:
 
 
 func get_coupling_timings() -> Dictionary:
-	_coupling_timings_mutex.lock()
-	var copy := _coupling_timings.duplicate()
-	_coupling_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()
 
 
 func _read_coupling_timings() -> void:
@@ -732,9 +728,7 @@ func _read_coupling_timings() -> void:
 				out[stage] = float(timestamp - starts[stage]) / 1e6
 	if out.is_empty():
 		return
-	_coupling_timings_mutex.lock()
-	_coupling_timings = out
-	_coupling_timings_mutex.unlock()
+	_timing_store.publish(out)
 
 
 ## The gather and return sets bind solver textures, whose RIDs are only known once

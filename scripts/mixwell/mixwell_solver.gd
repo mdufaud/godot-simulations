@@ -46,7 +46,7 @@ var _force_periodic_validation := false
 var _affine_mode := -1
 var _wall_calibration := 1.0
 var _last_sample_gpu_ms := 1.0
-var _timings := {}
+var _timing_store := GpuTimingStore.new()
 var _metrics := {
 	"area_error": 0.0,
 	"max_area_error": 0.0,
@@ -64,7 +64,6 @@ var _metrics := {
 	"convergence_p99": 0.0,
 	"sample": 0,
 }
-var _timings_mutex := Mutex.new()
 var _metrics_mutex := Mutex.new()
 var _state_mutex := Mutex.new()
 var _snapshot_version := 0
@@ -559,10 +558,7 @@ func get_diagnostic_texture() -> RID:
 
 
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var result := _timings.duplicate()
-	_timings_mutex.unlock()
-	return result
+	return _timing_store.snapshot()
 
 
 func poll_timings() -> void:
@@ -1035,8 +1031,7 @@ func _read_timings() -> void:
 	var result := GpuTimings.read(_rd, "mixwell/", _render_profiling)
 	if result.is_empty():
 		if _render_profiling:
-			_timings_mutex.lock()
-			_timings = {
+			_timing_store.publish({
 				"init": 0.0,
 				"rd_line": 0.0,
 				"rd_segment": 0.0,
@@ -1046,14 +1041,11 @@ func _read_timings() -> void:
 				"accumulate": 0.0,
 				"total": 0.0,
 				"timestamps_available": false,
-			}
-			_timings_mutex.unlock()
+			})
 		return
 	if result.has("total") and is_finite(float(result.total)) and result.total > 0.0:
 		_last_sample_gpu_ms = float(result.total)
-	_timings_mutex.lock()
-	_timings = result
-	_timings_mutex.unlock()
+	_timing_store.publish(result)
 
 
 func _pack_push_constant(index: int, segment: Vector4, radius_px: float,

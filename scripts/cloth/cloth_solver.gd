@@ -53,8 +53,7 @@ var _uniform_sets := {}
 var _buffers := {}
 var _tex_rid := RID()
 var _seed_data := PackedFloat32Array()
-var _timings := {}
-var _timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 
 
 func vertex_count() -> int:
@@ -201,17 +200,12 @@ func _read_timings() -> void:
 	var out := GpuTimings.read(_rd, profile_key + "/")
 	if out.is_empty():
 		return
-	_timings_mutex.lock()
-	_timings = out
-	_timings_mutex.unlock()
+	_timing_store.publish(out)
 
 
 # Main thread. GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var copy := _timings.duplicate()
-	_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()
 
 
 func free_render() -> void:

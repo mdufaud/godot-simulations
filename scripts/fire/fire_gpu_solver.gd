@@ -319,8 +319,7 @@ var _pool_stats_cache := {}
 var _pool_stats_mutex := Mutex.new()
 var _bootstrap_bounds := AABB()
 var _display_bounds_ready := false
-var _timings := {}
-var _timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 var _time_accumulator := 0.0
 
 
@@ -570,10 +569,7 @@ func _compute_bootstrap_bounds() -> AABB:
 
 
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var copy := _timings.duplicate()
-	_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()
 
 
 # =========================================================================
@@ -1365,12 +1361,9 @@ func _on_stats_ready(bytes: PackedByteArray) -> void:
 
 func _read_timings() -> void:
 	if not profiling:
-		# Stale numbers outlive the toggle otherwise: nothing else ever writes
-		# _timings, so the last profiled frame would stay on screen forever.
-		if not _timings.is_empty():
-			_timings_mutex.lock()
-			_timings.clear()
-			_timings_mutex.unlock()
+		# Stale numbers outlive the toggle otherwise: nothing else ever publishes,
+		# so the last profiled frame would stay on screen forever.
+		_timing_store.clear()
 		return
 	var count := _rd.get_captured_timestamps_count()
 	if count < 2:
@@ -1402,9 +1395,7 @@ func _read_timings() -> void:
 		prev_time = t
 
 	if not acc.is_empty():
-		_timings_mutex.lock()
-		_timings = acc
-		_timings_mutex.unlock()
+		_timing_store.publish(acc)
 
 
 ## Pool occupancy, for the verification harness and the debug overlay. Rendering

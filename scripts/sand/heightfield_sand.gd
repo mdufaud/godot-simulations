@@ -28,8 +28,7 @@ var _pipelines := {}
 var _sets := {}
 var _tex := [RID(), RID()]
 var _seed_data := PackedFloat32Array()
-var _timings := {}
-var _timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 
 
 func cell_size() -> float:
@@ -157,16 +156,11 @@ func _read_timings() -> void:
 	var parsed := GpuTimings.read(_rd, TIMESTAMP_PREFIX)
 	if parsed.is_empty():
 		return
-	_timings_mutex.lock()
-	_timings = parsed
-	_timings_mutex.unlock()
+	_timing_store.publish(parsed)
 
 
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var copy := _timings.duplicate()
-	_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()
 
 
 func free_render() -> void:

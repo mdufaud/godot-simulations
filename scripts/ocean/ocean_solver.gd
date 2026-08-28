@@ -85,8 +85,7 @@ var _foam_last_update_frame := PackedInt32Array()
 var _foam_reset_pending := false
 var _cascade_dirty: Array[bool] = []
 var _frame := 0
-var _timings := {}
-var _timings_mutex := Mutex.new()
+var _timing_store := GpuTimingStore.new()
 
 
 func num_cascades() -> int:
@@ -434,39 +433,12 @@ func _mark(cl: int, name: String) -> int:
 
 # Render thread. Reads last frame's timestamps; repeated names sum across cascades.
 func _read_timings() -> void:
-	var out := {}
-	var prev_time := 0
-	var start_time := 0
-	var in_chain := false
-	for i in _rd.get_captured_timestamps_count():
-		var nm := _rd.get_captured_timestamp_name(i)
-		if not nm.begins_with("ocean/"):
-			continue
-		var t := _rd.get_captured_timestamp_gpu_time(i)
-		if nm == "ocean/start":
-			start_time = t
-			prev_time = t
-			in_chain = true
-			continue
-		if not in_chain:
-			continue
-		var seg := nm.trim_prefix("ocean/")
-		if seg == "end":
-			out["total"] = float(t - start_time) / 1e6
-			in_chain = false
-		else:
-			out[seg] = out.get(seg, 0.0) + float(t - prev_time) / 1e6
-		prev_time = t
+	var out := GpuTimings.read(_rd, "ocean/")
 	if out.is_empty():
 		return
-	_timings_mutex.lock()
-	_timings = out
-	_timings_mutex.unlock()
+	_timing_store.publish(out)
 
 
 # Main thread. GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
-	_timings_mutex.lock()
-	var copy := _timings.duplicate()
-	_timings_mutex.unlock()
-	return copy
+	return _timing_store.snapshot()

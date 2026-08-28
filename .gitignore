@@ -29,3 +29,4 @@ resources/ocean/*
 __pycache__/
 tmp/
 CLAUDE.md
+.zcode

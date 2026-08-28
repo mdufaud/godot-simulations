@@ -45,13 +45,12 @@ var mm: MultiMesh
 var star_mat: ShaderMaterial
 
 var status_label: Label
-var profiler_label: Label
+var profiler := SimProfiler.new()
 var param_group: VBoxContainer
 var star_size_slider: HSlider
 var brightness_slider: HSlider
 var _paused := false
 var _sim_time := 0.0
-var _profile_accum := 0.0
 
 
 func _ready() -> void:
@@ -72,7 +71,9 @@ func _ready() -> void:
 	mm = _build_multimesh()
 	_setup_stars()
 	_setup_ui()
-	_setup_profiler()
+	profiler.lines_provider = _profiler_lines
+	profiler.enabled_changed.connect(_on_profiler_enabled)
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
 	_apply_scene()
 	RenderingServer.call_on_render_thread(solver.init_render)
 
@@ -195,7 +196,7 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	menu.add_label("Particles")
 	menu.add_button("65k", func(): _set_particle_count(65536))
 	menu.add_button("262k", func(): _set_particle_count(262144))
@@ -206,19 +207,6 @@ func _setup_ui() -> void:
 
 func _set_render_scale(v: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, v)
-
-
-func _setup_profiler() -> void:
-	profiler_label = Label.new()
-	profiler_label.position = Vector2(8, 8)
-	var mono := SystemFont.new()
-	mono.font_names = PackedStringArray(["monospace"])
-	profiler_label.add_theme_font_override("font", mono)
-	profiler_label.add_theme_font_size_override("font_size", 13)
-	profiler_label.add_theme_color_override("font_outline_color", Color.BLACK)
-	profiler_label.add_theme_constant_override("outline_size", 4)
-	profiler_label.visible = false
-	menu.get_parent().add_child(profiler_label)
 
 
 func _update_status() -> void:
@@ -317,19 +305,13 @@ func _tex_width_for(n: int) -> int:
 	return w
 
 
-func _on_profiler_toggled(on: bool) -> void:
+func _on_profiler_enabled(on: bool) -> void:
 	solver.profiling = on
-	profiler_label.visible = on
-	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), on)
 
 
-func _update_overlay() -> void:
+func _profiler_lines() -> PackedStringArray:
 	var t := solver.get_timings()
 	var lines := PackedStringArray()
-	lines.append("FPS %d  frame %.2f ms" % [
-		Performance.get_monitor(Performance.TIME_FPS),
-		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
-	])
 	if t.has("total"):
 		lines.append("sim GPU %.2f ms" % t["total"])
 	if t.has("step"):
@@ -338,10 +320,7 @@ func _update_overlay() -> void:
 		lines.append("  force %.2f | integrate %.2f" % [
 			t.get("force", 0.0), t.get("integrate", 0.0),
 		])
-	lines.append("viewport GPU %.2f ms" % RenderingServer.viewport_get_measured_render_time_gpu(
-		get_viewport().get_viewport_rid()
-	))
-	profiler_label.text = "\n".join(lines)
+	return lines
 
 
 func _process(delta: float) -> void:
@@ -362,10 +341,7 @@ func _process(delta: float) -> void:
 		_sync_horizon()
 	scene_def.update_frame(_sim_time, solver)
 	RenderingServer.call_on_render_thread(solver.step_render)
-	_profile_accum += delta
-	if profiler_label.visible and _profile_accum >= 0.25:
-		_profile_accum = 0.0
-		_update_overlay()
+	profiler.poll(delta)
 
 
 func _exit_tree() -> void:

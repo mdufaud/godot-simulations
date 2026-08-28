@@ -18,8 +18,7 @@ var scenario_option: OptionButton
 var solver_option: OptionButton
 var cascade_decor: Node3D
 
-var profiler_label: Label
-var _profile_accum := 0.0
+var profiler := SimProfiler.new()
 
 
 func _ready() -> void:
@@ -32,7 +31,9 @@ func _ready() -> void:
 	fluid.start()
 	_build_cascade_decor()
 	_setup_ui()
-	_setup_profiler()
+	profiler.lines_provider = _profiler_lines
+	profiler.enabled_changed.connect(_on_profiler_enabled)
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
 	_apply_env()
 
 
@@ -83,7 +84,7 @@ func _setup_ui() -> void:
 	menu.add_separator()
 	menu.add_section("Performance")
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on))
-	menu.add_debug_toggle("📊", "Profiler overlay", false, _on_profiler_toggled)
+	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
 	menu.add_label("Particles")
 	for count in fluid_config.particle_counts:
@@ -167,38 +168,25 @@ func _on_lava_toggled(on: bool) -> void:
 	_apply_env()
 
 
+func _process(delta: float) -> void:
+	profiler.poll(delta)
+
+
 func _apply_env() -> void:
 	if world_env.environment != null:
 		world_env.environment.glow_enabled = fluid.mode > 0.5
 
 
-func _setup_profiler() -> void:
-	profiler_label = Label.new()
-	profiler_label.position = Vector2(8, 8)
-	var mono := SystemFont.new()
-	mono.font_names = PackedStringArray(["monospace"])
-	profiler_label.add_theme_font_override("font", mono)
-	profiler_label.add_theme_font_size_override("font_size", 13)
-	profiler_label.add_theme_color_override("font_outline_color", Color.BLACK)
-	profiler_label.add_theme_constant_override("outline_size", 4)
-	profiler_label.visible = false
-	menu.get_parent().add_child(profiler_label)
-
-
-func _on_profiler_toggled(on: bool) -> void:
+func _on_profiler_enabled(on: bool) -> void:
 	fluid.set_profiling(on)
-	profiler_label.visible = on
-	for vp in fluid.profiled_viewports() + [get_viewport()]:
+	# The root viewport is measured by SimProfiler itself.
+	for vp in fluid.profiled_viewports():
 		RenderingServer.viewport_set_measure_render_time(vp.get_viewport_rid(), on)
 
 
-func _update_overlay() -> void:
+func _profiler_lines() -> PackedStringArray:
 	var t := fluid.get_timings()
 	var lines := PackedStringArray()
-	lines.append("FPS %d  frame %.2f ms" % [
-		Performance.get_monitor(Performance.TIME_FPS),
-		Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
-	])
 	if t.has("total"):
 		lines.append("sim GPU %.2f ms" % t["total"])
 	var stages := PackedStringArray()
@@ -213,16 +201,5 @@ func _update_overlay() -> void:
 		var vp: SubViewport = fluid.profiled_viewports()[entry[1]]
 		parts.append("%s %.2f" % [entry[0],
 			RenderingServer.viewport_get_measured_render_time_gpu(vp.get_viewport_rid())])
-	parts.append("root %.2f" % RenderingServer.viewport_get_measured_render_time_gpu(
-		get_viewport().get_viewport_rid()))
 	lines.append("viewport GPU ms: " + " | ".join(parts))
-	profiler_label.text = "\n".join(lines)
-
-
-func _process(delta: float) -> void:
-	if not profiler_label.visible:
-		return
-	_profile_accum += delta
-	if _profile_accum >= 0.25:
-		_profile_accum = 0.0
-		_update_overlay()
+	return lines
