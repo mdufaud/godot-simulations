@@ -1,9 +1,10 @@
 extends Node3D
 
-const GRID := 64
+const GRID := 128
 const COUNT := GRID * GRID
 
 var amount := 0.0
+var wind_direction := Vector2(1.0, 0.0)
 
 var _enabled := false
 var _material: ShaderMaterial
@@ -57,7 +58,17 @@ func update_state(camera_position: Vector3, mood: float, sim_time: float) -> voi
 	_material.set_shader_parameter("storm_mood", mood)
 	_material.set_shader_parameter("spray_amount", amount)
 	_material.set_shader_parameter("sim_time", sim_time)
-	_instance.visible = _enabled and amount > 0.0 and mood > 0.52
+	_material.set_shader_parameter("wind_direction", wind_direction)
+	_instance.visible = _enabled and amount > 0.0
+
+
+func set_sun_direction(direction: Vector3) -> void:
+	if _material != null:
+		_material.set_shader_parameter("sun_direction", direction)
+
+
+func set_wind_direction(direction: Vector2) -> void:
+	wind_direction = direction.normalized()
 
 
 func release_textures() -> void:

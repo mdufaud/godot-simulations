@@ -9,10 +9,11 @@ extends RefCounted
 const SHADER_DIR := "res://shaders/ocean/"
 const STAGES: Array[String] = [
 	"spectrum_init", "spectrum_init_art_directed", "spectrum_evolve", "fft_butterfly", "fft",
-	"transpose", "map_assemble",
+	"transpose", "map_assemble", "foam_feedback",
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
+const SOT_FOAM_UPDATE_INTERVAL := 2
 ## Full choppiness on short waves folds the surface into black back-faces;
 ## damp it as the cascades get finer.
 const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 0.8, 0.55]
@@ -37,6 +38,9 @@ var detail := 1.0
 var choppiness := 1.15
 var long_wave_height_m := 2.6
 var long_wave_length_m := 48.0
+var mid_wave_height_m := 0.0
+var mid_wave_length_m := 24.0
+var mid_wave_spread := 0.0
 var wind_wave_height_m := 0.8
 var wind_wave_length_m := 7.5
 var ripple_strength := 0.9
@@ -57,6 +61,7 @@ var amortize := false
 
 var initialized := false
 var profiling := false
+var foam_feedback_enabled := true
 
 var _rd: RenderingDevice
 var _shaders := {}
@@ -66,6 +71,11 @@ var _buffers := {}
 var _spectrum_tex := RID()
 var _displacement_tex := RID()
 var _normal_tex := RID()
+var _foam_tex_a := RID()
+var _foam_tex_b := RID()
+var _foam_read_indices := PackedInt32Array()
+var _foam_last_update_frame := PackedInt32Array()
+var _foam_reset_pending := false
 var _cascade_dirty: Array[bool] = []
 var _frame := 0
 var _timings := {}
@@ -84,6 +94,27 @@ func get_normal_tex_rid() -> RID:
 	return _normal_tex
 
 
+func get_foam_read_tex_rid(cascade: int) -> RID:
+	if cascade < 0 or cascade >= _foam_read_indices.size():
+		return RID()
+	return _foam_tex_a if _foam_read_indices[cascade] == 0 else _foam_tex_b
+
+
+func get_foam_tex_rid(index: int) -> RID:
+	return _foam_tex_a if index == 0 else _foam_tex_b
+
+
+func get_foam_read_indices() -> Vector4:
+	var indices := Vector4(0.0, 0.0, 0.0, 0.0)
+	if _foam_read_indices.size() > 0:
+		indices.x = float(_foam_read_indices[0])
+	if _foam_read_indices.size() > 1:
+		indices.y = float(_foam_read_indices[1])
+	if _foam_read_indices.size() > 2:
+		indices.z = float(_foam_read_indices[2])
+	return indices
+
+
 func set_backend(value: Backend) -> void:
 	if backend == value:
 		return
@@ -96,6 +127,7 @@ func set_backend(value: Backend) -> void:
 func mark_spectrum_dirty() -> void:
 	for i in _cascade_dirty.size():
 		_cascade_dirty[i] = true
+	_foam_reset_pending = true
 
 
 func init_render() -> void:
@@ -138,7 +170,9 @@ func init_render() -> void:
 	_spectrum_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
 	_displacement_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 	_normal_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
-	for tex in [_spectrum_tex, _displacement_tex, _normal_tex]:
+	_foam_tex_a = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT)
+	_foam_tex_b = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT)
+	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _foam_tex_a, _foam_tex_b]:
 		_rd.texture_clear(tex, Color(0, 0, 0, 0), 0, 1, 0, cascades)
 
 	for stage in STAGES:
@@ -148,10 +182,42 @@ func init_render() -> void:
 		uniforms.append(_buffer_uniform(2, _buffers["fft_data"]))
 		uniforms.append(_image_uniform(3, _displacement_tex))
 		uniforms.append(_image_uniform(4, _normal_tex))
+		uniforms.append(_image_uniform(5, _foam_tex_a))
+		uniforms.append(_image_uniform(6, _foam_tex_b))
 		_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders[stage], 0)
 
+	var foam_ab: Array[RDUniform] = []
+	foam_ab.append(_image_uniform(0, _spectrum_tex))
+	foam_ab.append(_buffer_uniform(1, _buffers["butterfly"]))
+	foam_ab.append(_buffer_uniform(2, _buffers["fft_data"]))
+	foam_ab.append(_image_uniform(3, _displacement_tex))
+	foam_ab.append(_image_uniform(4, _normal_tex))
+	foam_ab.append(_image_uniform(5, _foam_tex_a))
+	foam_ab.append(_image_uniform(6, _foam_tex_b))
+	_uniform_sets["foam_feedback_ab"] = _rd.uniform_set_create(
+		foam_ab, _shaders["foam_feedback"], 0)
+
+	var foam_ba: Array[RDUniform] = []
+	foam_ba.append(_image_uniform(0, _spectrum_tex))
+	foam_ba.append(_buffer_uniform(1, _buffers["butterfly"]))
+	foam_ba.append(_buffer_uniform(2, _buffers["fft_data"]))
+	foam_ba.append(_image_uniform(3, _displacement_tex))
+	foam_ba.append(_image_uniform(4, _normal_tex))
+	foam_ba.append(_image_uniform(5, _foam_tex_b))
+	foam_ba.append(_image_uniform(6, _foam_tex_a))
+	_uniform_sets["foam_feedback_ba"] = _rd.uniform_set_create(
+		foam_ba, _shaders["foam_feedback"], 0)
+	_pipelines["foam_feedback_ab"] = _rd.compute_pipeline_create(_shaders["foam_feedback"])
+	_pipelines["foam_feedback_ba"] = _rd.compute_pipeline_create(_shaders["foam_feedback"])
+
 	_cascade_dirty.resize(cascades)
+	_foam_read_indices.resize(cascades)
+	_foam_last_update_frame.resize(cascades)
+	for i in cascades:
+		_foam_read_indices[i] = 0
+		_foam_last_update_frame[i] = -1
 	mark_spectrum_dirty()
+	_foam_reset_pending = false
 
 	# Butterfly factors depend only on MAP_SIZE: dispatch once.
 	var pc := _pack_push_constant(0, 0.0, 0.0)
@@ -167,13 +233,19 @@ func step_render(delta: float) -> void:
 	if not initialized:
 		return
 	_read_timings()
+	if _foam_reset_pending:
+		_rd.texture_clear(_foam_tex_a, Color(0, 0, 0, 0), 0, 1, 0, num_cascades())
+		_rd.texture_clear(_foam_tex_b, Color(0, 0, 0, 0), 0, 1, 0, num_cascades())
+		for i in _foam_read_indices.size():
+			_foam_read_indices[i] = 0
+			_foam_last_update_frame[i] = _frame - 1
+		_foam_reset_pending = false
 
 	# Amortized cascades update every num_cascades() frames: scale the foam
 	# rates so accumulation/decay equilibrium stays frame-rate independent.
 	var eff_delta := delta * (float(num_cascades()) if amortize else 1.0)
-	var grow_rate := eff_delta * foam_amount * 7.5
-	var decay_rate := eff_delta * maxf(0.5, 10.0 - foam_amount) * 1.15 \
-		* 5.0 / maxf(foam_persistence, 0.05)
+	var grow_rate := eff_delta * foam_amount * 0.49
+	var decay_rate := eff_delta * 0.693 / maxf(foam_persistence, 0.05)
 
 	var g16 := map_size / 16
 	var g32 := map_size / 32
@@ -197,6 +269,22 @@ func step_render(delta: float) -> void:
 		cl = _mark(cl, "ocean/fft")
 		_dispatch(cl, "map_assemble", pc, g16, g16, 1)
 		cl = _mark(cl, "ocean/assemble")
+		var foam_interval := SOT_FOAM_UPDATE_INTERVAL \
+			if backend == Backend.SEA_OF_THIEVES_INSPIRED_FFT and not amortize else 1
+		var should_update_foam: bool = foam_feedback_enabled \
+			and (backend != Backend.SEA_OF_THIEVES_INSPIRED_FFT or i == 1) \
+			and _frame % foam_interval == 0
+		if should_update_foam:
+			var elapsed_frames := _frame - _foam_last_update_frame[i]
+			var foam_step_scale := float(maxi(elapsed_frames, 1))
+			var foam_pc := _pack_push_constant(i, grow_rate * foam_step_scale,
+				decay_rate * foam_step_scale)
+			var foam_stage := "foam_feedback_ab" if _foam_read_indices[i] == 0 \
+				else "foam_feedback_ba"
+			_dispatch(cl, foam_stage, foam_pc, g16, g16, 1)
+			_foam_read_indices[i] = 1 - _foam_read_indices[i]
+			_foam_last_update_frame[i] = _frame
+		cl = _mark(cl, "ocean/foam")
 	_rd.compute_list_end()
 	_rd.capture_timestamp("ocean/end")
 	_frame += 1
@@ -212,7 +300,7 @@ func free_render() -> void:
 	for key in _buffers:
 		if _buffers[key].is_valid():
 			_rd.free_rid(_buffers[key])
-	for tex in [_spectrum_tex, _displacement_tex, _normal_tex]:
+	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _foam_tex_a, _foam_tex_b]:
 		if tex.is_valid():
 			_rd.free_rid(tex)
 	for stage in _pipelines:
@@ -228,6 +316,10 @@ func free_render() -> void:
 	_spectrum_tex = RID()
 	_displacement_tex = RID()
 	_normal_tex = RID()
+	_foam_tex_a = RID()
+	_foam_tex_b = RID()
+	_foam_read_indices.clear()
+	_foam_last_update_frame.clear()
 	_cascade_dirty.clear()
 
 
@@ -316,6 +408,9 @@ func _pack_push_constant(cascade: int, grow_rate: float, decay_rate: float) -> P
 	pc.encode_float(104, crosswind_ratio)
 	pc.encode_float(108, crest_gain)
 	pc.encode_float(112, crest_bias)
+	pc.encode_float(116, mid_wave_height_m)
+	pc.encode_float(120, mid_wave_length_m)
+	pc.encode_float(124, mid_wave_spread)
 	return pc
 
 

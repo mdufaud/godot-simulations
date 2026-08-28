@@ -7,8 +7,8 @@ class_name OceanClipmap
 ## flat skirt (on the last level's lattice, which therefore never morphs)
 ## extends to the horizon. Positions only — UVs come from world XZ in-shader.
 
-const GRID := 64
-const HOLE := 32
+const GRID := 128
+const HOLE := 64
 
 
 static func build(cell0: float, ring_levels: int, skirt_radius: float) -> ArrayMesh:

@@ -20,6 +20,8 @@ layout(std430, set = 0, binding = 2) restrict buffer FFTBuffer {
 
 layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray displacement_map;
 layout(rgba16f, set = 0, binding = 4) restrict uniform image2DArray normal_map;
+layout(rg16f, set = 0, binding = 5) restrict uniform image2DArray foam_input;
+layout(rg16f, set = 0, binding = 6) restrict uniform image2DArray foam_output;
 
 layout(push_constant, std430) uniform Params {
     vec4 spectrum_a; //  0: tile_length, jonswap_alpha, peak_frequency, wind_speed
@@ -29,7 +31,7 @@ layout(push_constant, std430) uniform Params {
     ivec4 misc;      // 64: cascade_index, seed_x, seed_y, backend
     vec4 gains;      // 80: height_gain, long height, long wavelength, wind height
     vec4 art_a;      // 96: wind wavelength, ripple strength, crosswind, crest gain
-    vec4 art_b;      // 112: crest bias, unused x3
+    vec4 art_b;      // 112: crest bias, mid height, mid wavelength, mid spread
 } params;
 
 // Half 0: spectrum_evolve output / FFT input; half 1: FFT output. Parameter

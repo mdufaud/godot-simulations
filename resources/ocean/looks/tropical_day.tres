@@ -1,0 +1,44 @@
+[gd_resource type="Resource" script_class="OceanLookPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/ocean/ocean_look_preset.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Tropical Day"
+sun_elevation = 34.0
+sun_azimuth = 160.0
+sun_color = Color(1, 0.96, 0.84, 1)
+sun_energy = 1.85
+sun_angular_distance = 0.5
+sky_zenith = Color(0.025, 0.22, 0.62, 1)
+sky_horizon = Color(0.35, 0.78, 0.9, 1)
+sun_disk_color = Color(1, 0.94, 0.72, 1)
+haze_color = Color(0.42, 0.74, 0.86, 1)
+sky_energy = 1.5
+exposure = 1.05
+white_point = 8.0
+fog_color = Color(0.35, 0.67, 0.73, 1)
+fog_density = 0.00022
+fog_aerial_perspective = 0.5
+glow_intensity = 0.22
+glow_bloom = 0.04
+glow_hdr_threshold = 1.35
+deep_color = Color(0.02, 0.17, 0.24, 1)
+shallow_color = Color(0.03, 0.55, 0.54, 1)
+foam_color = Color(0.86, 0.94, 0.9, 1)
+roughness = 0.1
+sss_strength = 1.15
+sun_path_width = 0.012
+sun_glitter_strength = 0.9
+sky_reflection_strength = 0.82
+micro_normal_strength = 0.16
+micro_normal_scales = Vector2(0.09, 0.25)
+micro_normal_fade_start = 80.0
+micro_normal_fade_end = 400.0
+cloud_coverage = 0.56
+cloud_density = 0.56
+cloud_top_color = Color(0.94, 0.98, 1, 1)
+cloud_base_color = Color(0.32, 0.43, 0.55, 1)
+cloud_rim_color = Color(1, 0.95, 0.78, 1)
+cloud_rim_strength = 0.75
+rain_intensity = 0.0

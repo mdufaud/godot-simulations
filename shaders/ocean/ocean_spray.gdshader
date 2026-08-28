@@ -1,7 +1,7 @@
 shader_type spatial;
-render_mode unshaded, blend_add, cull_disabled, depth_draw_never, shadows_disabled, fog_disabled;
+render_mode unshaded, blend_mix, cull_disabled, depth_draw_never, shadows_disabled, fog_disabled;
 
-#define GRID 64
+#define GRID 128
 #define CASCADES 3
 
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
@@ -12,6 +12,9 @@ uniform float window_size = 168.0;
 uniform float storm_mood = 0.0;
 uniform float spray_amount = 0.0;
 uniform float sim_time = 0.0;
+uniform float min_pixel_size = 0.75;
+uniform vec3 sun_direction = vec3(0.0, 1.0, 0.0);
+uniform vec2 wind_direction = vec2(1.0, 0.0);
 uniform vec3 spray_color : source_color = vec3(0.64, 0.78, 0.77);
 
 varying float particle_alpha;
@@ -35,26 +38,44 @@ void vertex() {
 
 	vec3 displacement = vec3(0.0);
 	float crest = 0.0;
+	float breaking = 0.0;
 	for (int i = 0; i < CASCADES; i++) {
 		vec3 coords = vec3(xz * map_scales[i].xy, float(i));
 		displacement += textureLod(displacements, coords, 0.0).xyz;
-		crest = max(crest, textureLod(normals, coords, 0.0).z);
+		vec4 normal_sample = textureLod(normals, coords, 0.0);
+		crest = max(crest, normal_sample.z);
+		breaking = max(breaking, normal_sample.a);
 	}
 
-	float gate = smoothstep(0.58, 0.9, crest) * smoothstep(0.55, 0.9, storm_mood)
-		* spray_amount;
 	float cycle = fract(sim_time * mix(0.18, 0.31, hash11(seed + 9.0)) + hash11(seed));
 	float life = sin(cycle * 3.14159265);
-	float sparse = step(hash11(seed + 41.0), clamp(gate * 0.55, 0.0, 1.0));
-	particle_alpha = life * life * gate * sparse * 0.22;
 
 	vec3 center = vec3(xz.x + displacement.x, displacement.y, xz.y + displacement.z);
-	center.y += life * mix(0.35, 1.7, storm_mood) + cycle * cycle * 0.3;
-	center.xz += (hash21(seed + 73.0) - 0.5) * cycle * mix(0.35, 1.8, storm_mood);
+	float backlight = pow(max(dot(normalize(CAMERA_POSITION_WORLD - center),
+		-normalize(sun_direction)), 0.0), 2.0);
+	float weather_gate = smoothstep(0.12, 0.62, storm_mood);
+	float gate = smoothstep(0.06, 0.28, breaking) * weather_gate
+		* mix(0.55, 1.0, backlight) * spray_amount;
+	float sparse = step(hash11(seed + 41.0), clamp(gate * 0.68, 0.0, 1.0));
+	particle_alpha = life * life * gate * sparse * 0.58;
+
+	float spindrift = step(0.68, hash11(seed + 101.0));
+	float launch_arc = life * mix(0.35, 1.7, storm_mood);
+	float gravity_arc = cycle * cycle * mix(0.3, 1.2, spindrift);
+	center.y += 2.5 + crest * 1.8 + launch_arc - gravity_arc;
+	center.xz += wind_direction * cycle * mix(0.35, 2.4, storm_mood)
+		+ (hash21(seed + 73.0) - 0.5) * cycle * mix(0.35, 1.8, storm_mood);
 	vec3 center_view = (VIEW_MATRIX * vec4(center, 1.0)).xyz;
 	particle_uv = UV * 2.0 - 1.0;
-	float size = mix(0.025, 0.18, hash11(seed + 23.0)) * mix(0.6, 1.25, storm_mood);
-	vec2 billboard = vec2(particle_uv.x * size, particle_uv.y * size * 2.6);
+	float size = mix(0.05, 0.30, hash11(seed + 23.0))
+		* mix(0.7, 1.35, storm_mood);
+	vec2 billboard = vec2(particle_uv.x * size,
+		particle_uv.y * size * mix(2.6, 5.4, spindrift));
+	float distance_to_camera = max(-center_view.z, 0.001);
+	float pixel_world = 2.0 * distance_to_camera
+		/ (VIEWPORT_SIZE.y * PROJECTION_MATRIX[1][1]);
+	float pixel_size = max(size, min_pixel_size * pixel_world);
+	billboard *= pixel_size / max(size, 0.001);
 	POSITION = PROJECTION_MATRIX * vec4(center_view + vec3(billboard, 0.0), 1.0);
 }
 

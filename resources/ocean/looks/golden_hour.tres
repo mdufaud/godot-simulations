@@ -1,0 +1,44 @@
+[gd_resource type="Resource" script_class="OceanLookPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/ocean/ocean_look_preset.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Golden Hour"
+sun_elevation = 8.0
+sun_azimuth = 180.0
+sun_color = Color(1, 0.72, 0.48, 1)
+sun_energy = 2.25
+sun_angular_distance = 1.8
+sky_zenith = Color(0.045, 0.15, 0.42, 1)
+sky_horizon = Color(0.58, 0.5, 0.43, 1)
+sun_disk_color = Color(1, 0.84, 0.56, 1)
+haze_color = Color(0.55, 0.5, 0.46, 1)
+sky_energy = 1.25
+exposure = 1.1
+white_point = 9.0
+fog_color = Color(0.52, 0.47, 0.43, 1)
+fog_density = 0.0008
+fog_aerial_perspective = 0.68
+glow_intensity = 0.3
+glow_bloom = 0.07
+glow_hdr_threshold = 1.1
+deep_color = Color(0.05, 0.28, 0.34, 1)
+shallow_color = Color(0.04, 0.58, 0.58, 1)
+foam_color = Color(0.84, 0.93, 0.91, 1)
+roughness = 0.16
+sss_strength = 1.35
+sun_path_width = 0.006
+sun_glitter_strength = 0.84
+sky_reflection_strength = 0.64
+micro_normal_strength = 0.18
+micro_normal_scales = Vector2(0.085, 0.23)
+micro_normal_fade_start = 70.0
+micro_normal_fade_end = 360.0
+cloud_coverage = 0.72
+cloud_density = 0.44
+cloud_top_color = Color(0.92, 0.78, 0.65, 1)
+cloud_base_color = Color(0.28, 0.27, 0.32, 1)
+cloud_rim_color = Color(1, 0.74, 0.42, 1)
+cloud_rim_strength = 1.05
+rain_intensity = 0.0

@@ -11,11 +11,12 @@ var world_env: WorldEnvironment
 var storm: OceanStorm
 var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
-## provide apply_preset, set_time_scale, set_frozen, throw_crate, clear_crates,
-## set_map_size, set_sun_elevation, set_sun_azimuth and set_render_scale.
+## provide apply_preset, apply_look, set_time_scale, set_frozen, throw_crate,
+## clear_crates, set_map_size, set_sun_elevation, set_sun_azimuth and set_render_scale.
 var host: Node
 
 var _preset_option: OptionButton
+var _look_option: OptionButton
 var _spectral_group: VBoxContainer
 var _art_group: VBoxContainer
 var _wind_speed: HSlider
@@ -26,6 +27,9 @@ var _choppiness: HSlider
 var _height_gain: HSlider
 var _long_height: HSlider
 var _long_length: HSlider
+var _mid_height: HSlider
+var _mid_length: HSlider
+var _mid_spread: HSlider
 var _wind_height: HSlider
 var _wind_length: HSlider
 var _ripple_strength: HSlider
@@ -38,10 +42,12 @@ var _foam_persistence: HSlider
 var _spray_amount: HSlider
 var _sun_glitter_intensity: HSlider
 var _mood: HSlider
+var _sun_elevation: HSlider
+var _sun_azimuth: HSlider
 var _updating := false
 
 
-func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: float,
+func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, sun_azimuth: float,
 		time_scale: float) -> void:
 	var names: Array = []
 	for preset in presets:
@@ -71,6 +77,12 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 		solver.long_wave_height_m, func(v: float): solver.long_wave_height_m = v)
 	_long_length = _spectrum_slider(menu, "Long wavelength (m)", 5.0, 200.0,
 		solver.long_wave_length_m, func(v: float): solver.long_wave_length_m = v)
+	_mid_height = _spectrum_slider(menu, "Mid wave height (m)", 0.0, 5.0,
+		solver.mid_wave_height_m, func(v: float): solver.mid_wave_height_m = v)
+	_mid_length = _spectrum_slider(menu, "Mid wavelength (m)", 5.0, 100.0,
+		solver.mid_wave_length_m, func(v: float): solver.mid_wave_length_m = v)
+	_mid_spread = _spectrum_slider(menu, "Mid wave spread", 0.0, 1.0,
+		solver.mid_wave_spread, func(v: float): solver.mid_wave_spread = v)
 	_wind_height = _spectrum_slider(menu, "Wind wave height (m)", 0.0, 5.0,
 		solver.wind_wave_height_m, func(v: float): solver.wind_wave_height_m = v)
 	_wind_length = _spectrum_slider(menu, "Wind wavelength (m)", 1.0, 30.0,
@@ -110,15 +122,21 @@ func build(menu: SimMenu, presets: Array, sun_elevation: float, sun_azimuth: flo
 	_spray_amount = menu.add_slider("Spray amount", 0.0, 2.0, 0.1, host.set_spray_amount)
 	menu.add_slider("Foam strength", 0.0, 3.0, 1.0,
 		func(v: float): surface_mat.set_shader_parameter("foam_strength", v))
-	_sun_glitter_intensity = menu.add_slider("Sun glitter intensity", 0.0, 2.0, 0.7,
-		func(v: float): surface_mat.set_shader_parameter("sun_glitter_strength", v))
 	menu.add_separator()
 
 	menu.add_section("Environment")
+	var look_names: Array = []
+	for look in looks:
+		look_names.append((look as OceanLookPreset).display_name)
+	_look_option = menu.add_option_button("Environment", look_names, 0, host.apply_look)
 	_mood = menu.add_slider("Storm mood", 0.0, 1.0, storm.mood_target,
 		func(v: float): storm.mood_target = v)
-	menu.add_slider("Sun elevation", 2.0, 80.0, sun_elevation, host.set_sun_elevation)
-	menu.add_slider("Sun azimuth", 0.0, 360.0, sun_azimuth, host.set_sun_azimuth)
+	_sun_elevation = menu.add_slider("Sun elevation", 2.0, 80.0, sun_elevation,
+		host.set_sun_elevation)
+	_sun_azimuth = menu.add_slider("Sun azimuth", 0.0, 360.0, sun_azimuth,
+		host.set_sun_azimuth)
+	_sun_glitter_intensity = menu.add_slider("Sun glitter intensity", 0.0, 2.0, 0.7,
+		func(v: float): surface_mat.set_shader_parameter("sun_glitter_strength", v))
 	menu.add_separator()
 
 	menu.add_section("Performance")
@@ -147,6 +165,9 @@ func sync_to_preset(preset: OceanPreset) -> void:
 	_height_gain.value = preset.height_gain
 	_long_height.value = preset.long_wave_height_m
 	_long_length.value = preset.long_wave_length_m
+	_mid_height.value = preset.mid_wave_height_m
+	_mid_length.value = preset.mid_wave_length_m
+	_mid_spread.value = preset.mid_wave_spread
 	_wind_height.value = preset.wind_wave_height_m
 	_wind_length.value = preset.wind_wave_length_m
 	_ripple_strength.value = preset.ripple_strength
@@ -157,9 +178,16 @@ func sync_to_preset(preset: OceanPreset) -> void:
 	_foam_amount.value = preset.foam_amount
 	_foam_persistence.value = preset.foam_persistence
 	_spray_amount.value = preset.spray_amount
-	_sun_glitter_intensity.value = preset.sun_glitter_intensity
-	_mood.value = preset.storm_mood
 	_updating = false
+
+
+func sync_to_look(look: OceanLookPreset) -> void:
+	if _look_option == null:
+		return
+	_look_option.select(host.current_look_index)
+	_sun_elevation.set_value_no_signal(look.sun_elevation)
+	_sun_azimuth.set_value_no_signal(look.sun_azimuth)
+	_sun_glitter_intensity.set_value_no_signal(look.sun_glitter_strength)
 
 
 ## Emitting item_selected keeps the panel dropdown and the persisted value in sync.

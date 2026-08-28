@@ -1,0 +1,44 @@
+[gd_resource type="Resource" script_class="OceanLookPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/ocean/ocean_look_preset.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Storm Overcast"
+sun_elevation = 9.0
+sun_azimuth = 180.0
+sun_color = Color(0.74, 0.81, 0.86, 1)
+sun_energy = 1.75
+sun_angular_distance = 1.25
+sky_zenith = Color(0.025, 0.055, 0.09, 1)
+sky_horizon = Color(0.16, 0.23, 0.27, 1)
+sun_disk_color = Color(0.65, 0.75, 0.84, 1)
+haze_color = Color(0.1, 0.15, 0.18, 1)
+sky_energy = 0.72
+exposure = 1.15
+white_point = 5.5
+fog_color = Color(0.1, 0.16, 0.18, 1)
+fog_density = 0.0011
+fog_aerial_perspective = 0.58
+glow_intensity = 0.12
+glow_bloom = 0.035
+glow_hdr_threshold = 1.45
+deep_color = Color(0.045, 0.17, 0.17, 1)
+shallow_color = Color(0.12, 0.34, 0.31, 1)
+foam_color = Color(0.79, 0.87, 0.84, 1)
+roughness = 0.22
+sss_strength = 1.5
+sun_path_width = 0.018
+sun_glitter_strength = 0.55
+sky_reflection_strength = 0.66
+micro_normal_strength = 0.38
+micro_normal_scales = Vector2(0.12, 0.36)
+micro_normal_fade_start = 45.0
+micro_normal_fade_end = 310.0
+cloud_coverage = 0.96
+cloud_density = 0.94
+cloud_top_color = Color(0.4, 0.45, 0.52, 1)
+cloud_base_color = Color(0.055, 0.07, 0.09, 1)
+cloud_rim_color = Color(0.5, 0.59, 0.7, 1)
+cloud_rim_strength = 0.42
+rain_intensity = 1.0

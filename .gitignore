@@ -15,6 +15,13 @@ resources/*
 resources/ocean/*
 !resources/ocean/foam_pattern.png
 !resources/ocean/foam_breakup.png
+!resources/ocean/foam_pattern_sot.png
+!resources/ocean/foam_breakup_sot.png
+!resources/ocean/micro_normal_sot.png
+!resources/ocean/micro_normal.png
+!resources/ocean/micro_normal.png.import
+!resources/ocean/looks/
+!resources/ocean/looks/*.tres
 
 .codex
 .claude

@@ -78,10 +78,20 @@ func set_profiling(on: bool) -> void:
 
 
 func get_gpu_time() -> float:
+	return get_capture_gpu_time() + get_feedback_gpu_time()
+
+
+func get_capture_gpu_time() -> float:
 	if not _profiling or _capture_viewport == null:
 		return 0.0
-	var total := RenderingServer.viewport_get_measured_render_time_gpu(
+	return RenderingServer.viewport_get_measured_render_time_gpu(
 		_capture_viewport.get_viewport_rid())
+
+
+func get_feedback_gpu_time() -> float:
+	if not _profiling:
+		return 0.0
+	var total := 0.0
 	for viewport in _feedback_viewports:
 		total += RenderingServer.viewport_get_measured_render_time_gpu(viewport.get_viewport_rid())
 	return total
