@@ -13,7 +13,14 @@ const STAGES: Array[String] = [
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
-const SOT_FOAM_UPDATE_INTERVAL := 2
+# P0-B: every-frame feedback keeps the breaking front fresh; foam_step_scale
+# already compensates the rates if this is ever spaced back out.
+const SOT_FOAM_UPDATE_INTERVAL := 1
+## Fix plan P0-A (cause C1): the foam feedback used to run on cascade 1 only,
+## the very cascade whose breaking coverage is near zero (~0.8 % vs ~11 % on
+## cascade 0). Cascades 0 and 1 both feed the feedback; cascade 2 (ripple) stays
+## out — its noise has no structure worth accumulating.
+var foam_cascade_count := 2
 ## Full choppiness on short waves folds the surface into black back-faces;
 ## damp it as the cascades get finer.
 const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 0.8, 0.55]
@@ -272,7 +279,8 @@ func step_render(delta: float) -> void:
 		var foam_interval := SOT_FOAM_UPDATE_INTERVAL \
 			if backend == Backend.SEA_OF_THIEVES_INSPIRED_FFT and not amortize else 1
 		var should_update_foam: bool = foam_feedback_enabled \
-			and (backend != Backend.SEA_OF_THIEVES_INSPIRED_FFT or i == 1) \
+			and (backend != Backend.SEA_OF_THIEVES_INSPIRED_FFT \
+				or i < foam_cascade_count) \
 			and _frame % foam_interval == 0
 		if should_update_foam:
 			var elapsed_frames := _frame - _foam_last_update_frame[i]

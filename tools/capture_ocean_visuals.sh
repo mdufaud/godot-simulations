@@ -14,6 +14,9 @@ CONTROL_FRAMES="${CONTROL_FRAMES:-120}"
 WARMUP="${WARMUP:-90}"
 DT="${DT:-0.016666667}"
 CAPTURE_TIME="${CAPTURE_TIME:-20.0}"
+# Fix plan 0.6: seconds of LIVE simulation before the first capture so the foam
+# feedback is at equilibrium (persistence ~4 s in storm; equilibrium ~13-17 s).
+FOAM_WARMUP="${FOAM_WARMUP:-16.0}"
 WIND_DIRECTION="${WIND_DIRECTION:-0.0}"
 LOOK="${LOOK:-1}"
 SUN_ELEVATION="${SUN_ELEVATION:-34.0}"
@@ -45,7 +48,8 @@ common_args() {
 	printf '%s\n' \
 		"preset=$preset" "backend=1" "look=$look" "mood=$mood" \
 		"mood_snap=1" "lightning=0" "view=$view" "ui=0" "time=$CAPTURE_TIME" \
-		"dt=$DT" "warmup=$WARMUP" "wind=$WIND_DIRECTION" \
+		"dt=$DT" "warmup=$WARMUP" "foam_warmup=$FOAM_WARMUP" \
+		"wind=$WIND_DIRECTION" \
 		"sun_elevation=$SUN_ELEVATION" "sun_azimuth=$SUN_AZIMUTH" \
 		"rain=0" "spray=0" "interaction=0"
 }
@@ -163,8 +167,9 @@ if [[ "${PAIRS:-true}" == "true" ]]; then
 fi
 
 if [[ "$DIAGNOSTICS" == "true" ]]; then
-	printf 'ocean campaign phase=%s output=%s resolution=%s frames=%s every=%s warmup=%s dt=%s capture_time=%s wind=%s look=%s sun=%s/%s\n' \
-		"$PHASE" "$OUT_DIR" "$RESOLUTION" "$FRAMES" "$EVERY" "$WARMUP" "$DT" \
+	printf 'ocean campaign phase=%s output=%s resolution=%s frames=%s every=%s warmup=%s foam_warmup=%s dt=%s capture_time=%s wind=%s look=%s sun=%s/%s\n' \
+		"$PHASE" "$OUT_DIR" "$RESOLUTION" "$FRAMES" "$EVERY" "$WARMUP" \
+		"$FOAM_WARMUP" "$DT" \
 		"$CAPTURE_TIME" "$WIND_DIRECTION" "$LOOK" "$SUN_ELEVATION" "$SUN_AZIMUTH" \
 		> "$OUT_DIR/run-${PHASE}.txt"
 	{

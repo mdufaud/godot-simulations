@@ -235,6 +235,7 @@ func apply_look(index: int) -> void:
 	surface_mat.set_shader_parameter("micro_normal_scales", look.micro_normal_scales)
 	surface_mat.set_shader_parameter("micro_normal_fade_start", look.micro_normal_fade_start)
 	surface_mat.set_shader_parameter("micro_normal_fade_end", look.micro_normal_fade_end)
+	surface_mat.set_shader_parameter("aerial_density", look.aerial_density)
 	storm.apply_look(look)
 	_menu_builder.sync_to_look(look)
 
@@ -336,6 +337,24 @@ func set_capture_fixed_delta(value: float) -> void:
 	_capture_fixed_delta = maxf(value, 0.0)
 
 
+## Fix plan 0.6 (trap M1): advance the LIVE simulation by `seconds` before the
+## first captured frame so the foam feedback (persistence ~4 s in storm) sits at
+## equilibrium instead of its zero-initialised transient. The spectral phase
+## time keeps flowing from the capture time; nothing renders in between. Steps
+## are flushed to the render thread in batches so every step completes before
+## the await returns.
+func warmup_foam(seconds: float) -> void:
+	var steps := int(ceil(seconds / 0.06))
+	for i in steps:
+		_sim_time += 0.06
+		solver.sim_time = _sim_time
+		RenderingServer.call_on_render_thread(solver.step_render.bind(0.06))
+		if i % 60 == 59:
+			await RenderingServer.frame_post_draw
+	# Let the last foam state land in the read texture before any capture.
+	await RenderingServer.frame_post_draw
+
+
 func set_capture_wind_direction(value: float) -> void:
 	solver.wind_direction = fposmod(value, TAU)
 	solver.mark_spectrum_dirty()
@@ -417,6 +436,7 @@ func _setup_ocean_mesh() -> void:
 		scales.append(Vector4(inv, inv, 1.0, 1.0))
 	surface_mat.set_shader_parameter("map_scales", scales)
 	surface_mat.set_shader_parameter("num_cascades", solver.num_cascades())
+	surface_mat.set_shader_parameter("num_foam_cascades", solver.foam_cascade_count)
 	surface_mat.set_shader_parameter("foam_pattern",
 		load("res://resources/ocean/foam_pattern.png"))
 	surface_mat.set_shader_parameter("foam_breakup",
@@ -497,7 +517,8 @@ func _bind_textures() -> void:
 	surface_mat.set_shader_parameter("foam_history_b", foam_texture_b)
 	surface_mat.set_shader_parameter("foam_history_indices", solver.get_foam_read_indices())
 	foam_window.bind_ocean(disp_texture, solver.tile_lengths)
-	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera)
+	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera,
+		foam_texture_a, foam_texture_b, solver.get_foam_read_indices())
 	spray.set_sun_direction(sun.global_transform.basis.z.normalized())
 	texture_bound = true
 
@@ -586,13 +607,16 @@ func capture_metadata_async(path: String) -> String:
 	if profiling_was_enabled:
 		solver.profiling = false
 	_capture_profiling = false
+	var visibility := _capture_foam_visibility()
+	var foam_strength := clampf(0.2 + solver.foam_amount * 0.24, 0.2, 2.0)
 	var layer_metrics: Array[Dictionary] = []
 	for cascade in solver.num_cascades():
 		var normal: PackedByteArray = await _capture_readback(
 			solver.get_normal_tex_rid(), cascade)
 		var foam: PackedByteArray = await _capture_readback(
 			solver.get_foam_read_tex_rid(cascade), cascade)
-		layer_metrics.append(_capture_texture_metrics(normal, foam))
+		layer_metrics.append(_capture_texture_metrics(normal, foam,
+			visibility[cascade], foam_strength))
 	if profiling_was_enabled:
 		solver.profiling = true
 	_capture_profiling = capture_profiling_was_enabled
@@ -600,16 +624,96 @@ func capture_metadata_async(path: String) -> String:
 	var breaking_layers := PackedFloat32Array()
 	var foam_layers := PackedFloat32Array()
 	var fresh_layers := PackedFloat32Array()
+	var visible_layers := PackedFloat32Array()
+	var breaking_visible_layers := PackedFloat32Array()
 	for metrics in layer_metrics:
 		crest_layers.append(metrics.crest_coverage)
 		breaking_layers.append(metrics.breaking_coverage)
 		foam_layers.append(metrics.foam_coverage)
 		fresh_layers.append(metrics.fresh_coverage)
-	var rendered := layer_metrics[1] if layer_metrics.size() > 1 else layer_metrics[0]
-	return "%s crest_cov_layers=%s breaking_cov_layers=%s foam_cov_layers=%s fresh_cov_layers=%s crest_cov=%.4f breaking_cov=%.4f foam_cov=%.4f foam_mean=%.4f fresh_mean=%.4f" % [
+		visible_layers.append(metrics.foam_cov_visible)
+		breaking_visible_layers.append(metrics.breaking_cov_visible)
+	var rendered := _rendered_layer_metrics(layer_metrics)
+	return "%s crest_cov_layers=%s breaking_cov_layers=%s foam_cov_layers=%s fresh_cov_layers=%s foam_visible_layers=%s crest_cov=%.4f breaking_cov=%.4f foam_cov=%.4f foam_mean=%.4f fresh_mean=%.4f foam_cov_visible=%.4f breaking_cov_visible=%.4f measure_version=%d" % [
 		capture_metadata(path), crest_layers, breaking_layers, foam_layers,
-		fresh_layers, rendered.crest_coverage, rendered.breaking_coverage,
-		rendered.foam_coverage, rendered.foam_mean, rendered.fresh_mean]
+		fresh_layers, visible_layers, rendered.crest_coverage,
+		rendered.breaking_coverage, rendered.foam_coverage, rendered.foam_mean,
+		rendered.fresh_mean, _max_over_layers(visible_layers),
+		_max_over_layers(breaking_visible_layers), OceanConfig.MEASURE_VERSION]
+
+
+## Per-cascade foam visibility as the surface shader computes it (fix plan 0.1):
+## cascade_fade * detail_filter * layer weight, plus the distance fade applied
+## to the final foam factor. Camera-dependent, so this is the capture camera's
+## distance to the water plane and its pixel footprint at that distance.
+func _capture_foam_visibility() -> Array[float]:
+	var cam := get_viewport().get_camera_3d()
+	var position := cam.global_position if cam != null else Vector3.ZERO
+	var dist := maxf(position.y, 1.0)
+	var fov := 65.0
+	if cam != null:
+		fov = cam.fov
+	var viewport_height := maxf(get_viewport().get_visible_rect().size.y, 1.0)
+	var pixel_world := 2.0 * dist * tan(deg_to_rad(fov) * 0.5) / viewport_height
+	var wavelengths := _cascade_wavelengths()
+	var visibilities: Array[float] = []
+	for cascade in solver.num_cascades():
+		var tile := solver.tile_lengths[cascade]
+		var cascade_fade := exp(-dist * 0.32 / tile)
+		var wavelength := wavelengths[cascade]
+		var detail_filter := 1.0 - smoothstep(wavelength * 0.22, wavelength * 0.55,
+			pixel_world)
+		var layer_weight := 0.85 if cascade == 0 else 1.0
+		visibilities.append(cascade_fade * detail_filter * layer_weight
+			* exp(-dist * 0.0015))
+	return visibilities
+
+
+## Same wavelengths as _sync_wave_filter_uniforms pushes to the material.
+func _cascade_wavelengths() -> Array[float]:
+	var middle := solver.wind_wave_length_m
+	if solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT \
+		and solver.mid_wave_height_m > 0.01:
+		middle = solver.mid_wave_length_m
+	return [solver.long_wave_length_m, middle, 0.72]
+
+
+## The surface material reads max() over the simulated cascades with per-layer
+## weights (0.85 for the long cascade) — not layer 1 alone (fix plan P0-A.3).
+func _rendered_layer_metrics(layer_metrics: Array[Dictionary]) -> Dictionary:
+	var simulated := mini(solver.foam_cascade_count, layer_metrics.size())
+	var rendered := layer_metrics[0].duplicate()
+	var crest := 0.0
+	var breaking := 0.0
+	var foam := 0.0
+	var foam_mean := 0.0
+	var fresh_mean := 0.0
+	var fresh := 0.0
+	for i in layer_metrics.size():
+		var metrics := layer_metrics[i]
+		crest = maxf(crest, metrics.crest_coverage)
+		breaking = maxf(breaking, metrics.breaking_coverage)
+		if i >= simulated:
+			continue
+		var weight := 0.85 if i == 0 else 1.0
+		foam = maxf(foam, metrics.foam_coverage * weight)
+		foam_mean = maxf(foam_mean, metrics.foam_mean * weight)
+		fresh = maxf(fresh, metrics.fresh_coverage * weight)
+		fresh_mean = maxf(fresh_mean, metrics.fresh_mean * weight)
+	rendered.crest_coverage = crest
+	rendered.breaking_coverage = breaking
+	rendered.foam_coverage = foam
+	rendered.foam_mean = foam_mean
+	rendered.fresh_coverage = fresh
+	rendered.fresh_mean = fresh_mean
+	return rendered
+
+
+func _max_over_layers(values: PackedFloat32Array) -> float:
+	var best := 0.0
+	for value in values:
+		best = maxf(best, value)
+	return best
 
 
 func capture_image_metrics(image: Image) -> String:
@@ -631,8 +735,65 @@ func capture_image_metrics(image: Image) -> String:
 	var mean := sum / maxf(float(count), 1.0)
 	var variance := maxf(sum_sq / maxf(float(count), 1.0) - mean * mean, 0.0)
 	var coverage := capture_water_coverage(image)
-	return "CAPTURE IMAGE lower_luma=%.4f lower_luma_sd=%.4f lower_sat=%.4f water_cov=%.4f" % [
-		mean, sqrt(variance), saturation_sum / maxf(float(count), 1.0), coverage]
+	return "CAPTURE IMAGE lower_luma=%.4f lower_luma_sd=%.4f lower_sat=%.4f water_cov=%.4f orient_coh=%.4f banding=%.4f" % [
+		mean, sqrt(variance), saturation_sum / maxf(float(count), 1.0), coverage,
+		capture_orientation_coherence(image), capture_banding_fraction(image)]
+
+
+## Fix plan 0.3 (trap M3): mean orientation coherence of the lower half, from
+## the structure tensor of the luminance gradients. This is the accepted
+## short-wave metric — the raw HF energy ratio is banned as a quality signal.
+func capture_orientation_coherence(image: Image) -> float:
+	var y_start := int(float(image.get_height()) * 0.5)
+	var block := 16
+	var coherence_sum := 0.0
+	var blocks := 0
+	for by in range(y_start, image.get_height() - block, block * 2):
+		for bx in range(0, image.get_width() - block, block * 2):
+			var jxx := 0.0
+			var jxy := 0.0
+			var jyy := 0.0
+			for y in range(by + 1, by + block - 1, 2):
+				for x in range(bx + 1, bx + block - 1, 2):
+					var gx := _luma_difference(image, x + 1, y) - _luma_difference(image, x - 1, y)
+					var gy := _luma_difference(image, x, y + 1) - _luma_difference(image, x, y - 1)
+					jxx += gx * gx
+					jxy += gx * gy
+					jyy += gy * gy
+			var trace := jxx + jyy
+			if trace < 1e-7:
+				continue
+			var discriminant := sqrt(maxf((jxx - jyy) * (jxx - jyy) + 4.0 * jxy * jxy, 0.0))
+			coherence_sum += discriminant / trace
+			blocks += 1
+	return coherence_sum / maxf(float(blocks), 1.0)
+
+
+## Fraction of exactly flat neighbour pairs in the 8-bit luminance: a proxy for
+## quantisation banding, the non-structured HF the plan tells us to exclude.
+func capture_banding_fraction(image: Image) -> float:
+	var y_start := int(float(image.get_height()) * 0.5)
+	var flat := 0
+	var pairs := 0
+	for y in range(y_start, image.get_height(), 4):
+		for x in range(0, image.get_width() - 1, 4):
+			var l0 := _luma_byte(image, x, y)
+			var l1 := _luma_byte(image, x + 1, y)
+			if l0 == l1:
+				flat += 1
+			pairs += 1
+	return float(flat) / maxf(float(pairs), 1.0)
+
+
+func _luma_difference(image: Image, x: int, y: int) -> float:
+	x = clampi(x, 0, image.get_width() - 1)
+	y = clampi(y, 0, image.get_height() - 1)
+	return _luma_byte(image, x, y)
+
+
+func _luma_byte(image: Image, x: int, y: int) -> float:
+	var color := image.get_pixel(x, y)
+	return floorf((color.r * 0.2126 + color.g * 0.7152 + color.b * 0.0722) * 255.0)
 
 
 func capture_water_coverage(image: Image) -> float:
@@ -681,41 +842,73 @@ func _store_capture_readback(state: Dictionary, data: PackedByteArray) -> void:
 	state.done = true
 
 
-func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray) -> Dictionary:
+## Raw texel counts use the shared MEASURE_* thresholds (fix plan 0.7). The
+## *_cov_visible fields re-apply the surface shader's style_mode==1 composition
+## chain to the raw signal so metadata becomes comparable to the rendered pixel
+## (fix plan 0.1, trap M2). Documented drift risk: the ribbon/breakup texture
+## multiplies live only in the shader, so visible coverage is an upper bound.
+func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray,
+		foam_visibility: float, foam_strength: float) -> Dictionary:
 	var crest_active := 0
 	var breaking_active := 0
+	var breaking_visible_active := 0
 	var normal_count := 0
 	for i in normal.size() / 8:
 		var crest := _capture_half(normal.decode_u16(i * 8 + 4))
 		var breaking := _capture_half(normal.decode_u16(i * 8 + 6))
-		if crest > 0.15:
+		if crest > OceanConfig.MEASURE_CREST_THRESHOLD:
 			crest_active += 1
-		if breaking > 0.15:
+		if breaking > OceanConfig.MEASURE_BREAKING_THRESHOLD:
 			breaking_active += 1
+		if breaking * foam_visibility > OceanConfig.MEASURE_BREAKING_THRESHOLD:
+			breaking_visible_active += 1
 		normal_count += 1
 	var foam_sum := 0.0
 	var fresh_sum := 0.0
 	var foam_active := 0
 	var fresh_active := 0
+	var foam_visible_active := 0
 	var foam_count := 0
 	for i in foam.size() / 4:
 		var persistent := _capture_half(foam.decode_u16(i * 4))
 		var fresh := _capture_half(foam.decode_u16(i * 4 + 2))
 		foam_sum += persistent
 		fresh_sum += fresh
-		if persistent > 0.15:
+		if persistent > OceanConfig.MEASURE_FOAM_THRESHOLD:
 			foam_active += 1
-		if fresh > 0.02:
+		if fresh > OceanConfig.MEASURE_FRESH_THRESHOLD:
 			fresh_active += 1
+		# Same grid as the normal map: the fresh channel folds in the breaking
+		# texel exactly like the shader's fresh_signal.
+		var breaking := _capture_half(normal.decode_u16(i * 8 + 6))
+		var composed := _composed_screen_foam(persistent, fresh, breaking, foam_strength)
+		if composed * foam_visibility > OceanConfig.MEASURE_FOAM_THRESHOLD:
+			foam_visible_active += 1
 		foam_count += 1
 	return {
 		"crest_coverage": float(crest_active) / maxf(float(normal_count), 1.0),
 		"breaking_coverage": float(breaking_active) / maxf(float(normal_count), 1.0),
 		"foam_coverage": float(foam_active) / maxf(float(foam_count), 1.0),
 		"fresh_coverage": float(fresh_active) / maxf(float(foam_count), 1.0),
+		"foam_cov_visible": float(foam_visible_active) / maxf(float(foam_count), 1.0),
+		"breaking_cov_visible": float(breaking_visible_active)
+			/ maxf(float(normal_count), 1.0),
 		"foam_mean": foam_sum / maxf(float(foam_count), 1.0),
 		"fresh_mean": fresh_sum / maxf(float(foam_count), 1.0),
 	}
+
+
+## ocean_surface.gdshader's foam composition (style_mode 1), minus the breakup
+## texture stage. Fresh foam folds in the rendered breaking contribution
+## (foam_breaking * 0.45) so a live front counts before history accumulates.
+func _composed_screen_foam(persistent: float, fresh: float, breaking: float,
+		foam_strength: float) -> float:
+	var persistent_source := clampf(persistent * foam_strength * 0.92, 0.0, 1.0)
+	var fresh_signal := maxf(fresh, breaking * 0.45)
+	var fresh_source := clampf(fresh_signal * foam_strength * 1.35, 0.0, 1.0)
+	var persistent_foam := smoothstep(0.018, 0.16, persistent_source)
+	var fresh_foam := smoothstep(0.006, 0.055, fresh_source)
+	return 1.0 - (1.0 - persistent_foam * 0.92) * (1.0 - fresh_foam * 1.12)
 
 
 func _capture_half(bits: int) -> float:

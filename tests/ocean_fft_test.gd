@@ -77,6 +77,10 @@ func _run() -> void:
 		"crest compression is not monotonic from Calm to Storm")
 	_check(states[0].foam_mean < 0.0001 and states[0].fresh_mean < 0.0001,
 		"Calm produced open-water foam")
+	# P0-A/P0-B absolute guard: no cascade may foam spontaneously in calm.
+	_check(states[0].foam_coverage_by_layer[0] < 0.001
+		and states[0].foam_coverage_by_layer[1] < 0.001,
+		"Calm produced foam on a simulated cascade")
 	_check(states[0].breaking_coverage < 0.01
 		and states[1].breaking_coverage <= states[2].breaking_coverage
 		and states[2].breaking_coverage <= states[3].breaking_coverage
@@ -134,18 +138,27 @@ func _run() -> void:
 	demo.set_frozen(true)
 	var settled_storm := await _state_metrics(demo, true, true)
 	_check(settled_storm.primary_crest_coverage >= 0.08
-		and settled_storm.primary_crest_coverage <= 0.22,
-		"Storm crest coverage is outside 8..22%% (%.1f%%)"
+		and settled_storm.primary_crest_coverage <= 0.24,
+		"Storm crest coverage is outside 8..24%% (%.1f%%)"
 		% (settled_storm.primary_crest_coverage * 100.0))
 	_check(settled_storm.primary_breaking_coverage >= 0.03
-		and settled_storm.primary_breaking_coverage <= 0.12,
-		"Storm breaking coverage is outside 3..12%% (%.1f%%)"
+		and settled_storm.primary_breaking_coverage <= 0.16,
+		"Storm breaking coverage is outside 3..16%% (%.1f%%)"
 		% (settled_storm.primary_breaking_coverage * 100.0))
-	_check(settled_storm.foam_coverage_by_layer[0] < 0.0001,
-		"long-wave cascade still generates visible foam (%.3f%%)"
+	# P0-A recalibration (fix plan §7): the foam feedback now simulates the long
+	# cascade too, so layer 0 MUST carry foam in storm and must stay silent in
+	# calm. The old bound (< 0.0001) encoded the C1 routing bug.
+	_check(settled_storm.foam_coverage_by_layer[0] > 0.005,
+		"long-wave cascade foam is absent (%.3f%%)"
 		% (settled_storm.foam_coverage_by_layer[0] * 100.0))
+	# Layer-1 bound re-calibrated for P0-B (0.35 -> 0.40) then P1-B (0.40 ->
+	# 0.45, justified at the commit per the plan's rule): the permissive
+	# injection, every-frame feedback and the P1-B short-energy spectrum
+	# legitimately raise steady-state mid-cascade coverage; morphology stays
+	# ribbon-like (fragmented components, mean width ~6 m), the physical guard
+	# stays the < 0.40 total (Monahan).
 	_check(settled_storm.foam_coverage_by_layer[1] > 0.001
-		and settled_storm.foam_coverage_by_layer[1] < 0.35,
+		and settled_storm.foam_coverage_by_layer[1] < 0.45,
 		"mid-wave ribbon foam is absent or saturated (%.1f%%)"
 		% (settled_storm.foam_coverage_by_layer[1] * 100.0))
 	_check(settled_storm.fresh_coverage_by_layer[1] > 0.001,
@@ -331,14 +344,17 @@ func _state_metrics(demo, include_foam: bool = false, include_topology: bool = f
 			var foam := await _read_texture(demo.solver.get_foam_read_tex_rid(layer), layer)
 			var foam_metrics := _foam_metrics(foam)
 			var foam_overlap: Dictionary = {"fresh_active": 0, "overlap": 0, "outside": 0}
-			if layer == 1:
-				var mid_normal := await _read_texture(demo.solver.get_normal_tex_rid(), 1)
-				foam_overlap = _fresh_breaking_overlap(mid_normal, foam)
-				if include_topology:
-					var foam_morphology := _foam_morphology(foam)
-					persistent_ribbon = foam_morphology.persistent
-					fresh_ribbon = foam_morphology.fresh
-					fresh_persistent_iou = foam_morphology.iou
+			if layer < demo.solver.foam_cascade_count:
+				# P0-A: fresh/breaking coherence is checked on every simulated
+				# cascade, not just the mid one.
+				var layer_normal := await _read_texture(
+					demo.solver.get_normal_tex_rid(), layer)
+				foam_overlap = _fresh_breaking_overlap(layer_normal, foam)
+			if layer == 1 and include_topology:
+				var foam_morphology := _foam_morphology(foam)
+				persistent_ribbon = foam_morphology.persistent
+				fresh_ribbon = foam_morphology.fresh
+				fresh_persistent_iou = foam_morphology.iou
 			foam_sum += foam_metrics.sum
 			fresh_sum += foam_metrics.fresh_sum
 			foam_count += foam_metrics.count
@@ -529,9 +545,9 @@ func _normal_metrics(data: PackedByteArray) -> Dictionary:
 		slope_sq += x.value * x.value + y.value * y.value
 		crest_sum += crest.value
 		breaking_sum += breaking.value
-		if crest.value > 0.15:
+		if crest.value > OceanConfig.MEASURE_CREST_THRESHOLD:
 			crest_active += 1
-		if breaking.value > 0.15:
+		if breaking.value > OceanConfig.MEASURE_BREAKING_THRESHOLD:
 			breaking_active += 1
 		count += 1
 	return {"slope_sq": slope_sq, "crest_sum": crest_sum,
@@ -555,9 +571,9 @@ func _foam_metrics(data: PackedByteArray) -> Dictionary:
 			continue
 		sum += foam.value
 		fresh_sum += fresh.value
-		if foam.value > 0.02:
+		if foam.value > OceanConfig.MEASURE_FOAM_THRESHOLD:
 			active += 1
-		if fresh.value > 0.005:
+		if fresh.value > OceanConfig.MEASURE_FRESH_THRESHOLD:
 			fresh_active += 1
 		count += 1
 	return {"sum": sum, "fresh_sum": fresh_sum, "active": active,
@@ -584,7 +600,7 @@ func _fresh_breaking_overlap(normal: PackedByteArray, foam: PackedByteArray) -> 
 	var overlap := 0
 	for i in texels:
 		var fresh := _half(foam.decode_u16(i * 4 + 2))
-		if not fresh.finite or fresh.value <= 0.005:
+		if not fresh.finite or fresh.value <= OceanConfig.MEASURE_FRESH_THRESHOLD:
 			continue
 		fresh_active += 1
 		if breaking_band[i] != 0:
@@ -681,8 +697,9 @@ func _foam_morphology(data: PackedByteArray) -> Dictionary:
 			var source_texel := (y * STEP * map_size + x * STEP)
 			var foam := _half(data.decode_u16(source_texel * 4))
 			var fresh_foam := _half(data.decode_u16(source_texel * 4 + 2))
-			persistent[texel] = int(foam.finite and foam.value > 0.02)
-			fresh[texel] = int(fresh_foam.finite and fresh_foam.value > 0.005)
+			persistent[texel] = int(foam.finite and foam.value > OceanConfig.MEASURE_FOAM_THRESHOLD)
+			fresh[texel] = int(fresh_foam.finite
+				and fresh_foam.value > OceanConfig.MEASURE_FRESH_THRESHOLD)
 			if persistent[texel] != 0 and fresh[texel] != 0:
 				intersection += 1
 			if persistent[texel] != 0 or fresh[texel] != 0:

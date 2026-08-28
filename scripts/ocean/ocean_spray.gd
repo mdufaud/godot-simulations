@@ -11,12 +11,18 @@ var _material: ShaderMaterial
 var _instance: MultiMeshInstance3D
 var _displacements: Texture2DArrayRD
 var _normals: Texture2DArrayRD
+var _foam_a: Texture2DArrayRD
+var _foam_b: Texture2DArrayRD
 
 
 func build(displacements: Texture2DArrayRD, normals: Texture2DArrayRD,
-		tile_lengths: PackedFloat32Array, _camera: Camera3D) -> void:
+		tile_lengths: PackedFloat32Array, _camera: Camera3D,
+		foam_a: Texture2DArrayRD = null, foam_b: Texture2DArrayRD = null,
+		foam_indices: Vector4 = Vector4(0.0, 0.0, 0.0, 0.0)) -> void:
 	_displacements = displacements
 	_normals = normals
+	_foam_a = foam_a
+	_foam_b = foam_b
 	if _instance == null:
 		var quad := QuadMesh.new()
 		quad.size = Vector2(1.0, 1.0)
@@ -41,6 +47,10 @@ func build(displacements: Texture2DArrayRD, normals: Texture2DArrayRD,
 	_material.set_shader_parameter("map_scales", scales)
 	_material.set_shader_parameter("displacements", _displacements)
 	_material.set_shader_parameter("normals", _normals)
+	if _foam_a != null and _foam_b != null:
+		_material.set_shader_parameter("foam_history_a", _foam_a)
+		_material.set_shader_parameter("foam_history_b", _foam_b)
+		_material.set_shader_parameter("foam_history_indices", foam_indices)
 	_instance.visible = _enabled and amount > 0.0
 
 
@@ -76,3 +86,5 @@ func release_textures() -> void:
 		_instance.visible = false
 	_displacements = null
 	_normals = null
+	_foam_a = null
+	_foam_b = null

@@ -26,7 +26,9 @@ void main() {
     float phase_speed = sqrt(max(G_GRAV * phase_k
         * tanh(phase_k * max(params.spectrum_b.y, 1.0)), 0.0));
     vec2 transport_velocity = wind * (params.spectrum_a.w + phase_speed * 0.35);
-    float update_hz = params.misc.w == 1 ? 30.0 : 60.0;
+    // P0-B: the SoT feedback now steps every frame (interval 2 -> 1), so both
+    // backends advect at the frame rate.
+    float update_hz = 60.0;
     float advection_px = clamp(length(transport_velocity) * (1.0 / update_hz)
         * float(MAP_SIZE) / max(params.spectrum_a.x, 1.0), 0.0, 8.0);
     vec2 adv_direction = normalize(transport_velocity);
@@ -55,8 +57,17 @@ void main() {
         breaking_support = max(breaking_support,
             imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, -radius)), cascade)).a);
     }
-    float persistent_injection = pow(smoothstep(0.025, 0.22, injection), 1.15);
-    float fresh_injection = pow(clamp(injection * 2.6, 0.0, 1.0), 1.6);
+    // P0-B (cause C5): more permissive injection — events fire frequently and
+    // at every frame instead of only at the strongest crests. P0-A per-layer
+    // bias: the long cascade's ~2 m cells average the folding, and its foam
+    // advects ~150 m (wind x persistence) before decaying, so a loose threshold
+    // fills the whole tile — measured: bias 4 saturated 97 % of layer 0 at
+    // equilibrium. 8x keeps accumulation to the crests that actually fold
+    // (injection > ~0.1), the plan's "biais de seuil par couche".
+    float cascade_bias = cascade == 0 ? 8.0 : 1.0;
+    float persistent_injection = pow(smoothstep(
+        0.012 * cascade_bias, 0.15 * cascade_bias, injection), 1.15);
+    float fresh_injection = pow(clamp(injection * 4.0 / cascade_bias, 0.0, 1.0), 1.6);
     float persistent = history.r * exp(-params.foam_p.z);
     float fresh = history.g * exp(-params.foam_p.z * 6.0)
         * smoothstep(0.0, 0.16, breaking_support);

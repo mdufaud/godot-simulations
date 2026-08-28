@@ -101,14 +101,18 @@ void main() {
         / max(curvature_scale, 1e-4);
     float slope = length(vec2(dhy_dx, dhy_dz));
     float crest_height = smoothstep(0.16 - crest_strength * 0.10, 0.66, height_norm);
-    float crest_shape = smoothstep(0.62, 1.42, crest_curvature);
+    // P0-B (cause C5): widen the emission window — more crests above the
+    // compression threshold at the same instant. The crest mask loosens from
+    // (0.62, 1.42) to (0.45, 1.20) and the calm guard lives in the threshold
+    // formula (~0.144 in calm), which the zero-foam test keeps absolute.
+    float crest_shape = smoothstep(0.45, 1.20, crest_curvature);
     float crest_slope = smoothstep(0.035, 0.22 + params.art_b.x * 0.10, slope);
     float crest = pow(crest_height * crest_shape
         * mix(0.42, 1.0, crest_slope), 1.35);
     float sea_state_level = clamp(params.spectrum_a.w / 33.0
         + params.spectrum_b.z * 0.22, 0.0, 1.0);
-    float compression_threshold = max(0.035,
-        0.05 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.012);
+    float compression_threshold = max(0.020,
+        0.05 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.030);
     float compression_span = mix(0.10, 0.075, sea_state_level);
     float medium_breaking_gain = params.misc.x == 1
         ? mix(0.35, 5.0, smoothstep(0.85, 2.0, band_height)) : 1.0;
@@ -116,7 +120,8 @@ void main() {
         ? crest
             * smoothstep(compression_threshold,
                 compression_threshold + compression_span, compression)
-            * medium_breaking_gain * 0.30
+            * medium_breaking_gain * mix(0.30, 0.42,
+                clamp(params.foam_p.x, 0.0, 1.0))
         : max(0.0, params.foam_p.x - jacobian);
 
     float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);

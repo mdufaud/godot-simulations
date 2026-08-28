@@ -6,6 +6,12 @@ render_mode unshaded, blend_mix, cull_disabled, depth_draw_never, shadows_disabl
 
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
+uniform sampler2DArray foam_history_a : filter_linear, repeat_enable;
+uniform sampler2DArray foam_history_b : filter_linear, repeat_enable;
+uniform vec4 foam_history_indices = vec4(0.0);
+// P3-B: spawn is rejected below this breaking level; 0 rolls back to the
+// mood-only gate.
+uniform float spray_breaking_threshold = 0.2;
 uniform vec4 map_scales[CASCADES];
 uniform vec2 window_center = vec2(0.0);
 uniform float window_size = 168.0;
@@ -47,6 +53,21 @@ void vertex() {
 		breaking = max(breaking, normal_sample.a);
 	}
 
+	// P3-B: the foam feedback confirms active breaking — spawn is rejected
+	// where the fresh channel is empty even if the instantaneous breaking texel
+	// fires. Threshold 0 rolls back to the mood-only gate.
+	float foam_signal = 0.0;
+	if (spray_breaking_threshold > 0.0) {
+		for (int i = 0; i < 2; i++) {
+			float read_b = i == 0 ? foam_history_indices.x : foam_history_indices.y;
+			vec3 foam_coords = vec3(xz * map_scales[i].xy, float(i));
+			vec4 foam_sample = read_b > 0.5
+				? textureLod(foam_history_b, foam_coords, 0.0)
+				: textureLod(foam_history_a, foam_coords, 0.0);
+			foam_signal = max(foam_signal, foam_sample.g);
+		}
+	}
+
 	float cycle = fract(sim_time * mix(0.18, 0.31, hash11(seed + 9.0)) + hash11(seed));
 	float life = sin(cycle * 3.14159265);
 
@@ -54,7 +75,11 @@ void vertex() {
 	float backlight = pow(max(dot(normalize(CAMERA_POSITION_WORLD - center),
 		-normalize(sun_direction)), 0.0), 2.0);
 	float weather_gate = smoothstep(0.12, 0.62, storm_mood);
-	float gate = smoothstep(0.06, 0.28, breaking) * weather_gate
+	float breaking_gate = spray_breaking_threshold > 0.0
+		? smoothstep(spray_breaking_threshold, spray_breaking_threshold + 0.22, breaking)
+			* smoothstep(0.015, 0.10, foam_signal)
+		: smoothstep(0.06, 0.28, breaking);
+	float gate = breaking_gate * weather_gate
 		* mix(0.55, 1.0, backlight) * spray_amount;
 	float sparse = step(hash11(seed + 41.0), clamp(gate * 0.68, 0.0, 1.0));
 	particle_alpha = life * life * gate * sparse * 0.58;

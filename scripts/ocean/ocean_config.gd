@@ -1,5 +1,15 @@
 class_name OceanConfig extends Resource
 
+## Measurement thresholds (fix plan 0.7, trap M2): ONE definition of "this texel
+## counts as foam" shared by the capture readbacks and the test suite. They sit
+## at the bottom of the render ramps on purpose; render smoothsteps stay
+## independent (docs/ocean_fix_plan.md annexe C). measure_version=2 in reports.
+const MEASURE_FOAM_THRESHOLD := 0.02
+const MEASURE_FRESH_THRESHOLD := 0.005
+const MEASURE_CREST_THRESHOLD := 0.15
+const MEASURE_BREAKING_THRESHOLD := 0.15
+const MEASURE_VERSION := 2
+
 @export_range(8, 2048, 1) var map_size: int = 512
 @export var clipmap_tile_lengths_m: PackedFloat32Array = PackedFloat32Array([1013.0, 127.0, 17.0])
 @export_range(1, 32, 1) var clipmap_levels: int = 8

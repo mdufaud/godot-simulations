@@ -66,7 +66,10 @@ def main() -> None:
     phase = args.campaign / args.phase
     pairs = phase / "pairs"
     annotated = phase / "annotated"
-    rows = ["pair\tref_luma\tref_saturation\tref_contrast\tcapture_luma\tcapture_saturation\tcapture_contrast"]
+    # Fix plan 0.7: foam thresholds are unified (MEASURE_* in ocean_config.gd);
+    # historical metrics.tsv rows used foam > 0.15 / fresh > 0.02 and are not
+    # comparable — the version column marks the split.
+    rows = ["pair\tref_luma\tref_saturation\tref_contrast\tcapture_luma\tcapture_saturation\tcapture_contrast\tmeasure_version"]
     for name, (capture_name, reference_name) in PAIRS.items():
         capture_path = pairs / capture_name
         reference_path = args.references / reference_name
@@ -77,7 +80,8 @@ def main() -> None:
         board(name, capture, reference, annotated / f"{name}.png")
         ref_values = metrics(reference)
         capture_values = metrics(capture)
-        rows.append(name + "\t" + "\t".join(f"{value:.6f}" for value in ref_values + capture_values))
+        rows.append(name + "\t" + "\t".join(
+            f"{value:.6f}" for value in ref_values + capture_values) + "\t2")
     (phase / "metrics.tsv").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 

@@ -38,6 +38,9 @@ uniform int debug_view = 0;
 uniform int geometry_cascade = -1;
 uniform bool foam_feedback_enabled = true;
 uniform int num_cascades = 3;
+// Cascades whose foam feedback actually simulates (P0-A): matches
+// OceanSolver.foam_cascade_count.
+uniform int num_foam_cascades = 2;
 uniform vec4 map_scales[MAX_CASCADES]; // xy = uv scale (1/tile), z = displacement scale, w = normal scale
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
@@ -55,6 +58,9 @@ uniform sampler2D cloud_reflection : filter_linear, repeat_disable, hint_default
 uniform bool cloud_reflection_enabled = true;
 uniform vec3 sky_zenith : source_color = vec3(0.055, 0.18, 0.43);
 uniform vec3 sky_horizon : source_color = vec3(0.95, 0.43, 0.18);
+// P0-C.3: exponential aerial convergence of the far water toward the sky
+// (per look; 6e-4 overcast, ~2.5e-4 tropical, 1/m).
+uniform float aerial_density = 0.00025;
 uniform sampler2D interaction_foam : filter_linear, repeat_disable, hint_default_black;
 uniform vec2 interaction_center = vec2(0.0);
 uniform float interaction_size = 128.0;
@@ -73,6 +79,9 @@ varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
 varying float crest_factor;
+// P3-A: crest signal summed over the two simulated cascades (0.65/0.35) —
+// subsurface scattering follows every breaking crest, not one cascade's.
+varying float sss_crest_factor;
 varying float glitter_factor;
 varying float filtered_roughness;
 
@@ -106,8 +115,12 @@ void vertex() {
 	world_uv = VERTEX.xz;
 	// Each cascade fades with distance in proportion to its tile length: storm
 	// swell (cascade 0, ~1 km tile) must stay visible for kilometres or the far
-	// sea collapses into a flat mirror that merges with the sky. Fades complete
-	// before the clipmap edge (~2.1 km) so the flat skirt joins seamlessly.
+	// sea collapses into a flat mirror that merges with the sky. P0-C (cause
+	// C6): the skirt shares the last ring's 32 m lattice, which carries
+	// lambda >= 64 m — the swell octave is representable all the way out, so
+	// the silhouette cascade keeps a fade floor instead of dying at 2.1 km.
+	// The floor applies to every vertex including the skirt, so the join stays
+	// crack-free by construction; aerial_density dissolves the far termination.
 	float dist = length(VERTEX.xz - CAMERA_POSITION_WORLD.xz);
 	vec3 displacement = vec3(0.0);
 	for (int i = 0; i < num_cascades; i++) {
@@ -117,6 +130,9 @@ void vertex() {
 		vec4 scales = map_scales[i];
 		float tile = 1.0 / max(scales.x, 1e-6);
 		float fade = min(exp(-(dist - max(tile * 0.7, 60.0)) * 2.5 / max(tile, 80.0)), 1.0);
+		if (style_mode == 1 && i == 0) {
+			fade = max(fade, 0.35); // the swell stays visible to the clipmap edge
+		}
 		float wavelength = cascade_wavelength(i);
 		float geometry_footprint = style_mode == 1
 			? max(cell * 1.25, pixel_world_size * 1.75) : cell;
@@ -190,6 +206,7 @@ void fragment() {
 	float foam_history = 0.0;
 	float foam_fresh = 0.0;
 	float foam_breaking = 0.0;
+	float sss_crest_mask = 0.0;
 	vec2 world_dx = dFdx(world_uv);
 	vec2 world_dy = dFdy(world_uv);
 	float pixel_footprint = max(length(world_dx), length(world_dy));
@@ -210,22 +227,41 @@ void fragment() {
 		float wavelength = cascade_wavelength(i);
 		float detail_filter = 1.0 - smoothstep(wavelength * 0.22,
 			wavelength * 0.55, pixel_footprint);
+		// P1-B.3 (cause C2): stop strangling the short cascades in the shader —
+		// 0.42 -> 0.55 mid, 0.16 -> 0.32 ripple; detail_filter + Toksvig keep
+		// the minification aliased-free.
 		float style_normal_weight = style_mode == 1
-			? (i == 0 ? 1.0 : (i == 1 ? 0.42 : 0.16)) : 1.0;
+			? (i == 0 ? 1.0 : (i == 1 ? 0.55 : 0.32)) : 1.0;
+		// P0-C.2: per-cascade floors keep the crest modulation alive in far
+		// shading instead of collapsing into a flat mirror (0.10 long / 0.06
+		// mid; the ripple cascade keeps the old floors — it is dead at range).
+		float far_normal_floor = i == 0 ? 0.10 : (i == 1 ? 0.06 : 0.025);
+		float far_crest_floor = i == 0 ? 0.10 : (i == 1 ? 0.06 : 0.08);
 		gradient += normal_sample.xy * scales.w * normal_strength
-			* max(cascade_fade, 0.025) * detail_filter * style_normal_weight;
-		peak_mask = max(peak_mask, normal_sample.z * max(cascade_fade, 0.08)
+			* max(cascade_fade, far_normal_floor) * detail_filter * style_normal_weight;
+		peak_mask = max(peak_mask, normal_sample.z * max(cascade_fade, far_crest_floor)
 			* detail_filter);
+		// P3-A: weighted crest sum for the SSS path instead of one cascade.
+		sss_crest_mask += normal_sample.z * max(cascade_fade, far_crest_floor)
+			* detail_filter * (i == 0 ? 0.65 : (i == 1 ? 0.35 : 0.0));
 		if (style_mode == 1) {
-			if (i == 1) {
-				float foam_visibility = cascade_fade * detail_filter;
-				foam_breaking = normal_sample.a * foam_visibility;
-				if (foam_feedback_enabled && foam_visibility > 0.0) {
-					vec4 foam_sample = sample_foam_history(coords);
-					foam_history = foam_sample.r * foam_visibility;
-					foam_fresh = foam_sample.g * foam_visibility;
-				}
+			// P0-A (cause C1): read foam from every simulated cascade, not just
+			// cascade 1 — cascade 0 carries the breaking signal (crest cov ~21 %
+			// vs ~0.4 %). max() keeps band overlaps (lambda 21-22 m) from
+			// double-counting; the layer weight is a calibration knob.
+			float layer_weight = i == 0 ? 0.85 : 1.0;
+			float foam_visibility = cascade_fade * detail_filter * layer_weight;
+			float layer_breaking = normal_sample.a * foam_visibility;
+			float layer_hist = 0.0;
+			float layer_fresh = 0.0;
+			if (foam_feedback_enabled && i < num_foam_cascades && foam_visibility > 0.0) {
+				vec4 foam_sample = sample_foam_history(coords);
+				layer_hist = foam_sample.r * foam_visibility;
+				layer_fresh = foam_sample.g * foam_visibility;
 			}
+			foam_breaking = max(foam_breaking, layer_breaking);
+			foam_history = max(foam_history, layer_hist);
+			foam_fresh = max(foam_fresh, layer_fresh);
 		} else {
 			if (foam_feedback_enabled) {
 				vec4 foam_sample = sample_foam_history(coords);
@@ -236,6 +272,9 @@ void fragment() {
 		breaking_mask = max(breaking_mask, normal_sample.a * detail_filter);
 	}
 	crest_factor = clamp(peak_mask, 0.0, 1.0);
+	// P3-A + review: overcast storms get no through-crest transmission — the
+	// mood dims the SSS path so crest flanks stop glowing pale cyan.
+	sss_crest_factor = clamp(sss_crest_mask, 0.0, 1.0) * mix(1.0, 0.5, storm_mood);
 
 	vec2 wind = normalize(wind_direction);
 	vec2 across = vec2(-wind.y, wind.x);
@@ -248,8 +287,12 @@ void fragment() {
 	vec3 macro_reflection = normalize(reflect(-VIEW, macro_normal));
 	float sun_alignment = max(dot(macro_reflection, sun_view), 0.0);
 	float corridor_width = max(sun_path_width * 10.0, 0.12);
+	// P1-C (cause C3): the corridor modulates the SPECULAR lobe (Cox & Munk),
+	// not the detail itself — a floor keeps micro relief alive outside the sun
+	// path (0.45 clear weather, 0.75 in storm), killing the "airbrushed" look.
+	float micro_floor = mix(0.45, 0.75, smoothstep(0.0, 0.6, storm_mood));
 	float micro_corridor = style_mode == 1
-		? sqrt(smoothstep(cos(corridor_width), cos(corridor_width * 0.35), sun_alignment))
+		? max(micro_floor, sqrt(smoothstep(cos(corridor_width), cos(corridor_width * 0.35), sun_alignment)))
 		: 1.0;
 	vec2 micro_a_uv = wind_uv * micro_normal_scales.x
 		+ vec2(TIME * 0.006, -TIME * 0.002);
@@ -282,13 +325,15 @@ void fragment() {
 		max(length(micro_a_dx), length(micro_a_dy)),
 		max(length(micro_b_dx), length(micro_b_dy))) * max(micro_size.x, micro_size.y);
 	float micro_pixel_fade = 1.0 - smoothstep(6.0, 18.0, micro_texel_footprint);
-	float style_micro_strength = style_mode == 1 ? 0.35 : 1.0;
+	// P1-C: 0.35 -> 0.60 — the micro detail was reduced below usefulness.
+	float style_micro_strength = style_mode == 1 ? 0.60 : 1.0;
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
 		* micro_distance_fade * micro_pixel_fade * style_micro_strength * micro_corridor;
 	gradient += wind * micro_slope.x + across * micro_slope.y;
 	float persistent_source = clamp(foam_history * foam_strength * 0.92, 0.0, 1.0);
+	// P0-B: show the whitecap immediately, before the feedback accumulates.
 	float fresh_signal = style_mode == 1 && foam_feedback_enabled
-		? max(foam_fresh, foam_breaking * 0.16) : foam_fresh;
+		? max(foam_fresh, foam_breaking * 0.45) : foam_fresh;
 	float fresh_source = clamp(fresh_signal * foam_strength * 1.35, 0.0, 1.0);
 	float persistent_foam = style_mode == 1
 		? smoothstep(0.018, 0.16, persistent_source)
@@ -312,18 +357,34 @@ void fragment() {
 			float breakup_art = textureGrad(foam_breakup, breakup_uv,
 				dFdx(breakup_uv), dFdy(breakup_uv)).r;
 			float breakup_detail = smoothstep(0.24, 0.76, breakup_art);
-			persistent_foam *= mix(0.34, 1.0, ribbon_detail * breakup_detail);
+			// P1-A'.2 (cause C4): the breakup carves the EDGES while the core
+			// stays opaque (>= 0.72) but is hole-punched at a second scale —
+			// the billow/cauliflower morphology of the reference foam.
+			float core = smoothstep(0.30, 0.65, persistent_source);
+			float breakup_hi = smoothstep(0.26, 0.68, textureGrad(foam_breakup,
+				breakup_uv * 5.2, dFdx(breakup_uv) * 5.2,
+				dFdy(breakup_uv) * 5.2).r);
+			// Review pass: the core keeps 0.72-1.0 of its foam -> smooth snow
+			// sheets at 50% coverage. Billows now carve holes through the cores
+			// (0.48 floor) so persistent foam reads as gray textured patches.
+			persistent_foam *= mix(mix(0.30, 1.0, ribbon_detail * breakup_detail),
+				mix(0.48, 1.0, breakup_hi), core);
 			fresh_foam *= mix(0.70, 1.0, mix(ribbon_detail, 1.0, breakup_detail));
-			ocean_foam = 1.0 - (1.0 - persistent_foam * 0.92)
-				* (1.0 - fresh_foam * 1.12);
 		}
+		// P1-A'.3: the persistent veil carries farther than the ephemeral fresh
+		// white instead of sharing one distance fade (0.0008 vs 0.0015 /m).
+		float persistent_part = persistent_foam * 0.92;
+		float fresh_part = fresh_foam * 1.12;
+		ocean_foam = 1.0 - (1.0 - persistent_part) * (1.0 - fresh_part);
+		foam_factor = max(persistent_part * exp(-dist * 0.0008),
+			fresh_part * exp(-dist * 0.0015));
 	} else {
 		breakup = texture(foam_breakup, breakup_uv).r;
 		float breakup_mask = smoothstep(0.34, 0.72, breakup);
 		float physical_foam = max(persistent_foam * 0.96, fresh_foam * 1.28);
 		ocean_foam = physical_foam * mix(0.86, 1.0, breakup_mask);
+		foam_factor = ocean_foam * exp(-dist * 0.0015);
 	}
-	foam_factor = ocean_foam * exp(-dist * 0.0015);
 	if (style_mode == 1 && foam_feedback_enabled) {
 		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
 		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
@@ -337,7 +398,13 @@ void fragment() {
 			}
 		}
 	}
-	glitter_factor = style_mode == 1 ? micro_corridor
+	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
+	// decoupling specularity from detail keeps the sun path bright without
+	// dragging micro normals back behind a corridor gate.
+	float glitter_corridor = style_mode == 1
+		? smoothstep(cos(corridor_width), cos(corridor_width * 0.5), sun_alignment)
+		: 0.0;
+	glitter_factor = style_mode == 1 ? glitter_corridor
 		: mix(0.28, 0.92, smoothstep(0.08, 0.84, peak_mask));
 
 	vec3 world_normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
@@ -459,40 +526,62 @@ void fragment() {
 			vec2 cloud_uv = cloud_clip.xy / max(cloud_clip.w, 1e-4) * 0.5 + 0.5;
 			float cloud_valid = step(0.0, cloud_uv.x) * step(0.0, cloud_uv.y)
 				* step(cloud_uv.x, 1.0) * step(cloud_uv.y, 1.0);
-			vec4 cloud = texture(cloud_reflection, clamp(cloud_uv, vec2(0.001), vec2(0.999)));
+			// P2: explicit LOD + alpha floor kill the blocky-mip artefacts
+			// (swell_day crenellated blocks top-left).
+			vec4 cloud = textureLod(cloud_reflection,
+				clamp(cloud_uv, vec2(0.001), vec2(0.999)), 2.0);
 			float cloud_mix = smoothstep(0.04, 0.22, cloud.a) * cloud_valid
 				* (style_mode == 1 ? 0.38 : 1.0);
-			reflected_sky = mix(reflected_sky, cloud.rgb / max(cloud.a, 0.08), cloud_mix);
+			reflected_sky = mix(reflected_sky, cloud.rgb / max(cloud.a, 0.25), cloud_mix);
 		}
-		vec3 reflection_emission = reflected_sky * fresnel
+		// P1-D.1 (cause C7): tint the reflection toward the deep water body —
+		// raw sky in the troughs reads as an empty mirror, not a water column.
+		vec3 reflection_tinted = mix(reflected_sky, deep_water * 1.6, 0.25);
+		vec3 reflection_emission = reflection_tinted * fresnel
 			* sky_reflection_strength * (1.0 - foam_factor * 0.72);
 
 		float fresh_ratio = fresh_foam / max(persistent_foam + fresh_foam, 1e-3);
 		float foam_roughness = mix(0.76, 0.95, fresh_ratio);
 		ROUGHNESS = mix(filtered_roughness, foam_roughness,
 			clamp(foam_factor * 1.05, 0.0, 1.0));
-		vec3 persistent_tint = foam_color.rgb * 0.68;
+		// P1-A'.1 (loi L4): storm foam is GREY (reference luma ~0.40), golden
+		// hour foam is warm — the environment drives the tint, mood ramps it.
+		vec3 ambient_gray = mix(foam_color.rgb, sky_zenith, 0.52);
+		vec3 persistent_tint = mix(foam_color.rgb * 0.68, ambient_gray * 0.88,
+			smoothstep(0.25, 0.9, storm_mood));
 		vec3 fresh_tint = foam_color.rgb * 1.12;
 		vec3 foam_tint = mix(persistent_tint, fresh_tint,
 			clamp(fresh_ratio * 0.92, 0.0, 1.0));
 		ALBEDO = mix(base_color, foam_tint, foam_factor);
-		float horizon_mix = style_mode == 1
-			? smoothstep(420.0, 1500.0, dist) * 0.28 : 0.0;
-		ALBEDO = mix(ALBEDO,
-			mix(color_shallow.rgb * 0.8, sky_horizon, 0.42), horizon_mix);
+		// P0-C.3: atmospheric perspective converges the far sea CONTINUOUSLY
+		// toward the sky, never below it — the old horizon_mix band pulled the
+		// distance toward color_shallow*0.8, rendering darker than both the
+		// water and the sky (the "black trough" at the horizon).
+		float aerial = 1.0 - exp(-dist * aerial_density);
+		vec3 horizon_color = mix(sky_horizon, sky_zenith, 0.15);
+		ALBEDO = mix(ALBEDO, horizon_color, aerial);
 		vec3 stable_water = mix(deep_water, shallow_water * 0.82,
 			clamp(flank_band * 0.62 + crest_band * 0.45
 			+ transmission_mask * 0.72, 0.0, 1.0));
+		// P1-D.2: halve the ambient fill and reserve it to the wave flanks so
+		// troughs can approach the reference's dark luma (~0.15 storm); P1-A'.3
+		// re-opens it where foam lives.
 		float water_fill = style_mode == 1
-			? mix(0.035, 0.14, weather_mix) : 0.0;
+			? mix(0.02, 0.07, weather_mix) * flank_band + foam_factor * 0.12 : 0.0;
+		// Review pass: overcast crests scatter barely any subsurface light.
+		float storm_dim = mix(1.0, 0.55, storm_mood);
 		EMISSION = reflection_emission
 			+ stable_water * water_fill
 			+ shallow_water * transmission_mask
 			* (style_mode == 1 ? 0.045 : 0.0)
-			+ color_shallow.rgb * crest_scatter
+			+ color_shallow.rgb * crest_scatter * storm_dim
 			* (style_mode == 1 ? 0.18 : 0.28) * (1.0 - foam_factor)
-			+ color_shallow.rgb * wrapped_transmission * 0.18 * (1.0 - foam_factor)
-			+ foam_tint * foam_factor * (style_mode == 1 ? 0.035 : 0.03);
+			+ color_shallow.rgb * wrapped_transmission * storm_dim * 0.18 * (1.0 - foam_factor)
+			+ foam_tint * foam_factor * (style_mode == 1 ? 0.09 : 0.03);
+		// P0-C.3 (completion): the haze replaces the OUTGOING radiance, not just
+		// ALBEDO — otherwise the far field keeps mirroring the dark cloud base
+		// at full strength and reads as a black band at the horizon seam.
+		EMISSION *= 1.0 - aerial;
 		if (debug_view == 1) {
 			float debug_wavelength = geometry_cascade >= 0
 				? cascade_wavelength(geometry_cascade) : cascade_wavelengths.x;
@@ -590,20 +679,26 @@ void light() {
 	float narrow_roughness = max(filtered_roughness * 0.46, 0.026);
 	float narrow_distribution = ggx_distribution(max(dot(NORMAL, narrow_halfway), 0.0),
 		narrow_roughness);
+	// P2: stronger narrow lobe for glints, reinforced at low sun (hundreds of
+	// white-gold fragments instead of one molten ribbon); the 4.0 product cap
+	// keeps fireflies out.
+	float narrow_weight = min(glitter_factor
+		* mix(1.0, 2.2, smoothstep(0.35, 0.05, sun_direction.y)), 4.0);
 	float path = style_mode == 1
 		? d_ggx * mix(0.06, 0.12, glitter_factor)
-			+ narrow_distribution * glitter_factor * 0.035
+			+ narrow_distribution * narrow_weight * 0.06
 		: d_ggx * 0.24 + narrow_distribution * glitter_factor * 0.045;
 	SPECULAR_LIGHT += fresnel * path * geometric_attenuation / (4.0 * dot_nv + 0.1)
 		* ATTENUATION * LIGHT_COLOR / PI * sun_glitter_strength;
 
 	const vec3 sss_modifier = vec3(0.9, 1.15, 0.85);
-	float sss_height = sss_strength * crest_factor * pow(max(dot(LIGHT, -VIEW), 0.0), 3.0)
+	// P3-A: SSS follows the multi-cascade crest sum.
+	float sss_height = sss_strength * sss_crest_factor * pow(max(dot(LIGHT, -VIEW), 0.0), 3.0)
 		* pow(0.5 - 0.5 * dot(LIGHT, NORMAL), 2.0);
 	float backscatter = style_mode == 1
 		? sss_strength * pow(max(dot(VIEW, -LIGHT), 0.0), 1.6)
 			* smoothstep(0.08, 0.55, 1.0 - NORMAL.y)
-			* (0.25 + 0.75 * crest_factor) : 0.0;
+			* (0.25 + 0.75 * sss_crest_factor) : 0.0;
 	float wrapped = max(dot_nl * 0.68 + 0.32, 0.0);
 	float lambertian = 0.38 * wrapped;
 	vec3 transmission = sss_height * sss_modifier / (1.0 + light_mask)

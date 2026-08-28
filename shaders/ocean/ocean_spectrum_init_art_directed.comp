@@ -71,9 +71,9 @@ float broad_direction(vec2 k_dir, vec2 wind_dir, float spread_value,
         acos(clamp(dot(k_dir, left_dir), -1.0, 1.0)));
     float right = longuet_higgins_function(focus,
         acos(clamp(dot(k_dir, right_dir), -1.0, 1.0)));
-    // A restrained side lobe breaks parallel ribbons without creating a
-    // second soft hill field across the wind direction.
-    float secondary_weight = clamp(crosswind * 0.38, 0.0, 0.18);
+    // P1-B (loi L6): a stronger side lobe breaks parallel ribbons into wave
+    // groups and festoons instead of a single wind train.
+    float secondary_weight = clamp(crosswind * 0.38, 0.0, 0.30);
     float side = 0.5 * (left + right);
     return mix(primary, side, secondary_weight) * (1.0 - secondary_weight)
         + 0.5 / PI * secondary_weight;
@@ -112,7 +112,10 @@ vec2 spectrum_amplitude(ivec2 id) {
     float long_band = broad_log_band(k, params.gains.z, 0.48);
     float mid_band = broad_log_band(k, params.art_b.z, 0.56);
     float wind_band = broad_log_band(k, params.art_a.x, 0.66);
-    float ripple_band = broad_log_band(k, 0.84, 0.88);
+    // P1-B (cause C2): widen the ripple band so it fills the bottom of
+    // cascade 2's k range (the old 0.84/0.88 band already fell to 0.39 at
+    // kmin = 2.218 rad/m).
+    float ripple_band = broad_log_band(k, 0.9, 1.05);
     float wind_sea_level = clamp(params.spectrum_a.w / 33.0, 0.0, 1.0);
     float sea_state_level = clamp(wind_sea_level + params.spectrum_b.z * 0.22,
         0.0, 1.0);
@@ -127,8 +130,8 @@ vec2 spectrum_amplitude(ivec2 id) {
     float art_weight = 0.08
         + long_band * (0.45 + long_level * 1.15 + (long_energy - 1.0) * 0.30)
         + mid_band * (0.24 + mid_level * 1.35 + (mid_energy - 1.0) * 0.34)
-        + wind_band * (0.18 + wind_level * (0.70 + sea_state_level * 0.70))
-        + ripple_band * (0.10 + ripple_level * 0.30);
+        + wind_band * (0.26 + wind_level * (0.80 + sea_state_level * 0.70))
+        + ripple_band * (0.22 + ripple_level * 0.55);
 
     float crosswind_band = clamp(mid_band * 0.85 + wind_band * 0.65
         + ripple_band * 0.25, 0.0, 1.0);
@@ -149,7 +152,7 @@ vec2 spectrum_amplitude(ivec2 id) {
     float wind_direction_weight = clamp(wind_band
         * (0.08 + wind_level * 0.10), 0.0, 0.14);
     directional = mix(directional, mid_direction,
-        clamp(mid_direction_weight + wind_direction_weight, 0.0, 0.36));
+        clamp(mid_direction_weight + wind_direction_weight, 0.0, 0.45));
 
     directional *= exp(-(1.0 - params.spectrum_b.w)
         * (1.0 - params.spectrum_b.w) * k * k);

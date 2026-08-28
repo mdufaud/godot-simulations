@@ -45,6 +45,7 @@ var _lightning := false
 var _interaction := false
 var _rain := true
 var _spray := true
+var _foam_warmup := 0.0
 
 
 func _initialize() -> void:
@@ -86,6 +87,7 @@ func _initialize() -> void:
 			"interaction": _interaction = value == "1" or value.to_lower() == "true"
 			"rain": _rain = value != "0" and value.to_lower() != "false"
 			"spray": _spray = value != "0" and value.to_lower() != "false"
+			"foam_warmup": _foam_warmup = maxf(float(value), 0.0)
 			"size":
 				var dims := value.split("x")
 				if dims.size() == 2:
@@ -168,6 +170,11 @@ func _run() -> void:
 		await process_frame
 	if _capture_time >= 0.0 and _demo.has_method("set_capture_time"):
 		_demo.set_capture_time(_capture_time)
+	# Foam equilibrium warmup (fix plan 0.6): live steps between the spectral
+	# time re-anchor and the unfreeze, so captured foam is stationary.
+	if _foam_warmup > 0.0 and _demo.has_method("warmup_foam"):
+		await _demo.warmup_foam(_foam_warmup)
+		_demo.set_frozen(true)
 	if _coverage and _demo.has_method("set_capture_debug"):
 		_demo.set_capture_debug(1)
 		await process_frame
@@ -183,10 +190,11 @@ func _run() -> void:
 		_demo.set_capture_profiling(true)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(_freeze)
-	print("CAPTURE CONFIG preset=%d look=%d backend=%d view=%s time=%.6f dt=%.6f warmup=%d wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d cascade=%d" % [
+	print("CAPTURE CONFIG preset=%d look=%d backend=%d view=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d cascade=%d" % [
 		_preset, _look, _backend, _view, _capture_time, _fixed_delta, _warmup,
-		_wind_direction, _sun_elevation, _sun_azimuth, _frames, _every, _size.x,
-		_size.y, _foam_feedback, _micro_normals, _reflection, _debug_view, _cascade])
+		_foam_warmup, _wind_direction, _sun_elevation, _sun_azimuth, _frames,
+		_every, _size.x, _size.y, _foam_feedback, _micro_normals, _reflection,
+		_debug_view, _cascade])
 	var waited := 0
 	while waited < _frames:
 		if _every > 0 and waited > 0 and waited % _every == 0:

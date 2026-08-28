@@ -39,6 +39,8 @@ class_name OceanLookPreset extends Resource
 @export var micro_normal_scales := Vector2(0.085, 0.23)
 @export_range(5.0, 500.0, 1.0) var micro_normal_fade_start := 70.0
 @export_range(10.0, 1000.0, 1.0) var micro_normal_fade_end := 360.0
+# Far-water aerial convergence toward the sky (P0-C.3), 1/m.
+@export_range(0.0, 0.001, 0.00001) var aerial_density := 0.00025
 
 @export_group("Clouds")
 @export_range(0.0, 1.0, 0.01) var cloud_coverage := 0.78
