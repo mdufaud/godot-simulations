@@ -8,44 +8,14 @@ vec2 foam_at(ivec2 id, int cascade) {
     return imageLoad(foam_input, ivec3(wrap_id(id), cascade)).rg;
 }
 
-vec2 foam_bilinear(vec2 position, int cascade) {
-    ivec2 base = ivec2(floor(position));
-    vec2 f = fract(position);
-    vec2 a = foam_at(base, cascade);
-    vec2 b = foam_at(base + ivec2(1, 0), cascade);
-    vec2 c = foam_at(base + ivec2(0, 1), cascade);
-    vec2 d = foam_at(base + ivec2(1, 1), cascade);
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
     int cascade = params.misc.x;
-    vec2 wind = vec2(sin(params.spectrum_b.x), cos(params.spectrum_b.x));
-    float phase_k = 2.0 * PI / max(params.spectrum_a.x, 1.0);
-    float phase_speed = sqrt(max(G_GRAV * phase_k
-        * tanh(phase_k * max(params.spectrum_b.y, 1.0)), 0.0));
-    vec2 transport_velocity = wind * (params.spectrum_a.w + phase_speed * 0.35);
-    // P0-B: the SoT feedback now steps every frame (interval 2 -> 1), so both
-    // backends advect at the frame rate.
-    float update_hz = 60.0;
-    float advection_px = clamp(length(transport_velocity) * (1.0 / update_hz)
-        * float(MAP_SIZE) / max(params.spectrum_a.x, 1.0), 0.0, 8.0);
-    vec2 adv_direction = normalize(transport_velocity);
-    vec2 sample_position = vec2(id) - adv_direction * advection_px;
-    vec2 advected = foam_bilinear(sample_position, cascade);
-    vec2 local = foam_at(id, cascade);
-    vec2 wind_neighbor = foam_at(id + ivec2(round(adv_direction)), cascade);
-    vec2 cross_neighbor = foam_at(id + ivec2(round(vec2(-adv_direction.y,
-        adv_direction.x))), cascade);
-    vec2 diffused = local * 0.62 + wind_neighbor * 0.28 + cross_neighbor * 0.10;
-    vec2 history = mix(advected, diffused, 0.12);
+    vec2 history = foam_at(id, cascade);
 
     vec4 breaking = imageLoad(normal_map, ivec3(id, cascade));
     float injection = breaking.a;
     float crest = breaking.b;
-    // Fresh foam follows the moving breaking front; a small support stencil
-    // keeps the short-lived trail local while allowing one-pixel advection.
     float breaking_support = injection;
     for (int radius = 1; radius <= 2; radius++) {
         breaking_support = max(breaking_support,
@@ -57,24 +27,17 @@ void main() {
         breaking_support = max(breaking_support,
             imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, -radius)), cascade)).a);
     }
-    // P0-B (cause C5): more permissive injection — events fire frequently and
-    // at every frame instead of only at the strongest crests. P0-A per-layer
-    // bias: the long cascade's ~2 m cells average the folding, and its foam
-    // advects ~150 m (wind x persistence) before decaying, so a loose threshold
-    // fills the whole tile — measured: bias 4 saturated 97 % of layer 0 at
-    // equilibrium. 8x keeps accumulation to the crests that actually fold
-    // (injection > ~0.1), the plan's "biais de seuil par couche".
-    float cascade_bias = cascade == 0 ? 8.0 : 1.0;
+    float cascade_bias = cascade == 0 ? 1.5 : 1.0;
     float persistent_injection = pow(smoothstep(
-        0.012 * cascade_bias, 0.15 * cascade_bias, injection), 1.15);
-    float fresh_injection = pow(clamp(injection * 4.0 / cascade_bias, 0.0, 1.0), 1.6);
+        0.055 * cascade_bias, 0.50 * cascade_bias, injection), 1.15);
+    float fresh_injection = pow(clamp(injection * 3.5 / cascade_bias, 0.0, 1.0), 1.6);
     float persistent = history.r * exp(-params.foam_p.z);
     float fresh = history.g * exp(-params.foam_p.z * 6.0)
         * smoothstep(0.0, 0.16, breaking_support);
-    float persistent_growth = params.foam_p.y * (0.045 + crest * 0.10);
-    float fresh_growth = params.foam_p.y * (0.24 + crest * 0.55);
+    float persistent_growth = params.foam_p.y * (0.012 + crest * 0.018);
+    float fresh_growth = params.foam_p.y * (0.35 + crest * 0.30);
     persistent = clamp(persistent + persistent_injection * persistent_growth
         * (1.0 - persistent), 0.0, 1.0);
-    fresh = clamp(max(fresh, fresh_injection * fresh_growth), 0.0, 1.0);
+    fresh = clamp(fresh + fresh_injection * fresh_growth * (1.0 - fresh), 0.0, 1.0);
     imageStore(foam_output, ivec3(id, cascade), vec4(persistent, fresh, 0.0, 1.0));
 }

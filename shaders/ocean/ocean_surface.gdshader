@@ -47,7 +47,6 @@ uniform sampler2DArray normals : filter_linear, repeat_enable;
 uniform sampler2DArray foam_history_a : filter_linear, repeat_enable;
 uniform sampler2DArray foam_history_b : filter_linear, repeat_enable;
 uniform vec4 foam_history_indices = vec4(0.0);
-uniform sampler2D foam_pattern : filter_linear_mipmap, repeat_enable, hint_default_white;
 uniform sampler2D foam_breakup : filter_linear_mipmap, repeat_enable, hint_default_white;
 uniform sampler2D micro_normal : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform vec2 micro_normal_scales = vec2(0.085, 0.23);
@@ -205,7 +204,6 @@ void fragment() {
 	float breaking_mask = 0.0;
 	float foam_history = 0.0;
 	float foam_fresh = 0.0;
-	float foam_breaking = 0.0;
 	float sss_crest_mask = 0.0;
 	vec2 world_dx = dFdx(world_uv);
 	vec2 world_dy = dFdy(world_uv);
@@ -251,7 +249,6 @@ void fragment() {
 			// double-counting; the layer weight is a calibration knob.
 			float layer_weight = i == 0 ? 0.85 : 1.0;
 			float foam_visibility = cascade_fade * detail_filter * layer_weight;
-			float layer_breaking = normal_sample.a * foam_visibility;
 			float layer_hist = 0.0;
 			float layer_fresh = 0.0;
 			if (foam_feedback_enabled && i < num_foam_cascades && foam_visibility > 0.0) {
@@ -259,7 +256,6 @@ void fragment() {
 				layer_hist = foam_sample.r * foam_visibility;
 				layer_fresh = foam_sample.g * foam_visibility;
 			}
-			foam_breaking = max(foam_breaking, layer_breaking);
 			foam_history = max(foam_history, layer_hist);
 			foam_fresh = max(foam_fresh, layer_fresh);
 		} else {
@@ -330,61 +326,27 @@ void fragment() {
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
 		* micro_distance_fade * micro_pixel_fade * style_micro_strength * micro_corridor;
 	gradient += wind * micro_slope.x + across * micro_slope.y;
-	float persistent_source = clamp(foam_history * foam_strength * 0.92, 0.0, 1.0);
-	// P0-B: show the whitecap immediately, before the feedback accumulates.
-	float fresh_signal = style_mode == 1 && foam_feedback_enabled
-		? max(foam_fresh, foam_breaking * 0.45) : foam_fresh;
-	float fresh_source = clamp(fresh_signal * foam_strength * 1.35, 0.0, 1.0);
-	float persistent_foam = style_mode == 1
-		? smoothstep(0.018, 0.16, persistent_source)
-		: smoothstep(0.08, 0.58, persistent_source);
-	float fresh_foam = style_mode == 1
-		? smoothstep(0.006, 0.055, fresh_source)
-		: smoothstep(0.03, 0.38, fresh_source);
-	float ridge_boost = mix(0.82, 1.12, smoothstep(0.18, 0.72, peak_mask));
-	persistent_foam *= ridge_boost;
-	fresh_foam *= ridge_boost;
-	vec2 breakup_uv = world_uv * 0.19 - wind * TIME * 0.006;
-	float breakup = 1.0;
-	float ocean_foam = 0.0;
-	if (style_mode == 1) {
-		if (foam_feedback_enabled && (persistent_foam > 0.0 || fresh_foam > 0.0)) {
-			vec2 ribbon_uv = wind_uv * vec2(0.055, 0.16)
-				- vec2(TIME * 0.002, TIME * 0.007);
-			float ribbon_art = textureGrad(foam_pattern, ribbon_uv,
-				dFdx(ribbon_uv), dFdy(ribbon_uv)).r;
-			float ribbon_detail = smoothstep(0.18, 0.72, ribbon_art);
-			float breakup_art = textureGrad(foam_breakup, breakup_uv,
-				dFdx(breakup_uv), dFdy(breakup_uv)).r;
-			float breakup_detail = smoothstep(0.24, 0.76, breakup_art);
-			// P1-A'.2 (cause C4): the breakup carves the EDGES while the core
-			// stays opaque (>= 0.72) but is hole-punched at a second scale —
-			// the billow/cauliflower morphology of the reference foam.
-			float core = smoothstep(0.30, 0.65, persistent_source);
-			float breakup_hi = smoothstep(0.26, 0.68, textureGrad(foam_breakup,
-				breakup_uv * 5.2, dFdx(breakup_uv) * 5.2,
-				dFdy(breakup_uv) * 5.2).r);
-			// Review pass: the core keeps 0.72-1.0 of its foam -> smooth snow
-			// sheets at 50% coverage. Billows now carve holes through the cores
-			// (0.48 floor) so persistent foam reads as gray textured patches.
-			persistent_foam *= mix(mix(0.30, 1.0, ribbon_detail * breakup_detail),
-				mix(0.48, 1.0, breakup_hi), core);
-			fresh_foam *= mix(0.70, 1.0, mix(ribbon_detail, 1.0, breakup_detail));
-		}
-		// P1-A'.3: the persistent veil carries farther than the ephemeral fresh
-		// white instead of sharing one distance fade (0.0008 vs 0.0015 /m).
-		float persistent_part = persistent_foam * 0.92;
-		float fresh_part = fresh_foam * 1.12;
-		ocean_foam = 1.0 - (1.0 - persistent_part) * (1.0 - fresh_part);
-		foam_factor = max(persistent_part * exp(-dist * 0.0008),
-			fresh_part * exp(-dist * 0.0015));
-	} else {
-		breakup = texture(foam_breakup, breakup_uv).r;
-		float breakup_mask = smoothstep(0.34, 0.72, breakup);
-		float physical_foam = max(persistent_foam * 0.96, fresh_foam * 1.28);
-		ocean_foam = physical_foam * mix(0.86, 1.0, breakup_mask);
-		foam_factor = ocean_foam * exp(-dist * 0.0015);
-	}
+	float persistent_foam = clamp(foam_history * foam_strength * 6.0, 0.0, 1.0);
+	float fresh_foam = clamp(foam_fresh * foam_strength * 3.0, 0.0, 1.0);
+	float foam_coverage = max(persistent_foam, fresh_foam);
+	vec2 foam_detail_uv = (wind_uv - vec2(TIME * 0.25, TIME * 0.06))
+		* vec2(1.0 / 120.0, 1.0 / 72.0);
+	vec2 foam_detail_dx = dFdx(foam_detail_uv);
+	vec2 foam_detail_dy = dFdy(foam_detail_uv);
+	float foam_detail = textureGrad(foam_breakup, foam_detail_uv,
+		foam_detail_dx, foam_detail_dy).r;
+	foam_factor = smoothstep(1.0 - foam_coverage,
+		1.12 - foam_coverage, foam_detail) * exp(-dist * 0.0012);
+	float foam_detail_x = textureGrad(foam_breakup,
+		foam_detail_uv + vec2(0.002, 0.0), foam_detail_dx, foam_detail_dy).r;
+	float foam_detail_y = textureGrad(foam_breakup,
+		foam_detail_uv + vec2(0.0, 0.002), foam_detail_dx, foam_detail_dy).r;
+	vec2 foam_relief = vec2(foam_detail - foam_detail_x,
+		foam_detail - foam_detail_y) * foam_factor;
+	gradient += (wind * foam_relief.x + across * foam_relief.y) * 1.4;
+	vec2 breakup_uv = world_uv * 0.08 - wind * TIME * 0.003;
+	float breakup = textureGrad(foam_breakup, breakup_uv,
+		dFdx(breakup_uv), dFdy(breakup_uv)).r;
 	if (style_mode == 1 && foam_feedback_enabled) {
 		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
 		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
@@ -392,8 +354,6 @@ void fragment() {
 		if (inside > 0.0) {
 			float interaction = texture(interaction_foam, interaction_uv).r;
 			if (interaction > 0.0) {
-				breakup = textureGrad(foam_breakup, breakup_uv,
-					dFdx(breakup_uv), dFdy(breakup_uv)).r;
 				foam_factor = max(foam_factor, interaction * mix(0.65, 1.0, breakup));
 			}
 		}

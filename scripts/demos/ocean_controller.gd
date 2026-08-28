@@ -262,12 +262,6 @@ func set_backend(value: int) -> void:
 	solver.set_backend(value)
 	var styled := value == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT
 	surface_mat.set_shader_parameter("style_mode", 1 if styled else 0)
-	surface_mat.set_shader_parameter("foam_pattern", load(
-		"res://resources/ocean/foam_pattern_sot.png" if styled
-		else "res://resources/ocean/foam_pattern.png"))
-	surface_mat.set_shader_parameter("foam_breakup", load(
-		"res://resources/ocean/foam_breakup_sot.png" if styled
-		else "res://resources/ocean/foam_breakup.png"))
 	surface_mat.set_shader_parameter("micro_normal", load(
 		"res://resources/ocean/micro_normal_sot.png" if styled
 		else "res://resources/ocean/micro_normal.png"))
@@ -437,8 +431,6 @@ func _setup_ocean_mesh() -> void:
 	surface_mat.set_shader_parameter("map_scales", scales)
 	surface_mat.set_shader_parameter("num_cascades", solver.num_cascades())
 	surface_mat.set_shader_parameter("num_foam_cascades", solver.foam_cascade_count)
-	surface_mat.set_shader_parameter("foam_pattern",
-		load("res://resources/ocean/foam_pattern.png"))
 	surface_mat.set_shader_parameter("foam_breakup",
 		load("res://resources/ocean/foam_breakup.png"))
 	surface_mat.set_shader_parameter("micro_normal",
@@ -843,10 +835,9 @@ func _store_capture_readback(state: Dictionary, data: PackedByteArray) -> void:
 
 
 ## Raw texel counts use the shared MEASURE_* thresholds (fix plan 0.7). The
-## *_cov_visible fields re-apply the surface shader's style_mode==1 composition
-## chain to the raw signal so metadata becomes comparable to the rendered pixel
-## (fix plan 0.1, trap M2). Documented drift risk: the ribbon/breakup texture
-## multiplies live only in the shader, so visible coverage is an upper bound.
+## *_cov_visible fields re-apply the surface shader's coverage scaling. The
+## detailed pattern threshold lives only in the shader, so coverage is an upper
+## bound.
 func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray,
 		foam_visibility: float, foam_strength: float) -> Dictionary:
 	var crest_active := 0
@@ -878,10 +869,7 @@ func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray,
 			foam_active += 1
 		if fresh > OceanConfig.MEASURE_FRESH_THRESHOLD:
 			fresh_active += 1
-		# Same grid as the normal map: the fresh channel folds in the breaking
-		# texel exactly like the shader's fresh_signal.
-		var breaking := _capture_half(normal.decode_u16(i * 8 + 6))
-		var composed := _composed_screen_foam(persistent, fresh, breaking, foam_strength)
+		var composed := _composed_screen_foam(persistent, fresh, foam_strength)
 		if composed * foam_visibility > OceanConfig.MEASURE_FOAM_THRESHOLD:
 			foam_visible_active += 1
 		foam_count += 1
@@ -898,17 +886,12 @@ func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray,
 	}
 
 
-## ocean_surface.gdshader's foam composition (style_mode 1), minus the breakup
-## texture stage. Fresh foam folds in the rendered breaking contribution
-## (foam_breaking * 0.45) so a live front counts before history accumulates.
-func _composed_screen_foam(persistent: float, fresh: float, breaking: float,
+## ocean_surface.gdshader's foam coverage before the detailed pattern threshold.
+func _composed_screen_foam(persistent: float, fresh: float,
 		foam_strength: float) -> float:
-	var persistent_source := clampf(persistent * foam_strength * 0.92, 0.0, 1.0)
-	var fresh_signal := maxf(fresh, breaking * 0.45)
-	var fresh_source := clampf(fresh_signal * foam_strength * 1.35, 0.0, 1.0)
-	var persistent_foam := smoothstep(0.018, 0.16, persistent_source)
-	var fresh_foam := smoothstep(0.006, 0.055, fresh_source)
-	return 1.0 - (1.0 - persistent_foam * 0.92) * (1.0 - fresh_foam * 1.12)
+	var persistent_foam := clampf(persistent * foam_strength * 6.0, 0.0, 1.0)
+	var fresh_foam := clampf(fresh * foam_strength * 3.0, 0.0, 1.0)
+	return maxf(persistent_foam, fresh_foam)
 
 
 func _capture_half(bits: int) -> float:
