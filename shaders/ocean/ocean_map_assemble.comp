@@ -111,16 +111,27 @@ void main() {
         * mix(0.42, 1.0, crest_slope), 1.35);
     float sea_state_level = clamp(params.spectrum_a.w / 33.0
         + params.spectrum_b.z * 0.22, 0.0, 1.0);
+    // The JONSWAP spectrum concentrates its energy in the long swell (its peak
+    // sits far above the mid-cascade band), so the fold threshold calibrated
+    // on the art-directed spectrum reads near-zero whitecaps in a storm.
+    // Halve it for that backend — same dosage slider, coverage calibrated
+    // against the SoT backend's storm breaking (~10-14 %).
+    float backend_threshold_scale = params.misc.w == 1 ? 1.0 : 0.5;
     float compression_threshold = max(0.020,
-        0.19 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.045);
+        0.19 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.045)
+        * backend_threshold_scale;
     float compression_span = mix(0.10, 0.075, sea_state_level);
     float medium_breaking_gain = params.misc.x == 1
         ? mix(0.5, 1.0, smoothstep(0.85, 2.0, band_height)) : 1.0;
-    float breaking_source = params.misc.w == 1
-        ? smoothstep(compression_threshold,
-            compression_threshold + compression_span, compression)
-            * mix(0.50, 1.0, crest) * medium_breaking_gain
-        : max(0.0, params.foam_p.x - jacobian);
+    // Foam injection fix (29/08): BOTH backends inject where the surface
+    // folds. The old JONSWAP hinge (whitecap - jacobian) fired over huge
+    // diffuse areas — any J below the dose — which the feedback turned into a
+    // uniform wash with no crest-locked trails. Same fold threshold and O(1)
+    // amplitude for both backends; whitecap stays the dosage through
+    // compression_threshold.
+    float breaking_source = smoothstep(compression_threshold,
+        compression_threshold + compression_span, compression)
+        * mix(0.50, 1.0, crest) * medium_breaking_gain;
 
     float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);
     vec2 gradient = vec2(

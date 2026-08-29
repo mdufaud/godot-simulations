@@ -417,7 +417,11 @@ void fragment() {
 			* (1.0 - 0.35 * smoothstep(0.25, 0.8, height_normalized));
 		float height_crest = smoothstep(0.18, 0.72, height_normalized);
 		float flank_band = max(flank_mask, height_flank * 0.58);
-		float crest_signal = max(crest_mask, height_crest);
+		// The height term alone paints the crest color on visually FLAT water
+		// once wave height saturates the normalization (broad pale "bubbles"
+		// floating on smooth swells): require the local slope too, so the
+		// scatter only sits on geometry that actually shows a crest.
+		float crest_signal = max(crest_mask, height_crest * flank_mask);
 		float sun_transmission = clamp(0.32 + sun_facing * 0.38
 			+ backlight * 0.30, 0.0, 1.0);
 		float transmission_mask = crest_signal
