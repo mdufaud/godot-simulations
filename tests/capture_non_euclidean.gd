@@ -63,6 +63,10 @@ func _run() -> void:
 		quit(1)
 		return
 	await _capture_spherical_garden()
+	await _capture_growing_corridor()
+	await _capture_grip_room()
+	await _capture_wrap_world()
+	await _capture_holonomy_loop()
 	print("CAPTURE_NON_EUCLIDEAN_DONE")
 	quit(0)
 
@@ -242,6 +246,81 @@ func _capture_spherical_garden() -> void:
 	for _frame in 4:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_spherical_garden.png")
+
+
+## The corridor at three depths: one capture per segment entered, so the growth
+## of the rebuilt geometry is on camera.
+func _capture_growing_corridor() -> void:
+	demo._go_to_case(3)
+	var corridor := demo.get_node("Cells/GrowingCorridor") as Node3D
+	var depths := [Vector3(0.0, 0.9, -2.2), Vector3(0.0, 0.9, -10.0),
+		Vector3(0.0, 0.9, -25.0)]
+	for index in depths.size():
+		player.set_pose(Transform3D(Basis.IDENTITY, corridor.to_global(depths[index])))
+		for _tick in 60:
+			demo._physics_process(0.0)
+		for _frame in 4:
+			await process_frame
+		await _capture("res://tmp/non_euclidean_corridor_depth%d.png" % index)
+
+
+## The grip lab: the near ball resting small at the spawn view, then a ball
+## committed to the giant bound on the shelf.
+func _capture_grip_room() -> void:
+	demo._go_to_case(4)
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_grip_small.png")
+	var ball: GripBall = demo._grip.props[1]
+	ball.commit_scale(GripBall.RADIUS_MAX)
+	ball.place_at(demo.get_node("Cells/GripRoom").to_global(Vector3(0.0, 3.25, -7.0)))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_grip_giant.png")
+	demo._grip.reset()
+
+
+## The wrap garden: the block from the spawn, then from the far edge where the
+## eight neighbour copies should read as the continuation of the floor.
+func _capture_wrap_world() -> void:
+	demo._go_to_case(5)
+	var world := demo.get_node("Cells/WrapWorld") as Node3D
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_wrap_center.png")
+	player.set_pose(Transform3D(Basis.IDENTITY, world.to_global(Vector3(8.0, 2.6, 16.0))))
+	(player.get_node("CameraPivot") as Node3D).rotation.x = -0.28
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_wrap_edge.png")
+	(player.get_node("CameraPivot") as Node3D).rotation.x = 0.0
+
+
+## The holonomy square: the start vault facing its exit, the straight-through
+## fourth vault with its two opposed doors, then the first vault as the loop
+## returns to it — through an entrance its walls could not close into.
+func _capture_holonomy_loop() -> void:
+	demo._go_to_case(6)
+	var vault1 := demo.get_node("Cells/HolonomyLoop/Vault1") as Node3D
+	var vault4 := demo.get_node("Cells/HolonomyLoop/Vault4") as Node3D
+	for _frame in 4:
+		await process_frame
+	player.set_pose(demo._holonomy.spawn_pose)
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_vault1.png")
+	# Vault nodes carry their ring yaw, so aim through each vault's own basis:
+	# the east-side view looks straight at the west exit door.
+	player.set_pose(Transform3D(vault4.global_basis * Basis(Vector3.UP, PI * 0.5),
+		vault4.to_global(Vector3(2.4, 0.9, 0.0))))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_vault4.png")
+	player.set_pose(Transform3D(Basis.IDENTITY,
+		vault1.to_global(Vector3(0.0, 0.9, 3.2))))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_returned.png")
 
 
 func _aimed_pose(portal: Portal3D, local_position: Vector3) -> Transform3D:

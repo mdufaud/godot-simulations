@@ -70,6 +70,10 @@ func _test_scene_integration() -> void:
 	await _test_rigid_body_traversal(demo, source, destination)
 	await _test_staircase(demo, player, cells)
 	await _test_spherical_curvature(demo, player, cells)
+	await _test_growing_corridor(demo, player, cells)
+	await _test_grip_room(demo, player, cells)
+	await _test_wrap_world(demo, player, cells)
+	await _test_holonomy_loop(demo, player, cells)
 	_test_existing_input_contract()
 	await _test_player_input(player)
 
@@ -237,6 +241,298 @@ func _test_spherical_curvature(demo: Node3D, player: NonEuclideanPlayer,
 		"spherical transport changed shell radius")
 	_check(_basis_error(player.global_basis, initial_basis) <= 0.0002,
 		"full great-circle transport did not restore view frame")
+
+
+func _test_growing_corridor(demo: Node3D, player: NonEuclideanPlayer,
+		cells: Node3D) -> void:
+	demo._go_to_case(3)
+	var corridor := cells.get_node("GrowingCorridor") as Node3D
+	var exhibit: ExhibitGrowingCorridor = demo._corridor
+	await physics_frame
+	_check(absf(player.global_position.y - 0.9) <= 0.05,
+		"corridor spawn does not rest on the first segment floor")
+	_check(corridor.get_node_or_null("Segment00") != null,
+		"corridor does not start with its scale-1 segment")
+	player.capture_mouse()
+	var ceiling_heights: Array[float] = []
+	var previous_crossings := 0
+	var frame := 0
+	while frame < 1500 and exhibit.crossing_count < 3:
+		frame += 1
+		Input.action_press("move_forward")
+		Input.action_press("move_down")
+		await physics_frame
+		if frame % 10 == 0:
+			_check(player.global_position.y >= 0.85,
+				"floor vanished under the player during a segment swap")
+		if exhibit.crossing_count > previous_crossings:
+			previous_crossings = exhibit.crossing_count
+			var height := _ceiling_height_above(player)
+			ceiling_heights.append(height)
+			if ceiling_heights.size() > 1:
+				_check(height > ceiling_heights[ceiling_heights.size() - 2] + 0.5,
+					"corridor ceiling did not grow across threshold %d" % previous_crossings)
+	Input.action_release("move_forward")
+	Input.action_release("move_down")
+	_check(ceiling_heights.size() >= 3,
+		"walking the corridor did not cross three thresholds")
+	_check(exhibit.virtual_distance > 0.0,
+		"virtual distance stayed at zero while walking forward")
+	_check(exhibit.current_index >= 3,
+		"player did not reach the fourth segment after three crossings")
+	# Turnaround: the corridor behind is a capped dead end, never a hole.
+	var local_before_back := corridor.to_local(player.global_position)
+	for _frame in 240:
+		Input.action_press("move_back")
+		Input.action_press("move_down")
+		await physics_frame
+	Input.action_release("move_back")
+	Input.action_release("move_down")
+	_check(player.global_position.y >= 0.85,
+		"floor vanished under the player while walking back")
+	var local_after_back := corridor.to_local(player.global_position)
+	_check(local_after_back.z > local_before_back.z,
+		"walking back did not move the player toward the start")
+	_check(exhibit.current_index >= 1,
+		"player escaped the corridor window while walking back")
+	# Reset: counters to zero and geometry rebuilt at scale 1.
+	demo._reset_current_case()
+	await physics_frame
+	await physics_frame
+	_check(exhibit.crossing_count == 0 and is_zero_approx(exhibit.virtual_distance),
+		"corridor reset did not zero its counters")
+	_check(exhibit.current_index == 0, "corridor reset did not return to the first segment")
+	_check(player.global_position.distance_to(exhibit.spawn_pose.origin) <= 0.05,
+		"corridor reset did not re-pose the player at the spawn")
+	_check(_ceiling_height_above(player) < 2.5,
+		"corridor reset did not rebuild scale-1 geometry")
+
+
+func _test_grip_room(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) -> void:
+	_check(InputMap.has_action("grab"), "shared grab action is missing")
+	demo._go_to_case(4)
+	await physics_frame
+	var room := cells.get_node("GripRoom") as Node3D
+	var ball: GripBall = demo._grip.props[0]
+	var grab: GrabController3D = demo._grab
+	var camera := player.get_camera()
+	var exclude: Array[RID] = [player.get_rid()]
+	var ball_position := room.to_global(Vector3(-2.6, 0.35, -1.5))
+	# Grab the near ball from ~1 m and keep it held: re-aim level in the same
+	# tick, before the controller's next probe, so the floor behind the ball
+	# cannot count as a contact.
+	_place_aiming(player, ball_position + Vector3(0.0, 1.3, 0.75),
+		ball_position + Vector3(0.0, 0.1, 0.0))
+	await physics_frame
+	_check(grab.try_grab(camera, 1, exclude), "ball not grabbed at one metre")
+	_place_aiming(player, player.global_position + Vector3.UP * 0.75,
+		player.global_position + Vector3.UP * 0.75 - player.global_basis.z)
+	await physics_frame
+	_check(grab.held_body == ball, "grab controller held the wrong body")
+	_check(ball.freeze, "held ball did not freeze")
+	_check(ball.display_radius() > 0.1, "held ball lost a readable in-hand size")
+	await physics_frame
+	_check(grab.held_body == ball, "held ball resolved without meeting a surface")
+	# Put it down on the floor at the feet: the size stays small.
+	_place_aiming(player, player.global_position + Vector3.UP * 0.75,
+		player.global_position - player.global_basis.z * 0.55 - Vector3.UP * 0.75)
+	await physics_frame
+	grab.release()
+	_check(grab.held_body == null, "release did not let go")
+	_check(not ball.freeze, "ball stayed frozen after release")
+	_check(ball.linear_velocity.length_squared() <= 0.000001,
+		"ball kept velocity through release")
+	var small_radius := ball.display_radius()
+	_check(is_equal_approx(small_radius, _collision_radius(ball)),
+		"mesh and collision radius diverged after the small put-down")
+	_check(small_radius < GripBall.RADIUS_MAX * 0.5,
+		"floor put-down did not keep the ball small")
+	# Grab again and put it down against the far wall through the opening:
+	# the size resolves at the wall's distance and clamps to the giant bound.
+	_place_aiming(player, ball.global_position + Vector3(0.0, 1.3, 0.75),
+		ball.global_position)
+	await physics_frame
+	_check(grab.try_grab(camera, 1, exclude), "ball not grabbed again for the wall test")
+	_place_aiming(player, room.to_global(Vector3(0.0, 1.65, -0.5)),
+		room.to_global(Vector3(0.0, 1.65, -12.0)))
+	await physics_frame
+	_check(grab.held_body == ball, "held ball resolved before the wall put-down")
+	grab.release()
+	var giant_radius := ball.display_radius()
+	_check(giant_radius >= GripBall.RADIUS_MAX - 0.01,
+		"wall put-down did not resolve a giant size")
+	_check(is_equal_approx(giant_radius, _collision_radius(ball)),
+		"mesh and collision radius diverged after the giant put-down")
+	_check(not ball.freeze, "ball stayed frozen after the giant put-down")
+	for _frame in 40:
+		await physics_frame
+	_check(is_finite(ball.global_position.length_squared()),
+		"giant ball position left the finite range while settling")
+	_check(is_equal_approx(_collision_radius(ball), GripBall.RADIUS_MAX),
+		"giant ball radius drifted while settling")
+	# Reset returns every ball to its built pose and size.
+	demo._reset_current_case()
+	await physics_frame
+	await physics_frame
+	_check(is_equal_approx(ball.display_radius(), ball.base_radius()),
+		"reset did not restore the built ball size")
+	_check(is_equal_approx(_collision_radius(ball), ball.base_radius()),
+		"reset did not restore the collision sphere")
+	_check(ball.global_position.distance_to(demo._grip.props[0].global_position) <= 0.001,
+		"reset moved the first ball")
+
+
+func _test_wrap_world(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) -> void:
+	demo._go_to_case(5)
+	var world := cells.get_node("WrapWorld") as Node3D
+	var exhibit: ExhibitWrapWorld = demo._wrap
+	await physics_frame
+	_check(absf(player.global_position.y - 0.9) <= 0.06,
+		"wrap world spawn does not rest on the block top")
+	# Straight walk across the seam: the floor must hold every frame and the
+	# cell must stay bounded — the wrap must never read as a hole or a jump.
+	player.capture_mouse()
+	player.set_pose(Transform3D(Basis.IDENTITY, world.to_global(Vector3(8.0, 0.9, 17.0))))
+	await physics_frame
+	var loops_before := exhibit.wrap_count
+	var min_height := INF
+	var frame := 0
+	while frame < 600 and exhibit.wrap_count == loops_before:
+		frame += 1
+		Input.action_press("move_forward")
+		Input.action_press("move_down")
+		await physics_frame
+		min_height = minf(min_height, player.global_position.y)
+	Input.action_release("move_forward")
+	Input.action_release("move_down")
+	_check(exhibit.wrap_count == loops_before + 1,
+		"straight walk did not wrap exactly once within 600 frames")
+	_check(min_height >= 0.7, "floor vanished under the player at the wrap seam")
+	var walked_local := world.to_local(player.global_position)
+	_check(absf(walked_local.x) <= ExhibitWrapWorld.PERIODS.x * 0.5 \
+		and absf(walked_local.z) <= ExhibitWrapWorld.PERIODS.z * 0.5,
+		"player ended outside the bounded cell after wrapping")
+	_check(walked_local.z > ExhibitWrapWorld.PERIODS.z * 0.5 - 4.0,
+		"wrap did not carry the player one full period over")
+	# The prop loops through the central shaft: re-entering from above, staying
+	# in the shaft, and never accelerating past the terminal fall cap.
+	var sphere := exhibit.props[0]
+	sphere.global_transform = Transform3D(Basis.IDENTITY,
+		world.to_global(Vector3(0.0, 2.5, 0.0)))
+	sphere.linear_velocity = Vector3.ZERO
+	sphere.angular_velocity = Vector3.ZERO
+	sphere.sleeping = false
+	var prop_wraps_before := exhibit.prop_wraps
+	frame = 0
+	var max_speed := 0.0
+	var max_radius := 0.0
+	while frame < 900 and exhibit.prop_wraps < prop_wraps_before + 3:
+		frame += 1
+		await physics_frame
+		max_speed = maxf(max_speed, sphere.linear_velocity.length())
+		var sphere_local := world.to_local(sphere.global_position)
+		max_radius = maxf(max_radius, Vector2(sphere_local.x, sphere_local.z).length())
+	_check(exhibit.prop_wraps >= prop_wraps_before + 3,
+		"sphere did not loop three times through the shaft")
+	_check(max_speed <= ExhibitWrapWorld.TERMINAL_FALL + 1.0,
+		"fall speed accumulated past the terminal cap while looping")
+	_check(max_radius <= 1.25, "sphere drifted out of the shaft while looping")
+	_check(is_finite(sphere.global_position.length_squared()),
+		"sphere position left the finite range while looping")
+	# Reset zeroes the counters and rebuilds the built poses.
+	demo._reset_current_case()
+	await physics_frame
+	await physics_frame
+	_check(exhibit.wrap_count == 0 and exhibit.prop_wraps == 0,
+		"wrap reset did not zero the loop counters")
+	_check(player.global_position.distance_to(exhibit.spawn_pose.origin) <= 0.05,
+		"wrap reset did not re-pose the player at the spawn")
+	var sphere_home := world.to_local(exhibit.props[0].global_position)
+	_check(sphere_home.distance_to(Vector3(-4.0, 0.4, 4.0)) <= 0.2,
+		"wrap reset did not return the sphere to its built spot")
+
+
+func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
+		cells: Node3D) -> void:
+	demo._go_to_case(6)
+	var cell := cells.get_node("HolonomyLoop") as Node3D
+	var exhibit: ExhibitHolonomyLoop = demo._holonomy
+	var vault1 := cell.get_node("Vault1") as Node3D
+	await physics_frame
+	_check(exhibit.exits.size() == 4 and exhibit.entrances.size() == 4,
+		"holonomy loop does not chain four exits into four entrances")
+	var spawn_local := vault1.to_local(player.global_position)
+	_check(absf(spawn_local.x) <= ExhibitHolonomyLoop.VAULT.x * 0.5 \
+		and absf(spawn_local.z) <= ExhibitHolonomyLoop.VAULT.z * 0.5,
+		"holonomy spawn is not inside the first vault")
+	_check(absf(player.global_position.y - 0.9) <= 0.06,
+		"holonomy spawn does not rest on the vault floor")
+	# The built square must compose to a pure quarter turn — the exhibit's claim.
+	var walk: Array[Transform3D] = []
+	for step in 4:
+		walk.append(exhibit.exits[step].get_mapping())
+	var loop := HolonomyState.loop_mapping(walk[0], walk[1], walk[2], walk[3])
+	_check(absf(HolonomyState.turn_angle(loop) - PI * 0.5) <= 0.001,
+		"the built square does not compose to a +90° turn")
+	_check(loop.basis.y.distance_to(Vector3.UP) <= 0.001,
+		"the built square's loop turns about a tilted axis")
+	# Walk the cycle I→II→III→IV→I with scripted crossings: every crossing must
+	# land in front of the next vault's entrance, and every one must be counted.
+	for step in 4:
+		var entry: Portal3D = exhibit.exits[step]
+		var arrival: Portal3D = exhibit.entrances[(step + 1) % 4]
+		player.set_pose(Transform3D(Basis.IDENTITY,
+			entry.to_global(Vector3(0.0, -0.8, -0.05))))
+		player._portal_previous_position = entry.to_global(Vector3(0.0, -0.8, 0.05))
+		entry._physics_process(0.0)
+		_check(player.global_position.distance_to(arrival.global_position) <= 3.0,
+			"crossing exit %d did not land in front of the next entrance" % (step + 1))
+		await physics_frame
+	_check(exhibit.crossing_count == 4, "the four crossings were not all counted")
+	# The loop returns the player inside the first vault, through its entrance:
+	# they settle in the doorway itself, so the bounds are the shell envelope.
+	var returned_local := vault1.to_local(player.global_position)
+	_check(absf(returned_local.x) <= ExhibitHolonomyLoop.VAULT.x * 0.5 + 0.5 \
+		and absf(returned_local.z) <= ExhibitHolonomyLoop.VAULT.z * 0.5 + 0.5,
+		"the full loop did not return the player to the first vault")
+	await physics_frame
+	await physics_frame
+	_check(player._portal_lock == null, "arrival portal stays locked after the loop")
+	var settled := player.global_position
+	await physics_frame
+	_check(player.global_position.distance_to(settled) <= 0.001,
+		"the player ping-ponged through the return portal")
+	# Reset zeroes the counter and re-poses the player at the spawn.
+	demo._reset_current_case()
+	await physics_frame
+	await physics_frame
+	_check(exhibit.crossing_count == 0, "holonomy reset did not zero the crossings")
+	_check(player.global_position.distance_to(exhibit.spawn_pose.origin) <= 0.05,
+		"holonomy reset did not re-pose the player at the spawn")
+	_check(_basis_error(player.global_basis, exhibit.spawn_pose.basis) <= 0.001,
+		"holonomy reset did not restore the spawn orientation")
+
+
+func _place_aiming(player: NonEuclideanPlayer, eye: Vector3, target: Vector3) -> void:
+	var to_target := target - eye
+	var horizontal := Vector3(to_target.x, 0.0, to_target.z).normalized()
+	player.set_pose(Transform3D(_basis_from_forward(horizontal), eye - Vector3.UP * 0.75))
+	(player.get_node("CameraPivot") as Node3D).rotation.x = atan2(to_target.y,
+		Vector3(to_target.x, 0.0, to_target.z).length())
+
+
+func _collision_radius(ball: GripBall) -> float:
+	for child in ball.get_children():
+		if child is CollisionShape3D:
+			return ((child as CollisionShape3D).shape as SphereShape3D).radius
+	return -1.0
+
+
+func _ceiling_height_above(player: NonEuclideanPlayer) -> float:
+	var query := PhysicsRayQueryParameters3D.create(player.global_position,
+		player.global_position + Vector3.UP * 60.0, 1, [player.get_rid()])
+	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+	return hit.position.y - player.global_position.y if not hit.is_empty() else -1.0
 
 
 func _test_existing_input_contract() -> void:
