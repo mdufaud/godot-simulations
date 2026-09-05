@@ -5,6 +5,8 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+layout(set = 0, binding = 7) uniform sampler2D foam_noise_texture;
+
 float shifted_component(ivec2 id, int layer, int component) {
     ivec2 wrapped = (id + ivec2(MAP_SIZE_I)) % ivec2(MAP_SIZE_I);
     float sign_shift = float(-2 * ((wrapped.x & 1) ^ (wrapped.y & 1)) + 1);
@@ -16,8 +18,57 @@ float height_sample(ivec2 id, int cascade) {
     return shifted_component(id, cascade, 1);
 }
 
+// The tutorial field is periodic over a fixed 20 m domain regardless of the
+// short cascade's tile length: wave vectors are integer cycles of that domain
+// and the noise repeats an integer number of times per domain.
+const float TUTORIAL_DOMAIN = 20.0;
+
+float tutorial_noise(vec2 uv, vec2 direction) {
+    float repeats = params.spectrum_a.x / TUTORIAL_DOMAIN * 2.0;
+    float loop_time = mod(params.foam_p.w, 200.0);
+    return textureLod(foam_noise_texture,
+        uv * repeats * 2.0 + vec2(1.0) + loop_time * direction * 0.07, 0.0).r;
+}
+
+vec3 tutorial_gerstner(vec2 pos, vec2 uv, vec2 direction, float amplitude,
+        float frequency, float speed, float steepness, float scale) {
+    direction = normalize(direction);
+    vec2 wave_vector = direction
+        * round(frequency * TUTORIAL_DOMAIN / (2.0 * PI))
+        * (2.0 * PI / TUTORIAL_DOMAIN);
+    float angular_speed = round(speed * 200.0 / (2.0 * PI))
+        * (2.0 * PI / 200.0);
+    float phase = mod(params.foam_p.w, 200.0) * angular_speed
+        + dot(wave_vector, pos);
+    float noise_value = tutorial_noise(uv, direction) - 0.5;
+    vec3 displacement;
+    displacement.y = sin(phase) * amplitude + noise_value * 0.05;
+    displacement.xz = direction * cos(phase) * steepness
+        + noise_value * vec2(0.06, -0.06);
+    return displacement * scale;
+}
+
+vec3 tutorial_displacement(ivec2 id) {
+    ivec2 wrapped = (id + ivec2(MAP_SIZE_I)) % ivec2(MAP_SIZE_I);
+    vec2 uv = (vec2(wrapped) + 0.5) / float(MAP_SIZE);
+    vec2 pos = uv * params.spectrum_a.x;
+    float scale = clamp(params.gains.w / 1.7, 0.0, 1.5);
+    vec3 displacement = tutorial_gerstner(pos, uv, vec2(0.0, 1.0),
+        0.4, 1.0, 1.3, 0.2, scale);
+    displacement += tutorial_gerstner(pos, uv, vec2(1.0, 1.0),
+        0.15, 1.3, 1.6, 0.12, scale);
+    displacement += tutorial_gerstner(pos, uv, vec2(1.0, 0.0),
+        0.12, 2.0, 2.0, 0.17, scale);
+    displacement += tutorial_gerstner(pos, uv, vec2(-0.4, 1.0),
+        0.01, 3.0, 3.0, 0.1, scale);
+    displacement += tutorial_gerstner(pos, uv, vec2(-0.2, 0.7),
+        0.025, 4.0, 4.0, 0.08, scale);
+    return displacement;
+}
+
 float stylized_crest_strength() {
-    return params.misc.w == 1
+    // Art-directed spectrum flavour (bit 1 clear); JONSWAP stays unshaped.
+    return (params.misc.w & 2) == 0
         ? clamp((params.art_a.w - 1.0) * 0.14, 0.0, 0.30)
         : 0.0;
 }
@@ -53,6 +104,43 @@ float shaped_height_sample(ivec2 id, int cascade, float reference_height, float 
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
     int cascade = params.misc.x;
+    bool tutorial_model = (params.misc.w & 1) == 1;
+    bool pure_tutorial = tutorial_model
+        && params.gains.y <= 0.001 && params.art_b.y <= 0.001;
+    if (pure_tutorial && cascade < 2) {
+        imageStore(displacement_map, ivec3(id, cascade), vec4(0.0));
+        imageStore(normal_map, ivec3(id, cascade), vec4(0.0));
+        return;
+    }
+    if (tutorial_model && cascade == 2) {
+        float texel_m = params.spectrum_a.x / float(MAP_SIZE);
+        vec3 wave_current = tutorial_displacement(id);
+        vec3 wave_right = tutorial_displacement(id + ivec2(1, 0));
+        vec3 wave_back = tutorial_displacement(id + ivec2(0, 1));
+        vec3 dpos_x = wave_right - wave_current;
+        vec3 dpos_z = wave_back - wave_current;
+        float dhx_dx = dpos_x.x / texel_m;
+        float dhx_dz = dpos_z.x / texel_m;
+        float dhz_dx = dpos_x.z / texel_m;
+        float dhz_dz = dpos_z.z / texel_m;
+        float dhy_dx = dpos_x.y / texel_m;
+        float dhy_dz = dpos_z.y / texel_m;
+        float jacobian = (1.0 + dhx_dx) * (1.0 + dhz_dz)
+            - dhx_dz * dhz_dx;
+        float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0)
+            * max(abs(jacobian), 0.08);
+        vec2 gradient = vec2(
+            ((1.0 + dhz_dz) * dhy_dx - dhz_dx * dhy_dz) / safe_jacobian,
+            ((1.0 + dhx_dx) * dhy_dz - dhx_dz * dhy_dx) / safe_jacobian
+        );
+        float scale = clamp(params.gains.w / 1.7, 0.0, 1.5);
+        float crest = smoothstep(0.12 * scale, 0.52 * scale, wave_current.y);
+        float compression = 1.0 - smoothstep(0.0, 0.7, jacobian);
+        imageStore(displacement_map, ivec3(id, cascade), vec4(wave_current, 0.0));
+        imageStore(normal_map, ivec3(id, cascade), vec4(
+            clamp(gradient, vec2(-4.0), vec2(4.0)), crest, compression));
+        return;
+    }
     float chop = params.spectrum_c.w;
     float sign_shift = float(-2 * ((id.x & 1) ^ (id.y & 1)) + 1);
 
@@ -70,15 +158,22 @@ void main() {
     float dhx_dx = l2.y * chop;
     float dhz_dz = l3.x * chop;
     float dhz_dx = l3.y * chop;
+    float dhx_dz = dhz_dx;
 
-    float jacobian = (1.0 + dhx_dx) * (1.0 + dhz_dz) - dhz_dx * dhz_dx;
-    float compression = max(0.0, 1.0 - jacobian);
+    float jacobian = (1.0 + dhx_dx) * (1.0 + dhz_dz) - dhx_dz * dhz_dx;
     float band_height = params.misc.x == 0 ? params.gains.y
         : (params.misc.x == 1 ? params.art_b.y : params.gains.w);
     float band_length = params.misc.x == 0 ? params.gains.z
         : (params.misc.x == 1 ? params.art_b.z : params.art_a.x);
     float height_reference = max(0.35, band_height * 0.72
         + params.gains.w * 0.08);
+    // Cascade 2 only carries the short tail of the wind sea, but band_height
+    // refers to the full wind wave height — its raw heights sit ~4x below the
+    // crest window and the crest mask starves (Storm crest p99 = 0.04).
+    // Scale the reference to the band's own amplitude (Storm p99|hy| = 0.35).
+    if (cascade == 2) {
+        height_reference = max(0.35, height_reference * 0.28);
+    }
     float crest_strength = stylized_crest_strength();
     // Keep displacement physically generated by the FFT. Crest gain shapes the
     // breaking mask below, not the vertical surface itself; sculpting height
@@ -109,34 +204,32 @@ void main() {
     float crest_slope = smoothstep(0.035, 0.22 + params.art_b.x * 0.10, slope);
     float crest = pow(crest_height * crest_shape
         * mix(0.42, 1.0, crest_slope), 1.35);
-    float sea_state_level = clamp(params.spectrum_a.w / 33.0
-        + params.spectrum_b.z * 0.22, 0.0, 1.0);
-    // The JONSWAP spectrum concentrates its energy in the long swell (its peak
-    // sits far above the mid-cascade band), so the fold threshold calibrated
-    // on the art-directed spectrum reads near-zero whitecaps in a storm.
-    // Halve it for that backend — same dosage slider, coverage calibrated
-    // against the SoT backend's storm breaking (~10-14 %).
-    float backend_threshold_scale = params.misc.w == 1 ? 1.0 : 0.5;
-    float compression_threshold = max(0.020,
-        0.19 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.045)
-        * backend_threshold_scale;
-    float compression_span = mix(0.10, 0.075, sea_state_level);
-    float medium_breaking_gain = params.misc.x == 1
-        ? mix(0.5, 1.0, smoothstep(0.85, 2.0, band_height)) : 1.0;
-    // Foam injection fix (29/08): BOTH backends inject where the surface
-    // folds. The old JONSWAP hinge (whitecap - jacobian) fired over huge
-    // diffuse areas — any J below the dose — which the feedback turned into a
-    // uniform wash with no crest-locked trails. Same fold threshold and O(1)
-    // amplitude for both backends; whitecap stays the dosage through
-    // compression_threshold.
-    float breaking_source = smoothstep(compression_threshold,
-        compression_threshold + compression_span, compression)
-        * mix(0.50, 1.0, crest) * medium_breaking_gain;
+    float breaking_source = 1.0 - smoothstep(0.0, 0.7, jacobian);
+    if (!tutorial_model) {
+        // Production path: continuous compression mask with per-cascade
+        // threshold and gain. The long cascade only folds at genuine breaker
+        // events; the short one needs a raised threshold so constant
+        // micro-folding does not flood the mask.
+        float compression = max(0.0, 1.0 - jacobian);
+        float sea_state_level = clamp(params.spectrum_a.w / 33.0
+            + params.spectrum_b.z * 0.22, 0.0, 1.0);
+        float threshold_bias = cascade == 0 ? 1.5 : (cascade == 2 ? 1.25 : 1.0);
+        float compression_threshold = max(0.020,
+            0.19 + (1.0 - params.foam_p.x) * 0.10 - sea_state_level * 0.045)
+            * 0.5 * threshold_bias;
+        float compression_span = mix(0.10, 0.075, sea_state_level);
+        float medium_breaking_gain = params.misc.x == 1
+            ? mix(0.5, 1.0, smoothstep(0.85, 2.0, band_height)) : 1.0;
+        float cascade_gain = params.misc.x == 1 ? medium_breaking_gain : 1.0;
+        breaking_source = smoothstep(compression_threshold,
+            compression_threshold + compression_span, compression)
+            * mix(0.50, 1.0, crest) * cascade_gain;
+    }
 
     float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);
     vec2 gradient = vec2(
         ((1.0 + dhz_dz) * dhy_dx - dhz_dx * dhy_dz) / safe_jacobian,
-        ((1.0 + dhx_dx) * dhy_dz - dhz_dx * dhy_dx) / safe_jacobian
+        ((1.0 + dhx_dx) * dhy_dz - dhx_dz * dhy_dx) / safe_jacobian
     );
     gradient = clamp(gradient, vec2(-4.0), vec2(4.0));
 

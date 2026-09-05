@@ -15,8 +15,8 @@ WARMUP="${WARMUP:-90}"
 DT="${DT:-0.016666667}"
 CAPTURE_TIME="${CAPTURE_TIME:-20.0}"
 # Fix plan 0.6: seconds of LIVE simulation before the first capture so the foam
-# feedback is at equilibrium (persistence ~4 s in storm; equilibrium ~13-17 s).
-FOAM_WARMUP="${FOAM_WARMUP:-16.0}"
+# feedback is at equilibrium.
+FOAM_WARMUP="${FOAM_WARMUP:-3.0}"
 WIND_DIRECTION="${WIND_DIRECTION:-0.0}"
 LOOK="${LOOK:-1}"
 SUN_ELEVATION="${SUN_ELEVATION:-34.0}"
@@ -90,8 +90,37 @@ capture_pair() {
 }
 
 if [[ "$FULL" == "true" ]]; then
+	IFS=',' read -r -a times <<< "${TIMES:-$CAPTURE_TIME}"
+	IFS=',' read -r -a profiles <<< "${PROFILES:-high}"
+	# Quality-tier campaign: Storm across every profile at every view, plus
+	# long-horizon (60/120/180 s) persistence frames on the default profile.
+	for profile in "${profiles[@]}"; do
+		for view in "${views[@]}" interaction; do
+			output="$PHASE_DIR/full/storm_${view}_q${profile}.png"
+			capture_state_view storm 3 1 "$view" "$output" \
+				"quality=$profile" "interaction=$([[ $view == interaction ]] && echo 1 || echo 0)"
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+				"$PHASE" "storm" 3 1 "$LOOK" "${view}_q${profile}" \
+				"$CAPTURE_TIME" "$DT" "$WIND_DIRECTION" "$SUN_ELEVATION" \
+				"$SUN_AZIMUTH" \
+				>> "$OUT_DIR/manifest.tsv"
+		done
+	done
+	for t in "${times[@]}"; do
+		t_int="${t%.*}"
+		output="$PHASE_DIR/full/storm_low_crest_t${t_int}s.png"
+		capture_state_view storm 3 1 low_crest "$output" \
+			"quality=${profiles[0]}" "time=$t"
+		printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			"$PHASE" "storm" 3 1 "$LOOK" "low_crest_t${t_int}s" \
+			"$t" "$DT" "$WIND_DIRECTION" "$SUN_ELEVATION" \
+			"$SUN_AZIMUTH" \
+			>> "$OUT_DIR/manifest.tsv"
+	done
+	# Non-storm states once, on the default profile.
 	for i in "${!states[@]}"; do
 		state="${states[$i]}"
+		[[ "$state" == "storm" ]] && continue
 		state_index=-1
 		for candidate in "${!state_names[@]}"; do
 			if [[ "${state_names[$candidate]}" == "$state" ]]; then
@@ -107,7 +136,7 @@ if [[ "$FULL" == "true" ]]; then
 		mood="${moods[$state_index]}"
 		for view in "${views[@]}"; do
 			capture_state_view "$state" "$preset" "$mood" "$view" \
-				"$PHASE_DIR/full/${state}_${view}.png"
+				"$PHASE_DIR/full/${state}_${view}.png" "quality=${profiles[0]}"
 			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 				"$PHASE" "$state" "$preset" "$mood" "$LOOK" "$view" \
 				"$CAPTURE_TIME" "$DT" "$WIND_DIRECTION" "$SUN_ELEVATION" \

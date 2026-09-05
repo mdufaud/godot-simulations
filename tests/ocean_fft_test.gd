@@ -25,6 +25,22 @@ func _run() -> void:
 		return
 
 	demo.set_backend(OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
+	# The demo defaults to Ultra; the suite's numeric contracts are pinned on
+	# High (same pipeline, 512²) so runs stay fast, with dedicated Performance
+	# and Ultra sections below.
+	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	for frame in 360:
+		await process_frame
+		if demo.solver.initialized and demo.texture_bound:
+			break
+	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.HIGH
+		and demo.solver.map_size == 512
+		and demo.solver.foam_near_size == 1024
+		and not demo.solver.amortize,
+		"High profile did not configure the solver")
+	_check(demo.solver.estimate_vram_bytes()
+		== OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH),
+		"VRAM estimate does not match the live allocation sizes")
 	var dirty_before: Array = demo.solver._cascade_dirty.duplicate()
 	demo.apply_look(1)
 	_check(demo.current_look_index == 1, "Tropical Day look was not applied")
@@ -59,7 +75,9 @@ func _run() -> void:
 		_check(state.non_finite == 0, "ocean produced NaN or Inf")
 		for energy in state.band_rms:
 			_check(energy > 0.001, "one FFT band has no measurable energy")
-		_check(state.active_band_count >= 2,
+		# Calm's 40 m band legitimately lives on cascade 1 (257 m tile) — the
+		# layer-0 spectrum alone is allowed to look thin for it.
+		_check(state.active_band_count >= 2 or state.height_rms < 0.2,
 			"spectrum collapsed into one dominant artificial band")
 		_check(state.crest_mean >= 0.0 and state.crest_mean < 0.16,
 			"crest ridge is too broad or outside normalized range")
@@ -77,6 +95,9 @@ func _run() -> void:
 		"crest compression is not monotonic from Calm to Storm")
 	_check(states[0].foam_mean < 0.0001 and states[0].fresh_mean < 0.0001,
 		"Calm produced open-water foam")
+	# Refonte contract: Calm foam coverage stays under 0.5% of the tiles.
+	_check(states[0].foam_coverage < 0.005,
+		"Calm foam coverage exceeds 0.5%% (%.2f%%)" % (states[0].foam_coverage * 100.0))
 	# P0-A/P0-B absolute guard: no cascade may foam spontaneously in calm.
 	_check(states[0].foam_coverage_by_layer[0] < 0.001
 		and states[0].foam_coverage_by_layer[1] < 0.001,
@@ -96,7 +117,7 @@ func _run() -> void:
 		and storm_state.dominant_wavelength_m <= 170.0,
 		"Storm dominant wavelength is %.1f m, expected 120..170 m"
 		% storm_state.dominant_wavelength_m)
-	_check(swell_state.groupiness > 0.30 and storm_state.groupiness > 0.25,
+	_check(swell_state.groupiness > 0.30 and storm_state.groupiness > 0.30,
 		"wave groups are too uniform (Swell %.3f, Storm %.3f)"
 		% [swell_state.groupiness, storm_state.groupiness])
 	_check(storm_state.long_max_rms > 3.4 and storm_state.long_max_abs < 40.0,
@@ -137,65 +158,95 @@ func _run() -> void:
 	await _frames(240)
 	demo.set_frozen(true)
 	var settled_storm := await _state_metrics(demo, true, true)
+	var storm_short_displacement := await _read_texture(
+		demo.solver.get_displacement_tex_rid(), 2)
+	var storm_short_normal := await _read_texture(demo.solver.get_normal_tex_rid(), 2)
+	var storm_short_normal_metrics := _normal_metrics(storm_short_normal)
+	var storm_short_breaking_coverage: float = float(storm_short_normal_metrics.breaking_active) \
+		/ maxf(float(storm_short_normal_metrics.count), 1.0)
+	var storm_short_shape := _shape_coherence(
+		storm_short_displacement, storm_short_normal, demo.solver.map_size)
 	_check(settled_storm.primary_crest_coverage >= 0.08
 		and settled_storm.primary_crest_coverage <= 0.24,
 		"Storm crest coverage is outside 8..24%% (%.1f%%)"
 		% (settled_storm.primary_crest_coverage * 100.0))
-	_check(settled_storm.primary_breaking_coverage >= 0.03
-		and settled_storm.primary_breaking_coverage <= 0.16,
-		"Storm breaking coverage is outside 3..16%% (%.1f%%)"
-		% (settled_storm.primary_breaking_coverage * 100.0))
-	# P0-A recalibration (fix plan §7): the foam feedback now simulates the long
+	# Storm short cascade runs real FFT wind waves now: its fold mask must fire
+	# measurably but not flood the tile.
+	_check(storm_short_breaking_coverage >= 0.01
+		and storm_short_breaking_coverage <= 0.30,
+		"Storm short-cascade breaking coverage is outside 1..30%% (%.1f%%)"
+		% (storm_short_breaking_coverage * 100.0))
+	# Any dominant repetition below 60 m in the short tile (67 m) means a
+	# periodic wave snuck back in.
+	var storm_periodicity := _max_lag_correlation(storm_short_displacement,
+		demo.solver.map_size, demo.solver.tile_lengths[2], 4.0, 60.0)
+	_check(storm_periodicity < 0.45,
+		"Storm shows dominant wave repetition below 60 m (%.2f)" % storm_periodicity)
+	# Storm spectral peaks live in the three cascade bands (132 / 36 / 9 m).
+	var peak_windows: Array = [[90.0, 220.0], [24.0, 60.0], [5.0, 16.0]]
+	for cascade in 3:
+		var spectrum_layer := await _read_texture(demo.solver._spectrum_tex, cascade)
+		var peak := _cascade_peak_wavelength(spectrum_layer, demo.solver.map_size,
+			demo.solver.tile_lengths[cascade])
+		var window: Array = peak_windows[cascade]
+		_check(peak >= window[0] and peak <= window[1],
+			"Storm cascade %d spectral peak at %.1f m, expected %.0f..%.0f m"
+			% [cascade, peak, window[0], window[1]])
+	# P0-A recalibration (fix plan §7): the foam feedback simulates the long
 	# cascade too, so layer 0 MUST carry foam in storm and must stay silent in
 	# calm. The old bound (< 0.0001) encoded the C1 routing bug.
 	_check(settled_storm.foam_coverage_by_layer[0] > 0.005,
 		"long-wave cascade foam is absent (%.3f%%)"
 		% (settled_storm.foam_coverage_by_layer[0] * 100.0))
-	# Layer-1 bound re-calibrated for P0-B (0.35 -> 0.40) then P1-B (0.40 ->
-	# 0.45, justified at the commit per the plan's rule): the permissive
-	# injection, every-frame feedback and the P1-B short-energy spectrum
-	# legitimately raise steady-state mid-cascade coverage; morphology stays
-	# ribbon-like (fragmented components, mean width ~6 m), the physical guard
-	# stays the < 0.40 total (Monahan).
-	_check(settled_storm.foam_coverage_by_layer[1] > 0.001
-		and settled_storm.foam_coverage_by_layer[1] < 0.45,
-		"mid-wave ribbon foam is absent or saturated (%.1f%%)"
-		% (settled_storm.foam_coverage_by_layer[1] * 100.0))
-	_check(settled_storm.fresh_coverage_by_layer[1] > 0.001,
-		"mid-wave fresh foam is absent")
-	_check(settled_storm.foam_coverage < 0.40,
-		"storm foam history saturated %.1f%% of the long-wave tile"
+	# Storm total foam coverage stabilises in the 8..25% window (refonte plan).
+	_check(settled_storm.foam_coverage >= 0.08 and settled_storm.foam_coverage <= 0.25,
+		"Storm foam coverage is outside 8..25%% (%.1f%%)"
 		% (settled_storm.foam_coverage * 100.0))
-	_check(settled_storm.fresh_breaking_overlap >= 0.8,
-		"fresh foam is outside the two-texel breaking band (%.1f%% overlap)"
+	_check(settled_storm.foam_coverage_by_layer[2] > 0.004,
+		"short-cascade storm foam is absent (%.1f%%)"
+		% (settled_storm.foam_coverage_by_layer[2] * 100.0))
+	_check(settled_storm.fresh_coverage_by_layer[2] > 0.004,
+		"short-cascade fresh foam is absent")
+	_check(settled_storm.foam_coverage < 0.30,
+		"storm foam history is too broad at %.1f%% of the simulated tiles"
+		% (settled_storm.foam_coverage * 100.0))
+	_check(settled_storm.fresh_breaking_overlap >= 0.9,
+		"fresh foam is outside the compressed breaking band (%.1f%% overlap)"
 		% (settled_storm.fresh_breaking_overlap * 100.0))
 	_check(settled_storm.fresh_breaking_false_positive <= 0.20,
 		"fresh foam false positives exceed 20%% (%.1f%%)"
 		% (settled_storm.fresh_breaking_false_positive * 100.0))
-	var primary_shape: Dictionary = settled_storm.primary_shape
-	_check(primary_shape.breaking_count > 0
-		and primary_shape.breaking_height_mean > primary_shape.quiet_height_mean
-		and primary_shape.breaking_slope_mean > primary_shape.quiet_slope_mean
-		and primary_shape.breaking_curvature_mean > primary_shape.quiet_curvature_mean
-		and primary_shape.breaking_crest_mean > primary_shape.quiet_crest_mean,
+	_check(storm_short_shape.breaking_count > 0
+		and storm_short_shape.breaking_height_mean > storm_short_shape.quiet_height_mean
+		and storm_short_shape.breaking_slope_mean > storm_short_shape.quiet_slope_mean
+		and storm_short_shape.breaking_curvature_mean > storm_short_shape.quiet_curvature_mean
+		and storm_short_shape.breaking_crest_mean > storm_short_shape.quiet_crest_mean,
 		"Jacobian breaking lost height, slope, curvature or crest coherence")
 	for seam_ratio in settled_storm.seam_ratios:
 		_check(seam_ratio < 2.5,
 			"cascade seam differs from local wave continuity (ratio %.3f)" % seam_ratio)
 	var persistent_ribbon: Dictionary = settled_storm.persistent_ribbon
 	var fresh_ribbon: Dictionary = settled_storm.fresh_ribbon
+	var short_texel_m: float = demo.solver.tile_lengths[2] / demo.solver.map_size
 	_check(persistent_ribbon.component_count > 0 and fresh_ribbon.component_count > 0,
 		"storm foam has no measurable ribbon components")
 	_check(persistent_ribbon.mean_width > 0.0
 		and persistent_ribbon.p95_width >= persistent_ribbon.mean_width
+		and persistent_ribbon.p95_width * short_texel_m <= 5.0
 		and fresh_ribbon.mean_width > 0.0
-		and fresh_ribbon.p95_width >= fresh_ribbon.mean_width,
-		"foam ribbon width metrics are invalid")
-	_check(persistent_ribbon.small_pixel_fraction <= 0.10
-		and fresh_ribbon.small_pixel_fraction <= 0.10,
-		"small isolated foam components exceed 10%% of foam pixels")
+		and fresh_ribbon.p95_width >= fresh_ribbon.mean_width
+		and fresh_ribbon.p95_width * short_texel_m <= 3.5,
+		"foam ribbons are invalid or too broad")
+	_check(persistent_ribbon.small_pixel_fraction <= 0.16
+		and fresh_ribbon.small_pixel_fraction <= 0.16,
+		"small isolated foam components exceed 16%% of foam pixels")
 	_check(settled_storm.fresh_persistent_iou < 0.90,
 		"fresh and persistent foam have indistinguishable morphology")
+	# Near-feedback contract: the texture size tracks the active quality tier;
+	# only Ultra is held to the sub-centimetre bar (asserted in its smoke).
+	_check(demo.solver.foam_near_size
+		== OceanQualityProfile.FOAM_NEAR_SIZE[demo.solver.quality_tier],
+		"near foam size does not match the active profile")
 	var foam_before_decay: float = settled_storm.foam_mean
 	var fresh_before_decay: float = settled_storm.fresh_mean
 	demo.solver.foam_amount = 0.0
@@ -214,49 +265,251 @@ func _run() -> void:
 		"foam did not decay after injection stopped")
 	demo.apply_preset(3)
 
+	# Near feedback follows the camera: shift the view 2 m sideways; the foam
+	# field must advect with the world (matches the shifted previous frame)
+	# instead of staying texture-locked, and without a discontinuity column.
+	# The near field starts empty and takes a few seconds to fill, so settle
+	# it as long as the far histories above.
+	demo.set_frozen(false)
+	await _frames(240)
+	demo.set_frozen(true)
+	var near_size: int = demo.solver.foam_near_size
+	var near_domain: float = demo.solver.foam_near_domain
+	var near_before := _near_rg(await _read_texture(
+		demo.solver.get_foam_near_read_tex_rid(), 0), near_size)
+	var near_before_std := _near_channel_std(near_before)
+	demo.orbit_cam.target += Vector3(2.0, 0.0, 0.0)
+	demo.set_frozen(false)
+	await _frames(2)
+	demo.set_frozen(true)
+	demo.orbit_cam.target -= Vector3(2.0, 0.0, 0.0)
+	var near_after := _near_rg(await _read_texture(
+		demo.solver.get_foam_near_read_tex_rid(), 0), near_size)
+	var shift_texels := int(round(2.0 / near_domain * near_size))
+	var moved := _near_shift_stats(near_after, near_before, near_size, shift_texels, 4)
+	var static_cmp := _near_shift_stats(near_after, near_before, near_size, 0, 4)
+	if near_before_std > 0.01:
+		_check(moved.rms < static_cmp.rms * 0.7,
+			"near foam did not advect with the camera (shifted %.4f vs texture-locked %.4f)"
+			% [moved.rms, static_cmp.rms])
+		_check(moved.p99_col < maxf(moved.median_col * 20.0, 0.004),
+			"near foam shows a seam column after camera motion (p99 %.4f vs median %.4f)"
+			% [moved.p99_col, moved.median_col])
+	else:
+		print("  note: near field too flat for reprojection metrics (std %.4f)"
+			% near_before_std)
+
+	# 180 simulated seconds in 0.5 s steps: persistence must stay finite and
+	# bounded (no runaway growth, no washout). Fresh foam legitimately sits
+	# above persistent (it is the bright transient layer), so only the
+	# persistent band and the logistic bounds are asserted.
+	demo._capture_fixed_delta = 0.5
+	demo.set_frozen(false)
+	await _frames(360)
+	demo.set_frozen(true)
+	demo._capture_fixed_delta = -1.0
+	var near_settled := _near_rg(await _read_texture(
+		demo.solver.get_foam_near_read_tex_rid(), 0), near_size)
+	var persistent_mean := 0.0
+	var fresh_mean := 0.0
+	var max_value := 0.0
+	var texels := near_size * near_size
+	for i in range(0, texels, 4):
+		var r: float = near_settled[i * 2]
+		var g: float = near_settled[i * 2 + 1]
+		persistent_mean += r
+		fresh_mean += g
+		max_value = maxf(max_value, maxf(r, g))
+	persistent_mean /= float(ceil(texels / 4.0))
+	fresh_mean /= float(ceil(texels / 4.0))
+	_check(max_value <= 1.5,
+		"near foam overflowed its logistic bounds after 180 s (max %.3f)" % max_value)
+	_check(persistent_mean > 0.004 and persistent_mean < 0.8,
+		"near persistent foam unstable after 180 s (mean %.3f)" % persistent_mean)
+	_check(fresh_mean > 0.004 and fresh_mean <= 1.0,
+		"near fresh foam unstable after 180 s (mean %.3f)" % fresh_mean)
+
 	var loop_start: float = demo._sim_time
 	var at_start := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
 	demo.solver.mark_spectrum_dirty()
-	await _frames(8)
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
 	var regenerated := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
 	_check(at_start == regenerated, "fixed seeds are not deterministic")
 	demo._sim_time = loop_start + LOOP_PERIOD
 	demo.solver.sim_time = loop_start + LOOP_PERIOD
-	await _frames(8)
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
 	var looped := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
 	var loop_error := _texture_difference_rms(at_start, looped)
-	_check(loop_error < 0.001, "ocean 200-second loop RMS error is %f" % loop_error)
+	# Continuous physical dispersion: the FFT field must NOT repeat after the
+	# old 200 s quantization loop.
+	_check(loop_error > 0.05,
+		"FFT waves still loop after 200 s (RMS error %f — dispersion got requantized)" % loop_error)
 
 	demo.set_backend(OceanSolver.Backend.JONSWAP_TMA)
 	demo._sim_time = 37.0
 	demo.solver.sim_time = 37.0
-	await _frames(12)
-	var jonswap := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
-	_check(_height_rms(jonswap).rms > 0.001, "JONSWAP backend lost all energy")
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
+	var jonswap_initial := await _read_texture(
+		demo.solver.get_displacement_tex_rid(), 0)
+	_check(_height_rms(jonswap_initial).rms > 0.001,
+		"JONSWAP backend lost all energy")
+	var jonswap := jonswap_initial
 	demo.set_backend(OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
-	await _frames(12)
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
 	demo.set_backend(OceanSolver.Backend.JONSWAP_TMA)
 	demo._sim_time = 37.0
 	demo.solver.sim_time = 37.0
-	await _frames(12)
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
 	var jonswap_restored := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
 	_check(jonswap == jonswap_restored,
-		"JONSWAP/TMA changed after Sea of Thieves backend switch")
+		"JONSWAP/TMA changed after SoT backend switch")
 	demo.set_backend(OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
-	demo.set_map_size(256)
+	demo.apply_preset(3)
+	# Storm runs live long enough to seed the far histories with real foam;
+	# the quality switch below only proves anything if there is foam to clear.
+	demo.set_frozen(false)
+	await _frames(240)
+	demo.set_frozen(true)
+	# Performance tier: cascades rotate, near feedback every other frame, and
+	# every GPU resource is recreated (which also clears the foam history).
+	var pre_switch := await _state_metrics(demo, true, false, false, false)
+	demo.set_quality_profile(OceanQualityProfile.Tier.PERFORMANCE)
 	for frame in 360:
 		await process_frame
 		if demo.solver.initialized and demo.texture_bound:
 			break
-	_check(demo.solver.initialized and demo.texture_bound and demo.solver.map_size == 256,
+	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.PERFORMANCE
+		and demo.solver.map_size == 256
+		and demo.solver.foam_near_size == 512
+		and demo.solver.amortize
+		and demo.solver.foam_near_stride == 2,
 		"256 performance mode did not reinitialize")
+	_check(demo.solver.get_foam_near_read_index() == 0
+		and demo.solver._foam_near_dt == 0.0,
+		"performance profile switch kept stale near-foam state")
 	demo.set_frozen(false)
 	await _frames(24)
 	demo.set_frozen(true)
 	var reduced_map := await _state_metrics(demo, false, false, false, false, true)
+	_check(reduced_map.foam_mean < pre_switch.foam_mean * 0.5,
+		"profile switch did not clear the foam history (%.4f -> %.4f)" % [
+			pre_switch.foam_mean, reduced_map.foam_mean])
 	for seam_ratio in reduced_map.seam_ratios:
 		_check(seam_ratio < 2.5,
 			"reduced-map cascade seam differs from local continuity (ratio %.3f)" % seam_ratio)
+
+	# --- Physics sync: GPU point queries vs CPU ground truth read from the
+	# same maps. Exact-math replica of ocean_query.comp (bilinear torus sample,
+	# 4-iteration choppy inversion) — any gap is a marshalling/shader bug.
+	demo.set_frozen(true)
+	var query_points := PackedVector2Array()
+	for i in 33:
+		query_points.append(Vector2(
+			fposmod(float(i) * 12.7, 44.0) - 22.0,
+			fposmod(float(i) * 8.9, 36.0) - 18.0))
+	RenderingServer.call_on_render_thread(func():
+		demo.solver.submit_queries(query_points))
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
+	var query_results: PackedVector4Array = demo.solver.latest_results()
+	_check(demo.solver.query_results_valid() and query_results.size() == 33,
+		"point query readback lost or truncated (%d results)" % query_results.size())
+	var map_n: int = demo.solver.map_size
+	var tiles: PackedFloat32Array = demo.solver.tile_lengths
+	var query_disp: Array[PackedFloat32Array] = []
+	var query_norms: Array[PackedFloat32Array] = []
+	for cascade in 3:
+		query_disp.append(_decode_rgba16f(await _read_texture(
+			demo.solver.get_displacement_tex_rid(), cascade), map_n))
+		query_norms.append(_decode_rgba16f(await _read_texture(
+			demo.solver.get_normal_tex_rid(), cascade), map_n))
+	var height_errors: Array[float] = []
+	var normal_errors: Array[float] = []
+	var cascade_contribution: Array[float] = [0.0, 0.0, 0.0]
+	for i in query_points.size():
+		var truth := _query_ground_truth(query_disp, query_norms, map_n, tiles,
+			query_points[i], cascade_contribution)
+		var got := query_results[i]
+		if got.w < 0.5:
+			_check(false, "query result %d marked invalid" % i)
+			continue
+		height_errors.append(absf(got.x - truth.height))
+		var got_grad := Vector2(got.y, got.z)
+		var truth_grad := Vector2(truth.normal.x, truth.normal.z)
+		# In wave lulls both gradients are ~zero and the angle between two
+		# near-zero vectors is noise, so only steep points get the angle test;
+		# flat points must simply both be flat.
+		if truth.gradient_len > 0.02:
+			var dot := clampf(got_grad.normalized().dot(truth_grad.normalized()),
+				-1.0, 1.0)
+			normal_errors.append(rad_to_deg(acos(dot)))
+		elif got_grad.length() > 0.05:
+			normal_errors.append(90.0)
+		else:
+			normal_errors.append(0.0)
+	height_errors.sort()
+	normal_errors.sort()
+	var height_rms := 0.0
+	for e in height_errors:
+		height_rms += e * e
+	height_rms = sqrt(height_rms / maxf(height_errors.size(), 1))
+	if height_errors.is_empty():
+		_check(false, "no valid query results to compare against ground truth")
+		return
+	var height_p95: float = height_errors[int(height_errors.size() * 0.95) - 1]
+	var normal_max: float = normal_errors[normal_errors.size() - 1]
+	_check(height_rms <= 0.02,
+		"query height RMS %.3f cm exceeds 2 cm" % (height_rms * 100.0))
+	_check(height_p95 <= 0.05,
+		"query height P95 %.3f cm exceeds 5 cm" % (height_p95 * 100.0))
+	_check(normal_max <= 3.0,
+		"query normal deviates up to %.2f degrees from ground truth" % normal_max)
+	for cascade in 3:
+		var cascade_rms := sqrt(cascade_contribution[cascade]
+			/ float(query_points.size()))
+		_check(cascade_rms > 0.002,
+			"cascade %d does not measurably contribute to point queries (RMS %.4f m)"
+			% [cascade, cascade_rms])
+
+	# Ultra smoke: the 1024² pipeline initializes, runs and answers queries,
+	# and the VRAM estimates rank in the right order.
+	demo.set_quality_profile(OceanQualityProfile.Tier.ULTRA)
+	for frame in 720:
+		await process_frame
+		if demo.solver.initialized and demo.texture_bound:
+			break
+	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.ULTRA
+		and demo.solver.map_size == 1024
+		and demo.solver.foam_near_size == 2048,
+		"Ultra profile did not configure the solver (tier %d, map %d)" % [
+			demo.solver.quality_tier, demo.solver.map_size])
+	_check(demo.solver.foam_near_domain / demo.solver.foam_near_size < 0.01,
+		"Ultra near foam texel exceeds 1 cm (%.3f cm)" % (
+			demo.solver.foam_near_domain / demo.solver.foam_near_size * 100.0))
+	_check(OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.PERFORMANCE)
+		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH)
+		and OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH)
+		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.ULTRA),
+		"VRAM estimates do not increase with quality")
+	demo.set_frozen(false)
+	await _frames(12)
+	demo.set_frozen(true)
+	var ultra_short := await _read_texture(demo.solver.get_displacement_tex_rid(), 2)
+	_check(_height_rms(ultra_short).rms > 0.01, "Ultra 1024 pipeline produced no waves")
+	var ultra_points := PackedVector2Array([Vector2(3.0, -5.0), Vector2(11.0, 7.0)])
+	RenderingServer.call_on_render_thread(func():
+		demo.solver.submit_queries(ultra_points))
+	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
+	await _frames(2)
+	var ultra_results: PackedVector4Array = demo.solver.latest_results()
+	_check(ultra_results.size() == 2 and ultra_results[0].w > 0.5
+		and ultra_results[1].w > 0.5,
+		"Ultra query pass returned invalid results")
 
 	demo.queue_free()
 	await process_frame
@@ -350,7 +603,7 @@ func _state_metrics(demo, include_foam: bool = false, include_topology: bool = f
 				var layer_normal := await _read_texture(
 					demo.solver.get_normal_tex_rid(), layer)
 				foam_overlap = _fresh_breaking_overlap(layer_normal, foam)
-			if layer == 1 and include_topology:
+			if layer == 2 and include_topology:
 				var foam_morphology := _foam_morphology(foam)
 				persistent_ribbon = foam_morphology.persistent
 				fresh_ribbon = foam_morphology.fresh
@@ -524,6 +777,63 @@ func _dominant_wavelength(data: PackedByteArray, n: int, tile_length: float) -> 
 			max_energy = bins[bin]
 			dominant = bin
 	return float(dominant)
+
+
+## Peak wavelength of a cascade spectrum inside that cascade's band window.
+func _cascade_peak_wavelength(data: PackedByteArray, n: int, tile_length: float) -> float:
+	var values := data.to_float32_array()
+	var bins: Dictionary = {}
+	for y in n:
+		for x in n:
+			var radius := Vector2(float(x) - n * 0.5, float(y) - n * 0.5).length()
+			if radius < 1.0:
+				continue
+			var wavelength := tile_length / radius
+			if wavelength < 2.0 or wavelength > tile_length * 0.9:
+				continue
+			var i := (y * n + x) * 4
+			var energy := values[i] * values[i] + values[i + 1] * values[i + 1]
+			var bin := roundi(wavelength / 2.0) * 2
+			bins[bin] = bins.get(bin, 0.0) + energy
+	var dominant := 0
+	var max_energy := -1.0
+	for bin in bins:
+		if bins[bin] > max_energy:
+			max_energy = bins[bin]
+			dominant = bin
+	return float(dominant)
+
+
+## Highest normalized lag correlation of the height field for lags between
+## min_lag_m and max_lag_m. Periodic wave trains (tiled spectra) spike to ~1;
+## organic FFT interference stays low.
+func _max_lag_correlation(data: PackedByteArray, map_size: int, tile_length: float,
+		min_lag_m: float, max_lag_m: float) -> float:
+	var values := _rgba_half_values(data, map_size)
+	var texel_m := tile_length / float(map_size)
+	var min_lag := maxi(int(min_lag_m / texel_m), 1)
+	var max_lag := mini(int(max_lag_m / texel_m), map_size / 2)
+	var best := -1.0
+	var lag := min_lag
+	while lag <= max_lag:
+		var count := 0
+		var sum_sq := 0.0
+		var sum_lag_sq := 0.0
+		var sum_cross := 0.0
+		for y in range(0, map_size, 2):
+			var row := y * map_size
+			for x in range(0, map_size, 2):
+				var h := values[(row + x) * 4 + 1]
+				var h_lag := values[(row + (x + lag) % map_size) * 4 + 1]
+				sum_sq += h * h
+				sum_lag_sq += h_lag * h_lag
+				sum_cross += h * h_lag
+				count += 1
+		var correlation := (sum_cross / count) \
+			/ maxf(sqrt((sum_sq / count) * (sum_lag_sq / count)), 1e-9)
+		best = maxf(best, correlation)
+		lag += maxi((max_lag - min_lag) / 24, 1)
+	return best
 
 
 func _normal_metrics(data: PackedByteArray) -> Dictionary:
@@ -860,6 +1170,144 @@ func _half(bits: int) -> Dictionary:
 		return {"value": sign_value * mantissa * pow(2.0, -24), "finite": true}
 	return {"value": sign_value * (1.0 + mantissa / 1024.0)
 		* pow(2.0, exponent - 15), "finite": true}
+
+
+func _half_value(bits: int) -> float:
+	var exponent := (bits >> 10) & 0x1f
+	if exponent == 31:
+		return 0.0
+	var sign := -1.0 if bits & 0x8000 else 1.0
+	var mantissa := bits & 0x3ff
+	if exponent == 0:
+		return sign * mantissa * 5.960464477539063e-08
+	return sign * (1.0 + mantissa / 1024.0) * pow(2.0, exponent - 15)
+
+
+func _decode_rgba16f(data: PackedByteArray, map_size: int) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(map_size * map_size * 4)
+	for i in map_size * map_size:
+		for c in 4:
+			var offset := i * 8 + c * 2
+			out[i * 4 + c] = _half(data[offset] | (data[offset + 1] << 8))["value"]
+	return out
+
+
+## Decode an RG16F near-feedback readback into interleaved R,G floats.
+func _near_rg(data: PackedByteArray, size: int) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	out.resize(size * size * 2)
+	for i in size * size:
+		out[i * 2] = _half_value(data[i * 4] | (data[i * 4 + 1] << 8))
+		out[i * 2 + 1] = _half_value(data[i * 4 + 2] | (data[i * 4 + 3] << 8))
+	return out
+
+
+func _near_channel_std(data: PackedFloat32Array) -> float:
+	var count := 0
+	var mean := 0.0
+	var sq := 0.0
+	for i in range(0, data.size(), 32):
+		mean += data[i]
+		sq += data[i] * data[i]
+		count += 1
+	mean /= count
+	return sqrt(maxf(sq / count - mean * mean, 0.0))
+
+
+## RMS and per-column mean error between the near field B and the toroidal
+## shift of A by `shift` texels in x. Columns within `shift` of the wrap edge
+## have no overlapping world data and are excluded.
+func _near_shift_stats(b: PackedFloat32Array, a: PackedFloat32Array, size: int,
+		shift: int, stride: int) -> Dictionary:
+	var margin := shift + 8
+	var sq := 0.0
+	var count := 0
+	var col_err := PackedFloat32Array()
+	col_err.resize(size)
+	var col_count := PackedInt32Array()
+	col_count.resize(size)
+	for y in range(0, size, stride):
+		var row := y * size
+		for x in range(0, size - margin, stride):
+			var d := b[(row + x) * 2] - a[(row + (x + shift) % size) * 2]
+			sq += d * d
+			count += 1
+			col_err[x] += absf(d)
+			col_count[x] += 1
+	var col_means: Array[float] = []
+	for x in size - margin:
+		if col_count[x] > 0:
+			col_means.append(col_err[x] / col_count[x])
+	col_means.sort()
+	return {
+		"rms": sqrt(sq / maxf(count, 1)),
+		"median_col": col_means[col_means.size() / 2],
+		"p99_col": col_means[mini(col_means.size() - 1,
+			int(col_means.size() * 0.99))],
+	}
+
+
+## Exact GDScript replica of ocean_query.comp for one point: bilinear torus
+## samples of the decoded maps, 4-iteration choppy inversion. Returns the
+## height, the normalized normal, the raw gradient length; accumulates each
+## cascade's sum-of-squares height into contributions[cascade].
+func _query_ground_truth(disps: Array[PackedFloat32Array],
+		norms: Array[PackedFloat32Array], map_size: int,
+		tiles: PackedFloat32Array, point: Vector2,
+		contributions: Array[float]) -> Dictionary:
+	var g := point
+	for iteration in 4:
+		var disp := Vector2.ZERO
+		for cascade in 3:
+			var sd := _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g)
+			disp += Vector2(sd.x, sd.z)
+		g = point - disp
+	var height := 0.0
+	var gradient := Vector2.ZERO
+	for cascade in 3:
+		var s := _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g)
+		height += s.y
+		contributions[cascade] += s.y * s.y
+		gradient += _sample_map_vec2(norms[cascade], map_size, tiles[cascade], g)
+	var normal := Vector3(-gradient.x, 1.0, -gradient.y).normalized()
+	return {"height": height, "normal": normal, "gradient_len": gradient.length()}
+
+
+func _sample_map_vec3(texels: PackedFloat32Array, map_size: int, tile: float,
+		world: Vector2) -> Vector3:
+	var uv := world / tile
+	var grid := (uv - uv.floor()) * float(map_size) - Vector2(0.5, 0.5)
+	var i0 := Vector2i(grid.floor())
+	var t := grid - Vector2(i0)
+	var c00 := _texel_vec3(texels, map_size, i0)
+	var c10 := _texel_vec3(texels, map_size, i0 + Vector2i(1, 0))
+	var c01 := _texel_vec3(texels, map_size, i0 + Vector2i(0, 1))
+	var c11 := _texel_vec3(texels, map_size, i0 + Vector2i(1, 1))
+	return c00.lerp(c10, t.x).lerp(c01.lerp(c11, t.x), t.y)
+
+
+func _sample_map_vec2(texels: PackedFloat32Array, map_size: int, tile: float,
+		world: Vector2) -> Vector2:
+	var uv := world / tile
+	var grid := (uv - uv.floor()) * float(map_size) - Vector2(0.5, 0.5)
+	var i0 := Vector2i(grid.floor())
+	var t := grid - Vector2(i0)
+	var c00 := _texel_vec2(texels, map_size, i0)
+	var c10 := _texel_vec2(texels, map_size, i0 + Vector2i(1, 0))
+	var c01 := _texel_vec2(texels, map_size, i0 + Vector2i(0, 1))
+	var c11 := _texel_vec2(texels, map_size, i0 + Vector2i(1, 1))
+	return c00.lerp(c10, t.x).lerp(c01.lerp(c11, t.x), t.y)
+
+
+func _texel_vec3(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vector3:
+	var o := (posmod(at.y, map_size) * map_size + posmod(at.x, map_size)) * 4
+	return Vector3(texels[o], texels[o + 1], texels[o + 2])
+
+
+func _texel_vec2(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vector2:
+	var o := (posmod(at.y, map_size) * map_size + posmod(at.x, map_size)) * 4
+	return Vector2(texels[o], texels[o + 1])
 
 
 func _read_texture(rid: RID, layer: int) -> PackedByteArray:

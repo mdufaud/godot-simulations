@@ -81,6 +81,13 @@ func set_wind_direction(direction: Vector2) -> void:
 	wind_direction = direction.normalized()
 
 
+## The solver flips its foam ping-pong every step; spray must read the same
+## half as the surface or it samples the in-flight texture.
+func set_foam_indices(indices: Vector4) -> void:
+	if _material != null:
+		_material.set_shader_parameter("foam_history_indices", indices)
+
+
 func release_textures() -> void:
 	if _instance != null:
 		_instance.visible = false

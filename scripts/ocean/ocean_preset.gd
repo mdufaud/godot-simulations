@@ -9,7 +9,14 @@ class_name OceanPreset extends Resource
 ## solver.mark_spectrum_dirty()
 ## [/codeblock]
 
+## Wave generation model. FFT runs all three FFT cascades; TUTORIAL_GERSTNER
+## replaces the short cascade with the five periodic tutorial waves and zeroes
+## the long/mid ones.
+enum WaveModel { FFT, TUTORIAL_GERSTNER }
+
 @export var display_name := "Breeze"
+
+@export var wave_model: WaveModel = WaveModel.FFT
 
 @export_group("Wind")
 @export_range(0.5, 35.0, 0.1) var wind_speed_mps := 11.0
@@ -65,6 +72,7 @@ func validate() -> String:
 
 ## The spectrum stays stale until the caller marks it dirty.
 func apply_to(solver: OceanSolver) -> void:
+	solver.wave_model = wave_model
 	solver.wind_speed = wind_speed_mps
 	solver.fetch_km = fetch_km
 	solver.swell = swell

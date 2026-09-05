@@ -23,6 +23,7 @@ var _look := -1
 var _backend := -1
 var _mood := -1.0
 var _profile := false
+var _quality := -1
 var _features := true
 var _clouds := true
 var _view := ""
@@ -65,6 +66,7 @@ func _initialize() -> void:
 			"backend": _backend = int(value)
 			"mood": _mood = float(value)
 			"profile": _profile = value == "1" or value.to_lower() == "true"
+			"quality": _quality = _quality_tier(value)
 			"features": _features = value != "0" and value.to_lower() != "false"
 			"clouds": _clouds = value != "0" and value.to_lower() != "false"
 			"view": _view = value
@@ -119,6 +121,8 @@ func _run() -> void:
 		return
 	if _look >= 0 and _demo.has_method("apply_look"):
 		_demo.apply_look(_look)
+	if _quality >= 0 and _demo.has_method("set_quality_profile"):
+		_demo.set_quality_profile(_quality)
 	if _preset >= 0 and _demo.has_method("apply_preset"):
 		_demo.apply_preset(_preset)
 	if _backend >= 0 and _demo.has_method("set_backend"):
@@ -190,13 +194,18 @@ func _run() -> void:
 		_demo.set_capture_profiling(true)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(_freeze)
-	print("CAPTURE CONFIG preset=%d look=%d backend=%d view=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d cascade=%d" % [
-		_preset, _look, _backend, _view, _capture_time, _fixed_delta, _warmup,
+	print("CAPTURE CONFIG preset=%d look=%d backend=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d cascade=%d" % [
+		_preset, _look, _backend, _view,
+		OceanQualityProfile.tier_name(_quality) if _quality >= 0 else "default",
+		_capture_time, _fixed_delta, _warmup,
 		_foam_warmup, _wind_direction, _sun_elevation, _sun_azimuth, _frames,
 		_every, _size.x, _size.y, _foam_feedback, _micro_normals, _reflection,
 		_debug_view, _cascade])
 	var waited := 0
+	var toss_frame := maxi(1, int(_frames / 3))
 	while waited < _frames:
+		if _interaction and _demo.has_method("throw_crate") and waited == toss_frame:
+			_demo.throw_crate()
 		if _every > 0 and waited > 0 and waited % _every == 0:
 			await _grab(_numbered(waited))
 		await process_frame
@@ -223,6 +232,15 @@ func _set_target(value: String) -> void:
 			return
 	push_error("CAPTURE FAIL: unknown demo key %s" % value)
 	quit(1)
+
+
+## "performance"/"high"/"ultra" (or the raw tier index) -> OceanQualityProfile tier.
+func _quality_tier(value: String) -> int:
+	var lowered := value.to_lower()
+	for tier in OceanQualityProfile.TIER_NAMES.size():
+		if lowered == OceanQualityProfile.TIER_NAMES[tier].to_lower():
+			return tier
+	return clampi(int(value), 0, OceanQualityProfile.TIER_NAMES.size() - 1)
 
 
 func _grab(path: String, mirror_path: String = "") -> void:

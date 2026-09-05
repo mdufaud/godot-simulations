@@ -47,7 +47,19 @@ uniform sampler2DArray normals : filter_linear, repeat_enable;
 uniform sampler2DArray foam_history_a : filter_linear, repeat_enable;
 uniform sampler2DArray foam_history_b : filter_linear, repeat_enable;
 uniform vec4 foam_history_indices = vec4(0.0);
-uniform sampler2D foam_breakup : filter_linear_mipmap, repeat_enable, hint_default_white;
+// Camera-centred near-field foam feedback (physical coverage only, 20 m
+// window). Sampled bicubic; blended with the coarse per-cascade histories
+// between 8 and 10 m from the camera.
+uniform sampler2D foam_near_a : filter_linear, repeat_disable;
+uniform sampler2D foam_near_b : filter_linear, repeat_disable;
+uniform vec2 foam_near_center = vec2(0.0);
+uniform float foam_near_domain = 20.0;
+uniform float foam_near_index = 0.0;
+uniform bool foam_near_enabled = false;
+// Locally generated seamless detail (Worley lace + FBM + erosion, 2048²,
+// mipmapped). R = lace web (1.25 m and 0.417 m motifs), G = soft breakup.
+uniform sampler2D foam_detail : filter_linear_mipmap, repeat_enable, hint_default_white;
+uniform float foam_lace_gain : hint_range(0.0, 2.0) = 1.0;
 uniform sampler2D micro_normal : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform vec2 micro_normal_scales = vec2(0.085, 0.23);
 uniform float micro_normal_strength = 0.42;
@@ -196,6 +208,22 @@ vec4 sample_foam_history(vec3 coords) {
 		: texture(foam_history_a, coords);
 }
 
+/** Bicubic B-spline for a single 2D texture (near foam coverage). */
+vec4 texture_bicubic_2d(in sampler2D samp, in vec2 uv) {
+	vec2 dims = vec2(textureSize(samp, 0).xy);
+	vec2 dims_inv = 1.0 / dims;
+	vec2 xy = uv * dims + 0.5;
+	vec2 fuv = fract(xy);
+	vec4 wx = cubic_weights(fuv.x);
+	vec4 wy = cubic_weights(fuv.y);
+	vec4 g = vec4(wx.xz + wx.yw, wy.xz + wy.yw);
+	vec4 h = (vec4(wx.yw, wy.yw) / g + vec2(-1.5, 0.5).xyxy + floor(xy).xxyy) * dims_inv.xxyy;
+	vec2 w = g.xz / (g.xz + g.yw);
+	return mix(
+		mix(texture(samp, h.yw), texture(samp, h.xw), w.x),
+		mix(texture(samp, h.yz), texture(samp, h.xz), w.x), w.y);
+}
+
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = length(VERTEX);
@@ -243,10 +271,8 @@ void fragment() {
 		sss_crest_mask += normal_sample.z * max(cascade_fade, far_crest_floor)
 			* detail_filter * (i == 0 ? 0.65 : (i == 1 ? 0.35 : 0.0));
 		if (style_mode == 1) {
-			// P0-A (cause C1): read foam from every simulated cascade, not just
-			// cascade 1 — cascade 0 carries the breaking signal (crest cov ~21 %
-			// vs ~0.4 %). max() keeps band overlaps (lambda 21-22 m) from
-			// double-counting; the layer weight is a calibration knob.
+			// The short cascade carries the tutorial Gerstner source; the longer
+			// FFT cascades retain their own breaking history.
 			float layer_weight = i == 0 ? 0.85 : 1.0;
 			float foam_visibility = cascade_fade * detail_filter * layer_weight;
 			float layer_hist = 0.0;
@@ -259,13 +285,28 @@ void fragment() {
 			foam_history = max(foam_history, layer_hist);
 			foam_fresh = max(foam_fresh, layer_fresh);
 		} else {
-			if (foam_feedback_enabled) {
+			if (foam_feedback_enabled && i < num_foam_cascades) {
 				vec4 foam_sample = sample_foam_history(coords);
 				foam_history = max(foam_history, foam_sample.r * detail_filter);
 				foam_fresh = max(foam_fresh, foam_sample.g * detail_filter);
 			}
 		}
 		breaking_mask = max(breaking_mask, normal_sample.a * detail_filter);
+	}
+	// Camera-centred near foam rules inside 8 m and hands over to the coarse
+	// per-cascade histories across the 8..10 m band; a whisper of the distant
+	// history survives underneath so big-scale coverage never pops at the seam.
+	if (foam_near_enabled) {
+		float near_dist = length(world_uv - foam_near_center);
+		if (near_dist < foam_near_domain * 0.5) {
+			vec2 near_uv = (world_uv - foam_near_center) / foam_near_domain + 0.5;
+			vec4 near_sample = foam_near_index > 0.5
+				? texture_bicubic_2d(foam_near_b, near_uv)
+				: texture_bicubic_2d(foam_near_a, near_uv);
+			float near_weight = 1.0 - smoothstep(8.0, 10.0, near_dist);
+			foam_history = mix(foam_history, max(foam_history * 0.5, near_sample.r), near_weight);
+			foam_fresh = mix(foam_fresh, max(foam_fresh * 0.5, near_sample.g), near_weight);
+		}
 	}
 	crest_factor = clamp(peak_mask, 0.0, 1.0);
 	// P3-A + review: overcast storms get no through-crest transmission — the
@@ -326,35 +367,23 @@ void fragment() {
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
 		* micro_distance_fade * micro_pixel_fade * style_micro_strength * micro_corridor;
 	gradient += wind * micro_slope.x + across * micro_slope.y;
-	vec2 wave_gradient = gradient;
-	float persistent_foam = clamp(foam_history * foam_strength * 6.0, 0.0, 1.0);
-	float fresh_foam = clamp(foam_fresh * foam_strength * 3.0, 0.0, 1.0);
-	float foam_coverage = max(persistent_foam, fresh_foam);
-	// Canon SoT/Crest: the breakup texture SOFT-MODULATES the foam density, it
-	// does not binary-carve it. The source PNG is per-texel grain: thresholding
-	// it paints one white dot per bright texel at close range (the "salt"
-	// look), so the mip chain is biased into soft clouds and a wide ramp keeps
-	// foam_factor continuous — coverage gates, pattern only modulates.
-	vec2 foam_warp_m = (vec2(
-		texture(foam_breakup, wind_uv * 0.011 + vec2(TIME * 0.008, -TIME * 0.003), 2.0).r,
-		texture(foam_breakup, wind_uv * 0.017 + vec2(-TIME * 0.006, TIME * 0.004), 2.0).r)
-		- 0.5) * 3.0;
-	vec2 foam_octave_a = (wind_uv + foam_warp_m - vec2(TIME * 0.25, TIME * 0.06))
-		* vec2(1.0 / 120.0, 1.0 / 72.0);
-	vec2 foam_octave_b = (wind_uv + foam_warp_m - vec2(TIME * 0.12, TIME * 0.035))
-		* vec2(1.0 / 43.0, 1.0 / 29.0);
-	float foam_pattern = mix(texture(foam_breakup, foam_octave_a, 2.0).r,
-		texture(foam_breakup, foam_octave_b, 2.5).r, 0.5);
-	foam_factor = smoothstep(0.05, 0.85,
-		foam_coverage * mix(0.35, 1.25, foam_pattern)) * exp(-dist * 0.0012);
-	float foam_detail_x = texture(foam_breakup, foam_octave_a + vec2(0.02, 0.0), 2.0).r;
-	float foam_detail_y = texture(foam_breakup, foam_octave_a + vec2(0.0, 0.02), 2.0).r;
-	vec2 foam_relief = vec2(foam_pattern - foam_detail_x,
-		foam_pattern - foam_detail_y) * foam_factor;
-	gradient += (wind * foam_relief.x + across * foam_relief.y) * 1.4;
+	// Per-fragment lace: two rotated samplings of the generated seamless
+	// pattern. Its two lattices are 1.25 m (coarse) and 0.417 m (fine) at the
+	// 35 m repeat, and both samplings carve the SAME physical coverage stored
+	// in the feedback, so the lace stays attached to real compression zones.
+	// Automatic mip LOD + derivative filtering keep minification grain-free.
+	const mat2 lace_rot_a = mat2(vec2(0.9360, 0.3520), vec2(-0.3520, 0.9360));
+	const mat2 lace_rot_b = mat2(vec2(0.7290, 0.6845), vec2(-0.6845, 0.7290));
+	const float lace_repeat = 35.0;
+	float lace_a = texture(foam_detail, lace_rot_a * world_uv / lace_repeat).r;
+	float lace_b = texture(foam_detail, lace_rot_b * world_uv / lace_repeat).r;
+	float lace = clamp(max(lace_a, lace_b * 0.85) * foam_lace_gain, 0.0, 1.2);
+	float persistent_foam = clamp(foam_history * foam_strength * mix(0.35, 1.12, lace), 0.0, 1.0);
+	float fresh_foam = clamp(foam_fresh * foam_strength * mix(0.3, 1.15, lace), 0.0, 1.0);
+	foam_factor = persistent_foam * exp(-dist * 0.0012);
 	vec2 breakup_uv = world_uv * 0.08 - wind * TIME * 0.003;
 	// Same mip bias: shore/interaction breakup must stay soft clouds, not grain.
-	float breakup = texture(foam_breakup, breakup_uv, 2.0).r;
+	float breakup = texture(foam_detail, breakup_uv, 2.0).g;
 	if (style_mode == 1 && foam_feedback_enabled) {
 		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
 		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
@@ -366,11 +395,8 @@ void fragment() {
 			}
 		}
 	}
-	// Canon SoT/Crest: foam replaces the wave normal toward up — a whitecap is
-	// aerated churn, not tilted water. The breakup relief added above survives;
-	// only the wave gradient fades under the foam.
-	gradient = mix(wave_gradient, gradient,
-		1.0 - clamp(foam_factor * 0.75, 0.0, 0.8));
+	foam_factor *= mix(0.55, 1.05, lace);
+	gradient = mix(gradient, vec2(0.0), clamp(foam_factor * 0.8, 0.0, 0.8));
 	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
 	// decoupling specularity from detail keeps the sun path bright without
 	// dragging micro normals back behind a corridor gate.
@@ -490,7 +516,7 @@ void fragment() {
 		}
 
 		float shore = 1.0 - smoothstep(0.0, 1.3, scene_depth);
-		float shore_foam = shore * shore * smoothstep(0.18, 0.76, breakup + shore * 0.35)
+		float shore_foam = shore * shore * smoothstep(0.18, 0.76, breakup * lace + shore * 0.35)
 			* exp(-dist * 0.02);
 		foam_factor = max(foam_factor, min(shore_foam, 0.6));
 
@@ -519,9 +545,11 @@ void fragment() {
 			* sky_reflection_strength * (1.0 - foam_factor * 0.72);
 
 		float fresh_ratio = fresh_foam / max(persistent_foam + fresh_foam, 1e-3);
-		float foam_roughness = mix(0.76, 0.95, fresh_ratio);
+		// Foam is rougher than open water and fresh foam roughest of all; the
+		// strong mix drowns the specular so foam never reads as a shiny plate.
+		float foam_roughness = mix(0.82, 0.96, fresh_ratio);
 		ROUGHNESS = mix(filtered_roughness, foam_roughness,
-			clamp(foam_factor * 1.05, 0.0, 1.0));
+			clamp(foam_factor * 1.1, 0.0, 1.0));
 		// P1-A'.1 (loi L4): storm foam is GREY (reference luma ~0.40), golden
 		// hour foam is warm — the environment drives the tint, mood ramps it.
 		// Canon SoT: the grey also ramps per pixel with the trail's accumulated

@@ -154,6 +154,27 @@ vec2 spectrum_amplitude(ivec2 id) {
     directional = mix(directional, mid_direction,
         clamp(mid_direction_weight + wind_direction_weight, 0.0, 0.45));
 
+    // Storm recipe: 65% dominant wind lobe, 25% cross lobe at +35°, 10%
+    // diffuse. Interference between the lobes is what produces grouped big
+    // waves, lulls and isolated crests instead of parallel ribbons. The long
+    // cascade rotates its dominant lobe -15° off the wind so swell and wind
+    // sea never align perfectly.
+    float storm_mix = smoothstep(20.0, 28.0, params.spectrum_a.w);
+    if (storm_mix > 0.001) {
+        float swell_offset = radians(-15.0) * storm_mix
+            * clamp(long_level * 1.5, 0.0, 1.0);
+        vec2 main_dir = rotate_direction(wind_dir,
+            params.misc.x == 0 ? swell_offset : 0.0);
+        vec2 cross_dir = rotate_direction(wind_dir, radians(35.0));
+        float main_lobe = longuet_higgins_function(8.0,
+            acos(clamp(dot(k_dir, main_dir), -1.0, 1.0)));
+        float cross_lobe = longuet_higgins_function(11.0,
+            acos(clamp(dot(k_dir, cross_dir), -1.0, 1.0)));
+        float storm_directional = 0.65 * main_lobe + 0.25 * cross_lobe
+            + 0.10 * (0.5 / PI);
+        directional = mix(directional, storm_directional, storm_mix);
+    }
+
     directional *= exp(-(1.0 - params.spectrum_b.w)
         * (1.0 - params.spectrum_b.w) * k * k);
 

@@ -27,8 +27,8 @@ layout(push_constant, std430) uniform Params {
     vec4 spectrum_a; //  0: tile_length, jonswap_alpha, peak_frequency, wind_speed
     vec4 spectrum_b; // 16: wind_dir_rad, depth, swell, detail
     vec4 spectrum_c; // 32: spread, k_min, k_max, choppiness
-    vec4 foam_p;     // 48: whitecap, grow_rate, decay_rate, time
-    ivec4 misc;      // 64: cascade_index, seed_x, seed_y, backend
+    vec4 foam_p;     // 48: whitecap, foam_gain, decay_rate, time
+    ivec4 misc;      // 64: cascade_index, seed_x, seed_y, flags (bit0 tutorial, bit1 jonswap)
     vec4 gains;      // 80: height_gain, long height, long wavelength, wind height
     vec4 art_a;      // 96: wind wavelength, ripple strength, crosswind, crest gain
     vec4 art_b;      // 112: crest bias, mid height, mid wavelength, mid spread

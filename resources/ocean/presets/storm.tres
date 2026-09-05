@@ -5,6 +5,7 @@
 [resource]
 script = ExtResource("1_preset")
 display_name = "Storm"
+wave_model = 0
 wind_speed_mps = 33.0
 fetch_km = 300.0
 swell = 0.9

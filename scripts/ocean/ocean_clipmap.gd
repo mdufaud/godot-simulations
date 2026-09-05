@@ -1,7 +1,7 @@
 class_name OceanClipmap
 ## Procedural concentric clipmap for the FFT ocean surface. Every level is a
-## 64x64-cell grid whose cell doubles per level; ring levels carve out the
-## 32x32-cell hole the previous level fills. 2:1 boundaries are closed by the
+## 128x128-cell grid whose cell doubles per level; ring levels carve out the
+## 64x64-cell hole the previous level fills. 2:1 boundaries are closed by the
 ## surface shader's geomorph: each level's outer band morphs onto the coarser
 ## lattice, so both sides sample identical displacement and no crack opens. A
 ## flat skirt (on the last level's lattice, which therefore never morphs)

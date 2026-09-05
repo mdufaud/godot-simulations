@@ -3,20 +3,21 @@ class_name OceanMenu extends RefCounted
 ## sea-state sliders are the single path a preset travels through: applying a
 ## preset moves the sliders, and the sliders move the solver.
 
-const MAP_SIZES: Array[int] = [128, 256, 512]
-
 var solver: OceanSolver
 var surface_mat: ShaderMaterial
 var world_env: WorldEnvironment
 var storm: OceanStorm
 var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
-## provide apply_preset, apply_look, set_time_scale, set_frozen, throw_crate,
-## clear_crates, set_map_size, set_sun_elevation, set_sun_azimuth and set_render_scale.
+## provide apply_preset, apply_look, current_look_index, set_time_scale,
+## set_frozen, throw_crate, clear_crates, set_quality_profile,
+## quality_profile_label, quality_requested, quality_effective, set_backend,
+## set_spray_amount, set_sun_elevation, set_sun_azimuth and set_render_scale.
 var host: Node
 
 var _preset_option: OptionButton
 var _look_option: OptionButton
+var _profile_option: OptionButton
 var _spectral_group: VBoxContainer
 var _art_group: VBoxContainer
 var _wind_speed: HSlider
@@ -59,7 +60,8 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		names.append(typed.display_name)
 
 	menu.add_section("Sea state")
-	menu.add_option_button("Backend", ["JONSWAP / TMA", "Sea of Thieves-inspired FFT"],
+	# The spectrum flavour is a production-only choice.
+	menu.add_option_button("Spectrum", ["JONSWAP / TMA", "Art-directed (SoT)"],
 		solver.backend, _backend_selected)
 	_preset_option = menu.add_option_button("Preset", names, 1, host.apply_preset)
 	_spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
@@ -148,19 +150,31 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	menu.add_section("Performance")
 	menu.add_debug_toggle("🔮", "SSR", false,
 		func(on: bool): world_env.environment.ssr_enabled = on)
-	menu.add_debug_toggle("🐢", "Amortize cascades", false,
-		func(on: bool): solver.amortize = on)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
-	menu.add_label("FFT map size")
-	for size in MAP_SIZES:
-		menu.add_button(str(size), host.set_map_size.bind(size))
+	_profile_option = menu.add_option_button("Quality profile",
+		OceanQualityProfile.TIER_NAMES, host.quality_requested,
+		func(tier_idx: int):
+			host.set_quality_profile(tier_idx)
+			_refresh_profile_option(_profile_option))
+	_refresh_profile_option(_profile_option)
 	menu.add_slider("Render scale", 0.4, 1.0, 1.0, host.set_render_scale)
+
+
+## Keeps the profile selector honest: a degraded pick (e.g. Ultra on a GPU
+## whose 2D limit is below 1024) reads "Ultra requested / High active".
+func _refresh_profile_option(option: OptionButton) -> void:
+	for i in option.item_count:
+		if i == host.quality_requested \
+				and host.quality_requested != host.quality_effective:
+			option.set_item_text(i, host.quality_profile_label())
+		else:
+			option.set_item_text(i, OceanQualityProfile.TIER_NAMES[i])
 
 
 ## Moves every slider a preset carries, so the panel shows what is running. The
 ## sliders snap to their own step, so the host still applies the preset to the
-## solver afterwards for the exact values; the guard keeps these nine callbacks
-## from marking the spectrum dirty nine times on the way.
+## solver afterwards for the exact values; the guard keeps the 14 spectrum
+## sliders from marking the spectrum dirty on every assignment.
 func sync_to_preset(preset: OceanPreset) -> void:
 	_updating = true
 	_wind_speed.value = preset.wind_speed_mps

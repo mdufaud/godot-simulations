@@ -4,6 +4,7 @@
 
 [resource]
 script = ExtResource("1_preset")
+wave_model = 0
 display_name = "Breeze"
 wind_speed_mps = 11.0
 fetch_km = 120.0

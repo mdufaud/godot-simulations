@@ -1,0 +1,89 @@
+// GPU point queries against the rendered surface: inverts the horizontal
+// choppy displacement (4 fixed-point iterations), bilinearly samples the three
+// cascades and sums height + gradient. Results are read back asynchronously
+// (max one frame of latency); nothing on the CPU samples wave textures anymore.
+//
+// Result layout: vec4(height, normal_x, normal_z, valid).
+// Standalone shader: own bindings and push constant.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) restrict buffer QueryIn {
+    vec2 query_points[]; // world xz
+};
+layout(std430, set = 0, binding = 1) restrict buffer QueryOut {
+    vec4 query_results[];
+};
+layout(rgba16f, set = 0, binding = 2) restrict uniform image2DArray displacement_map;
+layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray normal_map;
+
+layout(push_constant, std430) uniform QueryParams {
+    vec4 tiles;   // tile length cascade 0, 1, 2, map_size
+    ivec4 cfg;    // num_cascades, point_count, unused, unused
+} qp;
+
+// Bilinear fetch on the cascade torus; wraps any world distance.
+vec3 sample_displacement(int cascade, float tile, vec2 world) {
+    float n = qp.tiles.w;
+    vec2 uv = world / tile;
+    vec2 f = uv - floor(uv);
+    vec2 grid = f * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 dims = ivec2(int(n));
+    ivec2 w0 = (i0 + dims) % dims;
+    ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
+    vec3 c00 = imageLoad(displacement_map, ivec3(w0.x, w0.y, cascade)).xyz;
+    vec3 c10 = imageLoad(displacement_map, ivec3(w1.x, w0.y, cascade)).xyz;
+    vec3 c01 = imageLoad(displacement_map, ivec3(w0.x, w1.y, cascade)).xyz;
+    vec3 c11 = imageLoad(displacement_map, ivec3(w1.x, w1.y, cascade)).xyz;
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+vec2 sample_gradient(int cascade, float tile, vec2 world) {
+    float n = qp.tiles.w;
+    vec2 uv = world / tile;
+    vec2 f = uv - floor(uv);
+    vec2 grid = f * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 dims = ivec2(int(n));
+    ivec2 w0 = (i0 + dims) % dims;
+    ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
+    vec2 c00 = imageLoad(normal_map, ivec3(w0.x, w0.y, cascade)).xy;
+    vec2 c10 = imageLoad(normal_map, ivec3(w1.x, w0.y, cascade)).xy;
+    vec2 c01 = imageLoad(normal_map, ivec3(w0.x, w1.y, cascade)).xy;
+    vec2 c11 = imageLoad(normal_map, ivec3(w1.x, w1.y, cascade)).xy;
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+void main() {
+    int index = int(gl_GlobalInvocationID.x);
+    if (index >= qp.cfg.y) {
+        return;
+    }
+    vec2 p = query_points[index];
+
+    // Invert the summed horizontal choppy displacement: find grid position g
+    // with g + D_xz(g) = p. |D| is far smaller than every tile, so the
+    // fixed-point iteration converges in a few steps.
+    vec2 g = p;
+    for (int iteration = 0; iteration < 4; iteration++) {
+        vec2 disp = vec2(0.0);
+        for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
+            disp += sample_displacement(cascade, qp.tiles[cascade], g).xz;
+        }
+        g = p - disp;
+    }
+
+    float height = 0.0;
+    vec2 gradient = vec2(0.0);
+    for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
+        height += sample_displacement(cascade, qp.tiles[cascade], g).y;
+        gradient += sample_gradient(cascade, qp.tiles[cascade], g);
+    }
+    vec3 normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
+    float valid = (isnan(height) || isnan(normal.x) || isnan(normal.z)
+        || isinf(height)) ? 0.0 : 1.0;
+    query_results[index] = vec4(height, normal.x, normal.z, valid);
+}

@@ -1,5 +1,8 @@
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+layout(set = 0, binding = 7) uniform sampler2D sea_foam;
+layout(set = 0, binding = 8) uniform sampler2D foam_noise_texture;
+
 ivec2 wrap_id(ivec2 id) {
     return (id + ivec2(MAP_SIZE_I)) % ivec2(MAP_SIZE_I);
 }
@@ -8,36 +11,64 @@ vec2 foam_at(ivec2 id, int cascade) {
     return imageLoad(foam_input, ivec3(wrap_id(id), cascade)).rg;
 }
 
+float current_foam(ivec2 id, int cascade, float compression) {
+    vec2 uv = (vec2(id) + 0.5) / float(MAP_SIZE);
+    vec2 foam_uv = uv;
+    if ((params.misc.w & 1) == 1 && cascade == 2) {
+        foam_uv *= params.spectrum_a.x / 10.0;
+    }
+    float foam_hf = textureLod(sea_foam, foam_uv * 24.0, 0.0).r;
+    float foam_lf = textureLod(sea_foam, foam_uv * 8.0, 0.0).r;
+    float mixed_foam = smoothstep(0.4, 1.0,
+        mix(foam_lf, foam_hf, compression));
+    float noise_value = textureLod(foam_noise_texture, foam_uv, 0.0).r;
+    noise_value = smoothstep(0.2, 0.7, noise_value) * 8.0;
+    return clamp(compression * mixed_foam * noise_value
+        * params.foam_p.y, 0.0, 1.0);
+}
+
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
     int cascade = params.misc.x;
-    vec2 history = foam_at(id, cascade);
-
+    vec2 previous = foam_at(id, cascade);
     vec4 breaking = imageLoad(normal_map, ivec3(id, cascade));
-    float injection = breaking.a;
-    float crest = breaking.b;
-    float breaking_support = injection;
-    for (int radius = 1; radius <= 2; radius++) {
-        breaking_support = max(breaking_support,
-            imageLoad(normal_map, ivec3(wrap_id(id + ivec2(radius, 0)), cascade)).a);
-        breaking_support = max(breaking_support,
-            imageLoad(normal_map, ivec3(wrap_id(id + ivec2(-radius, 0)), cascade)).a);
-        breaking_support = max(breaking_support,
-            imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, radius)), cascade)).a);
-        breaking_support = max(breaking_support,
-            imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, -radius)), cascade)).a);
+    // Production path: physical coverage only (persistent + fresh), detail
+    // lace is applied per-fragment in the surface shader. The tutorial keeps
+    // its pattern-modulated foam.
+    if ((params.misc.w & 1) == 0) {
+        float injection = breaking.a;
+        float crest = breaking.b;
+        float breaking_support = injection;
+        for (int radius = 1; radius <= 2; radius++) {
+            breaking_support = max(breaking_support,
+                imageLoad(normal_map, ivec3(wrap_id(id + ivec2(radius, 0)), cascade)).a);
+            breaking_support = max(breaking_support,
+                imageLoad(normal_map, ivec3(wrap_id(id + ivec2(-radius, 0)), cascade)).a);
+            breaking_support = max(breaking_support,
+                imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, radius)), cascade)).a);
+            breaking_support = max(breaking_support,
+                imageLoad(normal_map, ivec3(wrap_id(id + ivec2(0, -radius)), cascade)).a);
+        }
+        float cascade_bias = cascade == 0 ? 1.5 : 1.0;
+        float persistent_injection = pow(smoothstep(
+            0.055 * cascade_bias, 0.50 * cascade_bias, injection), 1.15);
+        float fresh_injection = pow(clamp(injection * 3.5 / cascade_bias, 0.0, 1.0), 1.6);
+        float persistent = previous.r * exp(-params.foam_p.z);
+        float fresh = previous.g * exp(-params.foam_p.z * 6.0)
+            * smoothstep(0.0, 0.16, breaking_support);
+        // Calibrated so the pooled Storm coverage (all three cascades, now
+        // that cascade 2's crest mask actually fires) stays inside the 8..25%
+        // contract window.
+        float persistent_growth = params.foam_p.y * (0.010 + crest * 0.014);
+        float fresh_growth = params.foam_p.y * (0.35 + crest * 0.30);
+        persistent = clamp(persistent + persistent_injection * persistent_growth
+            * (1.0 - persistent), 0.0, 1.0);
+        fresh = clamp(fresh + fresh_injection * fresh_growth * (1.0 - fresh), 0.0, 1.0);
+        imageStore(foam_output, ivec3(id, cascade), vec4(persistent, fresh, 0.0, 1.0));
+        return;
     }
-    float cascade_bias = cascade == 0 ? 1.5 : 1.0;
-    float persistent_injection = pow(smoothstep(
-        0.055 * cascade_bias, 0.50 * cascade_bias, injection), 1.15);
-    float fresh_injection = pow(clamp(injection * 3.5 / cascade_bias, 0.0, 1.0), 1.6);
-    float persistent = history.r * exp(-params.foam_p.z);
-    float fresh = history.g * exp(-params.foam_p.z * 6.0)
-        * smoothstep(0.0, 0.16, breaking_support);
-    float persistent_growth = params.foam_p.y * (0.012 + crest * 0.018);
-    float fresh_growth = params.foam_p.y * (0.35 + crest * 0.30);
-    persistent = clamp(persistent + persistent_injection * persistent_growth
-        * (1.0 - persistent), 0.0, 1.0);
-    fresh = clamp(fresh + fresh_injection * fresh_growth * (1.0 - fresh), 0.0, 1.0);
-    imageStore(foam_output, ivec3(id, cascade), vec4(persistent, fresh, 0.0, 1.0));
+    float compression = clamp(breaking.a, 0.0, 1.0);
+    float current = current_foam(id, cascade, compression);
+    float history = previous.r * exp(-params.foam_p.z);
+    imageStore(foam_output, ivec3(id, cascade), vec4(max(current, history), current, 0.0, 1.0));
 }
