@@ -8,6 +8,8 @@ var _menu: SimMenu
 var _case_option: OptionButton
 var _status_label: Label
 var _debug_label: Label
+var _crosshair: Label
+var _grab_hint: Label
 var _touch_controls: Control
 var _jump_button: Button
 var _sprint_button: Button
@@ -54,6 +56,13 @@ func set_status(text: String) -> void:
 	_status_label.text = text
 
 
+## Lights the crosshair and shows the grab prompt while a grip ball is aimed at
+## within reach; resets both while not.
+func set_grab_hint(active: bool) -> void:
+	_crosshair.modulate = Color(0.4, 0.9, 1.0) if active else Color.WHITE
+	_grab_hint.visible = active
+
+
 func is_debug_visible() -> bool:
 	return _debug_label.visible
 
@@ -96,6 +105,19 @@ func _build_overlay(ui_layer: CanvasLayer) -> void:
 	crosshair.size = Vector2(24.0, 36.0)
 	crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui_layer.add_child(crosshair)
+	_crosshair = crosshair
+
+	_grab_hint = Label.new()
+	_grab_hint.text = "HOLD CLICK TO GRAB"
+	_grab_hint.add_theme_font_size_override("font_size", 18)
+	_grab_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_grab_hint.set_anchors_preset(Control.PRESET_CENTER)
+	_grab_hint.position = Vector2(-120.0, 30.0)
+	_grab_hint.size = Vector2(240.0, 28.0)
+	_grab_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_grab_hint.modulate = Color(0.4, 0.9, 1.0, 0.9)
+	_grab_hint.visible = false
+	ui_layer.add_child(_grab_hint)
 
 	_debug_label = Label.new()
 	_debug_label.position = Vector2(18.0, 102.0)

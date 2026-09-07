@@ -94,6 +94,7 @@ declare -a CPU_SUITES=(
 	"apparent_scale|res://tests/apparent_scale_test.gd"
 	"wrap_world_state|res://tests/wrap_world_state_test.gd"
 	"holonomy_state|res://tests/holonomy_state_test.gd"
+	"grab_controller|res://tests/grab_controller_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"

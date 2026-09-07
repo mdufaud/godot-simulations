@@ -14,15 +14,18 @@ class_name ExhibitGrowingCorridor extends RefCounted
 ## The host drives it: [method track] every physics frame while active,
 ## [method set_active] on case switch, [method reset] on reset.
 
-const SEGMENTS_AHEAD := 3
+const SEGMENTS_AHEAD := 4
 const GROWTH := 1.7
 const MAX_SCALE := 8.0
 const BASE := Vector3(3.0, 3.0, 8.0)
-const FOV_PULSE_FRAMES := 54
-const FOV_BUMP := 7.0
-## The built window reaches ~320 m ahead at steady state, so the camera far
+## The built window reaches ~420 m ahead at steady state, so the camera far
 ## plane stretches while this exhibit is active and goes back on leave.
-const DEPTH_FAR := 400.0
+const DEPTH_FAR := 500.0
+## Exhibit-local fog: strong enough that the deepest built segments (never
+## closer than ~190 m with SEGMENTS_AHEAD = 4) are fully veiled, so a freshly
+## built segment or the jumping backdrop never pops into view. Restored on
+## leave.
+const CORRIDOR_FOG := 0.02
 
 ## Where the player starts, in world space. Valid after [method build].
 var spawn_pose: Transform3D
@@ -40,8 +43,8 @@ var _cum: Array[float] = [0.0]
 var _floor_index := 0
 var _previous_depth := 0.0
 var _cell_states: Array = []
-var _fov_pulse_frames := 0
 var _original_far := -1.0
+var _original_fog := -1.0
 
 
 func build(cells: Node3D, materials: Dictionary) -> void:
@@ -56,8 +59,8 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 
 
 ## Detects the segment the player stands in, weighs their forward steps into the
-## virtual distance, rebuilds the window on threshold crossings and decays the
-## growth FOV pulse. Returns [code]true[/code] when the HUD readout changed.
+## virtual distance and rebuilds the window on threshold crossings. Returns
+## [code]true[/code] when the HUD readout changed.
 func track(player: NonEuclideanPlayer) -> bool:
 	var changed := false
 	var depth := -_cell.to_local(player.global_position).z
@@ -71,14 +74,12 @@ func track(player: NonEuclideanPlayer) -> bool:
 	if index != current_index:
 		_enter_segment(index)
 		changed = true
-	if _fov_pulse_frames > 0:
-		_animate_fov(player)
-		changed = true
 	return changed
 
 
 func set_active(active: bool, player: NonEuclideanPlayer) -> void:
 	var camera := player.get_camera()
+	var environment := player.get_world_3d().environment
 	if camera != null:
 		if active:
 			if _original_far < 0.0:
@@ -86,8 +87,14 @@ func set_active(active: bool, player: NonEuclideanPlayer) -> void:
 			camera.far = DEPTH_FAR
 		elif _original_far >= 0.0:
 			camera.far = _original_far
-			camera.fov = player.fov
-	_fov_pulse_frames = 0
+	if environment != null:
+		if active:
+			if _original_fog < 0.0:
+				_original_fog = environment.fog_density
+			environment.fog_density = CORRIDOR_FOG
+		elif _original_fog >= 0.0:
+			environment.fog_density = _original_fog
+			_original_fog = -1.0
 	if active:
 		_previous_depth = -_cell.to_local(player.global_position).z
 
@@ -121,8 +128,6 @@ func _enter_segment(index: int) -> void:
 	_cell_states = GrowingCorridorState.next_state(_cell_states, index, direction)
 	current_index = index
 	crossing_count += 1
-	if direction == GrowingCorridorState.Entered.FORWARD:
-		_fov_pulse_frames = FOV_PULSE_FRAMES
 	_ensure_window()
 
 
@@ -147,8 +152,8 @@ func _ensure_window() -> void:
 
 ## The deepest segment carries a backdrop wall, so the window's open end reads as
 ## distant depth instead of a hole into the background. It jumps one segment
-## deeper on every crossing — always two segments and 60+ m away from the
-## player, far past any contrast the fog leaves.
+## deeper on every crossing — always several segments and 190+ m away, deep in
+## the exhibit fog where the jump cannot be seen.
 func _update_backdrop() -> void:
 	var high := current_index + SEGMENTS_AHEAD
 	for index in _segments.keys():
@@ -264,15 +269,3 @@ func _add_recycle_cap(index: int) -> void:
 		Vector3(size.x + 1.0, size.y + 0.5, 0.5), _materials["concrete_dark"])
 	GeometryKit.add_label(node, "⟲ RECYCLED\nTHE SPACE BEHIND NO LONGER EXISTS",
 		Vector3(0.0, size.y * 0.72, size.z * 0.5 + 0.52), PI, Color(1.0, 0.55, 0.25), 40)
-
-
-func _animate_fov(player: NonEuclideanPlayer) -> void:
-	var camera := player.get_camera()
-	if camera == null:
-		_fov_pulse_frames = 0
-		return
-	_fov_pulse_frames -= 1
-	var progress := 1.0 - float(maxi(_fov_pulse_frames, 0)) / float(FOV_PULSE_FRAMES)
-	camera.fov = lerpf(player.fov + FOV_BUMP, player.fov, progress)
-	if _fov_pulse_frames <= 0:
-		camera.fov = player.fov

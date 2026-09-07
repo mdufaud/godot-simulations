@@ -29,4 +29,5 @@ resources/ocean/*
 __pycache__/
 tmp/
 CLAUDE.md
+AGENTS.md
 .zcode

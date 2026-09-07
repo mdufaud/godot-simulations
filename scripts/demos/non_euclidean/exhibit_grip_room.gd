@@ -33,7 +33,7 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 	_build_shell(materials)
 	_build_markers(materials)
 	props.assign([
-		_add_grip_ball(Vector3(-2.6, 0.35, -1.5), 0.35, Color(0.2, 0.55, 0.85), 1.2),
+		_add_grip_ball(Vector3(-2.6, 0.35, 3.0), 0.35, Color(0.2, 0.55, 0.85), 1.2),
 		_add_grip_ball(Vector3(0.0, SHELF_TOP + 0.5, -7.0), 0.5, Color(0.9, 0.42, 0.1), 2.0),
 		_add_grip_ball(Vector3(0.0, 0.45, -11.5), 0.45, Color(0.2, 0.75, 0.4), 1.6),
 	])

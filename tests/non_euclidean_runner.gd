@@ -317,7 +317,7 @@ func _test_grip_room(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	var grab: GrabController3D = demo._grab
 	var camera := player.get_camera()
 	var exclude: Array[RID] = [player.get_rid()]
-	var ball_position := room.to_global(Vector3(-2.6, 0.35, -1.5))
+	var ball_position := room.to_global(Vector3(-2.6, 0.35, 3.0))
 	# Grab the near ball from ~1 m and keep it held: re-aim level in the same
 	# tick, before the controller's next probe, so the floor behind the ball
 	# cannot count as a contact.
