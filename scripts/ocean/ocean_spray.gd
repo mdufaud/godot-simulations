@@ -11,18 +11,14 @@ var _material: ShaderMaterial
 var _instance: MultiMeshInstance3D
 var _displacements: Texture2DArrayRD
 var _normals: Texture2DArrayRD
-var _foam_a: Texture2DArrayRD
-var _foam_b: Texture2DArrayRD
+var _foam_near_a: Texture2DArrayRD
+var _foam_near_b: Texture2DArrayRD
 
 
 func build(displacements: Texture2DArrayRD, normals: Texture2DArrayRD,
-		tile_lengths: PackedFloat32Array, _camera: Camera3D,
-		foam_a: Texture2DArrayRD = null, foam_b: Texture2DArrayRD = null,
-		foam_indices: Vector4 = Vector4(0.0, 0.0, 0.0, 0.0)) -> void:
+		tile_lengths: PackedFloat32Array, _camera: Camera3D) -> void:
 	_displacements = displacements
 	_normals = normals
-	_foam_a = foam_a
-	_foam_b = foam_b
 	if _instance == null:
 		var quad := QuadMesh.new()
 		quad.size = Vector2(1.0, 1.0)
@@ -47,10 +43,8 @@ func build(displacements: Texture2DArrayRD, normals: Texture2DArrayRD,
 	_material.set_shader_parameter("map_scales", scales)
 	_material.set_shader_parameter("displacements", _displacements)
 	_material.set_shader_parameter("normals", _normals)
-	if _foam_a != null and _foam_b != null:
-		_material.set_shader_parameter("foam_history_a", _foam_a)
-		_material.set_shader_parameter("foam_history_b", _foam_b)
-		_material.set_shader_parameter("foam_history_indices", foam_indices)
+	if _foam_near_a != null and _foam_near_b != null:
+		bind_foam_fields(_foam_near_a, _foam_near_b)
 	_instance.visible = _enabled and amount > 0.0
 
 
@@ -81,11 +75,21 @@ func set_wind_direction(direction: Vector2) -> void:
 	wind_direction = direction.normalized()
 
 
-## The solver flips its foam ping-pong every step; spray must read the same
-## half as the surface or it samples the in-flight texture.
-func set_foam_indices(indices: Vector4) -> void:
+func bind_foam_fields(a: Texture2DArrayRD, b: Texture2DArrayRD) -> void:
+	_foam_near_a = a
+	_foam_near_b = b
 	if _material != null:
-		_material.set_shader_parameter("foam_history_indices", indices)
+		_material.set_shader_parameter("foam_near_a", _foam_near_a)
+		_material.set_shader_parameter("foam_near_b", _foam_near_b)
+		_material.set_shader_parameter("foam_near_enabled", _foam_near_a != null and _foam_near_b != null)
+
+
+func set_foam_state(center: Vector2, domains: Vector3, index: float) -> void:
+	if _material == null:
+		return
+	_material.set_shader_parameter("foam_near_center", center)
+	_material.set_shader_parameter("foam_domains", domains)
+	_material.set_shader_parameter("foam_near_index", index)
 
 
 func release_textures() -> void:
@@ -93,5 +97,5 @@ func release_textures() -> void:
 		_instance.visible = false
 	_displacements = null
 	_normals = null
-	_foam_a = null
-	_foam_b = null
+	_foam_near_a = null
+	_foam_near_b = null

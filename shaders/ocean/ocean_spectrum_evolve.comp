@@ -14,6 +14,14 @@ void main() {
     vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * 2.0 * PI / params.spectrum_a.x;
     float k = length(k_vec) + 1e-6;
     vec2 k_unit = k_vec / k;
+    if (id.x == 0) {
+        k_vec.x = 0.0;
+        k_unit.x = 0.0;
+    }
+    if (id.y == 0) {
+        k_vec.y = 0.0;
+        k_unit.y = 0.0;
+    }
 
     vec4 h0 = imageLoad(spectrum_tex, ivec3(id, cascade)); // xy=h0(k), zw=conj(h0(-k))
     // Continuous physical dispersion: no loop quantization. The FFT
@@ -37,6 +45,22 @@ void main() {
     vec2 dhx_dx = -h * k_vec.y * k_unit.y;
     vec2 dhz_dz = -h * k_vec.x * k_unit.x;
     vec2 dhz_dx = -h * k_vec.y * k_unit.x;
+
+    if ((params.misc.w & 1) == 0) {
+        float wind = max(params.spectrum_a.w, 0.01);
+        float peak = max(params.spectrum_a.z, 0.01);
+        float fetch = G_GRAV * G_GRAV / (wind * pow(peak / 22.0, 3.0));
+        float alpha = 0.076 * pow(wind * wind / (fetch * G_GRAV), 0.22);
+        float amplitude = sqrt(max(params.spectrum_a.y, 1e-8) / max(alpha, 1e-8));
+        float long_weight = exp(-k * 9.549);
+        float height_gain = 1.0 + (params.gains.x - 1.0) * long_weight;
+        float horizontal_gain = 1.0 / mix(1.0, max(amplitude * height_gain, 1.0), long_weight);
+        hx *= horizontal_gain;
+        hz *= horizontal_gain;
+        dhx_dx *= horizontal_gain;
+        dhz_dz *= horizontal_gain;
+        dhz_dx *= horizontal_gain;
+    }
 
     fft_data[FFT_IDX(id.x, id.y, 0, 0)] = vec2(hx.x - hy.y, hx.y + hy.x);
     fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vec2(hz.x - dhy_dx.y, hz.y + dhy_dx.x);

@@ -205,16 +205,19 @@ func _make_proxy(mesh: Mesh) -> MeshInstance3D:
 
 
 func _update_dynamic_proxies() -> void:
-	var stale: Array[Node3D] = []
-	for body: Node3D in _dynamic_proxies:
-		var proxy: MeshInstance3D = _dynamic_proxies[body]
-		if not is_instance_valid(body):
-			proxy.queue_free()
-			stale.append(body)
+	var stale: Array = []
+	for body_value in _dynamic_proxies.keys():
+		var proxy_value = _dynamic_proxies[body_value]
+		if not is_instance_valid(body_value) or not is_instance_valid(proxy_value):
+			if is_instance_valid(proxy_value):
+				proxy_value.queue_free()
+			stale.append(body_value)
 		else:
+			var body := body_value as Node3D
+			var proxy := proxy_value as MeshInstance3D
 			proxy.global_transform = body.global_transform
-	for body in stale:
-		_dynamic_proxies.erase(body)
+	for body_value in stale:
+		_dynamic_proxies.erase(body_value)
 
 
 func _make_black_texture() -> ImageTexture:

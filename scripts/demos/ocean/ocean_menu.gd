@@ -11,30 +11,23 @@ var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
 ## provide apply_preset, apply_look, current_look_index, set_time_scale,
 ## set_frozen, throw_crate, clear_crates, set_quality_profile,
-## quality_profile_label, quality_requested, quality_effective, set_backend,
-## set_spray_amount, set_sun_elevation, set_sun_azimuth and set_render_scale.
+## quality_profile_label, quality_requested, quality_effective,
+## set_foam_distance, set_detail_distance, set_spray_amount, set_sun_elevation,
+## set_sun_azimuth and set_render_scale.
 var host: Node
 
 var _preset_option: OptionButton
 var _look_option: OptionButton
 var _profile_option: OptionButton
-var _spectral_group: VBoxContainer
-var _art_group: VBoxContainer
+var _wind_direction: HSlider
 var _wind_speed: HSlider
 var _fetch: HSlider
 var _swell: HSlider
 var _spread: HSlider
+var _detail: HSlider
+var _jonswap_gamma: HSlider
 var _choppiness: HSlider
 var _height_gain: HSlider
-var _long_height: HSlider
-var _long_length: HSlider
-var _mid_height: HSlider
-var _mid_length: HSlider
-var _mid_spread: HSlider
-var _wind_height: HSlider
-var _wind_length: HSlider
-var _ripple_strength: HSlider
-var _crosswind_ratio: HSlider
 var _crest_bias: HSlider
 var _crest_gain: HSlider
 var _whitecap: HSlider
@@ -42,6 +35,9 @@ var _foam_amount: HSlider
 var _foam_persistence: HSlider
 var _spray_amount: HSlider
 var _foam_strength: HSlider
+var _foam_distance: HSlider
+var _foam_layout: Label
+var _detail_distance: HSlider
 var _sun_glitter_intensity: HSlider
 var _mood: HSlider
 var _sun_elevation: HSlider
@@ -50,6 +46,8 @@ var _updating := false
 ## Set once the user moves "Foam strength": presets stop overwriting it from
 ## then on (docs/ocean_foam_injection_fix.md §5.3).
 var _foam_strength_override := false
+var _foam_distance_override := false
+var _detail_distance_override := false
 
 
 func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, sun_azimuth: float,
@@ -60,13 +58,9 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		names.append(typed.display_name)
 
 	menu.add_section("Sea state")
-	# The spectrum flavour is a production-only choice.
-	menu.add_option_button("Spectrum", ["JONSWAP / TMA", "Art-directed (SoT)"],
-		solver.backend, _backend_selected)
 	_preset_option = menu.add_option_button("Preset", names, 1, host.apply_preset)
-	_spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
+	_wind_direction = _spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
 		func(v: float): solver.wind_direction = v)
-	_spectral_group = menu.add_group()
 	_wind_speed = _spectrum_slider(menu, "Wind speed (m/s)", 0.5, 35.0, solver.wind_speed,
 		func(v: float): solver.wind_speed = v)
 	_fetch = _spectrum_slider(menu, "Fetch (km)", 5.0, 1000.0, solver.fetch_km,
@@ -75,41 +69,31 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		func(v: float): solver.swell = v)
 	_spread = _spectrum_slider(menu, "Spread", 0.0, 1.0, solver.spread,
 		func(v: float): solver.spread = v)
-	_spectrum_slider(menu, "Detail", 0.5, 1.0, solver.detail,
+	_detail = _spectrum_slider(menu, "Detail", 0.5, 1.0, solver.detail,
 		func(v: float): solver.detail = v)
-	menu.end_group()
-	_art_group = menu.add_group()
-	_long_height = _spectrum_slider(menu, "Long wave height (m)", 0.0, 10.0,
-		solver.long_wave_height_m, func(v: float): solver.long_wave_height_m = v)
-	_long_length = _spectrum_slider(menu, "Long wavelength (m)", 5.0, 200.0,
-		solver.long_wave_length_m, func(v: float): solver.long_wave_length_m = v)
-	_mid_height = _spectrum_slider(menu, "Mid wave height (m)", 0.0, 5.0,
-		solver.mid_wave_height_m, func(v: float): solver.mid_wave_height_m = v)
-	_mid_length = _spectrum_slider(menu, "Mid wavelength (m)", 5.0, 100.0,
-		solver.mid_wave_length_m, func(v: float): solver.mid_wave_length_m = v)
-	_mid_spread = _spectrum_slider(menu, "Mid wave spread", 0.0, 1.0,
-		solver.mid_wave_spread, func(v: float): solver.mid_wave_spread = v)
-	_wind_height = _spectrum_slider(menu, "Wind wave height (m)", 0.0, 5.0,
-		solver.wind_wave_height_m, func(v: float): solver.wind_wave_height_m = v)
-	_wind_length = _spectrum_slider(menu, "Wind wavelength (m)", 1.0, 30.0,
-		solver.wind_wave_length_m, func(v: float): solver.wind_wave_length_m = v)
-	_ripple_strength = _spectrum_slider(menu, "Ripple strength", 0.0, 3.0,
-		solver.ripple_strength, func(v: float): solver.ripple_strength = v)
-	_crosswind_ratio = _spectrum_slider(menu, "Crosswind energy", 0.0, 0.65,
-		solver.crosswind_ratio, func(v: float): solver.crosswind_ratio = v)
-	menu.end_group()
-	_update_backend_visibility()
+	_detail.step = 0.01
+	_jonswap_gamma = _spectrum_slider(menu, "Peak enhancement (γ)", 1.0, 7.0,
+		solver.jonswap_gamma, func(v: float): solver.jonswap_gamma = v)
+	_jonswap_gamma.step = 0.1
 	menu.add_separator()
 
 	menu.add_section("Waves")
-	_choppiness = menu.add_slider("Choppiness", 0.0, 1.8, solver.choppiness,
-		func(v: float): solver.choppiness = v)
-	_height_gain = _spectrum_slider(menu, "Wave height", 0.0, 5.0, solver.height_gain,
+	_choppiness = menu.add_slider("Choppiness", 0.0, OceanSolver.JONSWAP_MAX_CHOPPINESS,
+		solver.choppiness,
+		func(v: float):
+			solver.choppiness = v
+			solver.request_render_refresh())
+	_height_gain = _spectrum_slider(menu, "Wave height", 0.0,
+		OceanSolver.JONSWAP_MAX_HEIGHT_GAIN, solver.height_gain,
 		func(v: float): solver.height_gain = v)
 	_crest_bias = menu.add_slider("Crest threshold", 0.0, 0.8, solver.crest_bias,
-		func(v: float): solver.crest_bias = v)
+		func(v: float):
+			solver.crest_bias = v
+			solver.request_render_refresh())
 	_crest_gain = menu.add_slider("Crest gain", 0.1, 8.0, solver.crest_gain,
-		func(v: float): solver.crest_gain = v)
+		func(v: float):
+			solver.crest_gain = v
+			solver.request_render_refresh())
 	menu.add_slider("Time scale", 0.0, 2.0, time_scale, host.set_time_scale)
 	menu.add_separator()
 
@@ -119,8 +103,10 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	menu.add_action_toggle("⏸", "Freeze", false, host.set_frozen)
 
 	menu.add_section("Foam")
-	_whitecap = menu.add_slider("Whitecap", 0.0, 2.0, solver.whitecap,
-		func(v: float): solver.whitecap = v)
+	_whitecap = menu.add_slider("Breaking threshold", 0.05, 0.95, solver.whitecap,
+		func(v: float):
+			solver.whitecap = v
+			solver.request_render_refresh())
 	_foam_amount = menu.add_slider("Foam amount", 0.0, 10.0, solver.foam_amount,
 		func(v: float): solver.foam_amount = v)
 	_foam_persistence = menu.add_slider("Foam persistence", 0.1, 15.0,
@@ -130,6 +116,13 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		func(v: float):
 			_foam_strength_override = true
 			surface_mat.set_shader_parameter("foam_strength", v))
+	_foam_distance = menu.add_slider("Fine foam radius (m)", 16.0, 512.0,
+		solver.foam_near_domain * 0.5, func(v: float):
+			_foam_distance_override = true
+			host.set_foam_distance(v))
+	_foam_distance.step = 1.0
+	_foam_layout = menu.add_label("")
+	sync_foam_layout()
 	menu.add_separator()
 
 	menu.add_section("Environment")
@@ -157,6 +150,11 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 			host.set_quality_profile(tier_idx)
 			_refresh_profile_option(_profile_option))
 	_refresh_profile_option(_profile_option)
+	_detail_distance = menu.add_slider("Detail distance (m)", 250.0, 4000.0,
+		host.detail_distance_m, func(v: float):
+			_detail_distance_override = true
+			host.set_detail_distance(v))
+	_detail_distance.step = 50.0
 	menu.add_slider("Render scale", 0.4, 1.0, 1.0, host.set_render_scale)
 
 
@@ -173,25 +171,18 @@ func _refresh_profile_option(option: OptionButton) -> void:
 
 ## Moves every slider a preset carries, so the panel shows what is running. The
 ## sliders snap to their own step, so the host still applies the preset to the
-## solver afterwards for the exact values; the guard keeps the 14 spectrum
-## sliders from marking the spectrum dirty on every assignment.
+## solver afterwards for the exact values; the guard keeps the spectrum sliders
+## from marking the spectrum dirty on every assignment.
 func sync_to_preset(preset: OceanPreset) -> void:
 	_updating = true
 	_wind_speed.value = preset.wind_speed_mps
 	_fetch.value = preset.fetch_km
 	_swell.value = preset.swell
 	_spread.value = preset.spread
+	_detail.value = preset.detail
+	_jonswap_gamma.value = preset.jonswap_gamma
 	_choppiness.value = preset.choppiness
 	_height_gain.value = preset.height_gain
-	_long_height.value = preset.long_wave_height_m
-	_long_length.value = preset.long_wave_length_m
-	_mid_height.value = preset.mid_wave_height_m
-	_mid_length.value = preset.mid_wave_length_m
-	_mid_spread.value = preset.mid_wave_spread
-	_wind_height.value = preset.wind_wave_height_m
-	_wind_length.value = preset.wind_wave_length_m
-	_ripple_strength.value = preset.ripple_strength
-	_crosswind_ratio.value = preset.crosswind_ratio
 	_crest_bias.value = preset.crest_bias
 	_crest_gain.value = preset.crest_gain
 	_whitecap.value = preset.whitecap
@@ -220,6 +211,30 @@ func sync_foam_strength(value: float) -> bool:
 	return true
 
 
+func sync_foam_layout() -> void:
+	if _foam_layout != null:
+		_foam_layout.text = "Foam resolution: %.1f cm/texel | Reach: %.0f m" % [
+			solver.foam_near_domain / solver.foam_near_size * 100.0,
+			solver.foam_field_domains().z * 0.5]
+
+
+func sync_foam_distance(value: float) -> bool:
+	if _foam_distance_override:
+		return false
+	if _foam_distance != null:
+		_foam_distance.set_value_no_signal(value)
+	return true
+
+
+func sync_detail_distance(value: float) -> bool:
+	if _detail_distance_override:
+		return false
+	if _detail_distance != null:
+		_detail_distance.value = value
+		_detail_distance_override = false
+	return true
+
+
 ## Emitting item_selected keeps the panel dropdown and the persisted value in sync.
 func cycle_preset() -> void:
 	if _preset_option == null:
@@ -227,18 +242,6 @@ func cycle_preset() -> void:
 	var next := (_preset_option.selected + 1) % _preset_option.item_count
 	_preset_option.select(next)
 	_preset_option.item_selected.emit(next)
-
-
-func _backend_selected(index: int) -> void:
-	host.set_backend(index)
-	_update_backend_visibility()
-
-
-func _update_backend_visibility() -> void:
-	if _spectral_group != null:
-		_spectral_group.visible = solver.backend == OceanSolver.Backend.JONSWAP_TMA
-	if _art_group != null:
-		_art_group.visible = solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT
 
 
 ## Spectrum-shaping sliders flip the dirty flag: regeneration is one cheap

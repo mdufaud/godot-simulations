@@ -59,11 +59,14 @@ physics_test_run_process "$TIMEOUT" '^CAPTURE DONE' "$LOG_DIR/capture.stdout.log
 		"target=$TARGET" "out=$OUT" "frames=$FRAMES" "every=$EVERY" \
 		"size=$RESOLUTION" "${EXTRA_ARGS[@]}" || status=$?
 
+if rg -q 'SCRIPT ERROR:|ERROR:|CAPTURE FAIL' "$LOG_DIR/capture.stdout.log"; then
+	status=1
+fi
 if (( status != 0 )); then
 	printf 'capture: failed (exit %d); logs in %s\n' "$status" "$LOG_DIR" >&2
 	sed -n '1,40p' "$LOG_DIR/capture.stdout.log" >&2 || true
 	exit "$status"
 fi
 
-grep -E '^CAPTURE (CONFIG|COVERAGE|META|IMAGE|SHOT) ' "$LOG_DIR/capture.stdout.log" \
+grep -E '^CAPTURE (CONFIG|COVERAGE|META|IMAGE|SHOT|FOAM_FIELDS|FOAM_PIXELS|WAVES) ' "$LOG_DIR/capture.stdout.log" \
 	| sed -e 's/^CAPTURE SHOT /wrote /'

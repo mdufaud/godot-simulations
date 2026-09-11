@@ -35,13 +35,17 @@ float hasselmann_directional_spread(float w, float w_p, float wind_speed, float 
 }
 
 // JONSWAP x Kitaigorodskii depth attenuation (TMA).
-float tma_spectrum(float w, float w_p, float alpha, float depth) {
+float tma_spectrum(float w, float w_p, float alpha, float depth, float gamma) {
     const float beta = 1.25;
-    const float gamma = 3.3;
+    const float reference_gamma = 3.3;
 
     float sigma = (w <= w_p) ? 0.07 : 0.09;
     float r = exp(-(w - w_p) * (w - w_p) / (2.0 * sigma * sigma * w_p * w_p));
-    float jonswap = (alpha * G_GRAV * G_GRAV) / pow(w, 5.0) * exp(-beta * pow(w_p / w, 4.0)) * pow(gamma, r);
+    float peak_normalization =
+        (0.06533 * pow(reference_gamma, 0.8015) + 0.13467)
+        / (0.06533 * pow(gamma, 0.8015) + 0.13467);
+    float jonswap = (alpha * G_GRAV * G_GRAV) / pow(w, 5.0)
+        * exp(-beta * pow(w_p / w, 4.0)) * pow(gamma, r) * peak_normalization;
 
     float w_h = min(w * sqrt(depth / G_GRAV), 2.0);
     float depth_attenuation = (w_h <= 1.0) ? 0.5 * w_h * w_h : 1.0 - 0.5 * (2.0 - w_h) * (2.0 - w_h);
@@ -61,21 +65,24 @@ vec2 spectrum_amplitude(ivec2 id) {
     vec2 disp = dispersion_and_derivative(k, params.spectrum_b.y);
     float w = disp.x;
     float w_norm = disp.y / k * dk * dk;
-    float s = tma_spectrum(w, params.spectrum_a.z, params.spectrum_a.y, params.spectrum_b.y);
+    float gamma = clamp(params.art_a.z, 1.0, 7.0);
+    float s = tma_spectrum(w, params.spectrum_a.z, params.spectrum_a.y,
+        params.spectrum_b.y, gamma);
     float detail = params.spectrum_b.w;
     float d = mix(0.5 / PI,
         hasselmann_directional_spread(w, params.spectrum_a.z, params.spectrum_a.w,
             params.spectrum_b.z, theta - params.spectrum_b.x),
-        1.0 - params.spectrum_c.x) * exp(-(1.0 - detail) * (1.0 - detail) * k * k);
+        1.0 - params.spectrum_c.x * 0.9) * exp(-(1.0 - detail) * (1.0 - detail) * k * k);
     // Fixed per-cascade seed: re-generating on a slider change keeps phases
     // stable, so parameter sweeps look like weather instead of a scene cut.
-    vec2 u = hash2(uvec2(id + ivec2(params.misc.y, params.misc.z)));
+    // Seed from the signed Fourier mode so changing the FFT quality keeps
+    // every shared mode's phase and Gaussian draw identical.
+    ivec2 mode_id = id - ivec2(MAP_SIZE / 2);
+    vec2 u = hash2(uvec2(mode_id + ivec2(params.misc.y, params.misc.z)));
     // Master height gain, k-weighted (e-fold at lambda = 60 m): boosting all
     // wavelengths equally drives short waves past the breaking limit
-    // (H/lambda > 1/7) into angular micro-cliffs. Only the long swell grows,
-    // whose steepness stays physical even at gain 5. Choppy xz displacement
-    // derives from these same amplitudes, so horizontal motion scales along
-    // and the Jacobian foam reacts to the taller sea.
+    // (H/lambda > 1/7) into angular micro-cliffs. The solver bounds the pushed
+    // gain against both its JONSWAP limit and the complete wind/fetch sea state.
     float gain = 1.0 + (params.gains.x - 1.0) * exp(-k * 9.549);
     // 0.25 calibrates 4*sigma of the height field to the empirical JONSWAP
     // Hs(U, F) (measured 4.1x hot without it, from the +-k pair packing).

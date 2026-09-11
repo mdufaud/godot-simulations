@@ -15,7 +15,6 @@ resources/*
 resources/ocean/*
 !resources/ocean/foam_detail.png
 !resources/ocean/foam_detail.png.import
-!resources/ocean/micro_normal_sot.png
 !resources/ocean/micro_normal.png
 !resources/ocean/micro_normal.png.import
 !resources/ocean/presets/
@@ -29,4 +28,5 @@ resources/ocean/*
 __pycache__/
 tmp/
 CLAUDE.md
+AGENTS.md
 .zcode

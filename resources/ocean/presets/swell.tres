@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
 
 [resource]
+amplitude_scale = 1.0
 script = ExtResource("1_preset")
 wave_model = 0
 display_name = "Swell"
@@ -10,7 +11,9 @@ wind_speed_mps = 16.0
 fetch_km = 350.0
 swell = 1.6
 spread = 0.12
-choppiness = 1.0
+detail = 0.85
+jonswap_gamma = 3.3
+choppiness = 0.95
 height_gain = 1.0
 long_wave_height_m = 3.6
 long_wave_length_m = 110.0
@@ -23,7 +26,7 @@ ripple_strength = 0.32
 crosswind_ratio = 0.08
 crest_bias = 0.16
 crest_gain = 4.2
-whitecap = 0.7
+whitecap = 0.45
 foam_amount = 2.2
-foam_persistence = 5.5
+foam_persistence = 1.8
 spray_amount = 0.32

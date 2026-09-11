@@ -5,7 +5,8 @@ extends RefCounted
 ## feedback cadence, so "Performance / High / Ultra" always describes one
 ## reproducible configuration instead of five loose toggles. Switching tier
 ## recreates the GPU resources (clearing foam history) but keeps the preset,
-## wind and simulation time.
+## wind and simulation time. Ultra also extends the visible detail
+## distance so the far water keeps readable relief.
 
 enum Tier { PERFORMANCE, HIGH, ULTRA }
 
@@ -27,6 +28,18 @@ const FOAM_NEAR_SIZE := {
 	Tier.ULTRA: 2048,
 }
 
+const FOAM_NEAR_DISTANCE := {
+	Tier.PERFORMANCE: 48.0,
+	Tier.HIGH: 72.0,
+	Tier.ULTRA: 128.0,
+}
+
+const DETAIL_DISTANCE_M := {
+	Tier.PERFORMANCE: 900.0,
+	Tier.HIGH: 1800.0,
+	Tier.ULTRA: 3600.0,
+}
+
 ## PERFORMANCE rotates the cascades (one per frame); HIGH/ULTRA step all of
 ## them every frame.
 const AMORTIZE := {
@@ -43,9 +56,26 @@ const FOAM_NEAR_STRIDE := {
 	Tier.ULTRA: 1,
 }
 
+## Finest cascade steps every other frame on HIGH/ULTRA (wave periods there
+## are seconds long and phases stay continuous; the foam decay compensates).
+## PERFORMANCE already rotates all cascades, so the flag stays off.
+const SHORT_CASCADE_HALF_RATE := {
+	Tier.PERFORMANCE: false,
+	Tier.HIGH: true,
+	Tier.ULTRA: true,
+}
+
 
 static func tier_name(tier: int) -> String:
 	return TIER_NAMES[clampi(tier, 0, TIER_NAMES.size() - 1)]
+
+
+static func foam_near_distance(tier: int) -> float:
+	return FOAM_NEAR_DISTANCE[tier]
+
+
+static func detail_distance_m(tier: int) -> float:
+	return DETAIL_DISTANCE_M[tier]
 
 
 ## Largest 2D texture dimension the active GPU supports; -1 when unavailable
@@ -90,10 +120,14 @@ static func estimate_vram_bytes_for(map_size: int, foam_near_size: int) -> int:
 	var spectrum_tex := 16 * n * n * cascades
 	var displacement_tex := 8 * n * n * cascades
 	var normal_tex := 8 * n * n * cascades
-	var foam_tex := 4 * n * n * cascades * 2
-	var foam_near := 4 * f * f * 2
+	var mip_texels := 0
+	var mip_size := f
+	while mip_size > 0:
+		mip_texels += mip_size * mip_size
+		mip_size /= 2
+	var foam_near := 8 * mip_texels * 3 * 2
 	return butterfly + fft_data + spectrum_tex + displacement_tex \
-		+ normal_tex + foam_tex + foam_near
+		+ normal_tex * 2 + foam_near
 
 
 static func estimate_vram_bytes(tier: int) -> int:

@@ -46,7 +46,7 @@ common_args() {
 	local view="$3"
 	local look="${4:-$LOOK}"
 	printf '%s\n' \
-		"preset=$preset" "backend=1" "look=$look" "mood=$mood" \
+		"preset=$preset" "look=$look" "mood=$mood" \
 		"mood_snap=1" "lightning=0" "view=$view" "ui=0" "time=$CAPTURE_TIME" \
 		"dt=$DT" "warmup=$WARMUP" "foam_warmup=$FOAM_WARMUP" \
 		"wind=$WIND_DIRECTION" \

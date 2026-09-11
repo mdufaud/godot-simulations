@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
 
 [resource]
+amplitude_scale = 0.55
 script = ExtResource("1_preset")
 wave_model = 0
 display_name = "Calm"
@@ -20,7 +21,7 @@ ripple_strength = 0.25
 crosswind_ratio = 0.06
 crest_bias = 0.34
 crest_gain = 1.75
-whitecap = 0.1
+whitecap = 0.45
 foam_amount = 0.0
-foam_persistence = 2.0
+foam_persistence = 1.6
 spray_amount = 0.0

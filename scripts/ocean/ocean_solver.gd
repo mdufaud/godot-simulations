@@ -7,24 +7,30 @@ extends RefCounted
 ## output texture arrays through Texture2DArrayRD.
 
 const SHADER_DIR := "res://shaders/ocean/"
+const SpectrumMetrics := preload("res://scripts/ocean/ocean_spectrum_metrics.gd")
 const STAGES: Array[String] = [
-	"spectrum_init", "spectrum_init_art_directed", "spectrum_evolve", "fft_butterfly", "fft",
-	"transpose", "map_assemble", "foam_feedback",
+	"spectrum_init", "spectrum_evolve", "fft_butterfly", "fft",
+	"transpose", "map_assemble",
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
 const FOAM_AMOUNT_REFERENCE := 5.6
-const TUTORIAL_FOAM_DECAY_RATE := 3.5
-const FOAM_PATTERN_TEXTURE := preload("res://resources/ocean/foam_detail.png")
 const FOAM_NOISE_TEXTURE := preload("res://resources/ocean/foam_detail.png")
-## All cascades keep feedback history. The tutorial Gerstner displacement and
-## its high-resolution foam source live on the short cascade.
-var foam_cascade_count := 3
-## Full choppiness on short waves folds the surface into black back-faces;
-## damp it as the cascades get finer.
-const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 0.8, 0.55]
-
-enum Backend { JONSWAP_TMA, SEA_OF_THIEVES_INSPIRED_FFT }
+## Chop stays full on the long/mid cascades: crests pinch and the Jacobian
+## fold — which the foam feeds on — survives at the scales the eye reads.
+## Only the fine cascade is damped: full choppiness there folds the surface
+## into black back-faces faster than foam can cover them.
+const CHOP_PER_CASCADE: PackedFloat32Array = [1.0, 1.0, 0.78]
+const TILE_LENGTHS: PackedFloat32Array = [2039.0, 111.0, 25.0]
+const JONSWAP_MAX_HEIGHT_GAIN := 3.0
+const JONSWAP_BASE_HEIGHT_KNEE_M := 8.0
+const JONSWAP_BASE_HEIGHT_LIMIT_M := 10.0
+const JONSWAP_TOTAL_HEIGHT_KNEE_M := 8.0
+const JONSWAP_TOTAL_HEIGHT_LIMIT_M := 15.0
+const JONSWAP_MAX_CHOPPINESS := 1.8
+const JONSWAP_CHOPPINESS_KNEE := 1.1
+const JONSWAP_CHOPPINESS_LIMIT := 1.35
+const JONSWAP_FINE_CHOPPINESS_LIMIT := 0.86
 
 ## Wave generation model, driven by OceanPreset.wave_model (int: 0 = FFT, 1 =
 ## TUTORIAL_GERSTNER; kept as plain int so the two enum types stay assignable).
@@ -35,14 +41,14 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 
 var config: OceanConfig = OceanConfig.new()
 var map_size := 512
-## Pairwise non-commensurate lengths (2039/257, 257/67: no integer ratio), so
-## the super-period of the combined field exceeds any view. Sorted large ->
+## Pairwise non-commensurate lengths (2039/111 = 18.4, 111/25 = 4.44), so the
+## super-period of the combined field exceeds any view. Sorted large ->
 ## small; k-space bands are cut between them. Cascade 0 must hold the spectral
 ## peak: storm winds put lambda_p near 500 m, so the big tile has to exceed
-## that or storms lose their swell. The 67 m short tile keeps the dominant
-## repetition beyond the 60 m no-tile window.
-var tile_lengths: PackedFloat32Array = PackedFloat32Array([2039.0, 257.0, 67.0])
-var backend: Backend = Backend.SEA_OF_THIEVES_INSPIRED_FFT
+## that or storms lose their swell. The short 111/25 m tiles give the mid band
+## (lambda 4-20 m, where chop reads) ~11 cm texels at 1024^2 — the density the
+## reference GodotOceanWaves demo gets from its 57 m tile.
+var tile_lengths: PackedFloat32Array = TILE_LENGTHS.duplicate()
 var wave_model: int = WaveModel.FFT
 var wind_speed := 11.0
 var wind_direction := 0.0
@@ -51,6 +57,7 @@ var water_depth := 80.0
 var swell := 0.8
 var spread := 0.2
 var detail := 1.0
+var jonswap_gamma := 3.3
 var choppiness := 1.15
 var long_wave_height_m := 2.6
 var long_wave_length_m := 48.0
@@ -67,6 +74,13 @@ var crest_gain := 2.4
 ## boost, e-fold at 60 m): short wavelets keep physical steepness even at 5x.
 ## Changing it requires mark_spectrum_dirty().
 var height_gain := 1.0
+## Overall amplitude calibration. 1.0 = the physical JONSWAP amplitude (the
+## reference GodotOceanWaves look: every visible wave near its breaking
+## steepness). The spectrum shaders keep their 0.25 base calibration factor,
+## so the solver folds this into the pushed JONSWAP alpha: h ∝ sqrt(alpha),
+## alpha_pushed = alpha * (amplitude_scale / 0.25)^2. 0.25 reproduces the old
+## quarter-height look. Requires mark_spectrum_dirty().
+var amplitude_scale := 1.0
 var whitecap := 0.82
 var foam_amount := 3.5
 var foam_persistence := 5.0
@@ -79,14 +93,21 @@ var quality_tier: int = OceanQualityProfile.DEFAULT_TIER
 var initialized := false
 var profiling := false
 var foam_feedback_enabled := true
+## Update the finest cascade every other frame. Its wave periods (lambda <
+## tile/6) are seconds long, and phases keep advancing with sim_time, so a
+## 33 ms displacement hold is invisible; the foam decay compensates through
+## foam_step_scale. Saves one spectrum+FFT+assemble chain in three.
+var short_cascade_half_rate := false
 
 ## Camera-centred near-field foam feedback (shaders/ocean/ocean_foam_near.comp).
-## The controller pushes the camera xz every frame; the 20 m window follows it
-## and reprojects the previous coverage so foam stays world-anchored. Production
-## (FFT) wave model only: the tutorial keeps its own per-cascade ping-pong.
+## The controller pushes the camera xz every frame; the window follows it and
+## reprojects RG (residual, active) coverage so foam stays world-anchored. Its radius
+## follows the active quality profile and can be overridden from the menu.
+## Production (FFT) wave model only: the tutorial keeps its own per-cascade
+## ping-pong.
 var foam_near_enabled := true
 var foam_near_size := 2048
-var foam_near_domain := 20.0
+var foam_near_domain := 256.0
 ## Update the near feedback every Nth frame (Performance profile: 2).
 var foam_near_stride := 1
 ## Camera xz for the near feedback window; main-thread write, render-thread read.
@@ -102,6 +123,7 @@ var _query_has_pending := false
 var _query_submitted_count := 0
 var _query_latest := PackedVector4Array()
 var _query_results_valid := false
+var _query_generation := 0
 
 var _rd: RenderingDevice
 var _shaders := {}
@@ -111,20 +133,26 @@ var _buffers := {}
 var _spectrum_tex := RID()
 var _displacement_tex := RID()
 var _normal_tex := RID()
-var _foam_tex_a := RID()
-var _foam_tex_b := RID()
+var _derivative_tex := RID()
 var _foam_near_tex_a := RID()
 var _foam_near_tex_b := RID()
+var _foam_mip_views: Array[RID] = []
+var _foam_mip_count := 1
+var _spectral_references: Array[Dictionary] = []
+var _render_time := 0.0
+var _render_center := Vector2.ZERO
+var _published_foam_state := {"center": Vector2.ZERO, "index": 0, "time": 0.0, "step": 0}
+var _foam_state_mutex := Mutex.new()
+var _spectral_mutex := Mutex.new()
 var _foam_near_read_index := 0
 var _foam_near_dt := 0.0
 var _near_center_prev := Vector2.ZERO
-var _foam_pattern_rd := RID()
 var _foam_noise_rd := RID()
 var _foam_sampler := RID()
-var _foam_read_indices := PackedInt32Array()
-var _foam_last_update_frame := PackedInt32Array()
 var _foam_reset_pending := false
+var _foam_near_reset_pending := false
 var _cascade_dirty: Array[bool] = []
+var _render_refresh_pending := false
 var _frame := 0
 var _timing_store := GpuTimingStore.new()
 
@@ -141,25 +169,8 @@ func get_normal_tex_rid() -> RID:
 	return _normal_tex
 
 
-func get_foam_read_tex_rid(cascade: int) -> RID:
-	if cascade < 0 or cascade >= _foam_read_indices.size():
-		return RID()
-	return _foam_tex_a if _foam_read_indices[cascade] == 0 else _foam_tex_b
-
-
-func get_foam_tex_rid(index: int) -> RID:
-	return _foam_tex_a if index == 0 else _foam_tex_b
-
-
-func get_foam_read_indices() -> Vector4:
-	var indices := Vector4(0.0, 0.0, 0.0, 0.0)
-	if _foam_read_indices.size() > 0:
-		indices.x = float(_foam_read_indices[0])
-	if _foam_read_indices.size() > 1:
-		indices.y = float(_foam_read_indices[1])
-	if _foam_read_indices.size() > 2:
-		indices.z = float(_foam_read_indices[2])
-	return indices
+func get_derivative_tex_rid() -> RID:
+	return _derivative_tex
 
 
 func get_foam_near_read_tex_rid() -> RID:
@@ -174,13 +185,28 @@ func get_foam_near_read_index() -> int:
 	return _foam_near_read_index
 
 
-## True when the near feedback runs: the textures exist and the pass is
-## dispatched (FFT wave model only). The surface must refresh its
-## foam_near_enabled flag from this every frame — the solver stops updating
-## the near textures in tutorial mode, and stale blending would fade the
-## near-camera foam toward half its history value.
+func foam_field_domains() -> Vector3:
+	return Vector3(foam_near_domain, foam_near_domain * 4.0, foam_near_domain * 16.0)
+
+
+func foam_state() -> Dictionary:
+	_foam_state_mutex.lock()
+	var snapshot := _published_foam_state.duplicate()
+	_foam_state_mutex.unlock()
+	return snapshot
+
+
+func spectral_references() -> Array[Dictionary]:
+	_spectral_mutex.lock()
+	if _spectral_references.is_empty():
+		_spectral_references = SpectrumMetrics.compute(self)
+	var snapshot: Array[Dictionary] = _spectral_references
+	_spectral_mutex.unlock()
+	return snapshot
+
+
 func foam_near_active() -> bool:
-	return foam_near_enabled and wave_model == WaveModel.FFT \
+	return foam_near_enabled \
 			and _foam_near_tex_a.is_valid()
 
 
@@ -206,19 +232,38 @@ func query_results_valid() -> bool:
 	return _query_results_valid
 
 
-func set_backend(value: Backend) -> void:
-	if backend == value:
+func set_foam_distance(distance: float) -> void:
+	var domain := clampf(distance, 16.0, 512.0) * 2.0
+	if is_equal_approx(foam_near_domain, domain):
 		return
-	backend = value
-	mark_spectrum_dirty()
+	foam_near_domain = domain
+	_near_center_prev = near_center
+	_foam_near_reset_pending = true
+	_render_refresh_pending = true
 
 
 ## Sea-state params changed: regenerate the initial spectra (cheap, one 256²
 ## dispatch per cascade; phases stay stable thanks to the fixed seeds).
 func mark_spectrum_dirty() -> void:
+	_spectral_mutex.lock()
+	_spectral_references = SpectrumMetrics.compute(self)
+	_spectral_mutex.unlock()
+	_query_generation += 1
+	_query_results_valid = false
 	for i in _cascade_dirty.size():
 		_cascade_dirty[i] = true
 	_foam_reset_pending = true
+	_render_refresh_pending = true
+
+
+func request_render_refresh() -> void:
+	_render_refresh_pending = true
+
+
+func take_render_refresh_request() -> bool:
+	var pending := _render_refresh_pending
+	_render_refresh_pending = false
+	return pending
 
 
 func init_render() -> void:
@@ -261,12 +306,10 @@ func init_render() -> void:
 	_spectrum_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
 	_displacement_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 	_normal_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
-	_foam_tex_a = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT)
-	_foam_tex_b = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT)
-	_foam_pattern_rd = RenderingServer.texture_get_rd_texture(FOAM_PATTERN_TEXTURE.get_rid())
+	_derivative_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 	_foam_noise_rd = RenderingServer.texture_get_rd_texture(FOAM_NOISE_TEXTURE.get_rid())
 	_foam_sampler = _create_foam_sampler()
-	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _foam_tex_a, _foam_tex_b]:
+	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _derivative_tex]:
 		_rd.texture_clear(tex, Color(0, 0, 0, 0), 0, 1, 0, cascades)
 
 	for stage in STAGES:
@@ -276,45 +319,11 @@ func init_render() -> void:
 		uniforms.append(_buffer_uniform(2, _buffers["fft_data"]))
 		uniforms.append(_image_uniform(3, _displacement_tex))
 		uniforms.append(_image_uniform(4, _normal_tex))
-		uniforms.append(_image_uniform(5, _foam_tex_a))
-		uniforms.append(_image_uniform(6, _foam_tex_b))
 		if stage == "map_assemble":
 			uniforms.append(_sampled_texture_uniform(7, _foam_noise_rd))
-		elif stage == "foam_feedback":
-			uniforms.append(_sampled_texture_uniform(7, _foam_pattern_rd))
-			uniforms.append(_sampled_texture_uniform(8, _foam_noise_rd))
+			uniforms.append(_image_uniform(8, _derivative_tex))
 		_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders[stage], 0)
 
-	var foam_ab: Array[RDUniform] = []
-	foam_ab.append(_image_uniform(0, _spectrum_tex))
-	foam_ab.append(_buffer_uniform(1, _buffers["butterfly"]))
-	foam_ab.append(_buffer_uniform(2, _buffers["fft_data"]))
-	foam_ab.append(_image_uniform(3, _displacement_tex))
-	foam_ab.append(_image_uniform(4, _normal_tex))
-	foam_ab.append(_image_uniform(5, _foam_tex_a))
-	foam_ab.append(_image_uniform(6, _foam_tex_b))
-	foam_ab.append(_sampled_texture_uniform(7, _foam_pattern_rd))
-	foam_ab.append(_sampled_texture_uniform(8, _foam_noise_rd))
-	_uniform_sets["foam_feedback_ab"] = _rd.uniform_set_create(
-		foam_ab, _shaders["foam_feedback"], 0)
-
-	var foam_ba: Array[RDUniform] = []
-	foam_ba.append(_image_uniform(0, _spectrum_tex))
-	foam_ba.append(_buffer_uniform(1, _buffers["butterfly"]))
-	foam_ba.append(_buffer_uniform(2, _buffers["fft_data"]))
-	foam_ba.append(_image_uniform(3, _displacement_tex))
-	foam_ba.append(_image_uniform(4, _normal_tex))
-	foam_ba.append(_image_uniform(5, _foam_tex_b))
-	foam_ba.append(_image_uniform(6, _foam_tex_a))
-	foam_ba.append(_sampled_texture_uniform(7, _foam_pattern_rd))
-	foam_ba.append(_sampled_texture_uniform(8, _foam_noise_rd))
-	_uniform_sets["foam_feedback_ba"] = _rd.uniform_set_create(
-		foam_ba, _shaders["foam_feedback"], 0)
-	_pipelines["foam_feedback_ab"] = _rd.compute_pipeline_create(_shaders["foam_feedback"])
-	_pipelines["foam_feedback_ba"] = _rd.compute_pipeline_create(_shaders["foam_feedback"])
-
-	# Near-field foam feedback: standalone shader (own bindings and push
-	# constant), single 2D ping-pong textures, camera-centred 20 m window.
 	var near_spirv := ShaderCache.compile(_rd, "ocean_foam_near", defines
 		+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_near.comp"))
 	if not near_spirv.compile_error_compute.is_empty():
@@ -322,30 +331,42 @@ func init_render() -> void:
 		return
 	_shaders["foam_near"] = _rd.shader_create_from_spirv(near_spirv)
 	_pipelines["foam_near"] = _rd.compute_pipeline_create(_shaders["foam_near"])
-	_foam_near_tex_a = _create_tex_2d(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT, foam_near_size)
-	_foam_near_tex_b = _create_tex_2d(RenderingDevice.DATA_FORMAT_R16G16_SFLOAT, foam_near_size)
+	_foam_mip_count = int(log(float(foam_near_size)) / log(2.0)) + 1
+	_foam_near_tex_a = _create_foam_array()
+	_foam_near_tex_b = _create_foam_array()
 	# Vulkan image memory is undefined until cleared, and the first near
 	# dispatch reads the input half.
-	_rd.texture_clear(_foam_near_tex_a, Color(0, 0, 0, 0), 0, 1, 0, 1)
-	_rd.texture_clear(_foam_near_tex_b, Color(0, 0, 0, 0), 0, 1, 0, 1)
-	var near_ab: Array[RDUniform] = [
-		_image_uniform(0, _foam_tex_a),
-		_image_uniform(1, _foam_tex_b),
-		_image_uniform(2, _foam_near_tex_a),
-		_image_uniform(3, _foam_near_tex_b),
-	]
-	_uniform_sets["foam_near_ab"] = _rd.uniform_set_create(
-		near_ab, _shaders["foam_near"], 0)
-	var near_ba: Array[RDUniform] = [
-		_image_uniform(0, _foam_tex_a),
-		_image_uniform(1, _foam_tex_b),
-		_image_uniform(2, _foam_near_tex_b),
-		_image_uniform(3, _foam_near_tex_a),
-	]
-	_uniform_sets["foam_near_ba"] = _rd.uniform_set_create(
-		near_ba, _shaders["foam_near"], 0)
-	_pipelines["foam_near_ab"] = _rd.compute_pipeline_create(_shaders["foam_near"])
-	_pipelines["foam_near_ba"] = _rd.compute_pipeline_create(_shaders["foam_near"])
+	_clear_foam_fields()
+	var mip_spirv := ShaderCache.compile(_rd, "ocean_foam_mipmap", defines
+		+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_mipmap.comp"))
+	if not mip_spirv.compile_error_compute.is_empty():
+		push_error(mip_spirv.compile_error_compute)
+		return
+	_shaders["foam_mipmap"] = _rd.shader_create_from_spirv(mip_spirv)
+	_pipelines["foam_mipmap"] = _rd.compute_pipeline_create(_shaders["foam_mipmap"])
+	for index in 2:
+		var output := get_foam_near_tex_rid(index)
+		for layer in 3:
+			var previous_view := RID()
+			for mip in _foam_mip_count:
+				var view := _rd.texture_create_shared_from_slice(RDTextureView.new(), output, layer, mip)
+				_foam_mip_views.append(view)
+				if mip == 0:
+					var stage := ("foam_near_ab" if index == 1 else "foam_near_ba")
+					if layer > 0:
+						stage += "_%d" % layer
+					var uniforms: Array[RDUniform] = [
+						_sampled_texture_uniform(0, _derivative_tex),
+						_sampled_texture_uniform(1, get_foam_near_tex_rid(1 - index)),
+						_image_uniform(2, view),
+					]
+					_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders["foam_near"], 0)
+					_pipelines[stage] = _rd.compute_pipeline_create(_shaders["foam_near"])
+				else:
+					var key := "foam_mip_%d_%d_%d" % [index, layer, mip]
+					var uniforms: Array[RDUniform] = [_image_uniform(0, previous_view), _image_uniform(1, view)]
+					_uniform_sets[key] = _rd.uniform_set_create(uniforms, _shaders["foam_mipmap"], 0)
+				previous_view = view
 	_foam_near_read_index = 0
 	_foam_near_dt = 0.0
 
@@ -373,13 +394,9 @@ func init_render() -> void:
 	_query_submitted_count = 0
 
 	_cascade_dirty.resize(cascades)
-	_foam_read_indices.resize(cascades)
-	_foam_last_update_frame.resize(cascades)
-	for i in cascades:
-		_foam_read_indices[i] = 0
-		_foam_last_update_frame[i] = -1
 	mark_spectrum_dirty()
 	_foam_reset_pending = false
+	_foam_near_reset_pending = false
 
 	# Butterfly factors depend only on MAP_SIZE: dispatch once.
 	var pc := _pack_push_constant(0, 0.0, 0.0)
@@ -391,41 +408,45 @@ func init_render() -> void:
 	initialized = true
 
 
-func step_render(delta: float) -> void:
+func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = Vector2(INF, INF)) -> void:
 	if not initialized:
 		return
+	_render_time = sim_time if step_time < 0.0 else step_time
+	_render_center = near_center if not step_center.is_finite() else step_center
 	_read_timings()
 	if _foam_reset_pending:
-		_rd.texture_clear(_foam_tex_a, Color(0, 0, 0, 0), 0, 1, 0, num_cascades())
-		_rd.texture_clear(_foam_tex_b, Color(0, 0, 0, 0), 0, 1, 0, num_cascades())
-		_rd.texture_clear(_foam_near_tex_a, Color(0, 0, 0, 0), 0, 1, 0, 1)
-		_rd.texture_clear(_foam_near_tex_b, Color(0, 0, 0, 0), 0, 1, 0, 1)
-		for i in _foam_read_indices.size():
-			_foam_read_indices[i] = 0
-			_foam_last_update_frame[i] = _frame - 1
+		_clear_foam_fields()
 		_foam_near_read_index = 0
 		_foam_near_dt = 0.0
 		_foam_reset_pending = false
-
-	var tutorial_model := wave_model == WaveModel.TUTORIAL_GERSTNER
-	var foam_injection := clampf(foam_amount / FOAM_AMOUNT_REFERENCE, 0.0, 1.0) \
-		if tutorial_model else delta * foam_amount * 0.49
-	var decay_rate := delta * TUTORIAL_FOAM_DECAY_RATE if tutorial_model \
-		else delta * 0.693 / maxf(foam_persistence, 0.05)
+		_foam_near_reset_pending = false
+	elif _foam_near_reset_pending:
+		_clear_foam_fields()
+		_foam_near_read_index = 0
+		_foam_near_dt = 0.0
+		_foam_near_reset_pending = false
 
 	var g16 := map_size / 16
 	var g32 := map_size / 32
-	var cascade_list: Array = range(num_cascades()) if not amortize \
-		else [_frame % num_cascades()]
+	var cascade_list: Array = []
+	if amortize:
+		for i in num_cascades():
+			if i == _frame % num_cascades() or _cascade_dirty[i]:
+				cascade_list.append(i)
+	else:
+		for i in num_cascades():
+			# The fine cascade skips odd frames once short_cascade_half_rate is
+			# set; a dirty spectrum (preset edit) always runs immediately.
+			if i < num_cascades() - 1 or not short_cascade_half_rate \
+					or _frame % 2 == 0 or _cascade_dirty[i]:
+				cascade_list.append(i)
 
 	_rd.capture_timestamp("ocean/start")
 	var cl := _rd.compute_list_begin()
 	for i in cascade_list:
-		var pc := _pack_push_constant(i, foam_injection, decay_rate)
+		var pc := _pack_push_constant(i, 0.0, 0.0, _render_time)
 		if _cascade_dirty[i]:
-			var init_stage := "spectrum_init_art_directed" \
-				if backend == Backend.SEA_OF_THIEVES_INSPIRED_FFT else "spectrum_init"
-			_dispatch(cl, init_stage, pc, g16, g16, 1)
+			_dispatch(cl, "spectrum_init", pc, g16, g16, 1)
 			_cascade_dirty[i] = false
 		_dispatch(cl, "spectrum_evolve", pc, g16, g16, 1)
 		cl = _mark(cl, "ocean/spectrum")
@@ -435,37 +456,30 @@ func step_render(delta: float) -> void:
 		cl = _mark(cl, "ocean/fft")
 		_dispatch(cl, "map_assemble", pc, g16, g16, 1)
 		cl = _mark(cl, "ocean/assemble")
-		var should_update_foam: bool = foam_feedback_enabled \
-			and i < foam_cascade_count
-		if should_update_foam:
-			var elapsed_frames := _frame - _foam_last_update_frame[i]
-			var foam_step_scale := float(maxi(elapsed_frames, 1))
-			var feedback_injection := foam_injection if tutorial_model \
-				else foam_injection * foam_step_scale
-			var foam_pc := _pack_push_constant(i, feedback_injection,
-				decay_rate * foam_step_scale)
-			var foam_stage := "foam_feedback_ab" if _foam_read_indices[i] == 0 \
-				else "foam_feedback_ba"
-			_dispatch(cl, foam_stage, foam_pc, g16, g16, 1)
-			_foam_read_indices[i] = 1 - _foam_read_indices[i]
-			_foam_last_update_frame[i] = _frame
 		cl = _mark(cl, "ocean/foam")
 	# Near-field feedback once per (stride) frames, on the accumulated dt.
 	_foam_near_dt += delta
-	if foam_near_enabled and wave_model == WaveModel.FFT \
+	if foam_near_enabled \
 			and _frame % maxi(foam_near_stride, 1) == 0:
 		var near_stage := "foam_near_ab" if _foam_near_read_index == 0 \
 			else "foam_near_ba"
-		_dispatch(cl, near_stage, _pack_near_push_constant(_foam_near_dt),
-			foam_near_size / 16, foam_near_size / 16, 1)
+		for layer in 3:
+			var stage := near_stage if layer == 0 else near_stage + "_%d" % layer
+			_dispatch(cl, stage, _pack_near_push_constant(_foam_near_dt, layer),
+				foam_near_size / 16, foam_near_size / 16, 1)
 		_foam_near_read_index = 1 - _foam_near_read_index
-		_near_center_prev = near_center
+		_generate_foam_mips(cl, _foam_near_read_index)
+		_near_center_prev = _render_center
 		_foam_near_dt = 0.0
 		cl = _mark(cl, "ocean/foam_near")
 	_rd.compute_list_end()
 	_dispatch_pending_queries()
 	_rd.capture_timestamp("ocean/end")
 	_frame += 1
+	_foam_state_mutex.lock()
+	_published_foam_state = {"center": _near_center_prev, "index": _foam_near_read_index,
+		"time": _render_time, "step": _frame}
+	_foam_state_mutex.unlock()
 
 
 ## Render thread. Uploads the pending points, dispatches one query pass and
@@ -499,25 +513,28 @@ func _dispatch_pending_queries() -> void:
 	# before "ocean/end" is the query dispatch.
 	if profiling:
 		_rd.capture_timestamp("ocean/query")
-	_rd.buffer_get_data_async(_buffers["query_out"], _store_query_results,
+	_rd.buffer_get_data_async(_buffers["query_out"],
+		_store_query_results.bind(_query_submitted_count, _query_generation),
 		0, MAX_QUERY_POINTS * 16)
 
 
 # Render thread: decode the readback, then hop to the main thread. Only the
 # submitted slots are meaningful; the rest of the buffer stays stale.
-func _store_query_results(data: PackedByteArray) -> void:
+func _store_query_results(data: PackedByteArray, submitted_count: int, generation: int) -> void:
 	var floats := data.to_float32_array()
 	var results := PackedVector4Array()
-	var count := mini(_query_submitted_count, MAX_QUERY_POINTS)
+	var count := mini(submitted_count, MAX_QUERY_POINTS)
 	results.resize(count)
 	for i in count:
 		results[i] = Vector4(floats[i * 4], floats[i * 4 + 1],
 			floats[i * 4 + 2], floats[i * 4 + 3])
-	_apply_query_results.call_deferred(results)
+	_apply_query_results.call_deferred(results, generation)
 
 
 # Main thread.
-func _apply_query_results(results: PackedVector4Array) -> void:
+func _apply_query_results(results: PackedVector4Array, generation: int) -> void:
+	if generation != _query_generation:
+		return
 	_query_latest = results
 	_query_results_valid = true
 
@@ -532,7 +549,11 @@ func free_render() -> void:
 	for key in _buffers:
 		if _buffers[key].is_valid():
 			_rd.free_rid(_buffers[key])
-	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _foam_tex_a, _foam_tex_b,
+	for view in _foam_mip_views:
+		if view.is_valid():
+			_rd.free_rid(view)
+	_foam_mip_views.clear()
+	for tex in [_spectrum_tex, _displacement_tex, _normal_tex, _derivative_tex,
 			_foam_near_tex_a, _foam_near_tex_b]:
 		if tex.is_valid():
 			_rd.free_rid(tex)
@@ -551,15 +572,11 @@ func free_render() -> void:
 	_spectrum_tex = RID()
 	_displacement_tex = RID()
 	_normal_tex = RID()
-	_foam_tex_a = RID()
-	_foam_tex_b = RID()
+	_derivative_tex = RID()
 	_foam_near_tex_a = RID()
 	_foam_near_tex_b = RID()
-	_foam_pattern_rd = RID()
 	_foam_noise_rd = RID()
 	_foam_sampler = RID()
-	_foam_read_indices.clear()
-	_foam_last_update_frame.clear()
 	_cascade_dirty.clear()
 
 
@@ -578,18 +595,38 @@ func _create_tex_array(format: RenderingDevice.DataFormat) -> RID:
 	return _rd.texture_create(fmt, RDTextureView.new(), [])
 
 
-func _create_tex_2d(format: RenderingDevice.DataFormat, size: int) -> RID:
+func _create_foam_array() -> RID:
 	var fmt := RDTextureFormat.new()
-	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D
-	fmt.width = size
-	fmt.height = size
-	fmt.array_layers = 1
-	fmt.format = format
+	fmt.texture_type = RenderingDevice.TEXTURE_TYPE_2D_ARRAY
+	fmt.width = foam_near_size
+	fmt.height = foam_near_size
+	fmt.array_layers = 3
+	fmt.mipmaps = _foam_mip_count
+	fmt.format = RenderingDevice.DATA_FORMAT_R32G32_SFLOAT
 	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
-		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT \
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
 	return _rd.texture_create(fmt, RDTextureView.new(), [])
+
+
+func _clear_foam_fields() -> void:
+	for texture in [_foam_near_tex_a, _foam_near_tex_b]:
+		_rd.texture_clear(texture, Color(0, 0, 0, 0), 0, _foam_mip_count, 0, 3)
+
+
+func _generate_foam_mips(cl: int, index: int) -> void:
+	_rd.compute_list_bind_compute_pipeline(cl, _pipelines["foam_mipmap"])
+	for mip in range(1, _foam_mip_count):
+		var size := maxi(foam_near_size >> mip, 1)
+		var pc := PackedByteArray()
+		pc.resize(16)
+		pc.encode_s32(0, size)
+		_rd.compute_list_set_push_constant(cl, pc, pc.size())
+		for layer in 3:
+			var key := "foam_mip_%d_%d_%d" % [index, layer, mip]
+			_rd.compute_list_bind_uniform_set(cl, _uniform_sets[key], 0)
+			_rd.compute_list_dispatch(cl, maxi((size + 15) / 16, 1), maxi((size + 15) / 16, 1), 1)
+		_rd.compute_list_add_barrier(cl)
 
 
 func _image_uniform(binding: int, rid: RID) -> RDUniform:
@@ -634,40 +671,92 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, gx: int, gy: int, gz
 	_rd.compute_list_add_barrier(cl)
 
 
-## Push constant of the near-field foam feedback (96 B, layout documented in
-## ocean_foam_near.comp). Injection weights: the short cascade dominates, mid
-## and long add context.
-func _pack_near_push_constant(dt: float) -> PackedByteArray:
+func _jonswap_significant_height(scale: float) -> float:
+	var wind := maxf(wind_speed, 0.01)
+	var fetch_m := maxf(fetch_km * 1000.0, 1.0)
+	var alpha := 0.076 * pow(wind * wind / (fetch_m * GRAVITY), 0.22)
+	var omega_p := 22.0 * pow(GRAVITY * GRAVITY / (wind * fetch_m), 1.0 / 3.0)
+	return 2.20903 * sqrt(alpha) * GRAVITY \
+		/ maxf(omega_p * omega_p, 0.0001) * maxf(scale, 0.0)
+
+
+func _soft_limit(value: float, knee: float, limit: float) -> float:
+	if value <= knee:
+		return value
+	var span := limit - knee
+	return knee + span * (1.0 - exp(-(value - knee) / span))
+
+
+func effective_amplitude_scale() -> float:
+	var raw_height := _jonswap_significant_height(amplitude_scale)
+	if raw_height <= 0.0:
+		return maxf(amplitude_scale, 0.0)
+	var safe_height := _soft_limit(raw_height,
+		JONSWAP_BASE_HEIGHT_KNEE_M, JONSWAP_BASE_HEIGHT_LIMIT_M)
+	return amplitude_scale * safe_height / raw_height
+
+
+func effective_height_gain() -> float:
+	var base_height := _jonswap_significant_height(effective_amplitude_scale())
+	var input_gain := clampf(height_gain, 0.0, JONSWAP_MAX_HEIGHT_GAIN)
+	if base_height <= 0.0:
+		return input_gain
+	if input_gain <= 1.0:
+		return input_gain
+	var max_height := _soft_limit(base_height * JONSWAP_MAX_HEIGHT_GAIN,
+		JONSWAP_TOTAL_HEIGHT_KNEE_M, JONSWAP_TOTAL_HEIGHT_LIMIT_M)
+	var safe_height := lerpf(base_height, max_height,
+		(input_gain - 1.0) / (JONSWAP_MAX_HEIGHT_GAIN - 1.0))
+	return safe_height / base_height
+
+
+func effective_choppiness(cascade: int = 0) -> float:
+	var raw := clampf(choppiness, 0.0, JONSWAP_MAX_CHOPPINESS)
+	var compressed := raw
+	if raw > JONSWAP_CHOPPINESS_KNEE:
+		compressed = remap(raw, JONSWAP_CHOPPINESS_KNEE, JONSWAP_MAX_CHOPPINESS,
+			JONSWAP_CHOPPINESS_KNEE, JONSWAP_CHOPPINESS_LIMIT)
+	if cascade == 2:
+		if raw <= JONSWAP_CHOPPINESS_KNEE:
+			return raw * CHOP_PER_CASCADE[cascade]
+		return remap(raw, JONSWAP_CHOPPINESS_KNEE, JONSWAP_MAX_CHOPPINESS,
+			JONSWAP_CHOPPINESS_KNEE * CHOP_PER_CASCADE[cascade],
+			JONSWAP_FINE_CHOPPINESS_LIMIT)
+	return compressed * CHOP_PER_CASCADE[cascade]
+
+
+func _pack_near_push_constant(dt: float, layer: int = 0) -> PackedByteArray:
 	var pc := PackedByteArray()
 	pc.resize(96)
-	pc.encode_float(0, near_center.x)
-	pc.encode_float(4, near_center.y)
-	pc.encode_float(8, _near_center_prev.x)
-	pc.encode_float(12, _near_center_prev.y)
-	var foam_gain := clampf(foam_amount / FOAM_AMOUNT_REFERENCE, 0.0, 1.0)
+	var texel := foam_field_domains()[layer] / foam_near_size
+	var center := (_render_center / texel).floor() * texel
+	var previous_center := (_near_center_prev / texel).floor() * texel
+	pc.encode_float(0, center.x)
+	pc.encode_float(4, center.y)
+	pc.encode_float(8, previous_center.x)
+	pc.encode_float(12, previous_center.y)
+	var foam_gain := clampf(foam_amount / FOAM_AMOUNT_REFERENCE, 0.0, 1.0) \
+		if foam_feedback_enabled else 0.0
 	pc.encode_float(16, dt * 0.693 / maxf(foam_persistence, 0.05))
 	pc.encode_float(20, dt * 0.693 / maxf(foam_persistence * 0.167, 0.02))
-	pc.encode_float(24, foam_gain * 0.02)
-	pc.encode_float(28, foam_gain * 0.5)
-	pc.encode_float(32, foam_near_domain)
+	pc.encode_float(24, dt * 0.693 / maxf(foam_persistence, 0.05) * 0.68)
+	pc.encode_float(28, dt * foam_gain * 6.0)
+	pc.encode_float(32, foam_field_domains()[layer])
 	pc.encode_float(36, maxf(dt, 0.0001))
-	pc.encode_float(40, 0.6)
+	pc.encode_float(40, 0.15)
 	pc.encode_float(44, float(foam_near_size))
-	var read_mask := 0
 	var enabled_mask := 0
 	for i in num_cascades():
-		if _foam_read_indices[i] == 0:
-			read_mask |= 1 << i
 		enabled_mask |= 1 << i
-	pc.encode_s32(48, read_mask)
+	pc.encode_s32(48, layer)
 	pc.encode_s32(52, enabled_mask)
 	pc.encode_s32(56, 0)
 	pc.encode_s32(60, 0)
 	pc.encode_float(64, tile_lengths[0])
 	pc.encode_float(68, tile_lengths[1])
 	pc.encode_float(72, tile_lengths[2])
-	pc.encode_float(76, 0.35)
-	pc.encode_float(80, 0.7)
+	pc.encode_float(76, clampf(whitecap, 0.05, 0.95))
+	pc.encode_float(80, 1.0)
 	pc.encode_float(84, 1.0)
 	var wind_dir := Vector2(sin(wind_direction), cos(wind_direction))
 	pc.encode_float(88, wind_dir.x)
@@ -683,12 +772,15 @@ func _k_max(cascade: int) -> float:
 	return TAU / tile_lengths[cascade + 1] * 6.0
 
 
-func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float) -> PackedByteArray:
+func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float, step_time: float = -1.0) -> PackedByteArray:
 	var fetch_m := fetch_km * 1000.0
 	var alpha := 0.076 * pow(wind_speed * wind_speed / (fetch_m * GRAVITY), 0.22)
+	# amplitude_scale rides on alpha: the JONSWAP/TMA spectrum is linear in
+	# alpha, so the height amplitude scales with its square root exactly.
+	alpha *= pow(effective_amplitude_scale() / 0.25, 2.0)
 	var omega_p := 22.0 * pow(GRAVITY * GRAVITY / (wind_speed * fetch_m), 1.0 / 3.0)
 	var k_min := 0.0001 if cascade == 0 else _k_max(cascade - 1)
-	var eff_chop := choppiness * CHOP_PER_CASCADE[cascade]
+	var eff_chop := effective_choppiness(cascade)
 
 	var pc := PackedByteArray()
 	pc.resize(128)
@@ -707,26 +799,19 @@ func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float) -> P
 	pc.encode_float(48, whitecap)
 	pc.encode_float(52, foam_gain)
 	pc.encode_float(56, decay_rate)
-	pc.encode_float(60, sim_time)
+	pc.encode_float(60, sim_time if step_time < 0.0 else step_time)
 	pc.encode_s32(64, cascade)
 	pc.encode_s32(68, 1000 + cascade * 7919)
 	pc.encode_s32(72, 31337 + cascade * 104729)
-	# Shader flag bits (replaces the old backend enum): bit 0 selects the
-	# tutorial Gerstner path in map_assemble/foam_feedback, bit 1 selects the
-	# JONSWAP spectrum flavour.
-	var shader_flags := 0
-	if wave_model == WaveModel.TUTORIAL_GERSTNER:
-		shader_flags |= 1
-	if backend == Backend.JONSWAP_TMA:
-		shader_flags |= 2
-	pc.encode_s32(76, shader_flags)
-	pc.encode_float(80, height_gain)
-	pc.encode_float(84, long_wave_height_m)
-	pc.encode_float(88, long_wave_length_m)
+	pc.encode_s32(76, int(wave_model == WaveModel.TUTORIAL_GERSTNER))
+	pc.encode_float(80, effective_height_gain())
+	var reference: Dictionary = spectral_references()[cascade]
+	pc.encode_float(84, reference.height_rms_m if wave_model == WaveModel.FFT else long_wave_height_m)
+	pc.encode_float(88, reference.wavelength_m if wave_model == WaveModel.FFT else long_wave_length_m)
 	pc.encode_float(92, wind_wave_height_m)
 	pc.encode_float(96, wind_wave_length_m)
 	pc.encode_float(100, ripple_strength)
-	pc.encode_float(104, crosswind_ratio)
+	pc.encode_float(104, jonswap_gamma)
 	pc.encode_float(108, crest_gain)
 	pc.encode_float(112, crest_bias)
 	pc.encode_float(116, mid_wave_height_m)

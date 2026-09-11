@@ -16,7 +16,7 @@ SUN_ELEVATION="${SUN_ELEVATION:-34.0}"
 SUN_AZIMUTH="${SUN_AZIMUTH:-160.0}"
 
 mkdir -p "$OUT_DIR/raw"
-printf 'state\tprofile\tvram_mb\tsim_median_ms\tsim_p95_ms\tfoam_median_ms\tfoam_p95_ms\tfoam_near_gpu_ms\tquery_gpu_ms\tviewport_median_ms\tviewport_p95_ms\twater_coverage\tcrest_coverage\tbreaking_coverage\tfoam_coverage\n' \
+printf 'state\tprofile\tvram_mb\tsim_median_ms\tsim_p95_ms\tfoam_median_ms\tfoam_p95_ms\tfoam_near_gpu_ms\tquery_gpu_ms\tviewport_median_ms\tviewport_p95_ms\twater_coverage\twave_height_rms_m\tsimulation_source_mean\tpixel_foam_mean\n' \
 	> "$OUT_DIR/baseline.tsv"
 : > "$OUT_DIR/runs.log"
 
@@ -32,6 +32,22 @@ field() {
 	local key="$1"
 	local line="$2"
 	printf '%s\n' "$line" | tr ' ' '\n' | awk -F= -v wanted="$key" '$1 == wanted { print $2; exit }'
+}
+
+json_metric() {
+	printf '%s\n' "$3" | python3 -c '
+import json, sys
+kind, key = sys.argv[1:]
+values = [json.loads(line.split(" ", 2)[2]) for line in sys.stdin if line.startswith("CAPTURE " + kind + " ")]
+if not values:
+    raise SystemExit("Missing capture metric: " + kind)
+value = values[-1]
+if isinstance(value, list):
+    count = sum(r["pixels"] for r in value)
+    print(sum(r[key] * r["pixels"] for r in value if r["pixels"]) / count if count else -1)
+else:
+    print(value[key])
+' "$1" "$2"
 }
 
 resolution_size() {
@@ -77,7 +93,7 @@ for resolution in "${resolutions[@]}"; do
 				VIRTUAL_DISPLAY_HEIGHT="$display_height" RESOLUTION="$resolution" \
 				TIMEOUT="$TIMEOUT" GODOT="$GODOT" \
 				"$SCRIPT_DIR/capture.sh" ocean_demo "$output" "$FRAMES" 0 \
-				profile=1 coverage=1 preset="$preset" backend=1 look="$LOOK" \
+				profile=1 coverage=1 preset="$preset" look="$LOOK" \
 				quality="$profile" \
 				mood="$mood" mood_snap=1 lightning=0 view=overhead ui=0 \
 				time="$CAPTURE_TIME" dt="$DT" warmup="$WARMUP" wind="$WIND_DIRECTION" \
@@ -95,8 +111,8 @@ for resolution in "${resolutions[@]}"; do
 				"$(field foam_gpu "$meta")" "$(field foam_gpu_p95 "$meta")" \
 				"$(field foam_near_gpu "$meta")" "$(field query_gpu "$meta")" \
 				"$(field viewport_gpu "$meta")" "$(field viewport_gpu_p95 "$meta")" \
-				"${coverage:--1}" "$(field crest_cov "$meta")" \
-				"$(field breaking_cov "$meta")" "$(field foam_cov "$meta")" \
+				"${coverage:--1}" "$(json_metric WAVES height_rms_m "$capture_output")" \
+				"$(json_metric WAVES source_mean "$capture_output")" "$(json_metric FOAM_PIXELS mean_coverage "$capture_output")" \
 				>> "$OUT_DIR/baseline.tsv"
 		done
 	done
@@ -106,7 +122,7 @@ awk -F '\t' '
 NR == 1 {
 		print "# Ocean Phase 0 GPU baseline"
 		print ""
-		print "| State | Profile | VRAM MB | Sim median | Sim p95 | Foam median | Foam p95 | Near foam GPU | Query GPU | Viewport median | Viewport p95 | Water coverage | Crest coverage | Breaking coverage | Foam coverage |"
+		print "| State | Profile | VRAM MB | Sim median | Sim p95 | Foam median | Foam p95 | Near foam GPU | Query GPU | Viewport median | Viewport p95 | Water coverage | Wave RMS (m) | Simulation source | Pixel foam mean |"
 		print "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
 		next
 }

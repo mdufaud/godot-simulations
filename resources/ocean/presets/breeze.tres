@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
 
 [resource]
+amplitude_scale = 1.0
 script = ExtResource("1_preset")
 wave_model = 0
 display_name = "Breeze"
@@ -23,7 +24,7 @@ ripple_strength = 0.65
 crosswind_ratio = 0.12
 crest_bias = 0.24
 crest_gain = 3.7
-whitecap = 0.62
-foam_amount = 2.8
-foam_persistence = 5.0
+whitecap = 0.40
+foam_amount = 2.0
+foam_persistence = 1.3
 spray_amount = 0.12

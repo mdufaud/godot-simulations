@@ -3,6 +3,7 @@
 [ext_resource type="Script" path="res://scripts/ocean/ocean_preset.gd" id="1_preset"]
 
 [resource]
+amplitude_scale = 0.75
 script = ExtResource("1_preset")
 display_name = "Storm"
 wave_model = 0
@@ -10,7 +11,7 @@ wind_speed_mps = 33.0
 fetch_km = 300.0
 swell = 0.9
 spread = 0.22
-choppiness = 0.9
+choppiness = 1.05
 height_gain = 1.0
 long_wave_height_m = 3.8
 long_wave_length_m = 132.0
@@ -23,7 +24,7 @@ ripple_strength = 0.68
 crosswind_ratio = 0.2
 crest_bias = 0.18
 crest_gain = 4.6
-whitecap = 0.84
-foam_amount = 5.6
-foam_persistence = 4.2
+whitecap = 0.55
+foam_amount = 2.8
+foam_persistence = 0.8
 spray_amount = 1.0

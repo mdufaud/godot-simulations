@@ -1,111 +1,65 @@
-// Camera-centred near-field foam feedback. Runs once per frame after the
-// cascade loop (standalone shader: own bindings and push constant, the shared
-// ocean_common.comp layout is not compiled into this stage).
-//
-// The 20 x 20 m window follows the camera; when it moves, the previous
-// coverage is reprojected from the old window into the new one so foam stays
-// world-anchored (no grid, no jumping). R = persistent coverage, G = fresh
-// foam. Injection reads the three cascade histories (max-blended, weighted);
-// persistent and fresh channels decay and disperse independently. Only
-// physical coverage lives here: the lace detail is applied per fragment in
-// ocean_surface.gdshader.
-
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
-layout(rg16f, set = 0, binding = 0) restrict uniform image2DArray cascade_a;
-layout(rg16f, set = 0, binding = 1) restrict uniform image2DArray cascade_b;
-layout(rg16f, set = 0, binding = 2) restrict uniform image2D near_input;
-layout(rg16f, set = 0, binding = 3) restrict uniform image2D near_output;
+layout(set = 0, binding = 0) uniform sampler2DArray derivative_fields;
+layout(set = 0, binding = 1) uniform sampler2DArray history_input;
+layout(rg32f, set = 0, binding = 2) restrict uniform image2D near_output;
 
-// 96 bytes: stays under the 128-byte Vulkan portability guarantee.
 layout(push_constant, std430) uniform NearParams {
-    vec4 camera; //  0: curr.x, curr.z, prev.x, prev.z
-    vec4 rates;  // 16: persistent decay, fresh decay, persistent growth, fresh growth
-    vec4 cfg;    // 32: domain_m, dt, dispersal_mps, map_size
-    ivec4 icfg;  // 48: read_a_mask (bit i: cascade i history is in tex A), enabled_mask, 0, 0
-    vec4 tiles;  // 64: tile length cascade 0, 1, 2, injection weight cascade 0
-    vec4 extra;  // 80: injection weight cascade 1, cascade 2, wind.x, wind.y
+    vec4 camera;
+    vec4 rates;
+    vec4 cfg;
+    ivec4 icfg;
+    vec4 tiles;
+    vec4 extra;
 } np;
 
-// GLSL selection cannot operate on image handles — branch instead.
-vec2 load_foam(int cascade, ivec2 texel) {
-    if ((np.icfg.x & (1 << cascade)) != 0) {
-        return imageLoad(cascade_a, ivec3(texel, cascade)).rg;
-    }
-    return imageLoad(cascade_b, ivec3(texel, cascade)).rg;
+float integrate_coverage(float previous, float growth, float decay) {
+    float rate = growth + decay;
+    float equilibrium = growth / max(rate, 1e-8);
+    return mix(previous, equilibrium, 1.0 - exp(-rate));
 }
 
-vec2 cascade_sample(int cascade, vec2 frac_uv) {
-    // Manual bilinear on the torus from the cascade's current read half.
-    float size = np.cfg.w;
-    ivec2 dims = ivec2(int(size));
-    vec2 uv = frac_uv * size - 0.5;
-    ivec2 i0 = ivec2(floor(uv));
-    vec2 f = uv - vec2(i0);
-    ivec2 w0 = (i0 + dims) % dims;
-    ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
-    vec2 c00 = load_foam(cascade, w0);
-    vec2 c10 = load_foam(cascade, ivec2(w1.x, w0.y));
-    vec2 c01 = load_foam(cascade, ivec2(w0.x, w1.y));
-    vec2 c11 = load_foam(cascade, ivec2(w1.x, w1.y));
-    return mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
+float breaking_at(vec2 position) {
+    vec3 derivative = vec3(0.0);
+    for (int cascade = 0; cascade < 3; cascade++) {
+        if ((np.icfg.y & (1 << cascade)) != 0) {
+            derivative += textureLod(derivative_fields,
+                vec3(position / np.tiles[cascade], float(cascade)), 0.0).xyz;
+        }
+    }
+    float a = 1.0 + derivative.x;
+    float b = 1.0 + derivative.y;
+    float c = derivative.z;
+    float stretch = 0.5 * (a + b - sqrt((a - b) * (a - b) + 4.0 * c * c));
+    return smoothstep(0.0, 0.2, np.tiles.w - stretch);
 }
 
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
-    float size = np.cfg.w;
-    vec2 uv = (vec2(id) + 0.5) / size;
-
-    // World position covered by this texel of the new window.
+    vec2 uv = (vec2(id) + 0.5) / np.cfg.w;
     vec2 world = np.camera.xy + (uv - 0.5) * np.cfg.x;
-
-    // Reproject into the previous window; outside it the history is unknown.
-    vec2 prev_uv = (world - np.camera.zw) / np.cfg.x + 0.5;
-    vec2 prev = vec2(0.0);
-    float edge = 0.0;
-    if (all(greaterThan(prev_uv, vec2(0.0))) && all(lessThan(prev_uv, vec2(1.0)))) {
-        ivec2 dims = ivec2(int(size));
-        ivec2 prev_texel = clamp(ivec2(prev_uv * size), ivec2(0), dims - ivec2(1));
-        prev = imageLoad(near_input, prev_texel).rg;
-        // Fade one texel inside the border so the old window frame never
-        // renders as a straight line.
-        vec2 border = min(prev_uv, 1.0 - prev_uv) * size;
-        edge = clamp(min(border.x, border.y), 0.0, 1.0);
+    vec2 previous_uv = (world - np.camera.zw
+        - np.extra.zw * np.cfg.z * np.cfg.y) / np.cfg.x + 0.5;
+    vec2 previous = vec2(0.0);
+    vec2 border = min(previous_uv, 1.0 - previous_uv) * np.cfg.w;
+    if (min(border.x, border.y) >= 0.5) {
+        previous = textureLod(history_input, vec3(previous_uv, float(np.icfg.x)), 0.0).rg;
     }
-    prev *= edge;
-
-    // Wind dispersal: sample the history slightly upwind so coverage drifts
-    // downwind over its life.
-    if (np.cfg.z != 0.0) {
-        vec2 drift = np.extra.zw * (np.cfg.z * np.cfg.y / np.cfg.x);
-        vec2 drift_uv = prev_uv - drift;
-        if (all(greaterThan(drift_uv, vec2(0.0))) && all(lessThan(drift_uv, vec2(1.0)))) {
-            ivec2 dims = ivec2(int(size));
-            ivec2 drift_texel = clamp(ivec2(drift_uv * size), ivec2(0), dims - ivec2(1));
-            vec2 carried = imageLoad(near_input, drift_texel).rg;
-            prev = max(prev, carried * edge * 0.9);
-        }
-    }
-
-    // Inject from the three cascade histories at their current read halves.
-    float inj_persistent = 0.0;
-    float inj_fresh = 0.0;
-    for (int cascade = 0; cascade < 3; cascade++) {
-        float w = cascade == 0 ? np.tiles.w : (cascade == 1 ? np.extra.x : np.extra.y);
-        if (w <= 0.0 || (np.icfg.y & (1 << cascade)) == 0) {
-            continue;
-        }
-        float tile = cascade == 0 ? np.tiles.x : (cascade == 1 ? np.tiles.y : np.tiles.z);
-        vec2 frac_uv = vec2(world.x / tile - floor(world.x / tile),
-            world.y / tile - floor(world.y / tile));
-        vec2 foam = cascade_sample(cascade, frac_uv);
-        inj_persistent = max(inj_persistent, foam.x * w);
-        inj_fresh = max(inj_fresh, foam.y * w);
-    }
-
-    float persistent = prev.r * exp(-np.rates.x * np.cfg.y);
-    float fresh = prev.g * exp(-np.rates.y * np.cfg.y);
-    persistent = clamp(persistent + inj_persistent * np.rates.z * (1.0 - persistent), 0.0, 1.0);
-    fresh = clamp(fresh + inj_fresh * np.rates.w * (1.0 - fresh), 0.0, 1.0);
+    float footprint = np.cfg.x / np.cfg.w * 0.25;
+    float source = 0.25 * (breaking_at(world + vec2(footprint, footprint))
+        + breaking_at(world + vec2(-footprint, footprint))
+        + breaking_at(world + vec2(footprint, -footprint))
+        + breaking_at(world - vec2(footprint, footprint)));
+    float fresh = integrate_coverage(previous.g, source * np.rates.w, np.rates.y);
+    float active_rate = source * np.rates.w + np.rates.y;
+    float active_equilibrium = source * np.rates.w / max(active_rate, 1e-8);
+    float residual_decay = exp(-np.rates.x);
+    float rate_difference = active_rate - np.rates.x;
+    float transfer = abs(rate_difference) < 1e-5
+        ? residual_decay * (1.0 - 0.5 * rate_difference)
+        : (residual_decay - exp(-active_rate)) / rate_difference;
+    float persistent = previous.r * residual_decay
+        + np.rates.z / max(np.rates.x, 1e-8) * active_equilibrium * (1.0 - residual_decay)
+        + np.rates.z * (previous.g - active_equilibrium) * transfer;
     imageStore(near_output, id, vec4(persistent, fresh, 0.0, 1.0));
 }

@@ -59,6 +59,8 @@ func _run() -> void:
 		_fail("no SimMenu in scene tree")
 		_report()
 		return
+	if _demo == "ocean_demo":
+		await _check_ocean_actions(menu)
 	if _demo == "ambient_fluid_demo":
 		await _check_ambient_fluid_actions(menu)
 	if _demo == "mixwell_demo":
@@ -288,6 +290,48 @@ func _check_ambient_fluid_actions(menu: SimMenu) -> void:
 	await get_tree().physics_frame
 	if _demo_root.bodies.size() != 4:
 		_fail("ambient fluid reset action did not restore buoyancy set")
+
+
+func _check_ocean_actions(menu: SimMenu) -> void:
+	var action_bar := menu.get_node_or_null("BottomRight/ActionBar") as GridContainer
+	if action_bar == null:
+		_fail("ocean action bar missing")
+		return
+	var buttons: Dictionary = {}
+	for child in action_bar.get_children():
+		if child is Button and child.visible:
+			buttons[child.tooltip_text] = child
+	for expected in ["Sea", "Throw", "Clear", "Freeze"]:
+		if not buttons.has(expected):
+			_fail("ocean action missing: %s" % expected)
+	if _failures.size() > 0:
+		return
+
+	var initial_preset: int = _demo_root.current_preset_index
+	buttons.Sea.pressed.emit()
+	await get_tree().process_frame
+	if _demo_root.current_preset_index == initial_preset:
+		_fail("ocean sea action did not cycle the preset")
+
+	var initial_crates: int = _demo_root._crates.size()
+	buttons.Throw.pressed.emit()
+	await get_tree().physics_frame
+	if _demo_root._crates.size() != initial_crates + 1:
+		_fail("ocean throw action did not spawn one crate")
+	buttons.Clear.pressed.emit()
+	await get_tree().process_frame
+	if not _demo_root._crates.is_empty():
+		_fail("ocean clear action did not remove crates")
+
+	var freeze_button: Button = buttons.Freeze
+	freeze_button.set_pressed_no_signal(true)
+	freeze_button.toggled.emit(true)
+	if not _demo_root._frozen:
+		_fail("ocean freeze action did not pause simulation")
+	freeze_button.set_pressed_no_signal(false)
+	freeze_button.toggled.emit(false)
+	if _demo_root._frozen:
+		_fail("ocean freeze action did not resume simulation")
 
 
 func _fail(message: String) -> void:

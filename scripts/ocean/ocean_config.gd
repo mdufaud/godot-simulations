@@ -8,7 +8,7 @@ const MEASURE_FOAM_THRESHOLD := 0.02
 const MEASURE_FRESH_THRESHOLD := 0.005
 const MEASURE_CREST_THRESHOLD := 0.15
 const MEASURE_BREAKING_THRESHOLD := 0.15
-const MEASURE_VERSION := 4
+const MEASURE_VERSION := 5
 
 @export_range(8, 2048, 1) var map_size: int = 512
 @export var clipmap_tile_lengths_m: PackedFloat32Array = PackedFloat32Array([2039.0, 257.0, 67.0])

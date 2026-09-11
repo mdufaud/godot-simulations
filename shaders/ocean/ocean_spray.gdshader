@@ -6,9 +6,12 @@ render_mode unshaded, blend_mix, cull_disabled, depth_draw_never, shadows_disabl
 
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
-uniform sampler2DArray foam_history_a : filter_linear, repeat_enable;
-uniform sampler2DArray foam_history_b : filter_linear, repeat_enable;
-uniform vec4 foam_history_indices = vec4(0.0);
+uniform sampler2DArray foam_near_a : filter_linear_mipmap, repeat_disable;
+uniform sampler2DArray foam_near_b : filter_linear_mipmap, repeat_disable;
+uniform vec2 foam_near_center = vec2(0.0);
+uniform vec3 foam_domains = vec3(256.0, 1024.0, 4096.0);
+uniform float foam_near_index = 0.0;
+uniform bool foam_near_enabled = false;
 // P3-B: spawn is rejected below this breaking level; 0 rolls back to the
 // mood-only gate.
 uniform float spray_breaking_threshold = 0.2;
@@ -34,6 +37,45 @@ vec2 hash21(float p) {
 	return fract(sin(vec2(p * 127.1, p * 311.7)) * vec2(43758.5453, 22578.1459));
 }
 
+float sample_foam_near_layer(int layer, vec2 world_pos, float domain,
+		float distance_to_camera, float foam_texel_width, float pixel_scale) {
+	float texel = domain / max(foam_texel_width, 1.0);
+	vec2 center = floor(foam_near_center / texel) * texel;
+	vec2 uv = (world_pos - center) / domain + 0.5;
+	vec2 inside = step(vec2(0.0), uv) * step(uv, vec2(1.0));
+	float pixel_world = max(distance_to_camera, 0.001) * pixel_scale;
+	float texel_world = domain / max(foam_texel_width, 1.0);
+	float lod = clamp(log2(max(pixel_world / max(texel_world, 1e-6), 1.0)), 0.0, 8.0);
+	vec2 coverage = foam_near_index > 0.5
+		? textureLod(foam_near_b, vec3(uv, float(layer)), lod).rg
+		: textureLod(foam_near_a, vec3(uv, float(layer)), lod).rg;
+	return coverage.g * inside.x * inside.y;
+}
+
+float sample_foam_near(vec2 world_pos, float view_distance, float pixel_scale) {
+	float distance_to_center = length(world_pos - foam_near_center);
+	float foam_texel_width = float(textureSize(foam_near_a, 0).x);
+	for (int layer = 0; layer < 2; layer++) {
+		float radius = foam_domains[layer] * 0.5;
+		if (distance_to_center < radius) {
+			float current = sample_foam_near_layer(layer, world_pos,
+				foam_domains[layer], view_distance, foam_texel_width, pixel_scale);
+			float next = sample_foam_near_layer(layer + 1, world_pos,
+				foam_domains[layer + 1], view_distance, foam_texel_width, pixel_scale);
+			float transition = smoothstep(radius * 0.75, radius, distance_to_center);
+			return mix(current, next, transition);
+		}
+	}
+	float outer_radius = foam_domains.z * 0.5;
+	if (distance_to_center < outer_radius) {
+		float outer = sample_foam_near_layer(2, world_pos, foam_domains.z,
+			view_distance, foam_texel_width, pixel_scale);
+		return outer * (1.0 - smoothstep(outer_radius * 0.75, outer_radius,
+			distance_to_center));
+	}
+	return 0.0;
+}
+
 void vertex() {
 	int ix = int(INSTANCE_ID) % GRID;
 	int iz = int(INSTANCE_ID) / GRID;
@@ -53,20 +95,8 @@ void vertex() {
 		breaking = max(breaking, normal_sample.a);
 	}
 
-	// P3-B: the foam feedback confirms active breaking — spawn is rejected
-	// where the fresh channel is empty even if the instantaneous breaking texel
-	// fires. Threshold 0 rolls back to the mood-only gate.
-	float foam_signal = 0.0;
-	if (spray_breaking_threshold > 0.0) {
-		for (int i = 0; i < 2; i++) {
-			float read_b = i == 0 ? foam_history_indices.x : foam_history_indices.y;
-			vec3 foam_coords = vec3(xz * map_scales[i].xy, float(i));
-			vec4 foam_sample = read_b > 0.5
-				? textureLod(foam_history_b, foam_coords, 0.0)
-				: textureLod(foam_history_a, foam_coords, 0.0);
-			foam_signal = max(foam_signal, foam_sample.g);
-		}
-	}
+	float foam_view_distance = max(-((VIEW_MATRIX * vec4(xz.x, 0.0, xz.y, 1.0)).z), 0.001);
+	float foam_signal = foam_near_enabled ? sample_foam_near(xz, foam_view_distance, 2.0 / (VIEWPORT_SIZE.y * PROJECTION_MATRIX[1][1])) : 0.0;
 
 	float cycle = fract(sim_time * mix(0.18, 0.31, hash11(seed + 9.0)) + hash11(seed));
 	float life = sin(cycle * 3.14159265);
@@ -74,7 +104,7 @@ void vertex() {
 	vec3 center = vec3(xz.x + displacement.x, displacement.y, xz.y + displacement.z);
 	float backlight = pow(max(dot(normalize(CAMERA_POSITION_WORLD - center),
 		-normalize(sun_direction)), 0.0), 2.0);
-	float weather_gate = smoothstep(0.12, 0.62, storm_mood);
+	float weather_gate = mix(0.22, 1.0, smoothstep(0.12, 0.62, storm_mood));
 	float breaking_gate = spray_breaking_threshold > 0.0
 		? smoothstep(spray_breaking_threshold, spray_breaking_threshold + 0.22, breaking)
 			* smoothstep(0.015, 0.10, foam_signal)
@@ -82,24 +112,35 @@ void vertex() {
 	float gate = breaking_gate * weather_gate
 		* mix(0.55, 1.0, backlight) * spray_amount;
 	float sparse = step(hash11(seed + 41.0), clamp(gate * 0.68, 0.0, 1.0));
-	particle_alpha = life * life * gate * sparse * 0.58;
+	particle_alpha = life * life * gate * sparse * 0.65;
 
 	float spindrift = step(0.68, hash11(seed + 101.0));
-	float launch_arc = life * mix(0.35, 1.7, storm_mood);
+	float launch_arc = life * mix(0.18, 1.7, storm_mood);
 	float gravity_arc = cycle * cycle * mix(0.3, 1.2, spindrift);
-	center.y += 2.5 + crest * 1.8 + launch_arc - gravity_arc;
+	float surface_lift = mix(0.08, 0.16, spindrift)
+		+ crest * mix(0.75, 1.8, spindrift)
+		+ breaking * mix(0.20, 0.45, spindrift);
+	center.y += surface_lift + launch_arc - gravity_arc;
 	center.xz += wind_direction * cycle * mix(0.35, 2.4, storm_mood)
 		+ (hash21(seed + 73.0) - 0.5) * cycle * mix(0.35, 1.8, storm_mood);
 	vec3 center_view = (VIEW_MATRIX * vec4(center, 1.0)).xyz;
 	particle_uv = UV * 2.0 - 1.0;
 	float size = mix(0.05, 0.30, hash11(seed + 23.0))
 		* mix(0.7, 1.35, storm_mood);
-	vec2 billboard = vec2(particle_uv.x * size,
-		particle_uv.y * size * mix(2.6, 5.4, spindrift));
 	float distance_to_camera = max(-center_view.z, 0.001);
 	float pixel_world = 2.0 * distance_to_camera
 		/ (VIEWPORT_SIZE.y * PROJECTION_MATRIX[1][1]);
 	float pixel_size = max(size, min_pixel_size * pixel_world);
+	vec3 wind_view = (VIEW_MATRIX
+		* vec4(wind_direction.x, 0.0, wind_direction.y, 0.0)).xyz;
+	vec2 projected_wind = normalize(vec2(wind_view.x, wind_view.y) + vec2(0.0, 0.001));
+	vec2 spray_axis = normalize(mix(vec2(0.0, 1.0), projected_wind,
+		mix(0.18, 0.62, spindrift)));
+	vec2 spray_side = vec2(spray_axis.y, -spray_axis.x);
+	vec2 billboard = spray_side * particle_uv.x * size
+		+ spray_axis * particle_uv.y * size * mix(2.6, 5.4, spindrift);
+	float horizon_fade = 1.0 - smoothstep(62.0, 122.0, distance_to_camera);
+	particle_alpha *= horizon_fade;
 	billboard *= pixel_size / max(size, 0.001);
 	POSITION = PROJECTION_MATRIX * vec4(center_view + vec3(billboard, 0.0), 1.0);
 }

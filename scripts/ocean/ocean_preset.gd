@@ -27,9 +27,16 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 @export_range(0.0, 2.0, 0.01) var swell := 0.8
 ## Directional spreading: 0 is a narrow, aligned sea, 1 is confused.
 @export_range(0.0, 1.0, 0.01) var spread := 0.2
+@export_range(0.5, 1.0, 0.01) var detail := 1.0
+@export_range(1.0, 7.0, 0.1) var jonswap_gamma := 3.3
 
 @export_group("Waves")
 @export_range(0.0, 1.8, 0.01) var choppiness := 1.15
+## Overall sea amplitude. 1.0 = the physical JONSWAP amplitude for the wind
+## and fetch (the GodotOceanWaves reference look, waves near breaking
+## steepness); 0.25 = the old quarter-height calibration. Applied through the
+## spectrum alpha, so it scales every band and its derivatives together.
+@export_range(0.1, 2.0, 0.05) var amplitude_scale := 1.0
 @export_range(0.0, 5.0, 0.01) var height_gain := 1.0
 @export_range(0.0, 10.0, 0.01) var long_wave_height_m := 2.6
 @export_range(5.0, 200.0, 0.5) var long_wave_length_m := 48.0
@@ -55,6 +62,10 @@ func validate() -> String:
 		return "wind_speed_mps must be positive"
 	if fetch_km <= 0.0:
 		return "fetch_km must be positive"
+	if detail < 0.5 or detail > 1.0:
+		return "detail must be in 0.5..1"
+	if jonswap_gamma < 1.0 or jonswap_gamma > 7.0:
+		return "jonswap_gamma must be in 1..7"
 	if height_gain < 0.0:
 		return "height_gain cannot be negative"
 	if long_wave_height_m < 0.0 or mid_wave_height_m < 0.0 \
@@ -77,7 +88,10 @@ func apply_to(solver: OceanSolver) -> void:
 	solver.fetch_km = fetch_km
 	solver.swell = swell
 	solver.spread = spread
+	solver.detail = detail
+	solver.jonswap_gamma = jonswap_gamma
 	solver.choppiness = choppiness
+	solver.amplitude_scale = amplitude_scale
 	solver.height_gain = height_gain
 	solver.long_wave_height_m = long_wave_height_m
 	solver.long_wave_length_m = long_wave_length_m

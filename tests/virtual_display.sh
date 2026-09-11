@@ -114,7 +114,9 @@ physics_test_run_process() {
 	local status=0
 	shift 3
 
-	setsid "$@" >"$output_file" 2>&1 &
+	local data_dir
+	data_dir="$(mktemp -d "${output_file}.data.XXXXXX")" || return 1
+	XDG_DATA_HOME="$data_dir" setsid "$@" >"$output_file" 2>&1 &
 	process_pid=$!
 	trap 'if [[ -n "${process_pid:-}" ]]; then physics_test_process_stop "$process_pid"; fi; exit 130' INT TERM
 	deadline=$((SECONDS + timeout_seconds))

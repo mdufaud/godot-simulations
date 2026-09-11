@@ -36,13 +36,14 @@ var config: OceanConfig = OceanConfig.new()
 # cannot host Ultra — the menu shows "requested / active" then.
 var quality_requested: int = OceanQualityProfile.DEFAULT_TIER
 var quality_effective: int = OceanQualityProfile.DEFAULT_TIER
+var detail_distance_m: float = OceanQualityProfile.detail_distance_m(
+	OceanQualityProfile.DEFAULT_TIER)
 var surface_mat: ShaderMaterial
 var disp_texture: Texture2DArrayRD
 var norm_texture: Texture2DArrayRD
-var foam_texture_a: Texture2DArrayRD
-var foam_texture_b: Texture2DArrayRD
-var foam_near_texture_a: Texture2DRD
-var foam_near_texture_b: Texture2DRD
+var derivative_texture: Texture2DArrayRD
+var foam_near_texture_a: Texture2DArrayRD
+var foam_near_texture_b: Texture2DArrayRD
 var texture_bound := false
 var time_scale := 1.0
 var sun_elevation := 32.0
@@ -64,6 +65,7 @@ var _underwater := false
 var _crates: Array[OceanBuoy] = []
 var _rng := RandomNumberGenerator.new()
 var _capture_profiling := false
+var _capture_measurement := false
 var _capture_interaction_foam := true
 var _capture_debug_view := 0
 var _capture_fixed_delta := -1.0
@@ -83,9 +85,9 @@ var _camera_water_valid := false
 
 func _ready() -> void:
 	solver.config = config
-	quality_requested = GameManager.get_setting(
-		"ocean_quality_profile", OceanQualityProfile.DEFAULT_TIER)
-	_apply_quality_fields(quality_requested)
+	var stored_quality: int = int(GameManager.get_setting(
+		"ocean_quality_profile", OceanQualityProfile.DEFAULT_TIER))
+	_apply_quality_fields(stored_quality)
 	solver.map_size = OceanQualityProfile.FFT_SIZE[quality_effective]
 
 	orbit_cam.target = Vector3(0, 1.8, 0)
@@ -120,8 +122,9 @@ func _ready() -> void:
 	storm.build(self)
 	add_child(foam_window)
 	foam_window.build(surface_mat, main_camera, rocks)
+	foam_window.set_enabled(true)
 	add_child(spray)
-	set_backend(solver.backend)
+	spray.set_enabled(true)
 
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(func(on: bool):
@@ -148,21 +151,23 @@ func _process(delta: float) -> void:
 	if not texture_bound:
 		_bind_textures()
 		return
-	var foam_indices := solver.get_foam_read_indices()
-	surface_mat.set_shader_parameter("foam_history_indices", foam_indices)
-	spray.set_foam_indices(foam_indices)
 	var near_active := solver.foam_near_active()
+	surface_mat.set_shader_parameter("fft_surface", solver.wave_model == OceanSolver.WaveModel.FFT)
 	surface_mat.set_shader_parameter("foam_near_enabled", near_active)
 	if near_active:
-		surface_mat.set_shader_parameter("foam_near_index", float(solver.get_foam_near_read_index()))
-		surface_mat.set_shader_parameter("foam_near_center", solver.near_center)
+		var state := solver.foam_state()
+		surface_mat.set_shader_parameter("foam_near_index", float(state.index))
+		surface_mat.set_shader_parameter("foam_near_center", state.center)
+		surface_mat.set_shader_parameter("foam_domains", solver.foam_field_domains())
+		spray.set_foam_state(state.center, solver.foam_field_domains(), float(state.index))
 	var simulation_delta := _capture_fixed_delta if _capture_fixed_delta > 0.0 else delta
 	var step_scale := 0.0 if _frozen else time_scale
 	_sim_time += simulation_delta * step_scale
 	solver.sim_time = _sim_time
 
 	var cam := get_viewport().get_camera_3d()
-	storm.update(simulation_delta, cam)
+	if not _capture_measurement:
+		storm.update(simulation_delta, cam)
 
 	# World-space UVs anchor the wave field to the world. Continuous recentering
 	# avoids a whole clipmap lattice changing triangles on the same frame.
@@ -183,8 +188,10 @@ func _process(delta: float) -> void:
 			sin(solver.wind_direction)))
 		spray.update_state(p, storm.current_mood(), _sim_time)
 
-	if step_scale > 0.0:
-		RenderingServer.call_on_render_thread(solver.step_render.bind(simulation_delta * step_scale))
+	var refresh_requested := solver.take_render_refresh_request()
+	if step_scale > 0.0 or refresh_requested:
+		RenderingServer.call_on_render_thread(solver.step_render.bind(
+			simulation_delta * step_scale, _sim_time, solver.near_center))
 	profiler.poll(delta)
 	_collect_profile_sample()
 
@@ -250,11 +257,11 @@ func apply_preset(index: int) -> void:
 	# the unquantised values rather than whatever the sliders snapped to.
 	_menu_builder.sync_to_preset(preset)
 	preset.apply_to(solver)
+	solver.mark_spectrum_dirty()
 	current_preset_index = index
 	_sync_wave_filter_uniforms()
 	_sync_foam_material_strength()
 	set_spray_amount(preset.spray_amount)
-	solver.mark_spectrum_dirty()
 
 
 func _sync_foam_material_strength() -> void:
@@ -329,23 +336,29 @@ func set_capture_storm(value: float, lightning: bool = false) -> void:
 	storm.set_capture_rain(true)
 
 
-func set_backend(value: int) -> void:
-	solver.set_backend(value)
-	var styled := value == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT
-	surface_mat.set_shader_parameter("style_mode", 1 if styled else 0)
-	surface_mat.set_shader_parameter("micro_normal", load(
-		"res://resources/ocean/micro_normal_sot.png" if styled
-		else "res://resources/ocean/micro_normal.png"))
-	foam_window.set_enabled(styled and _capture_interaction_foam)
-	spray.set_enabled(styled)
-
-
 func set_spray_amount(value: float) -> void:
 	spray.amount = value
 
 
 func set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+func set_foam_distance(value: float) -> void:
+	solver.set_foam_distance(value)
+	if surface_mat != null:
+		surface_mat.set_shader_parameter("foam_domains", solver.foam_field_domains())
+
+
+func set_detail_distance(value: float) -> void:
+	detail_distance_m = clampf(value, 250.0, 4000.0)
+	if surface_mat != null:
+		surface_mat.set_shader_parameter("detail_distance_m", detail_distance_m)
+
+
+func set_capture_height_gain(value: float) -> void:
+	solver.height_gain = value
+	solver.mark_spectrum_dirty()
 
 
 func set_capture_view(view: String) -> void:
@@ -375,6 +388,16 @@ func set_capture_view(view: String) -> void:
 			orbit_cam.distance = 13.0
 			orbit_cam.pitch = -18.0
 			orbit_cam.yaw = 22.0
+		"foam_aerial":
+			# Oblique aerial framing: high enough to read the foam field over
+			# hundreds of metres, pitched so the big storm swells keep their
+			# shaded relief; yaw puts the sun cross-wise so crests and trails
+			# separate.
+			_capture_view_name = "foam_aerial"
+			orbit_cam.target = Vector3(0.0, 1.0, 0.0)
+			orbit_cam.distance = 100.0
+			orbit_cam.pitch = -55.0
+			orbit_cam.yaw = 90.0
 		"low_crest", "crest":
 			_capture_view_name = "low_crest"
 			orbit_cam.target = Vector3(0.0, 2.8, 0.0)
@@ -430,13 +453,19 @@ func set_capture_fixed_delta(value: float) -> void:
 ## time keeps flowing from the capture time; nothing renders in between. Steps
 ## are flushed to the render thread in batches so every step completes before
 ## the await returns.
+func move_capture_camera(offset: Vector3) -> void:
+	orbit_cam.target += offset
+	orbit_cam._update_transform()
+
+
 func warmup_foam(seconds: float) -> void:
-	var steps := int(ceil(seconds / 0.06))
+	var steps := maxi(1, int(ceil(seconds * 60.0)))
+	var step_delta := maxf(seconds, 0.0) / float(steps)
 	for i in steps:
-		_sim_time += 0.06
+		_sim_time += step_delta
 		solver.sim_time = _sim_time
-		RenderingServer.call_on_render_thread(solver.step_render.bind(0.06))
-		if i % 60 == 59:
+		RenderingServer.call_on_render_thread(solver.step_render.bind(step_delta, _sim_time, solver.near_center))
+		if i % 4 == 3:
 			await RenderingServer.frame_post_draw
 	# Let the last foam state land in the read texture before any capture.
 	await RenderingServer.frame_post_draw
@@ -448,7 +477,7 @@ func set_capture_wind_direction(value: float) -> void:
 
 
 func set_capture_debug(value: int) -> void:
-	_capture_debug_view = clampi(value, 0, 7)
+	_capture_debug_view = clampi(value, 0, 8)
 	if surface_mat != null:
 		surface_mat.set_shader_parameter("debug_view", _capture_debug_view)
 
@@ -473,28 +502,38 @@ func set_sun_azimuth(value: float) -> void:
 ## PERFORMANCE when the requested one does not fit the GPU (the menu reports
 ## "requested / active"; never a silent fallback).
 func _apply_quality_fields(requested: int) -> void:
-	quality_requested = requested
-	quality_effective = OceanQualityProfile.effective_tier(requested)
-	if quality_effective != requested:
+	quality_requested = clampi(requested, 0, OceanQualityProfile.TIER_NAMES.size() - 1)
+	quality_effective = OceanQualityProfile.effective_tier(quality_requested)
+	if quality_effective != quality_requested:
 		push_warning("Ocean quality: %s requested / %s active (GPU 2D texture limit %d)" % [
-			OceanQualityProfile.tier_name(requested),
+			OceanQualityProfile.tier_name(quality_requested),
 			OceanQualityProfile.tier_name(quality_effective),
 			OceanQualityProfile.max_texture_dimension()])
 	solver.amortize = OceanQualityProfile.AMORTIZE[quality_effective]
+	solver.short_cascade_half_rate = OceanQualityProfile.SHORT_CASCADE_HALF_RATE[quality_effective]
 	solver.foam_near_stride = OceanQualityProfile.FOAM_NEAR_STRIDE[quality_effective]
 	solver.foam_near_size = OceanQualityProfile.FOAM_NEAR_SIZE[quality_effective]
+	var foam_distance := OceanQualityProfile.foam_near_distance(quality_effective)
+	if _menu_builder.sync_foam_distance(foam_distance):
+		solver.set_foam_distance(foam_distance)
+	var detail_distance := OceanQualityProfile.detail_distance_m(quality_effective)
+	if _menu_builder.sync_detail_distance(detail_distance):
+		set_detail_distance(detail_distance)
 	solver.quality_tier = quality_effective
+	_menu_builder.sync_foam_layout()
 
 
 ## Profile switch: recreate every GPU resource cleanly (foam history cleared,
 ## preset/wind/simulation time kept) with the new tier's sizes.
 func set_quality_profile(tier: int) -> void:
-	if tier == quality_requested and solver.map_size \
+	var normalized_tier: int = clampi(tier, 0, OceanQualityProfile.TIER_NAMES.size() - 1)
+	if normalized_tier == quality_requested and solver.map_size \
 			== OceanQualityProfile.FFT_SIZE[quality_effective]:
 		return
-	_apply_quality_fields(tier)
-	GameManager.set_setting("ocean_quality_profile", tier)
+	_apply_quality_fields(normalized_tier)
+	GameManager.set_setting("ocean_quality_profile", normalized_tier)
 	_release_textures()
+	solver.initialized = false
 	RenderingServer.call_on_render_thread(solver.free_render)
 	solver.map_size = OceanQualityProfile.FFT_SIZE[quality_effective]
 	RenderingServer.call_on_render_thread(solver.init_render)
@@ -545,18 +584,14 @@ func _setup_ocean_mesh() -> void:
 	)
 	surface_mat = ShaderMaterial.new()
 	surface_mat.shader = load("res://shaders/ocean/ocean_surface.gdshader")
-	var scales := PackedVector4Array()
-	for i in solver.num_cascades():
-		var inv := 1.0 / solver.tile_lengths[i]
-		scales.append(Vector4(inv, inv, 1.0, 1.0))
-	surface_mat.set_shader_parameter("map_scales", scales)
+	_sync_ocean_scales()
 	surface_mat.set_shader_parameter("num_cascades", solver.num_cascades())
-	surface_mat.set_shader_parameter("num_foam_cascades", solver.foam_cascade_count)
 	_sync_foam_textures()
 	surface_mat.set_shader_parameter("clipmap_cell", config.finest_cell_m)
 	surface_mat.set_shader_parameter("clipmap_half_extent",
 		config.finest_cell_m * OceanClipmap.GRID * 0.5)
 	surface_mat.set_shader_parameter("clipmap_ring_levels", float(config.clipmap_levels))
+	surface_mat.set_shader_parameter("detail_distance_m", detail_distance_m)
 	_sync_wave_filter_uniforms()
 	surface_mat.set_shader_parameter("geometry_cascade", -1)
 	surface_mat.set_shader_parameter("sun_direction", sun.global_transform.basis.z.normalized())
@@ -565,23 +600,32 @@ func _setup_ocean_mesh() -> void:
 	ocean_mesh.material_override = surface_mat
 
 
+func _sync_ocean_scales() -> void:
+	var scales := PackedVector4Array()
+	for i in solver.num_cascades():
+		var inv := 1.0 / solver.tile_lengths[i]
+		scales.append(Vector4(inv, inv, 1.0, 1.0))
+	surface_mat.set_shader_parameter("map_scales", scales)
+
+
 func _sync_foam_textures() -> void:
 	if surface_mat == null:
 		return
 	surface_mat.set_shader_parameter("foam_detail", load(
 		"res://resources/ocean/foam_detail.png"))
+	surface_mat.set_shader_parameter("micro_normal", load(
+		"res://resources/ocean/micro_normal.png"))
 
 
 func _sync_wave_filter_uniforms() -> void:
 	if surface_mat == null:
 		return
-	var middle_wavelength := solver.wind_wave_length_m
-	var short_wavelength := 0.72
-	if solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT:
-		middle_wavelength = solver.mid_wave_length_m
-		short_wavelength = TAU
+	var references := solver.spectral_references()
+	_menu_builder.sync_foam_layout()
 	surface_mat.set_shader_parameter("cascade_wavelengths", Vector3(
-		solver.long_wave_length_m, middle_wavelength, short_wavelength))
+		references[0].wavelength_m, references[1].wavelength_m, references[2].wavelength_m))
+	surface_mat.set_shader_parameter("cascade_slope_variance", Vector3(
+		references[0].slope_variance, references[1].slope_variance, references[2].slope_variance))
 
 
 func _setup_ui() -> void:
@@ -625,28 +669,24 @@ func _bind_textures() -> void:
 	disp_texture.texture_rd_rid = solver.get_displacement_tex_rid()
 	norm_texture = Texture2DArrayRD.new()
 	norm_texture.texture_rd_rid = solver.get_normal_tex_rid()
-	foam_texture_a = Texture2DArrayRD.new()
-	foam_texture_a.texture_rd_rid = solver.get_foam_tex_rid(0)
-	foam_texture_b = Texture2DArrayRD.new()
-	foam_texture_b.texture_rd_rid = solver.get_foam_tex_rid(1)
+	derivative_texture = Texture2DArrayRD.new()
+	derivative_texture.texture_rd_rid = solver.get_derivative_tex_rid()
 	surface_mat.set_shader_parameter("displacements", disp_texture)
 	surface_mat.set_shader_parameter("normals", norm_texture)
-	surface_mat.set_shader_parameter("foam_history_a", foam_texture_a)
-	surface_mat.set_shader_parameter("foam_history_b", foam_texture_b)
-	surface_mat.set_shader_parameter("foam_history_indices", solver.get_foam_read_indices())
+	surface_mat.set_shader_parameter("derivatives", derivative_texture)
 	# Near textures bind unconditionally: foam_near_enabled is refreshed per
 	# frame from foam_near_active(), and a preset switch must never enable
 	# blending onto unbound (default-white) samplers.
-	foam_near_texture_a = Texture2DRD.new()
+	foam_near_texture_a = Texture2DArrayRD.new()
 	foam_near_texture_a.texture_rd_rid = solver.get_foam_near_tex_rid(0)
-	foam_near_texture_b = Texture2DRD.new()
+	foam_near_texture_b = Texture2DArrayRD.new()
 	foam_near_texture_b.texture_rd_rid = solver.get_foam_near_tex_rid(1)
 	surface_mat.set_shader_parameter("foam_near_a", foam_near_texture_a)
 	surface_mat.set_shader_parameter("foam_near_b", foam_near_texture_b)
-	surface_mat.set_shader_parameter("foam_near_domain", solver.foam_near_domain)
+	surface_mat.set_shader_parameter("foam_domains", solver.foam_field_domains())
 	foam_window.bind_ocean(disp_texture, solver.tile_lengths)
-	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera,
-		foam_texture_a, foam_texture_b, solver.get_foam_read_indices())
+	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera)
+	spray.bind_foam_fields(foam_near_texture_a, foam_near_texture_b)
 	spray.set_sun_direction(sun.global_transform.basis.z.normalized())
 	texture_bound = true
 
@@ -659,10 +699,8 @@ func _release_textures() -> void:
 		disp_texture.texture_rd_rid = RID()
 	if norm_texture != null:
 		norm_texture.texture_rd_rid = RID()
-	if foam_texture_a != null:
-		foam_texture_a.texture_rd_rid = RID()
-	if foam_texture_b != null:
-		foam_texture_b.texture_rd_rid = RID()
+	if derivative_texture != null:
+		derivative_texture.texture_rd_rid = RID()
 	if foam_near_texture_a != null:
 		foam_near_texture_a.texture_rd_rid = RID()
 	if foam_near_texture_b != null:
@@ -676,9 +714,7 @@ func _release_textures() -> void:
 func _profiler_lines() -> PackedStringArray:
 	var t := solver.get_timings()
 	var backend_name := "Tutorial Gerstner" \
-		if solver.wave_model == OceanSolver.WaveModel.TUTORIAL_GERSTNER \
-		else ("JONSWAP/TMA" if solver.backend == OceanSolver.Backend.JONSWAP_TMA \
-			else "Art-directed FFT")
+		if solver.wave_model == OceanSolver.WaveModel.TUTORIAL_GERSTNER else "JONSWAP/TMA"
 	var lines := PackedStringArray(["backend %s | profile %s | VRAM ~%.0f MB" % [
 		backend_name, quality_profile_label(),
 		solver.estimate_vram_bytes() / 1048576.0]])
@@ -713,7 +749,8 @@ func capture_metadata(path: String) -> String:
 		timings.get("total", 0.0))
 	var simulation_gpu_p95 := _percentile(_profile_simulation_samples, 0.95,
 		timings.get("total", 0.0))
-	var foam_gpu := _median(_profile_foam_samples, timings.get("foam", 0.0))
+	var foam_gpu := _median(_profile_foam_samples,
+		timings.get("foam", 0.0) + timings.get("foam_near", 0.0))
 	var foam_gpu_p95 := _percentile(_profile_foam_samples, 0.95, foam_gpu)
 	var interaction_capture_gpu := _median(_profile_interaction_capture_samples,
 		foam_window.get_capture_gpu_time())
@@ -726,9 +763,7 @@ func capture_metadata(path: String) -> String:
 	var viewport_gpu_p95 := _percentile(_profile_viewport_samples, 0.95, viewport_gpu)
 	var cloud_coverage := cloudscape.capture_alpha_coverage()
 	var backend_name := "Tutorial Gerstner" \
-		if solver.wave_model == OceanSolver.WaveModel.TUTORIAL_GERSTNER \
-		else ("JONSWAP/TMA" if solver.backend == OceanSolver.Backend.JONSWAP_TMA \
-			else "Art-directed FFT")
+		if solver.wave_model == OceanSolver.WaveModel.TUTORIAL_GERSTNER else "JONSWAP/TMA"
 	return "CAPTURE META backend=%s profile=%s vram_mb=%.1f look=%s preset=%s view=%s frame=%d time=%.6f fixed_dt=%.6f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f camera=%s water=%.3f sim_gpu=%.3f sim_gpu_p95=%.3f foam_gpu=%.3f foam_gpu_p95=%.3f foam_near_gpu=%.3f query_gpu=%.3f interaction_capture_gpu=%.3f interaction_feedback_gpu=%.3f cloud_gpu=%.3f cloud_gpu_p95=%.3f viewport_gpu=%.3f viewport_gpu_p95=%.3f cloud_cov=%.4f path=%s" % [
 		backend_name, quality_profile_label(),
 		solver.estimate_vram_bytes() / 1048576.0,
@@ -744,122 +779,140 @@ func capture_metadata(path: String) -> String:
 
 
 func capture_metadata_async(path: String) -> String:
-	# Texture readback may take several frames. Do not keep appending GPU timestamp
-	# queries while waiting: RenderingDevice has a finite per-frame timestamp ring.
-	# Preserve the capture profiler state and restore it after both readbacks.
+	await RenderingServer.frame_post_draw
 	var profiling_was_enabled := solver.profiling
 	var capture_profiling_was_enabled := _capture_profiling
-	if profiling_was_enabled:
-		solver.profiling = false
+	solver.profiling = false
 	_capture_profiling = false
-	var visibility := _capture_foam_visibility()
-	var foam_strength := clampf(0.25 + solver.foam_amount * 0.13, 0.25, 1.0)
-	var layer_metrics: Array[Dictionary] = []
-	for cascade in solver.num_cascades():
-		var normal: PackedByteArray = await _capture_readback(
-			solver.get_normal_tex_rid(), cascade)
-		var foam: PackedByteArray = await _capture_readback(
-			solver.get_foam_read_tex_rid(cascade), cascade)
-		layer_metrics.append(_capture_texture_metrics(normal, foam,
-			visibility[cascade], foam_strength))
-	if profiling_was_enabled:
-		solver.profiling = true
+	var state := solver.foam_state()
+	var fields: Array[Dictionary] = []
+	for layer in 3:
+		var data := await _capture_readback(solver.get_foam_near_read_tex_rid(), layer)
+		var expected := 0
+		var size := solver.foam_near_size
+		while size > 0:
+			expected += size * size * 8
+			size /= 2
+		if data.size() != expected:
+			_restore_capture_profile_state(profiling_was_enabled,
+				capture_profiling_was_enabled)
+			_capture_fail("foam field %d has %d bytes, expected %d" % [layer, data.size(), expected])
+			return "CAPTURE FAIL incomplete foam readback"
+		var values := data.slice(0, solver.foam_near_size * solver.foam_near_size * 8).to_float32_array()
+		var persistent := 0.0
+		var fresh := 0.0
+		var covered := 0
+		var maximum := 0.0
+		for i in range(0, values.size(), 2):
+			if not is_finite(values[i]) or not is_finite(values[i + 1]):
+				_restore_capture_profile_state(profiling_was_enabled,
+					capture_profiling_was_enabled)
+				_capture_fail("non-finite foam field %d" % layer)
+				return "CAPTURE FAIL non-finite foam"
+			persistent += values[i]
+			fresh += values[i + 1]
+			maximum = maxf(maximum, maxf(values[i], values[i + 1]))
+			if maxf(values[i], values[i + 1]) > OceanConfig.MEASURE_FOAM_THRESHOLD:
+				covered += 1
+		var count := values.size() / 2
+		fields.append({"layer": layer, "domain_m": solver.foam_field_domains()[layer],
+			"texel_m": solver.foam_field_domains()[layer] / solver.foam_near_size,
+			"persistent_mean": persistent / count, "fresh_mean": fresh / count,
+			"coverage": float(covered) / count, "maximum": maximum})
+	var rings := await _capture_foam_rings()
+	var waves := await _capture_wave_metrics()
+	_restore_capture_profile_state(profiling_was_enabled, capture_profiling_was_enabled)
+	print("CAPTURE FOAM_FIELDS %s" % JSON.stringify(fields))
+	print("CAPTURE FOAM_PIXELS %s" % JSON.stringify(rings))
+	print("CAPTURE WAVES %s" % JSON.stringify(waves))
+	return "%s state_time=%.6f state_step=%d seed=1000,31337 measure_version=%d" % [
+		capture_metadata(path), state.time, state.step, OceanConfig.MEASURE_VERSION]
+
+
+func _capture_wave_metrics() -> Dictionary:
+	var displacement: Array[PackedFloat32Array] = []
+	var derivative: Array[PackedFloat32Array] = []
+	for layer in 3:
+		for kind in 2:
+			var rid := solver.get_displacement_tex_rid() if kind == 0 else solver.get_derivative_tex_rid()
+			var data := await _capture_readback(rid, layer)
+			if data.size() != solver.map_size * solver.map_size * 8:
+				_capture_fail("incomplete wave field readback")
+				return {}
+			var image := Image.create_from_data(solver.map_size, solver.map_size, false, Image.FORMAT_RGBAH, data)
+			image.convert(Image.FORMAT_RGBAF)
+			if kind == 0:
+				displacement.append(image.get_data().to_float32_array())
+			else:
+				derivative.append(image.get_data().to_float32_array())
+	var metrics: Dictionary = preload("res://scripts/ocean/ocean_capture_metrics.gd").measure(
+		displacement, derivative, solver.map_size, solver.tile_lengths, clampf(solver.whitecap, 0.05, 0.95))
+	metrics["spectral_references"] = solver.spectral_references()
+	if metrics.has("error"):
+		_capture_fail(metrics.error)
+	return metrics
+
+
+func _restore_capture_profile_state(profiling_was_enabled: bool,
+		capture_profiling_was_enabled: bool) -> void:
+	solver.profiling = profiling_was_enabled
 	_capture_profiling = capture_profiling_was_enabled
-	var crest_layers := PackedFloat32Array()
-	var breaking_layers := PackedFloat32Array()
-	var foam_layers := PackedFloat32Array()
-	var fresh_layers := PackedFloat32Array()
-	var visible_layers := PackedFloat32Array()
-	var breaking_visible_layers := PackedFloat32Array()
-	for metrics in layer_metrics:
-		crest_layers.append(metrics.crest_coverage)
-		breaking_layers.append(metrics.breaking_coverage)
-		foam_layers.append(metrics.foam_coverage)
-		fresh_layers.append(metrics.fresh_coverage)
-		visible_layers.append(metrics.foam_cov_visible)
-		breaking_visible_layers.append(metrics.breaking_cov_visible)
-	var rendered := _rendered_layer_metrics(layer_metrics)
-	return "%s crest_cov_layers=%s breaking_cov_layers=%s foam_cov_layers=%s fresh_cov_layers=%s foam_visible_layers=%s crest_cov=%.4f breaking_cov=%.4f foam_cov=%.4f foam_mean=%.4f fresh_mean=%.4f foam_cov_visible=%.4f breaking_cov_visible=%.4f measure_version=%d" % [
-		capture_metadata(path), crest_layers, breaking_layers, foam_layers,
-		fresh_layers, visible_layers, rendered.crest_coverage,
-		rendered.breaking_coverage, rendered.foam_coverage, rendered.foam_mean,
-		rendered.fresh_mean, _max_over_layers(visible_layers),
-		_max_over_layers(breaking_visible_layers), OceanConfig.MEASURE_VERSION]
 
 
-## Per-cascade foam visibility as the surface shader computes it (fix plan 0.1):
-## cascade_fade * detail_filter * layer weight, plus the distance fade applied
-## to the final foam factor. Camera-dependent, so this is the capture camera's
-## distance to the water plane and its pixel footprint at that distance.
-func _capture_foam_visibility() -> Array[float]:
-	var cam := get_viewport().get_camera_3d()
-	var position := cam.global_position if cam != null else Vector3.ZERO
-	var dist := maxf(position.y, 1.0)
-	var fov := 65.0
-	if cam != null:
-		fov = cam.fov
-	var viewport_height := maxf(get_viewport().get_visible_rect().size.y, 1.0)
-	var pixel_world := 2.0 * dist * tan(deg_to_rad(fov) * 0.5) / viewport_height
-	var wavelengths := _cascade_wavelengths()
-	var visibilities: Array[float] = []
-	for cascade in solver.num_cascades():
-		var tile := solver.tile_lengths[cascade]
-		var cascade_fade := exp(-dist * 0.32 / tile)
-		var wavelength := wavelengths[cascade]
-		var detail_filter := 1.0 - smoothstep(wavelength * 0.22, wavelength * 0.55,
-			pixel_world)
-		var layer_weight := 0.85 if cascade == 0 else 1.0
-		visibilities.append(cascade_fade * detail_filter * layer_weight
-			* exp(-dist * 0.0012))
-	return visibilities
+func _capture_foam_rings() -> Array[Dictionary]:
+	var old_debug := _capture_debug_view
+	var original := world_env.environment
+	var measurement: Environment = original.duplicate()
+	measurement.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+	measurement.tonemap_exposure = 1.0
+	measurement.glow_enabled = false
+	measurement.adjustment_enabled = false
+	measurement.fog_enabled = false
+	measurement.volumetric_fog_enabled = false
+	measurement.background_mode = Environment.BG_COLOR
+	measurement.background_color = Color.BLACK
+	world_env.environment = measurement
+	_capture_measurement = true
+	var tint_visible := underwater_tint.visible
+	underwater_tint.hide()
+	set_capture_debug(8)
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	var image := get_viewport().get_texture().get_image()
+	var rings: Array[Dictionary] = []
+	var edges := [0.0, 50.0, 150.0, 500.0, 1500.0]
+	for i in 4:
+		rings.append({"from_m": edges[i], "to_m": edges[i + 1], "pixels": 0,
+			"coverage_sum": 0.0, "active_pixels": 0})
+	for y in image.get_height():
+		for x in image.get_width():
+			var pixel := image.get_pixel(x, y).srgb_to_linear()
+			if pixel.b < 0.98:
+				continue
+			var distance := pixel.g * 2000.0
+			for ring in rings:
+				if distance >= ring.from_m and distance < ring.to_m:
+					ring.pixels += 1
+					ring.coverage_sum += pixel.r
+					if pixel.r > OceanConfig.MEASURE_FOAM_THRESHOLD:
+						ring.active_pixels += 1
+					break
+	for ring in rings:
+		ring["mean_coverage"] = ring.coverage_sum / ring.pixels if ring.pixels > 0 else -1.0
+		ring["active_fraction"] = float(ring.active_pixels) / ring.pixels if ring.pixels > 0 else -1.0
+		ring.erase("coverage_sum")
+	world_env.environment = original
+	_capture_measurement = false
+	underwater_tint.visible = tint_visible
+	set_capture_debug(old_debug)
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	return rings
 
 
-## Same wavelengths as _sync_wave_filter_uniforms pushes to the material.
-func _cascade_wavelengths() -> Array[float]:
-	var middle := solver.wind_wave_length_m
-	var short := 0.72
-	if solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT:
-		middle = solver.mid_wave_length_m
-		short = TAU
-	return [solver.long_wave_length_m, middle, short]
-
-
-## The surface material reads max() over the simulated cascades with per-layer
-## weights (0.85 for the long cascade) — not layer 1 alone (fix plan P0-A.3).
-func _rendered_layer_metrics(layer_metrics: Array[Dictionary]) -> Dictionary:
-	var simulated := mini(solver.foam_cascade_count, layer_metrics.size())
-	var rendered := layer_metrics[0].duplicate()
-	var crest := 0.0
-	var breaking := 0.0
-	var foam := 0.0
-	var foam_mean := 0.0
-	var fresh_mean := 0.0
-	var fresh := 0.0
-	for i in layer_metrics.size():
-		var metrics := layer_metrics[i]
-		crest = maxf(crest, metrics.crest_coverage)
-		breaking = maxf(breaking, metrics.breaking_coverage)
-		if i >= simulated:
-			continue
-		var weight := 0.85 if i == 0 else 1.0
-		foam = maxf(foam, metrics.foam_coverage * weight)
-		foam_mean = maxf(foam_mean, metrics.foam_mean * weight)
-		fresh = maxf(fresh, metrics.fresh_coverage * weight)
-		fresh_mean = maxf(fresh_mean, metrics.fresh_mean * weight)
-	rendered.crest_coverage = crest
-	rendered.breaking_coverage = breaking
-	rendered.foam_coverage = foam
-	rendered.foam_mean = foam_mean
-	rendered.fresh_coverage = fresh
-	rendered.fresh_mean = fresh_mean
-	return rendered
-
-
-func _max_over_layers(values: PackedFloat32Array) -> float:
-	var best := 0.0
-	for value in values:
-		best = maxf(best, value)
-	return best
+func _capture_fail(message: String) -> void:
+	push_error("CAPTURE FAIL: " + message)
+	get_tree().quit(1)
 
 
 func capture_image_metrics(image: Image) -> String:
@@ -976,86 +1029,18 @@ func _capture_readback(rid: RID, layer: int) -> PackedByteArray:
 			call_deferred("_store_capture_readback", state, data)
 		)
 	)
-	for frame in 360:
+	var deadline := Time.get_ticks_msec() + 15000
+	while Time.get_ticks_msec() < deadline:
 		await get_tree().process_frame
 		if state.done:
 			return state.data
-	push_warning("Ocean capture: texture readback timed out; metrics will be zeros")
+	_capture_fail("GPU readback timed out")
 	return PackedByteArray()
 
 
 func _store_capture_readback(state: Dictionary, data: PackedByteArray) -> void:
 	state.data = data
 	state.done = true
-
-
-## Raw texel counts use the shared MEASURE_* thresholds (fix plan 0.7). The
-## *_cov_visible fields re-apply the surface shader's coverage scaling. The
-## detailed pattern threshold lives only in the shader, so coverage is an upper
-## bound.
-func _capture_texture_metrics(normal: PackedByteArray, foam: PackedByteArray,
-		foam_visibility: float, foam_strength: float) -> Dictionary:
-	var crest_active := 0
-	var breaking_active := 0
-	var breaking_visible_active := 0
-	var normal_count := 0
-	for i in normal.size() / 8:
-		var crest := _capture_half(normal.decode_u16(i * 8 + 4))
-		var breaking := _capture_half(normal.decode_u16(i * 8 + 6))
-		if crest > OceanConfig.MEASURE_CREST_THRESHOLD:
-			crest_active += 1
-		if breaking > OceanConfig.MEASURE_BREAKING_THRESHOLD:
-			breaking_active += 1
-		if breaking * foam_visibility > OceanConfig.MEASURE_BREAKING_THRESHOLD:
-			breaking_visible_active += 1
-		normal_count += 1
-	var foam_sum := 0.0
-	var fresh_sum := 0.0
-	var foam_active := 0
-	var fresh_active := 0
-	var foam_visible_active := 0
-	var foam_count := 0
-	for i in foam.size() / 4:
-		var persistent := _capture_half(foam.decode_u16(i * 4))
-		var fresh := _capture_half(foam.decode_u16(i * 4 + 2))
-		foam_sum += persistent
-		fresh_sum += fresh
-		if persistent > OceanConfig.MEASURE_FOAM_THRESHOLD:
-			foam_active += 1
-		if fresh > OceanConfig.MEASURE_FRESH_THRESHOLD:
-			fresh_active += 1
-		var composed := _composed_screen_foam(persistent, fresh, foam_strength)
-		if composed * foam_visibility > OceanConfig.MEASURE_FOAM_THRESHOLD:
-			foam_visible_active += 1
-		foam_count += 1
-	return {
-		"crest_coverage": float(crest_active) / maxf(float(normal_count), 1.0),
-		"breaking_coverage": float(breaking_active) / maxf(float(normal_count), 1.0),
-		"foam_coverage": float(foam_active) / maxf(float(foam_count), 1.0),
-		"fresh_coverage": float(fresh_active) / maxf(float(foam_count), 1.0),
-		"foam_cov_visible": float(foam_visible_active) / maxf(float(foam_count), 1.0),
-		"breaking_cov_visible": float(breaking_visible_active)
-			/ maxf(float(normal_count), 1.0),
-		"foam_mean": foam_sum / maxf(float(foam_count), 1.0),
-		"fresh_mean": fresh_sum / maxf(float(foam_count), 1.0),
-	}
-
-
-## ocean_surface.gdshader's foam coverage before the detailed pattern threshold.
-func _composed_screen_foam(persistent: float, _fresh: float,
-		foam_strength: float) -> float:
-	return clampf(persistent * foam_strength, 0.0, 1.0)
-
-
-func _capture_half(bits: int) -> float:
-	var exponent := (bits >> 10) & 0x1f
-	if exponent == 31:
-		return 0.0
-	var sign := -1.0 if bits & 0x8000 else 1.0
-	var mantissa := bits & 0x3ff
-	if exponent == 0:
-		return sign * mantissa * pow(2.0, -24.0)
-	return sign * (1.0 + mantissa / 1024.0) * pow(2.0, exponent - 15)
 
 
 func capture_ready() -> bool:
@@ -1078,8 +1063,7 @@ func set_capture_profiling(on: bool) -> void:
 
 func set_capture_foam(enabled: bool) -> void:
 	solver.foam_feedback_enabled = enabled
-	foam_window.set_enabled(enabled and _capture_interaction_foam
-		and solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
+	foam_window.set_enabled(enabled and _capture_interaction_foam)
 	if surface_mat != null:
 		surface_mat.set_shader_parameter("foam_feedback_enabled", enabled)
 
@@ -1103,8 +1087,7 @@ func set_capture_reflection(enabled: bool) -> void:
 
 func set_capture_interaction(enabled: bool) -> void:
 	_capture_interaction_foam = enabled
-	foam_window.set_enabled(enabled
-		and solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
+	foam_window.set_enabled(enabled)
 
 
 func set_render_features(on: bool) -> void:
@@ -1128,14 +1111,15 @@ func set_capture_rain(enabled: bool) -> void:
 
 
 func set_capture_spray(enabled: bool) -> void:
-	spray.set_enabled(enabled and solver.backend == OceanSolver.Backend.SEA_OF_THIEVES_INSPIRED_FFT)
+	spray.set_enabled(enabled)
 
 
 func _collect_profile_sample() -> void:
 	if not _capture_profiling:
 		return
 	var simulation: float = solver.get_timings().get("total", 0.0)
-	var foam: float = solver.get_timings().get("foam", 0.0)
+	var foam: float = solver.get_timings().get("foam", 0.0) \
+		+ solver.get_timings().get("foam_near", 0.0)
 	var viewport := RenderingServer.viewport_get_measured_render_time_gpu(
 		get_viewport().get_viewport_rid())
 	if simulation > 0.0 and viewport > 0.0:
