@@ -215,7 +215,7 @@ class RecordingSink:
 	var option: OptionButton
 	var toggle: CheckButton
 	var last_slider_value := -1.0
-	var last_option_index := -1
+	var last_option_value := -1
 	var last_toggle_state := false
 
 	func _init() -> void:
@@ -292,14 +292,14 @@ func _test_widget_pushes() -> void:
 	sink.slider.value_changed.connect(
 		func(value: float) -> void: sink.last_slider_value = value)
 	sink.option.item_selected.connect(
-		func(index: int) -> void: sink.last_option_index = index)
+		func(index: int) -> void: sink.last_option_value = index)
 	sink.toggle.toggled.connect(
 		func(pressed: bool) -> void: sink.last_toggle_state = pressed)
 
 	state.bind("strength", sink.slider,
 		func(value: float) -> void: sink.last_slider_value = value)
 	state.bind("count", sink.option,
-		func(index: int) -> void: sink.last_option_index = index,
+		func(count: int) -> void: sink.last_option_value = count,
 		func(count: float) -> int: return int(count / 16.0) - 1)
 	state.bind("enabled", sink.toggle,
 		func(pressed: bool) -> void: sink.last_toggle_state = pressed)
@@ -308,8 +308,8 @@ func _test_widget_pushes() -> void:
 	state.set_tier(SimQualityProfile.Tier.ULTRA)  # degrades to HIGH
 	_check(sink.slider.value == 3.0,
 		"tier switch moves the bound slider to the tier value")
-	_check(sink.option.selected == 2 and sink.last_option_index == 2,
-		"to_index translates tier values into option indices")
+	_check(sink.option.selected == 2 and sink.last_option_value == 48,
+		"to_index selects the item and the callback receives the raw tier value")
 	_check(sink.toggle.button_pressed == false and sink.last_toggle_state == false,
 		"tier switch flips the bound toggle without a signal loop")
 

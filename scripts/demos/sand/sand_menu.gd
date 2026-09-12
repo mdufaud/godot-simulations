@@ -6,8 +6,8 @@ var solver: HeightfieldSand
 var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
 ## provide apply_preset, restart, select_tool, set_auto_pour, set_strength,
-## set_brush_size, set_repose, set_grid_n, set_render_scale and expose the
-## SimQualityState named quality.
+## set_brush_size, set_repose, set_grid_n, set_mesh_n, set_render_scale and
+## expose the SimQualityState named quality.
 var host: Node
 
 var _status: Label
@@ -68,6 +68,14 @@ func build(menu: SimMenu, presets: Array, preset_idx: int, tool_choice: int,
 		func(idx: int): host.set_grid_n(SandQualityProfile.GRID_SIZES[idx]))
 	host.quality.bind("grid_n", grid_option, host.set_grid_n,
 		func(n: int) -> int: return SandQualityProfile.GRID_SIZES.find(n))
+	var mesh_labels: Array = []
+	for n in SandQualityProfile.MESH_SIZES:
+		mesh_labels.append("%d²" % n)
+	var mesh_option := menu.add_option_button("Visual mesh", mesh_labels,
+		SandQualityProfile.MESH_SIZES.find(host.mesh_n),
+		func(idx: int): host.set_mesh_n(SandQualityProfile.MESH_SIZES[idx]))
+	host.quality.bind("mesh_n", mesh_option, host.set_mesh_n,
+		func(n: int) -> int: return SandQualityProfile.MESH_SIZES.find(n))
 	host.quality.attach_menu_option(menu)
 	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
 		host.render_scale(), host.set_render_scale)

@@ -166,6 +166,14 @@ func set_grid_n(n: int) -> void:
 	restart()
 
 
+func set_mesh_n(n: int) -> void:
+	if n == mesh_n:
+		return
+	mesh_n = n
+	if view.terrain != null:
+		view.rebuild_terrain(mesh_n)
+
+
 func set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
 
@@ -186,12 +194,7 @@ func _apply_quality(values: Dictionary) -> void:
 		set_grid_n(int(values.grid_n))
 	else:
 		solver.grid_n = int(values.grid_n)
-	var sheet_n := int(values.mesh_n)
-	if view.terrain != null and sheet_n != mesh_n:
-		mesh_n = sheet_n
-		view.rebuild_terrain(mesh_n)
-	else:
-		mesh_n = sheet_n
+	set_mesh_n(int(values.mesh_n))
 
 
 func _unhandled_input(event: InputEvent) -> void:

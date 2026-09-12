@@ -113,15 +113,17 @@ func _set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
 
 
-## The layer counts scale around the active preset's base; a tier switch after
-## the menu exists re-fires the synced sliders, so this only handles the launch
-## path — self_shadow and render_scale are widget-bound by then.
+## The layer counts scale around the active preset's base. render_scale and
+## self_shadow are widget-bound — absent from values on a tier push (the
+## widget callbacks already applied them), so they fall back to the live
+## values.
 func _apply_quality(values: Dictionary) -> void:
-	_set_render_scale(values.render_scale)
+	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 	_settings.min_layer_count = clampi(
 		int(round(_base_min_layers * values.min_factor)), 4, 128)
 	_settings.max_layer_count = clampi(
 		int(round(_base_max_layers * values.max_factor)),
 		_settings.min_layer_count, 128)
-	_settings.self_shadow_enabled = values.self_shadow
+	_settings.self_shadow_enabled = values.get("self_shadow",
+		_settings.self_shadow_enabled)
 	_apply_settings()

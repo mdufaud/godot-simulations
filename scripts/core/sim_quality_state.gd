@@ -91,8 +91,8 @@ func reapply() -> void:
 ## instead of bypassing it (same pattern as FireQuality.register). [param node]
 ## may be null for a callback-only binding. For OptionButton bindings,
 ## [param to_index] translates the raw tier value into the item index (a
-## particle count into its position in the count list, say); without it the
-## value must already be an item index.
+## particle count into its position in the count list, say); the callback
+## always receives the raw tier value, the same number the tier table carries.
 func bind(key: String, node: Control, callback: Callable,
 		to_index: Callable = Callable()) -> void:
 	_controls[key] = {node = node, callback = callback, to_index = to_index}
@@ -129,14 +129,20 @@ func _apply_tier(persist: bool) -> void:
 			settings_key.trim_suffix("_quality_profile"),
 			profile.tier_name(requested), profile.tier_name(effective)])
 	var unbound := {}
+	var bound: Array[String] = []
 	var tier_values: Dictionary = profile.values(effective)
 	for key in tier_values:
 		if _controls.has(key):
-			_push(key, tier_values[key])
+			bound.append(key)
 		else:
 			unbound[key] = tier_values[key]
+	# Unbound keys land before the widget pushes: a push may rebuild from them
+	# (the fluid particle count re-allocates its impostor texture at the tier's
+	# width, so texture_width must already be in place).
 	if not unbound.is_empty() and _apply.is_valid():
 		_apply.call(unbound)
+	for key in bound:
+		_push(key, tier_values[key])
 	if persist:
 		var manager := _manager()
 		if manager != null:
@@ -178,7 +184,7 @@ func _push(key: String, value: Variant) -> void:
 			index = int(to_index.call(value))
 		if index >= 0 and index < option.item_count and index != option.selected:
 			option.select(index)
-		callback.call(index)
+		callback.call(value)
 	elif node is CheckButton:
 		var toggle := node as CheckButton
 		toggle.set_pressed_no_signal(bool(value))

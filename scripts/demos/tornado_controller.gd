@@ -80,6 +80,9 @@ var quality := SimQualityState.new()
 ## Set once the initial debris pool exists; a tier switch past this point
 ## rebuilds it through the debounced cap path.
 var _pool_built := false
+## Steps live on the funnel shader, which restore() reaches before the
+## materials are captured in _ready — the var carries the value across.
+var _raymarch_steps := 48
 
 
 func _ready() -> void:
@@ -104,6 +107,7 @@ func _ready() -> void:
 	debris_pool.scatter_props()
 	_pool_built = true
 	_funnel_mat = funnel_volume.material_override
+	_funnel_mat.set_shader_parameter("steps", _raymarch_steps)
 	_cloud_mat = cloud_deck.material_override
 	_renderer.setup(_funnel_mat, _cloud_mat, [
 		dust_particles.process_material as ShaderMaterial,
@@ -396,8 +400,10 @@ func _setup_ui() -> void:
 		_viewport.render_scale(), _set_render_scale)
 	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var steps_slider: HSlider = menu.add_slider("Raymarch steps", 16.0, 160.0,
-		_funnel_mat.get_shader_parameter("steps"),
-		func(v: float) -> void: _funnel_mat.set_shader_parameter("steps", int(v)))
+		float(_raymarch_steps),
+		func(v: float) -> void:
+			_raymarch_steps = int(v)
+			_funnel_mat.set_shader_parameter("steps", _raymarch_steps))
 	quality.bind("raymarch_steps", steps_slider,
 		func(v: float) -> void: _funnel_mat.set_shader_parameter("steps", int(v)))
 	var dust_labels: Array = []
@@ -429,7 +435,9 @@ func _set_dust_amount(n: int) -> void:
 ## cap change goes through the same debounced rebuild as the slider.
 func _apply_quality(values: Dictionary) -> void:
 	_set_render_scale(values.render_scale)
-	_funnel_mat.set_shader_parameter("steps", int(values.raymarch_steps))
+	_raymarch_steps = int(values.raymarch_steps)
+	if _funnel_mat != null:
+		_funnel_mat.set_shader_parameter("steps", _raymarch_steps)
 	_set_dust_amount(values.dust_amount)
 	if _pool_built:
 		_pending_cap = int(values.debris_cap)

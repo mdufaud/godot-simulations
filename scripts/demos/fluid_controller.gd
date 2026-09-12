@@ -92,6 +92,7 @@ func _setup_ui() -> void:
 
 	menu.add_separator()
 	menu.add_section("Performance")
+	quality.attach_menu_option(menu)
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on))
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
@@ -119,14 +120,18 @@ func _set_render_scale(v: float) -> void:
 ## Sets the fields a quality tier bundles. Before fluid.start() only the config
 ## changes (start() seeds the count and the solvers read texture_width); after,
 ## the same setters the menu uses apply the tier, rebuilding on a count change.
+## particle_count, water_scale and render_scale are widget-bound: absent from
+## values on a tier push (the widget callbacks already applied them), so they
+## fall back to the live values.
 func _apply_quality(values: Dictionary) -> void:
-	fluid_config.default_particle_count = values.particle_count
+	var count := int(values.get("particle_count", fluid.particle_count))
+	fluid_config.default_particle_count = count
 	fluid_config.texture_width = values.texture_width
 	if not _fluid_ready:
 		return
-	fluid.set_particle_count(values.particle_count)
-	fluid.set_render_scale(values.water_scale)
-	_set_render_scale(values.render_scale)
+	fluid.set_particle_count(count)
+	fluid.set_render_scale(values.get("water_scale", fluid.render_scale))
+	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 
 
 func _update_title() -> void:

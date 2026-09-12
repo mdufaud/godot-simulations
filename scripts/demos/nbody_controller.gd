@@ -195,6 +195,7 @@ func _setup_ui() -> void:
 	menu.add_separator()
 
 	menu.add_section("Performance")
+	quality.attach_menu_option(menu)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	var count_labels: Array = []
 	for count in NBodyQualityProfile.PARTICLE_COUNTS:
@@ -312,14 +313,17 @@ func _apply_quality(values: Dictionary) -> void:
 	config.self_gravity_max_particles = values.self_gravity_max
 	if gravity_toggle != null:
 		gravity_toggle.set_pressed_no_signal(values.self_gravity)
-	var count := mini(int(values.particle_count), int(values.self_gravity_max)) \
-		if values.self_gravity else int(values.particle_count)
+	# particle_count and render_scale are widget-bound: absent from values on a
+	# tier push (the widget callback already applied them), so fall back to the
+	# live values.
+	var count := int(values.get("particle_count", solver.particle_count))
+	count = mini(count, int(values.self_gravity_max)) if values.self_gravity else count
 	if solver.initialized:
 		_set_particle_count(count)
 	elif count != solver.particle_count:
 		solver.particle_count = count
 		solver.tex_width = _tex_width_for(count)
-	_set_render_scale(values.render_scale)
+	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 
 
 func _tex_width_for(n: int) -> int:
