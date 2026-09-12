@@ -32,12 +32,12 @@ const LOOKS := [
 
 var solver := OceanSolver.new()
 var config: OceanConfig = OceanConfig.new()
-# Requested tier (persisted) may differ from the active one when the GPU
-# cannot host Ultra — the menu shows "requested / active" then.
-var quality_requested: int = OceanQualityProfile.DEFAULT_TIER
-var quality_effective: int = OceanQualityProfile.DEFAULT_TIER
+# Shared quality-tier state: the persisted requested tier may differ from the
+# active one when the GPU cannot host the pick — the menu shows
+# "requested / active" then.
+var quality := SimQualityState.new()
 var detail_distance_m: float = OceanQualityProfile.detail_distance_m(
-	OceanQualityProfile.DEFAULT_TIER)
+	OceanQualityProfile.default_tier())
 var surface_mat: ShaderMaterial
 var disp_texture: Texture2DArrayRD
 var norm_texture: Texture2DArrayRD
@@ -85,10 +85,10 @@ var _camera_water_valid := false
 
 func _ready() -> void:
 	solver.config = config
-	var stored_quality: int = int(GameManager.get_setting(
-		"ocean_quality_profile", OceanQualityProfile.DEFAULT_TIER))
-	_apply_quality_fields(stored_quality)
-	solver.map_size = OceanQualityProfile.FFT_SIZE[quality_effective]
+	quality.setup(OceanQualityProfile, "ocean_quality_profile",
+		_apply_quality, _rebuild_quality_resources)
+	quality.restore()
+	solver.map_size = OceanQualityProfile.FFT_SIZE[quality.effective]
 
 	orbit_cam.target = Vector3(0, 1.8, 0)
 	orbit_cam.distance = 50.0
@@ -498,53 +498,39 @@ func set_sun_azimuth(value: float) -> void:
 	_apply_sun()
 
 
-## Sets the solver fields a quality tier bundles. Leaves the effective tier at
-## PERFORMANCE when the requested one does not fit the GPU (the menu reports
-## "requested / active"; never a silent fallback).
-func _apply_quality_fields(requested: int) -> void:
-	quality_requested = clampi(requested, 0, OceanQualityProfile.TIER_NAMES.size() - 1)
-	quality_effective = OceanQualityProfile.effective_tier(quality_requested)
-	if quality_effective != quality_requested:
-		push_warning("Ocean quality: %s requested / %s active (GPU 2D texture limit %d)" % [
-			OceanQualityProfile.tier_name(quality_requested),
-			OceanQualityProfile.tier_name(quality_effective),
-			OceanQualityProfile.max_texture_dimension()])
-	solver.amortize = OceanQualityProfile.AMORTIZE[quality_effective]
-	solver.short_cascade_half_rate = OceanQualityProfile.SHORT_CASCADE_HALF_RATE[quality_effective]
-	solver.foam_near_stride = OceanQualityProfile.FOAM_NEAR_STRIDE[quality_effective]
-	solver.foam_near_size = OceanQualityProfile.FOAM_NEAR_SIZE[quality_effective]
-	var foam_distance := OceanQualityProfile.foam_near_distance(quality_effective)
-	if _menu_builder.sync_foam_distance(foam_distance):
-		solver.set_foam_distance(foam_distance)
-	var detail_distance := OceanQualityProfile.detail_distance_m(quality_effective)
-	if _menu_builder.sync_detail_distance(detail_distance):
-		set_detail_distance(detail_distance)
-	solver.quality_tier = quality_effective
+## Sets the solver fields a quality tier bundles (the state hands over the
+## tier's values). The foam and detail distances honour their menu overrides,
+## and the effective tier degrades when the GPU cannot host the pick (the menu
+## reports "requested / active"; never a silent fallback).
+func _apply_quality(values: Dictionary) -> void:
+	solver.amortize = values.amortize
+	solver.short_cascade_half_rate = values.short_cascade_half_rate
+	solver.foam_near_stride = values.foam_near_stride
+	solver.foam_near_size = values.foam_near_size
+	if _menu_builder.sync_foam_distance(values.foam_near_distance):
+		solver.set_foam_distance(values.foam_near_distance)
+	if _menu_builder.sync_detail_distance(values.detail_distance_m):
+		set_detail_distance(values.detail_distance_m)
+	solver.quality_tier = quality.effective
 	_menu_builder.sync_foam_layout()
 
 
 ## Profile switch: recreate every GPU resource cleanly (foam history cleared,
 ## preset/wind/simulation time kept) with the new tier's sizes.
-func set_quality_profile(tier: int) -> void:
-	var normalized_tier: int = clampi(tier, 0, OceanQualityProfile.TIER_NAMES.size() - 1)
-	if normalized_tier == quality_requested and solver.map_size \
-			== OceanQualityProfile.FFT_SIZE[quality_effective]:
-		return
-	_apply_quality_fields(normalized_tier)
-	GameManager.set_setting("ocean_quality_profile", normalized_tier)
+func _rebuild_quality_resources() -> void:
 	_release_textures()
 	solver.initialized = false
 	RenderingServer.call_on_render_thread(solver.free_render)
-	solver.map_size = OceanQualityProfile.FFT_SIZE[quality_effective]
+	solver.map_size = OceanQualityProfile.FFT_SIZE[quality.effective]
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 
+func set_quality_profile(tier: int) -> void:
+	quality.set_tier(tier)
+
+
 func quality_profile_label() -> String:
-	if quality_requested != quality_effective:
-		return "%s requested / %s active" % [
-			OceanQualityProfile.tier_name(quality_requested),
-			OceanQualityProfile.tier_name(quality_effective)]
-	return OceanQualityProfile.tier_name(quality_effective)
+	return quality.label()
 
 
 ## Tossed from the camera; the physics tick submits its probes as GPU point

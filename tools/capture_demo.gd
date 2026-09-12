@@ -254,11 +254,12 @@ func _set_target(value: String) -> void:
 	quit(1)
 
 
-## "performance"/"high"/"ultra" (or the raw tier index) -> OceanQualityProfile tier.
+## "low"/"medium"/"high"/"ultra" (the legacy "performance" name, or the raw
+## tier index) -> SimQualityProfile tier.
 func _quality_tier(value: String) -> int:
 	var lowered := value.to_lower()
-	if lowered == "ultra":
-		return OceanQualityProfile.Tier.ULTRA
+	if lowered == "performance":
+		lowered = "low"
 	for tier in OceanQualityProfile.TIER_NAMES.size():
 		if lowered == OceanQualityProfile.TIER_NAMES[tier].to_lower():
 			return tier

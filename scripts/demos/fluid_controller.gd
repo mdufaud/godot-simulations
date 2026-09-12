@@ -8,9 +8,14 @@ extends Node3D
 @onready var main_cam: Camera3D = $CameraPivot/Camera3D
 @onready var world_env: WorldEnvironment = $WorldEnvironment
 @onready var menu: SimMenu = $UI/SimMenu
+@onready var _viewport := ViewportGuard.attach(self)
 
 var fluid: FluidSystem
 var fluid_config: FluidConfig = FluidConfig.new()
+var quality := SimQualityState.new()
+# True once fluid.start() has run and the runtime setters are safe to call;
+# the launch restore only lands config fields that start() seeds from.
+var _fluid_ready := false
 var pbf_group: VBoxContainer
 var sph_group: VBoxContainer
 var cascade_group: VBoxContainer
@@ -27,8 +32,12 @@ func _ready() -> void:
 	fluid.config = fluid_config
 	fluid.camera = main_cam
 	fluid.method = FluidSystem.Method.SPH
+	quality.setup(FluidQualityProfile, "fluid_quality_profile", _apply_quality)
+	quality.restore()
 	add_child(fluid)
 	fluid.start()
+	_fluid_ready = true
+	_apply_quality(FluidQualityProfile.values(quality.effective))
 	_build_cascade_decor()
 	_setup_ui()
 	profiler.lines_provider = _profiler_lines
@@ -85,11 +94,39 @@ func _setup_ui() -> void:
 	menu.add_section("Performance")
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on))
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
-	menu.add_slider("Render scale", 0.25, 1.0, fluid.render_scale, func(v): fluid.set_render_scale(v))
-	menu.add_label("Particles")
-	for count in fluid_config.particle_counts:
-		menu.add_button("%dk" % int(count / 1000), func(): fluid.set_particle_count(count))
+	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
+		func(v): fluid.set_render_scale(v))
+	quality.bind("water_scale", water_scale, fluid.set_render_scale)
+	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+		_viewport.render_scale(), _set_render_scale)
+	quality.bind("render_scale", scale_slider, _set_render_scale)
+	var count_labels: Array = []
+	for count in FluidQualityProfile.PARTICLE_COUNTS:
+		count_labels.append("%dk" % int(count / 1000))
+	var count_option := menu.add_option_button("Particles", count_labels,
+		FluidQualityProfile.PARTICLE_COUNTS.find(fluid.particle_count),
+		func(idx: int): fluid.set_particle_count(FluidQualityProfile.PARTICLE_COUNTS[idx]))
+	quality.bind("particle_count", count_option,
+		func(count): fluid.set_particle_count(count),
+		func(count): return FluidQualityProfile.PARTICLE_COUNTS.find(count))
 	_update_scenario_ui()
+
+
+func _set_render_scale(v: float) -> void:
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, v)
+
+
+## Sets the fields a quality tier bundles. Before fluid.start() only the config
+## changes (start() seeds the count and the solvers read texture_width); after,
+## the same setters the menu uses apply the tier, rebuilding on a count change.
+func _apply_quality(values: Dictionary) -> void:
+	fluid_config.default_particle_count = values.particle_count
+	fluid_config.texture_width = values.texture_width
+	if not _fluid_ready:
+		return
+	fluid.set_particle_count(values.particle_count)
+	fluid.set_render_scale(values.water_scale)
+	_set_render_scale(values.render_scale)
 
 
 func _update_title() -> void:

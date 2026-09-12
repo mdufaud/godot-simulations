@@ -2,13 +2,12 @@ class_name SandMenu extends RefCounted
 ## SimMenu panel of the sand demo. The three brush buttons behave as a radio
 ## group, so they live here rather than being rebuilt by the controller.
 
-const GRID_SIZES: Array[int] = [256, 512, 1024]
-
 var solver: HeightfieldSand
 var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
 ## provide apply_preset, restart, select_tool, set_auto_pour, set_strength,
-## set_brush_size, set_repose, set_grid_n and set_render_scale.
+## set_brush_size, set_repose, set_grid_n, set_render_scale and expose the
+## SimQualityState named quality.
 var host: Node
 
 var _status: Label
@@ -52,16 +51,27 @@ func build(menu: SimMenu, presets: Array, preset_idx: int, tool_choice: int,
 	menu.add_slider("Repose angle °", 20.0, 45.0, solver.repose_deg, host.set_repose)
 	menu.add_slider("Flow rate", 0.03, 0.12, solver.flow_rate,
 		func(v: float): solver.flow_rate = v)
-	menu.add_slider("Settle iterations", 2.0, 16.0, float(solver.iterations),
+	var iterations_slider := menu.add_slider("Settle iterations", 2.0, 16.0,
+		float(solver.iterations),
+		func(v: float): solver.iterations = int(round(v)))
+	host.quality.bind("iterations", iterations_slider,
 		func(v: float): solver.iterations = int(round(v)))
 	menu.add_separator()
 
 	menu.add_section("Performance")
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
-	menu.add_label("Grid resolution")
-	for n in GRID_SIZES:
-		menu.add_button("%d²" % n, host.set_grid_n.bind(n))
-	menu.add_slider("Render scale", 0.4, 1.0, 1.0, host.set_render_scale)
+	var grid_labels: Array = []
+	for n in SandQualityProfile.GRID_SIZES:
+		grid_labels.append("%d²" % n)
+	var grid_option := menu.add_option_button("Grid resolution", grid_labels,
+		SandQualityProfile.GRID_SIZES.find(solver.grid_n),
+		func(idx: int): host.set_grid_n(SandQualityProfile.GRID_SIZES[idx]))
+	host.quality.bind("grid_n", grid_option, host.set_grid_n,
+		func(n: int) -> int: return SandQualityProfile.GRID_SIZES.find(n))
+	host.quality.attach_menu_option(menu)
+	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+		host.render_scale(), host.set_render_scale)
+	host.quality.bind("render_scale", scale_slider, host.set_render_scale)
 
 
 func set_status(text: String) -> void:

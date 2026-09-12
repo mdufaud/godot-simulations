@@ -12,6 +12,7 @@ const SHADOW_DISTANCE := 40.0
 var config: GrassConfig = GrassConfig.new()
 var density := 1.0
 var wind_speed := 1.0
+var shadows_enabled := true
 var material: ShaderMaterial
 var _tiles: Array[Array] = []
 var _previous_tile_id := Vector3.ZERO
@@ -74,10 +75,21 @@ func set_colors(base: Color, tip: Color, sss: Color) -> void:
 
 
 func set_shadows(enabled: bool) -> void:
+	shadows_enabled = enabled
+	_apply_tile_shadows()
+
+
+## Moves the near-field shadow ring and re-flags the tiles; empty before build().
+func set_shadow_distance(distance_m: float) -> void:
+	config.shadow_distance_m = distance_m
+	_apply_tile_shadows()
+
+
+func _apply_tile_shadows() -> void:
 	for data in _tiles:
 		var near: bool = data[1].length() < config.shadow_distance_m
 		data[0].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
-			if enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			if shadows_enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _build_tiles() -> void:

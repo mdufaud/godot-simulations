@@ -8,22 +8,28 @@ var current_demo: String = ""
 
 # Global settings
 var settings: Dictionary = {
-	# N-body demo
-	"nbody_particle_count": 262144,
-	"nbody_self_gravity": false,
-
-	# Sand demo
-	"sand_grid_n": 512,
-
 	# Ocean demo
 	"ocean_map_size": 512,
 
-	# SSR demo
-	"ssr_demo_max_objects": 60,
-	"ssr_demo_spawn_rate": 0.25,
-	
-	# Planet demo
-	"planet_resolution": 0,  # marching-cubes density grid side; 0 = pick from platform
+	# Quality tiers (0 Low / 1 Medium / 2 High / 3 Ultra). Every key must exist
+	# here at startup: UserSettings only restores keys already in this dict.
+	# Ocean keeps High, the configuration it shipped with; the other demos
+	# default to Medium.
+	"ocean_quality_profile": 2,
+	"sand_quality_profile": 1,
+	"nbody_quality_profile": 1,
+	"planet_quality_profile": 1,
+	"fluid_quality_profile": 1,
+	"tornado_quality_profile": 1,
+	"cloth_quality_profile": 1,
+	"destruction_quality_profile": 1,
+	"grass_quality_profile": 1,
+	"mixwell_quality_profile": 1,
+	"fractal_quality_profile": 1,
+	"non_euclidean_quality_profile": 1,
+	"ssr_quality_profile": 1,
+	"ambient_fluid_quality_profile": 1,
+	"parallax_quality_profile": 1,
 }
 
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"

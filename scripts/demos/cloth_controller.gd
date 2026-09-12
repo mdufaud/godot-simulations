@@ -16,6 +16,10 @@ const PRESETS: Array[ClothPreset] = [
 
 var wind := ClothWind.new()
 var wind_enabled := true
+var quality := SimQualityState.new()
+## The active tier's values, kept so cloths built after the launch restore
+## (or a tier switch) pick the solver fields up.
+var _quality_values := {}
 var solvers: Array[ClothSolver] = []
 var renderers: Array[ClothRenderer] = []
 var profiler := SimProfiler.new()
@@ -30,7 +34,10 @@ func _ready() -> void:
 	orbit_cam.yaw = 30.0
 	orbit_cam.min_distance = 3.0
 	orbit_cam.max_distance = 60.0
+	quality.setup(ClothQualityProfile, "cloth_quality_profile", _apply_quality)
+	quality.restore()
 	_build_cloths()
+	_apply_solver_quality()
 	var props := ClothProps.new()
 	add_child(props)
 	props.build(PRESETS)
@@ -58,6 +65,8 @@ func _ready() -> void:
 		stretch = _on_stretch,
 		bending = _on_bending,
 		render_scale = _set_render_scale,
+		initial_render_scale = _viewport.render_scale(),
+		quality = quality,
 	}, profiler)
 	_init_solvers()
 	cloth_menu.update_status(solvers)
@@ -166,6 +175,22 @@ func _unpin_all() -> void:
 
 func _set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+## Stores the tier's values and pushes the solver fields to every live cloth;
+## at launch the solvers may not exist yet, so _apply_solver_quality runs
+## again after _build_cloths.
+func _apply_quality(values: Dictionary) -> void:
+	_quality_values = values
+	_apply_solver_quality()
+
+
+func _apply_solver_quality() -> void:
+	for solver in solvers:
+		solver.iterations = int(_quality_values.iterations)
+		solver.substeps = int(_quality_values.substeps)
+	if not _quality_values.is_empty():
+		_set_render_scale(_quality_values.render_scale)
 
 
 func _on_profiler_enabled(on: bool) -> void:

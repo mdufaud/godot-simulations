@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Runs CPU suites headless, then GPU suites in an invisible virtual Wayland display.
+# Runs the value gates headless (CPU suites, no window, no GPU), then — only
+# with GPU=1 — the rendering suites in an invisible virtual Wayland display.
 #
-#   tests/run_tests.sh
+#   tests/run_tests.sh                 # CPU/value gates only (the default gate)
+#   GPU=1 tests/run_tests.sh           # + ocean FFT, portal views, scene cycle, UI smoke
 #   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
+#
+# Screenshots are evidence tools, not gates: tools/capture.sh (any demo) and
+# tests/run_mixwell_capture.sh (mixwell, GPU oracle) are run by hand.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,6 +103,7 @@ declare -a CPU_SUITES=(
 	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
 	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
 	"cloth_wind|res://tests/cloth_wind_test.gd"
+	"quality_profiles|res://tests/quality_profiles_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do
 	name="${suite%%|*}"
@@ -109,6 +115,22 @@ done
 while (( ${#cpu_pids[@]} > 0 )); do
 	reap_cpu_suite
 done
+
+# The GPU phase boots a virtual Wayland compositor and renders real frames —
+# heavy, and it contends with everything else running on the machine. It is a
+# last resort: opt in with GPU=1 for compute suites (ocean FFT, portal views),
+# the full scene cycle and the SimMenu touch smoke. Evidence captures are never
+# part of the gate: use tools/capture.sh and tests/run_mixwell_capture.sh by
+# hand instead.
+if [[ "${GPU:-0}" != "1" ]]; then
+	if (( ${#failed[@]} > 0 )); then
+		printf 'Failed suites: %s\n' "${failed[*]}" >&2
+		printf 'Logs: %s\n' "$LOG_DIR" >&2
+		exit 1
+	fi
+	printf 'CPU/value gates passed (GPU suites skipped; run with GPU=1 to include them)\n'
+	exit 0
+fi
 
 if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
 	failed+=(non_euclidean ocean_fft scene_cycle ui_smoke)
@@ -188,9 +210,6 @@ else
 		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \
 		"$SCRIPT_DIR/run_ui_smoke.sh"; then
 		failed+=(ui_smoke)
-	fi
-	if ! GODOT="$GODOT" "$SCRIPT_DIR/run_mixwell_capture.sh"; then
-		failed+=(mixwell_capture)
 	fi
 fi
 

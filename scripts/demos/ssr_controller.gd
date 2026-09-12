@@ -12,9 +12,11 @@ extends Node3D
 @onready var omni_blue: OmniLight3D = $OmniLightBlue
 @onready var omni_warm: OmniLight3D = $OmniLightWarm
 @onready var spot_accent: SpotLight3D = $SpotLightAccent
+@onready var _viewport := ViewportGuard.attach(self)
 
 var _info_label: Label
 var config: SsrConfig = SsrConfig.new()
+var quality := SimQualityState.new()
 
 # ── Constants ────────────────────────────────────────────────────────────────
 const SPAWN_HEIGHT := 12.0
@@ -46,10 +48,11 @@ func _ready() -> void:
 	if config_error != "":
 		push_error("SSR config: %s" % config_error)
 		return
-	max_objects = GameManager.get_setting("ssr_demo_max_objects", config.max_objects)
+	quality.setup(SsrQualityProfile, "ssr_quality_profile", _apply_quality)
+	quality.restore()
 	spawner.roughness_override = roughness_override
 	spawner.metallic_override = metallic_override
-	spawn_timer.wait_time = GameManager.get_setting("ssr_demo_spawn_rate", config.spawn_interval_s)
+	spawn_timer.wait_time = config.spawn_interval_s
 
 	# Configure orbit camera
 	orbit_cam.target = Vector3.ZERO
@@ -84,7 +87,10 @@ func _build_menu() -> void:
 	_info_label = menu.add_label("Objects: 0")
 
 	menu.add_section("SSR")
-	menu.add_slider("Max Steps", 16.0, 256.0, 96.0, func(v: float) -> void: env.ssr_max_steps = int(v))
+	var steps_slider: HSlider = menu.add_slider("Max Steps", 16.0, 256.0,
+		env.ssr_max_steps, func(v: float) -> void: env.ssr_max_steps = int(v))
+	quality.bind("ssr_steps", steps_slider,
+		func(v: float) -> void: env.ssr_max_steps = int(v))
 	menu.add_slider("Fade In", 0.0, 1.0, 0.05, func(v: float) -> void: env.ssr_fade_in = v)
 	menu.add_slider("Fade Out", 0.0, 5.0, 3.0, func(v: float) -> void: env.ssr_fade_out = v)
 	menu.add_slider("Depth Tolerance", 0.01, 1.0, 0.25, func(v: float) -> void: env.ssr_depth_tolerance = v)
@@ -118,11 +124,60 @@ func _build_menu() -> void:
 	menu.add_action_toggle("⏱", "Auto", true, _on_auto_spawn_toggled)
 	menu.add_action("🧹", "Clear", _on_clear_pressed)
 
-	menu.add_debug_toggle("🌑", "SSAO", true, func(on: bool) -> void: env.ssao_enabled = on)
-	menu.add_debug_toggle("💡", "SSIL", true, func(on: bool) -> void: env.ssil_enabled = on)
-	menu.add_debug_toggle("✨", "Glow", true, func(on: bool) -> void: env.glow_enabled = on)
+	var ssao_toggle: Button = menu.add_debug_toggle("🌑", "SSAO", env.ssao_enabled,
+		func(on: bool) -> void: env.ssao_enabled = on)
+	quality.bind("ssao", ssao_toggle, func(on: bool) -> void: env.ssao_enabled = on)
+	var ssil_toggle: Button = menu.add_debug_toggle("💡", "SSIL", env.ssil_enabled,
+		func(on: bool) -> void: env.ssil_enabled = on)
+	quality.bind("ssil", ssil_toggle, func(on: bool) -> void: env.ssil_enabled = on)
+	var glow_toggle: Button = menu.add_debug_toggle("✨", "Glow", env.glow_enabled,
+		func(on: bool) -> void: env.glow_enabled = on)
+	quality.bind("glow", glow_toggle, func(on: bool) -> void: env.glow_enabled = on)
 	menu.add_debug_toggle("🌫", "Volumetric fog", false,
 		func(on: bool) -> void: env.volumetric_fog_enabled = on)
+
+	menu.add_section("Performance")
+	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+		_viewport.render_scale(), _set_render_scale)
+	quality.bind("render_scale", scale_slider, _set_render_scale)
+	var msaa_names := ["Off", "2×", "4×"]
+	var msaa_option: OptionButton = menu.add_option_button("MSAA", msaa_names,
+		_msaa_index(_viewport.msaa()), _set_msaa)
+	quality.bind("msaa", msaa_option, _set_msaa,
+		func(mode: int) -> int: return _msaa_index(mode))
+	var objects_slider: HSlider = menu.add_slider("Max objects", 10.0, 200.0,
+		float(max_objects), func(v: float) -> void: max_objects = int(v))
+	quality.bind("max_objects", objects_slider,
+		func(v: float) -> void: max_objects = int(v))
+	quality.attach_menu_option(menu)
+
+
+func _set_render_scale(value: float) -> void:
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+func _set_msaa(mode: int) -> void:
+	_viewport.set_msaa(mode)
+
+
+static func _msaa_index(mode: int) -> int:
+	match mode:
+		Viewport.MSAA_2X: return 1
+		Viewport.MSAA_4X: return 2
+		_: return 0
+
+
+## Tier launch path: the environment and spawner settings before the menu is
+## built; the bound keys re-push through their widgets on a tier switch.
+func _apply_quality(values: Dictionary) -> void:
+	var env := world_env.environment
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, values.render_scale)
+	_viewport.set_msaa(values.msaa)
+	env.ssr_max_steps = int(values.ssr_steps)
+	max_objects = int(values.max_objects)
+	env.ssao_enabled = values.ssao
+	env.ssil_enabled = values.ssil
+	env.glow_enabled = values.glow
 
 
 func _process(delta: float) -> void:

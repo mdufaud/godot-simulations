@@ -1,73 +1,99 @@
 class_name OceanQualityProfile
-extends RefCounted
+extends SimQualityProfile
 ## Coherent quality tiers for the whole ocean pipeline. A tier bundles the FFT
-## resolution, the near-foam texture size, cascade rotation and the near
-## feedback cadence, so "Performance / High / Ultra" always describes one
-## reproducible configuration instead of five loose toggles. Switching tier
+## resolution, the near-foam texture size and reach, the cascade rotation and
+## the feedback cadences, so "Low / Medium / High / Ultra" always describes one
+## reproducible configuration instead of loose toggles. Switching tier
 ## recreates the GPU resources (clearing foam history) but keeps the preset,
-## wind and simulation time. Ultra also extends the visible detail
+## wind and simulation time. Higher tiers also widen the visible detail
 ## distance so the far water keeps readable relief.
+##
+## The FFT resolution is capped at 1024: the FFT pass compiles one workgroup
+## row per invocation (local_size_x = MAP_SIZE), and 2048 exceeds every GPU's
+## maxComputeWorkGroupSize. The near-foam pipeline is calibrated per texel
+## density (its coverage contracts are pinned per tier), so Ultra keeps the
+## High foam configuration and spends its budget where nothing is held back:
+## the short cascade steps every frame and the ripple detail reaches its
+## maximum distance. The default tier is High, the configuration the demo
+## shipped with.
+static func default_tier() -> int:
+	return Tier.HIGH
 
-enum Tier { PERFORMANCE, HIGH, ULTRA }
-
-const DEFAULT_TIER := Tier.ULTRA
-
-const TIER_NAMES := ["Performance", "High", "Ultra"]
-
-## FFT cascade resolution (square).
+## FFT cascade resolution (square). Hardware ceiling 1024.
 const FFT_SIZE := {
-	Tier.PERFORMANCE: 256,
-	Tier.HIGH: 512,
+	Tier.LOW: 256,
+	Tier.MEDIUM: 512,
+	Tier.HIGH: 1024,
 	Tier.ULTRA: 1024,
 }
 
-## Camera-centred near foam texture resolution (square).
+## Camera-centred near foam texture resolution (square). The foam feedback is
+## tuned for ~12.5 cm/texel, so the size tracks the reach instead of growing
+## past it.
 const FOAM_NEAR_SIZE := {
-	Tier.PERFORMANCE: 512,
-	Tier.HIGH: 1024,
+	Tier.LOW: 512,
+	Tier.MEDIUM: 1024,
+	Tier.HIGH: 2048,
 	Tier.ULTRA: 2048,
 }
 
+## World-space radius the near foam texture covers (metres).
 const FOAM_NEAR_DISTANCE := {
-	Tier.PERFORMANCE: 48.0,
-	Tier.HIGH: 72.0,
+	Tier.LOW: 48.0,
+	Tier.MEDIUM: 72.0,
+	Tier.HIGH: 128.0,
 	Tier.ULTRA: 128.0,
 }
 
+## Distance at which the fine ripple detail fades out.
 const DETAIL_DISTANCE_M := {
-	Tier.PERFORMANCE: 900.0,
-	Tier.HIGH: 1800.0,
-	Tier.ULTRA: 3600.0,
+	Tier.LOW: 900.0,
+	Tier.MEDIUM: 1800.0,
+	Tier.HIGH: 3600.0,
+	Tier.ULTRA: 4000.0,
 }
 
-## PERFORMANCE rotates the cascades (one per frame); HIGH/ULTRA step all of
-## them every frame.
+## LOW rotates the cascades (one per frame); the others step all of them every
+## frame.
 const AMORTIZE := {
-	Tier.PERFORMANCE: true,
+	Tier.LOW: true,
+	Tier.MEDIUM: false,
 	Tier.HIGH: false,
 	Tier.ULTRA: false,
 }
 
-## Near feedback dispatch cadence: every other frame on PERFORMANCE (its dt
+## Near feedback dispatch cadence: every other frame on LOW (its dt
 ## compensation scales the rates), every frame otherwise.
 const FOAM_NEAR_STRIDE := {
-	Tier.PERFORMANCE: 2,
+	Tier.LOW: 2,
+	Tier.MEDIUM: 1,
 	Tier.HIGH: 1,
 	Tier.ULTRA: 1,
 }
 
-## Finest cascade steps every other frame on HIGH/ULTRA (wave periods there
+## Finest cascade steps every other frame on MEDIUM/HIGH (wave periods there
 ## are seconds long and phases stay continuous; the foam decay compensates).
-## PERFORMANCE already rotates all cascades, so the flag stays off.
+## LOW already rotates all cascades, so the flag stays off; Ultra runs the
+## short cascade at full rate.
 const SHORT_CASCADE_HALF_RATE := {
-	Tier.PERFORMANCE: false,
+	Tier.LOW: false,
+	Tier.MEDIUM: true,
 	Tier.HIGH: true,
-	Tier.ULTRA: true,
+	Tier.ULTRA: false,
 }
 
 
-static func tier_name(tier: int) -> String:
-	return TIER_NAMES[clampi(tier, 0, TIER_NAMES.size() - 1)]
+## The tier's knob bundle, keyed for SimQualityState.
+static func values(tier: int) -> Dictionary:
+	return {
+		fft_size = FFT_SIZE[tier],
+		foam_near_size = FOAM_NEAR_SIZE[tier],
+		foam_near_distance = FOAM_NEAR_DISTANCE[tier],
+		detail_distance_m = DETAIL_DISTANCE_M[tier],
+		amortize = AMORTIZE[tier],
+		foam_near_stride = FOAM_NEAR_STRIDE[tier],
+		short_cascade_half_rate = SHORT_CASCADE_HALF_RATE[tier],
+	}
 
 
 static func foam_near_distance(tier: int) -> float:
@@ -87,23 +113,13 @@ static func max_texture_dimension() -> int:
 	return rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
 
 
-## Highest tier at or below [param requested] whose textures fit the GPU.
-## ULTRA that does not fit degrades to HIGH (never silently: the caller shows
-## "requested / active" and warns).
-static func effective_tier(requested: int) -> int:
+## False when the tier's textures do not fit the GPU; SimQualityState then
+## degrades the request (never silently: the menu shows "requested / active").
+static func tier_supported(tier: int) -> bool:
 	var limit := max_texture_dimension()
 	if limit <= 0:
-		return requested
-	for tier: int in [Tier.ULTRA, Tier.HIGH, Tier.PERFORMANCE]:
-		if tier <= requested and FFT_SIZE[tier] <= limit \
-				and FOAM_NEAR_SIZE[tier] <= limit:
-			return tier
-	return Tier.PERFORMANCE
-
-
-## True when the menu must show the "requested / active" degraded label.
-static func is_degraded(requested: int, effective: int) -> bool:
-	return requested != effective
+		return true
+	return FFT_SIZE[tier] <= limit and FOAM_NEAR_SIZE[tier] <= limit
 
 
 ## Estimate the solver's VRAM footprint from the actual allocation sizes in

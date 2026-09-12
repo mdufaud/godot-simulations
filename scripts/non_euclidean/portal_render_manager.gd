@@ -1,15 +1,24 @@
 class_name PortalRenderManager
 extends Node
 
-const MAX_VIEWS := 2
+## Upper bound of the SubViewport pool; the quality tier picks 1-4 of these.
+const MAX_POOL := 4
 const MIN_NEAR := 0.001
 const NEAR_MARGIN := 0.02
 
 var player_camera: Camera3D
 var active_view_count := 0
 var debug_enabled := false
+## Live portal views; viewports are full-window renders, so capping the pool
+## is the cheapest lever on a weak GPU. Portals past the cap keep their last
+## image instead of re-rendering.
+var max_views := 2
+## Resolution factor of each portal target relative to the window; the image
+## is stretched back over the portal quad, so low values cost sharpness only.
+var portal_view_scale := 1.0
 
 var _slots: Array[Dictionary] = []
+var _portals: Array[Portal3D] = []
 var _portal_environment: Environment
 
 
@@ -41,12 +50,24 @@ func set_camera(camera: Camera3D) -> void:
 
 
 func configure_portals(portals: Array[Portal3D]) -> void:
-	assert(portals.size() <= _slots.size())
-	for index in _slots.size():
-		var portal: Portal3D = portals[index] if index < portals.size() else null
-		_slots[index]["portal"] = portal
-		if portal != null:
-			portal.set_render_texture((_slots[index]["viewport"] as SubViewport).get_texture())
+	_portals = portals.duplicate()
+	_assign_portal_slots()
+
+
+## Rebuilds the SubViewport pool at the new size and re-binds the portals.
+func set_max_views(count: int) -> void:
+	count = clampi(count, 1, MAX_POOL)
+	if count == max_views and not _slots.is_empty():
+		return
+	max_views = count
+	_teardown_pool()
+	_create_pool()
+	_assign_portal_slots()
+
+
+func set_portal_view_scale(scale: float) -> void:
+	portal_view_scale = clampf(scale, 0.25, 1.0)
+	_resize_pool()
 
 
 func set_debug_enabled(enabled: bool) -> void:
@@ -60,10 +81,24 @@ func get_debug_text() -> String:
 	for slot in _slots:
 		if slot["portal"] != null:
 			near_values.append("%.3f m" % (slot["camera"] as Camera3D).near)
-	return "Portal views: %d/2 · dedicated native HDR targets · near: %s" % [
+	return "Portal views: %d/%d · %.0f%% scale · near: %s" % [
 		active_view_count,
+		max_views,
+		portal_view_scale * 100.0,
 		", ".join(near_values),
 	]
+
+
+## Binds each portal to its pool slot; portals without a slot (views capped)
+## fall back to their static image.
+func _assign_portal_slots() -> void:
+	for index in _portals.size():
+		var portal := _portals[index]
+		if index < _slots.size():
+			_slots[index]["portal"] = portal
+			portal.set_render_texture((_slots[index]["viewport"] as SubViewport).get_texture())
+		else:
+			portal.set_render_texture(null)
 
 
 func _create_pool() -> void:
@@ -75,7 +110,7 @@ func _create_pool() -> void:
 		_portal_environment.tonemap_exposure = 1.0
 		_portal_environment.glow_enabled = false
 		_portal_environment.adjustment_enabled = false
-	for index in MAX_VIEWS:
+	for index in max_views:
 		var viewport := SubViewport.new()
 		viewport.name = "PortalViewport%d" % index
 		viewport.own_world_3d = false
@@ -103,9 +138,9 @@ func _create_pool() -> void:
 
 
 func _resize_pool() -> void:
-	var size := Vector2i(get_viewport().get_visible_rect().size)
+	var size := Vector2(get_viewport().get_visible_rect().size) * portal_view_scale
 	for slot in _slots:
-		(slot["viewport"] as SubViewport).size = size
+		(slot["viewport"] as SubViewport).size = Vector2i(size)
 
 
 func _configure_camera(camera: Camera3D, portal: Portal3D) -> void:
@@ -128,6 +163,14 @@ func _safe_near(portal: Portal3D, camera_pose: Transform3D) -> float:
 		var mapped_corner := portal.map_position(corner)
 		closest = minf(closest, (mapped_corner - camera_pose.origin).dot(forward))
 	return maxf(MIN_NEAR, closest - NEAR_MARGIN)
+
+
+func _teardown_pool() -> void:
+	for slot in _slots:
+		var viewport := slot["viewport"] as SubViewport
+		viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		viewport.free()
+	_slots.clear()
 
 
 func _disable_all() -> void:

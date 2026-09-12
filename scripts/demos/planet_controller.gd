@@ -27,6 +27,7 @@ const PRESETS := [
 
 var generator := PlanetGenerator.new()
 var config: PlanetConfig = PlanetConfig.new()
+var quality := SimQualityState.new()
 
 var sun_yaw := 30.0
 var sun_auto_rotate := false
@@ -40,6 +41,9 @@ var _fluid := PlanetFluid.new()
 var _menu_builder := PlanetMenu.new()
 
 var _mobile := false
+## True once the first generation has been requested; a tier switch regenerates
+## only after that.
+var _planet_ready := false
 var _regen_timer: Timer
 var _regen_pending := false
 ## The preset the height gradient is quoted against, so the radius slider can
@@ -50,8 +54,6 @@ var _preset: PlanetPreset = PRESETS[0]
 func _ready() -> void:
 	_mobile = VirtualJoystickScript.is_touch_ui()
 
-	var stored_resolution: int = GameManager.get_setting("planet_resolution", 0)
-	generator.resolution = stored_resolution if stored_resolution > 0 else (64 if _mobile else 128)
 	generator.config = config
 	generator.density_texture_changed.connect(_on_density_texture_changed)
 
@@ -65,8 +67,13 @@ func _ready() -> void:
 	orbit_cam.max_pitch = 89.0
 	orbit_cam.move_speed = 30.0
 
-	set_render_scale(render_scale)
 	view.build(planet_mesh, atmosphere_quad, world_env, $UI, _mobile)
+
+	# The tier lands before the first generation; touch devices fall back to
+	# Low instead of Medium when nothing is persisted yet.
+	quality.setup(PlanetQualityProfile, "planet_quality_profile", _apply_quality)
+	quality.fallback_tier = PlanetQualityProfile.Tier.LOW if _mobile else -1
+	quality.restore()
 
 	_atmosphere.mobile = _mobile
 	_atmosphere.changed.connect(_on_atmosphere_changed)
@@ -93,6 +100,7 @@ func _ready() -> void:
 	RenderingServer.call_on_render_thread(_atmosphere.init_render)
 	RenderingServer.call_on_render_thread(_atmosphere.bake_render)
 	start_generation()
+	_planet_ready = true
 
 
 func _exit_tree() -> void:
@@ -123,6 +131,19 @@ func _process(delta: float) -> void:
 func set_render_scale(value: float) -> void:
 	render_scale = value
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+## Sets the fields a quality tier bundles. A resolution change regenerates the
+## density field (debounced like every shape slider) once the planet is live.
+func _apply_quality(values: Dictionary) -> void:
+	var resolution: int = values.resolution
+	var regen := _planet_ready and resolution != generator.resolution
+	generator.resolution = resolution
+	set_render_scale(values.render_scale)
+	if view.surface != null:
+		view.surface.set_shader_parameter("detail_octaves", int(values.detail_octaves))
+	if regen:
+		start_generation()
 
 
 func apply_preset(index: int) -> void:

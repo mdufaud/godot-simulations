@@ -119,7 +119,7 @@ func _run() -> void:
 		demo.queue_free()
 		quit(1)
 		return
-	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
 	deadline = Time.get_ticks_msec() + 20000
 	while Time.get_ticks_msec() < deadline and not (demo.solver.initialized and demo.texture_bound):
 		await process_frame

@@ -9,7 +9,6 @@ const BALLOON := preload("res://resources/ambient_fluid/presets/balloon.tres")
 const UNDERWATER_BODY := preload("res://resources/ambient_fluid/presets/underwater_body.tres")
 const WATER_LEVEL := 0.4
 const POOL_HALF_SIZE := Vector2(6.8, 4.8)
-const MAX_OBJECTS := 24
 const MEDIUM_NAMES := ["Water", "Oil", "Honey", "Air", "Vacuum"]
 const MEDIUM_DENSITIES := [998.0, 850.0, 1420.0, 1.204, 0.0]
 const MEDIUM_VISCOSITIES := [1.002e-3, 0.065, 2.0, 1.81e-5, 0.0]
@@ -23,10 +22,13 @@ const TRAJECTORY_LIMIT := 3600
 @onready var water_surface: MeshInstance3D = $Pool/WaterSurface
 @onready var water_volume: MeshInstance3D = $Pool/WaterVolume
 @onready var medium_label: Label3D = $Pool/MediumLabel
+@onready var _viewport := ViewportGuard.attach(self)
 
 var fluid_body: AmbientFluidBody3D
 var bodies: Array[AmbientFluidBody3D] = []
 var demo_menu := AmbientFluidMenu.new()
+var max_objects := 24
+var quality := SimQualityState.new()
 var _medium_index := 0
 var _object_index := 3
 var _object_density_kg_m3 := 35.0
@@ -49,6 +51,9 @@ func _ready() -> void:
 	orbit_camera.max_distance = 26.0
 	_rng.seed = 0xA6B1E17
 	menu.persist_id = "ambient_fluid_demo_v2"
+	quality.setup(AmbientFluidQualityProfile, "ambient_fluid_quality_profile",
+		_apply_quality)
+	quality.restore()
 	demo_menu.build(menu, _medium_index, _object_index, _object_density_kg_m3,
 		_throw_speed_m_s, _flow_speed_m_s, {
 			scenario = _set_scenario,
@@ -71,6 +76,19 @@ func _ready() -> void:
 			clear = _clear_objects,
 			export_csv = _export_csv,
 		})
+	menu.add_section("Performance")
+	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+		_viewport.render_scale(), _set_render_scale)
+	quality.bind("render_scale", scale_slider, _set_render_scale)
+	var msaa_option: OptionButton = menu.add_option_button("MSAA", ["Off", "2×", "4×"],
+		_msaa_index(_viewport.msaa()), _set_msaa)
+	quality.bind("msaa", msaa_option, _set_msaa,
+		func(mode: int) -> int: return _msaa_index(mode))
+	var bodies_slider: HSlider = menu.add_slider("Max bodies", 4.0, 40.0,
+		float(max_objects), func(v: float) -> void: max_objects = int(v))
+	quality.bind("max_objects", bodies_slider,
+		func(v: float) -> void: max_objects = int(v))
+	quality.attach_menu_option(menu)
 	_update_medium_visuals()
 	_drop_buoyancy_set()
 
@@ -113,6 +131,29 @@ func _unhandled_input(event: InputEvent) -> void:
 		if mouse.pressed and mouse.button_index == MOUSE_BUTTON_RIGHT:
 			_throw_object()
 			get_viewport().set_input_as_handled()
+
+
+func _set_render_scale(value: float) -> void:
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+func _set_msaa(mode: int) -> void:
+	_viewport.set_msaa(mode)
+
+
+static func _msaa_index(mode: int) -> int:
+	match mode:
+		Viewport.MSAA_2X: return 1
+		Viewport.MSAA_4X: return 2
+		_: return 0
+
+
+## Tier launch path: the cap applies before the showcase drop spawns anything;
+## after the menu exists the keys are widget-bound and skip this.
+func _apply_quality(values: Dictionary) -> void:
+	max_objects = int(values.max_objects)
+	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, values.render_scale)
+	_viewport.set_msaa(values.msaa)
 
 
 func _throw_object() -> void:
@@ -171,7 +212,7 @@ func _spawn_body(type_index: int, density: float, spawn_position: Vector3,
 		velocity: Vector3, spin: Vector3, color_override := Color.TRANSPARENT,
 		config_override: AmbientFluidConfig = null, uniform_medium := false,
 		fluid_active := true) -> AmbientFluidBody3D:
-	while bodies.size() >= MAX_OBJECTS:
+	while bodies.size() >= max_objects:
 		var oldest: AmbientFluidBody3D = bodies.pop_front()
 		if is_instance_valid(oldest):
 			oldest.queue_free()

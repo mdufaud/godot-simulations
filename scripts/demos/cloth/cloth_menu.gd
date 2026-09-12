@@ -6,6 +6,7 @@ var wind_label: Label
 
 func build(menu: SimMenu, solvers: Array[ClothSolver], state: Dictionary,
 		callbacks: Dictionary, profiler: SimProfiler) -> void:
+	var quality: SimQualityState = callbacks.quality
 	menu.add_section("Scene")
 	menu.add_action("↺", "Reset", callbacks.reset)
 	status_label = menu.add_label("")
@@ -31,17 +32,22 @@ func build(menu: SimMenu, solvers: Array[ClothSolver], state: Dictionary,
 	menu.add_separator()
 
 	menu.add_section("Solver")
-	menu.add_slider("Iterations", 2.0, 20.0, float(solvers[0].iterations),
-		callbacks.set_all_int.bind("iterations"))
-	menu.add_slider("Substeps", 1.0, 6.0, float(solvers[0].substeps),
+	var iterations_slider := menu.add_slider("Iterations", 2.0, 24.0,
+		float(solvers[0].iterations), callbacks.set_all_int.bind("iterations"))
+	quality.bind("iterations", iterations_slider, callbacks.set_all_int.bind("iterations"))
+	var substeps_slider := menu.add_slider("Substeps", 1.0, 6.0, float(solvers[0].substeps),
 		callbacks.set_all_int.bind("substeps"))
+	quality.bind("substeps", substeps_slider, callbacks.set_all_int.bind("substeps"))
 	menu.add_slider("Relaxation", 1.0, 1.9, solvers[0].relaxation,
 		callbacks.set_all.bind("relaxation"))
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	menu.add_slider("Render scale", 0.4, 1.0, 1.0, callbacks.render_scale)
+	quality.attach_menu_option(menu)
+	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+		callbacks.initial_render_scale, callbacks.render_scale)
+	quality.bind("render_scale", scale_slider, callbacks.render_scale)
 
 
 func update_status(solvers: Array[ClothSolver]) -> void:

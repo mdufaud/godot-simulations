@@ -54,6 +54,12 @@ func set_marker_radius(radius_m: float) -> void:
 	marker.scale = Vector3(radius_m, 1.0, radius_m)
 
 
+## Replaces the displaced sheet's vertex grid (a quality-tier change); the
+## height binding, walls and helpers stay untouched.
+func rebuild_terrain(mesh_n: int) -> void:
+	terrain.mesh = _build_terrain_mesh(mesh_n)
+
+
 # Flat vertex grid displaced by the shader. One extra ring around the border
 # sits on the domain edge with COLOR.r = 0, so its verts stay on the floor and
 # the border quads become the sheet's side walls — no open underside visible.

@@ -31,6 +31,7 @@ const PROJECTILES := [
 var chunk_count := 100
 var fracture_bias := 0.6
 var config: DestructionConfig = DestructionConfig.new()
+var quality := SimQualityState.new()
 
 var walls: Array[FracturedWall] = []
 var launcher := ProjectileLauncher.new()
@@ -45,7 +46,8 @@ func _ready() -> void:
 	if config_error != "":
 		push_error("Destruction config: %s" % config_error)
 		return
-	chunk_count = config.chunk_count
+	quality.setup(DestructionQualityProfile, "destruction_quality_profile", _apply_quality)
+	quality.restore()
 	fracture_bias = config.fracture_bias
 	orbit_cam.target = Vector3(-1.8, 0.8, -1.5)
 	orbit_cam.distance = 18.0
@@ -115,7 +117,10 @@ func arm_projectile(index: int) -> void:
 # Rebuilding the walls on every slider tick would refracture 500 hulls per frame,
 # so the count and the bias land on release.
 func set_chunk_count(value: float) -> void:
-	chunk_count = int(round(value))
+	var count := int(round(value))
+	if count == chunk_count:
+		return
+	chunk_count = count
 	_queue_rebuild()
 
 
@@ -126,6 +131,19 @@ func set_bias(value: float) -> void:
 
 func set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+## What the viewport is actually scaled to, for seeding the menu slider.
+func render_scale() -> float:
+	return _viewport.render_scale()
+
+
+# Called from quality.restore() before the menu exists, so the chunk count
+# lands on the member ahead of the launch rebuild; once the slider is bound the
+# tier pushes through it and the debounced path refactures the walls.
+func _apply_quality(values: Dictionary) -> void:
+	set_render_scale(values.render_scale)
+	chunk_count = int(round(values.chunk_count))
 
 
 func _on_impact(origin: Vector3, radius_m: float, impulse: float) -> void:

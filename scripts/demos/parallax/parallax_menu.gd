@@ -7,6 +7,7 @@ var _settings: ParallaxConfig
 var _on_changed: Callable
 var _on_preset: Callable
 var _on_mesh: Callable
+var _quality: SimQualityState
 
 var _height_slider: HSlider
 var _min_layers_slider: HSlider
@@ -21,11 +22,12 @@ var _mesh_option: OptionButton
 
 
 func _init(settings: ParallaxConfig, on_changed: Callable, on_preset: Callable,
-		on_mesh: Callable) -> void:
+		on_mesh: Callable, quality: SimQualityState) -> void:
 	_settings = settings
 	_on_changed = on_changed
 	_on_preset = on_preset
 	_on_mesh = on_mesh
+	_quality = quality
 
 
 func build(menu: SimMenu, preset_names: Array) -> void:
@@ -89,7 +91,13 @@ func build(menu: SimMenu, preset_names: Array) -> void:
 	menu.add_action("🎨", "Preset", func() -> void: _cycle(_preset_option))
 	menu.add_action("🧊", "Mesh", func() -> void: _cycle(_mesh_option))
 
-	menu.add_debug_toggle("🌑", "Self-shadowing", true,
+	var shadow_toggle: Button = menu.add_debug_toggle("🌑", "Self-shadowing",
+		_settings.self_shadow_enabled,
+		func(pressed: bool) -> void:
+			_settings.self_shadow_enabled = pressed
+			_on_changed.call()
+	)
+	_quality.bind("self_shadow", shadow_toggle,
 		func(pressed: bool) -> void:
 			_settings.self_shadow_enabled = pressed
 			_on_changed.call()

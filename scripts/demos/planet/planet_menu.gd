@@ -5,8 +5,6 @@ class_name PlanetMenu extends RefCounted
 ## Registration order is load-bearing: SimMenu keys persisted values on
 ## "<section>/<label>" and replays them in registration order after _ready.
 
-const RESOLUTIONS: Array[int] = [64, 96, 128, 160]
-
 ## Assigned by the controller before [method build].
 var generator: PlanetGenerator
 var surface: ShaderMaterial
@@ -16,7 +14,7 @@ var orbit_cam: OrbitCamera
 var atmosphere_quad: MeshInstance3D
 ## The controller. Must answer: apply_preset(int), queue_regen(), start_generation(),
 ## set_render_scale(float), set_fluid_enabled(bool), rebuild_fluid(), aim_point(),
-## and carry sun_yaw / sun_auto_rotate.
+## carry sun_yaw / sun_auto_rotate, and expose the SimQualityState named quality.
 var host: Node
 
 var _status: Label
@@ -194,20 +192,31 @@ func build(menu: SimMenu, presets: Array) -> void:
 	menu.add_slider("Slip", 0.5, 1.0, 0.999, fluid.set_slip)
 
 	menu.add_section("Performance")
-	menu.add_option_button(
+	var resolution_option := menu.add_option_button(
 		"Resolution",
-		RESOLUTIONS.map(func(r: int) -> String: return "%d³" % r),
-		RESOLUTIONS.find(generator.resolution),
+		PlanetQualityProfile.RESOLUTIONS.map(func(r: int) -> String: return "%d³" % r),
+		PlanetQualityProfile.RESOLUTIONS.find(generator.resolution),
 		func(index: int) -> void:
-			generator.resolution = RESOLUTIONS[index]
-			GameManager.set_setting("planet_resolution", generator.resolution)
+			generator.resolution = PlanetQualityProfile.RESOLUTIONS[index]
 			host.start_generation()
 	)
-	menu.add_slider("Render scale", 0.4, 1.0, host.render_scale, host.set_render_scale)
-	menu.add_slider("Surface detail", 0.0, 8.0, float(surface.get_shader_parameter("detail_octaves")),
+	host.quality.bind("resolution", resolution_option,
+		func(res: int) -> void:
+			generator.resolution = res
+			host.start_generation(),
+		func(res: int) -> int: return PlanetQualityProfile.RESOLUTIONS.find(res))
+	host.quality.attach_menu_option(menu)
+	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0, host.render_scale,
+		host.set_render_scale)
+	host.quality.bind("render_scale", scale_slider, host.set_render_scale)
+	var detail_slider := menu.add_slider("Surface detail", 0.0, 8.0,
+		float(surface.get_shader_parameter("detail_octaves")),
 		func(v: float) -> void:
 			surface.set_shader_parameter("detail_octaves", int(v))
 	)
+	host.quality.bind("detail_octaves", detail_slider,
+		func(v: float) -> void:
+			surface.set_shader_parameter("detail_octaves", int(v)))
 	_status = menu.add_label("Generating…")
 
 

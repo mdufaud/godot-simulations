@@ -88,7 +88,7 @@ var foam_persistence := 5.0
 var sim_time := 0.0
 ## Update one cascade per frame round-robin instead of all of them.
 var amortize := false
-var quality_tier: int = OceanQualityProfile.DEFAULT_TIER
+var quality_tier: int = OceanQualityProfile.default_tier()
 
 var initialized := false
 var profiling := false

@@ -25,7 +25,7 @@ func build(host, exhibit_names: Array) -> void:
 	_menu.add_action("↺", "Reset", host._reset_current_case)
 	_menu.add_separator()
 	_menu.add_section("Impossible Storage")
-	_menu.add_label("Live native-resolution view · dedicated render target · no fallback image")
+	_menu.add_label("Portal views render to dedicated HDR targets; the quality tier scales their count and resolution")
 	_menu.add_debug_toggle("🧊", "Debug crossing volume", false,
 		func(enabled: bool) -> void:
 			host.render_manager.set_debug_enabled(enabled)
@@ -33,7 +33,19 @@ func build(host, exhibit_names: Array) -> void:
 	)
 	_menu.add_separator()
 	_menu.add_section("Performance")
-	_menu.add_slider("Render scale", 0.4, 1.0, 1.0, host._set_render_scale)
+	var scale_slider: HSlider = _menu.add_slider("Render scale", 0.4, 1.0,
+		host._viewport.render_scale(), host._set_render_scale)
+	host.quality.bind("render_scale", scale_slider, host._set_render_scale)
+	var views_slider: HSlider = _menu.add_slider("Portal views", 1.0, 4.0,
+		float(host.render_manager.max_views),
+		func(v: float) -> void: host.render_manager.set_max_views(int(v)))
+	host.quality.bind("portal_views", views_slider,
+		func(v: float) -> void: host.render_manager.set_max_views(int(v)))
+	var view_scale_slider: HSlider = _menu.add_slider("Portal view scale", 0.4, 1.0,
+		host.render_manager.portal_view_scale, host.render_manager.set_portal_view_scale)
+	host.quality.bind("portal_view_scale", view_scale_slider,
+		host.render_manager.set_portal_view_scale)
+	host.quality.attach_menu_option(_menu)
 
 	_build_overlay(host.ui_layer)
 	_build_touch_controls(host)

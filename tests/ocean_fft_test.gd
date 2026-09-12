@@ -32,7 +32,7 @@ func _run() -> void:
 		_finish("ocean_fft")
 		return
 	if OS.get_cmdline_user_args().has("--jonswap-controls-only"):
-		demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+		demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
 		for frame in 360:
 			await process_frame
 			if demo.solver.initialized and demo.texture_bound:
@@ -56,23 +56,23 @@ func _run() -> void:
 		_finish("ocean_foam_phases")
 		return
 
-	# The demo defaults to Ultra; the suite's numeric contracts are pinned on
-	# High (same pipeline, 512²) so runs stay fast, with dedicated Performance
-	# and Ultra sections below.
-	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	# The demo defaults to High; the suite's numeric contracts are pinned on
+	# Medium (same pipeline, 512²) so runs stay fast, with dedicated Low and
+	# Ultra sections below.
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
 	for frame in 360:
 		await process_frame
 		if demo.solver.initialized and demo.texture_bound:
 			break
 	demo._menu_builder._foam_distance_override = false
-	demo.set_foam_distance(OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.HIGH])
-	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.HIGH
+	demo.set_foam_distance(OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.MEDIUM])
+	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.MEDIUM
 		and demo.solver.map_size == 512
 		and demo.solver.foam_near_size == 1024
 		and demo.solver.foam_near_domain
-			== OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.HIGH] * 2.0
+			== OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.MEDIUM] * 2.0
 		and not demo.solver.amortize,
-		"High profile mismatch: tier=%d map=%d near=%d domain=%.1f amortize=%s" % [
+		"Medium profile mismatch: tier=%d map=%d near=%d domain=%.1f amortize=%s" % [
 			demo.solver.quality_tier, demo.solver.map_size, demo.solver.foam_near_size,
 			demo.solver.foam_near_domain, demo.solver.amortize])
 	_check(demo._menu_builder._foam_distance != null
@@ -85,7 +85,7 @@ func _run() -> void:
 		"foam distance control did not update and reset the near field")
 	demo.set_foam_distance(72.0)
 	_check(demo.solver.estimate_vram_bytes()
-		== OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH),
+		== OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.MEDIUM),
 		"VRAM estimate does not match the live allocation sizes")
 	await _check_nyquist_derivatives(demo.solver)
 	await _check_combined_foam(demo.solver)
@@ -373,19 +373,19 @@ func _run() -> void:
 	demo.set_frozen(false)
 	await _frames(240)
 	demo.set_frozen(true)
-	# Performance tier: cascades rotate, near feedback every other frame, and
+	# Low tier: cascades rotate, near feedback every other frame, and
 	# every GPU resource is recreated (which also clears the foam history).
 	var pre_switch := await _state_metrics(demo, true, false, false, false)
-	demo.set_quality_profile(OceanQualityProfile.Tier.PERFORMANCE)
+	demo.set_quality_profile(OceanQualityProfile.Tier.LOW)
 	for frame in 360:
 		await process_frame
 		if demo.solver.initialized and demo.texture_bound:
 			break
-	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.PERFORMANCE
+	_check(demo.solver.quality_tier == OceanQualityProfile.Tier.LOW
 		and demo.solver.map_size == 256
 		and demo.solver.foam_near_size == 512
 		and demo.solver.foam_near_domain
-			== OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.PERFORMANCE] * 2.0
+			== OceanQualityProfile.FOAM_NEAR_DISTANCE[OceanQualityProfile.Tier.LOW] * 2.0
 		and demo.solver.amortize
 		and demo.solver.foam_near_stride == 2,
 		"256 performance mode did not reinitialize")
@@ -491,9 +491,9 @@ func _run() -> void:
 			demo.solver.quality_tier, demo.solver.map_size])
 	_check(demo.solver.foam_near_domain / demo.solver.foam_near_size <= 0.125,
 		"Ultra combined foam texels exceed 12.5 cm")
-	_check(OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.PERFORMANCE)
-		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH)
-		and OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.HIGH)
+	_check(OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.LOW)
+		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.MEDIUM)
+		and OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.MEDIUM)
 		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.ULTRA),
 		"VRAM estimates do not increase with quality")
 	demo.set_frozen(false)
@@ -1216,13 +1216,14 @@ func _check_foam_phases(demo: Node) -> void:
 	var camera_state: Array = [demo.orbit_cam.target, demo.orbit_cam.distance,
 		demo.orbit_cam.pitch, demo.orbit_cam.yaw, demo.orbit_cam.is_processing(),
 		demo._capture_view_name, demo.rocks.visible, demo._capture_interaction_foam]
-	_check(OceanQualityProfile.TIER_NAMES == ["Performance", "High", "Ultra"]
-		and OceanQualityProfile.Tier.PERFORMANCE == 0
-		and OceanQualityProfile.Tier.HIGH == 1 and OceanQualityProfile.Tier.ULTRA == 2,
+	_check(OceanQualityProfile.TIER_NAMES == ["Low", "Medium", "High", "Ultra"]
+		and OceanQualityProfile.Tier.LOW == 0
+		and OceanQualityProfile.Tier.MEDIUM == 1 and OceanQualityProfile.Tier.HIGH == 2
+		and OceanQualityProfile.Tier.ULTRA == 3,
 		"quality names or saved tier identifiers changed")
 	var coverages: Array[float] = []
-	for tier in [OceanQualityProfile.Tier.PERFORMANCE, OceanQualityProfile.Tier.HIGH,
-			OceanQualityProfile.Tier.ULTRA]:
+	for tier in [OceanQualityProfile.Tier.LOW, OceanQualityProfile.Tier.MEDIUM,
+			OceanQualityProfile.Tier.HIGH, OceanQualityProfile.Tier.ULTRA]:
 		demo.set_quality_profile(tier)
 		if not await _wait_ocean_ready(demo, 20000):
 			_check(false, "foam phase profile did not initialize")
@@ -1244,7 +1245,7 @@ func _check_foam_phases(demo: Node) -> void:
 			print("FOAM PHASE tier=%s layer=%d %s" % [OceanQualityProfile.TIER_NAMES[tier], layer, morphology])
 			_check(morphology.coverage >= 0.07 and morphology.coverage <= 0.14,
 				"Swell coverage outside 7..14 percent on tier %d layer %d" % [tier, layer])
-			if tier == OceanQualityProfile.Tier.HIGH and layer == 0:
+			if tier == OceanQualityProfile.Tier.MEDIUM and layer == 0:
 				_check(morphology.fresh.area < morphology.persistent.area,
 					"Swell active area is not narrower than residual on layer %d" % layer)
 				_check(morphology.fresh.p95_width < morphology.persistent.p95_width,
@@ -1256,9 +1257,11 @@ func _check_foam_phases(demo: Node) -> void:
 			coverages.append(common_morphology.coverage)
 			print("FOAM COMMON tier=%s layer=%d coverage=%.6f" % [OceanQualityProfile.TIER_NAMES[tier], layer, common_morphology.coverage])
 	for layer in 3:
-		_check(absf(coverages[layer] - coverages[layer + 3]) <= 0.021
-			and absf(coverages[layer + 6] - coverages[layer + 3]) <= 0.021,
-			"Swell profile coverage differs from High by over 2.1 percentage points on layer %d" % layer)
+		for tier in [OceanQualityProfile.Tier.LOW, OceanQualityProfile.Tier.HIGH,
+				OceanQualityProfile.Tier.ULTRA]:
+			_check(absf(coverages[tier * 3 + layer]
+					- coverages[OceanQualityProfile.Tier.MEDIUM * 3 + layer]) <= 0.021,
+				"Swell profile coverage differs from Medium by over 2.1 percentage points on tier %d layer %d" % [tier, layer])
 	demo.orbit_cam.target = camera_state[0]
 	demo.orbit_cam.distance = camera_state[1]
 	demo.orbit_cam.pitch = camera_state[2]
@@ -1290,9 +1293,9 @@ func _check_nyquist_derivatives(solver: OceanSolver) -> void:
 
 
 func _check_coherence_contracts(demo: Node) -> void:
-	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
 	if not await _wait_ocean_ready(demo, 20000):
-		_check(false, "coherence mode timed out waiting for High profile")
+		_check(false, "coherence mode timed out waiting for Medium profile")
 		return
 	demo.apply_preset(3)
 	demo.set_frozen(true)
@@ -1398,9 +1401,9 @@ func _check_parseval(solver: OceanSolver, time: float) -> void:
 
 
 func _check_centered_mode_coherence(demo: Node) -> void:
-	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
 	if not await _wait_ocean_ready(demo, 20000):
-		_check(false, "coherence mode timed out reinitializing High profile")
+		_check(false, "coherence mode timed out reinitializing Medium profile")
 		return
 	demo.apply_preset(3)
 	demo.set_capture_time(20.0)

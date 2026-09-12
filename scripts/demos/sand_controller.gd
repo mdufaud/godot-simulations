@@ -5,7 +5,6 @@ extends Node3D
 ## shader) and aims the brush.
 
 const WORLD := 4.0
-const MESH_N := 512
 
 const PRESETS := [
 	preload("res://resources/sand/presets/sandbox.tres"),
@@ -21,6 +20,10 @@ const PRESETS := [
 
 var solver := HeightfieldSand.new()
 var config: SandConfig = SandConfig.new()
+var quality := SimQualityState.new()
+## Vertex grid of the displaced sheet, independent of the solver grid; the
+## quality tier owns it (see SandQualityProfile).
+var mesh_n := 512
 var view := SandScenery.new()
 var profiler := SimProfiler.new()
 
@@ -41,7 +44,8 @@ var _strength := 1.2
 
 func _ready() -> void:
 	solver.config = config
-	solver.grid_n = GameManager.get_setting("sand_grid_n", 512)
+	quality.setup(SandQualityProfile, "sand_quality_profile", _apply_quality)
+	quality.restore()
 	solver.world_size = WORLD
 
 	orbit_cam.pitch = -30.0
@@ -50,7 +54,7 @@ func _ready() -> void:
 	orbit_cam.max_distance = 40.0
 	orbit_cam.move_speed = 2.0
 
-	view.build(self, WORLD, MESH_N)
+	view.build(self, WORLD, mesh_n)
 	sun.shadow_enabled = true
 
 	profiler.lines_provider = _profiler_lines
@@ -159,12 +163,35 @@ func set_grid_n(n: int) -> void:
 	if n == solver.grid_n:
 		return
 	solver.grid_n = n
-	GameManager.set_setting("sand_grid_n", n)
 	restart()
 
 
 func set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+## What the viewport is actually scaled to, for seeding the menu slider.
+func render_scale() -> float:
+	return _viewport.render_scale()
+
+
+## Sets the fields a quality tier bundles. Before the solver runs the values
+## land directly (the launch restart below picks them up); afterwards a grid
+## change reseeds through the same restart path, and a sheet change rebuilds
+## the displaced mesh.
+func _apply_quality(values: Dictionary) -> void:
+	set_render_scale(values.render_scale)
+	solver.iterations = int(values.iterations)
+	if solver.initialized and int(values.grid_n) != solver.grid_n:
+		set_grid_n(int(values.grid_n))
+	else:
+		solver.grid_n = int(values.grid_n)
+	var sheet_n := int(values.mesh_n)
+	if view.terrain != null and sheet_n != mesh_n:
+		mesh_n = sheet_n
+		view.rebuild_terrain(mesh_n)
+	else:
+		mesh_n = sheet_n
 
 
 func _unhandled_input(event: InputEvent) -> void:

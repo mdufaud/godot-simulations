@@ -10,15 +10,13 @@ var storm: OceanStorm
 var profiler: SimProfiler
 ## The controller. Duck-typed to keep this file out of its type graph; it must
 ## provide apply_preset, apply_look, current_look_index, set_time_scale,
-## set_frozen, throw_crate, clear_crates, set_quality_profile,
-## quality_profile_label, quality_requested, quality_effective,
-## set_foam_distance, set_detail_distance, set_spray_amount, set_sun_elevation,
-## set_sun_azimuth and set_render_scale.
+## set_frozen, throw_crate, clear_crates, set_foam_distance,
+## set_detail_distance, set_spray_amount, set_sun_elevation,
+## set_sun_azimuth, set_render_scale and a SimQualityState named quality.
 var host: Node
 
 var _preset_option: OptionButton
 var _look_option: OptionButton
-var _profile_option: OptionButton
 var _wind_direction: HSlider
 var _wind_speed: HSlider
 var _fetch: HSlider
@@ -144,29 +142,13 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	menu.add_debug_toggle("🔮", "SSR", false,
 		func(on: bool): world_env.environment.ssr_enabled = on)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
-	_profile_option = menu.add_option_button("Quality profile",
-		OceanQualityProfile.TIER_NAMES, host.quality_requested,
-		func(tier_idx: int):
-			host.set_quality_profile(tier_idx)
-			_refresh_profile_option(_profile_option))
-	_refresh_profile_option(_profile_option)
+	host.quality.attach_menu_option(menu)
 	_detail_distance = menu.add_slider("Detail distance (m)", 250.0, 4000.0,
 		host.detail_distance_m, func(v: float):
 			_detail_distance_override = true
 			host.set_detail_distance(v))
 	_detail_distance.step = 50.0
 	menu.add_slider("Render scale", 0.4, 1.0, 1.0, host.set_render_scale)
-
-
-## Keeps the profile selector honest: a degraded pick (e.g. Ultra on a GPU
-## whose 2D limit is below 1024) reads "Ultra requested / High active".
-func _refresh_profile_option(option: OptionButton) -> void:
-	for i in option.item_count:
-		if i == host.quality_requested \
-				and host.quality_requested != host.quality_effective:
-			option.set_item_text(i, host.quality_profile_label())
-		else:
-			option.set_item_text(i, OceanQualityProfile.TIER_NAMES[i])
 
 
 ## Moves every slider a preset carries, so the panel shows what is running. The

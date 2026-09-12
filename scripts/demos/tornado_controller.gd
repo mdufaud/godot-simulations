@@ -76,6 +76,10 @@ var _bolt_mat: StandardMaterial3D
 var _pending_cap := -1
 var _cap_debounce := 0.0
 var _skirt_density := 0.5
+var quality := SimQualityState.new()
+## Set once the initial debris pool exists; a tier switch past this point
+## rebuilds it through the debounced cap path.
+var _pool_built := false
 
 
 func _ready() -> void:
@@ -94,8 +98,11 @@ func _ready() -> void:
 	wander_radius = config.wander_radius_m
 	_wander_noise.seed = 1337
 	debris_pool.field = field
+	quality.setup(TornadoQualityProfile, "tornado_quality_profile", _apply_quality)
+	quality.restore()
 	debris_pool.build_pool(debris_pool.debris_cap)
 	debris_pool.scatter_props()
+	_pool_built = true
 	_funnel_mat = funnel_volume.material_override
 	_cloud_mat = cloud_deck.material_override
 	_renderer.setup(_funnel_mat, _cloud_mat, [
@@ -110,7 +117,6 @@ func _ready() -> void:
 	_set_storm_color(storm_color)
 	_update_funnel_bounds()
 	cam_rig.set_pose(Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
-	_set_render_scale(0.75)
 	_setup_ui()
 
 
@@ -368,7 +374,7 @@ func _setup_ui() -> void:
 		func(v: float) -> void: debris_pool.spawn_rate = v)
 	menu.add_slider("Throw speed", 20.0, 80.0, debris_pool.throw_speed,
 		func(v: float) -> void: debris_pool.throw_speed = v)
-	menu.add_slider("Debris cap", 50.0, 400.0, float(debris_pool.debris_cap),
+	var cap_slider: HSlider = menu.add_slider("Debris cap", 50.0, 400.0, float(debris_pool.debris_cap),
 		func(v: float) -> void:
 			_pending_cap = int(v)
 			_cap_debounce = 0.6)
@@ -385,12 +391,28 @@ func _setup_ui() -> void:
 	_debris_bar = menu.add_progress_bar("Active debris", float(debris_pool.debris_cap))
 
 	menu.add_section("Performance")
-	menu.add_slider("Render scale", 0.4, 1.0, 0.75, _set_render_scale)
-	menu.add_slider("Raymarch steps", 16.0, 96.0, 96.0,
+	quality.attach_menu_option(menu)
+	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+		_viewport.render_scale(), _set_render_scale)
+	quality.bind("render_scale", scale_slider, _set_render_scale)
+	var steps_slider: HSlider = menu.add_slider("Raymarch steps", 16.0, 160.0,
+		_funnel_mat.get_shader_parameter("steps"),
 		func(v: float) -> void: _funnel_mat.set_shader_parameter("steps", int(v)))
-	menu.add_button("Dust 4k", func() -> void: _set_dust_amount(4000))
-	menu.add_button("Dust 14k", func() -> void: _set_dust_amount(14000))
-	menu.add_button("Dust 28k", func() -> void: _set_dust_amount(28000))
+	quality.bind("raymarch_steps", steps_slider,
+		func(v: float) -> void: _funnel_mat.set_shader_parameter("steps", int(v)))
+	var dust_labels: Array = []
+	for amount in TornadoQualityProfile.DUST_AMOUNTS:
+		dust_labels.append("%dk" % int(amount / 1000))
+	var dust_option: OptionButton = menu.add_option_button("Dust amount", dust_labels,
+		TornadoQualityProfile.DUST_AMOUNTS.find(dust_particles.amount),
+		func(idx: int): _set_dust_amount(TornadoQualityProfile.DUST_AMOUNTS[idx]))
+	quality.bind("dust_amount", dust_option,
+		func(amount): _set_dust_amount(amount),
+		func(amount): return TornadoQualityProfile.DUST_AMOUNTS.find(amount))
+	quality.bind("debris_cap", cap_slider,
+		func(v: float) -> void:
+			_pending_cap = int(v)
+			_cap_debounce = 0.6)
 
 
 func _set_render_scale(v: float) -> void:
@@ -400,3 +422,17 @@ func _set_render_scale(v: float) -> void:
 func _set_dust_amount(n: int) -> void:
 	dust_particles.amount = n
 	skirt_particles.amount = maxi(n / 7, 500)
+
+
+## Sets the fields a quality tier bundles. Before the debris pool exists the
+## cap lands on the pool directly (build_pool below picks it up); afterwards a
+## cap change goes through the same debounced rebuild as the slider.
+func _apply_quality(values: Dictionary) -> void:
+	_set_render_scale(values.render_scale)
+	_funnel_mat.set_shader_parameter("steps", int(values.raymarch_steps))
+	_set_dust_amount(values.dust_amount)
+	if _pool_built:
+		_pending_cap = int(values.debris_cap)
+		_cap_debounce = 0.6
+	else:
+		debris_pool.debris_cap = int(values.debris_cap)

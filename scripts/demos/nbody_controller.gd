@@ -8,8 +8,6 @@ extends Node3D
 # G = 1, M_bh = 1: the inner disk orbits in ~33 time units, so a 0.016 step would
 # take minutes per revolution. Energy stays conserved up to ~0.22 per substep.
 const TIME_STEP := 0.15
-# O(N^2): 32k costs ~24 ms/frame on a 760M iGPU, 16k ~6 ms. See TODO.md.
-const SELF_GRAVITY_MAX := 16384
 
 # Not a const: a class reference is not a constant expression in GDScript.
 static var SCENE_TYPES: Array = [
@@ -33,6 +31,7 @@ const PRESETS: Array[NBodyPreset] = [
 
 var solver := NBodySolver.new()
 var config: NBodyConfig = NBodyConfig.new()
+var quality := SimQualityState.new()
 var scene_def: NBodySceneDef = SCENE_TYPES[0].new()
 var active_preset: NBodyPreset = PRESETS[0]
 var attractor_list: Array = []
@@ -49,6 +48,7 @@ var profiler := SimProfiler.new()
 var param_group: VBoxContainer
 var star_size_slider: HSlider
 var brightness_slider: HSlider
+var gravity_toggle: Button
 var _paused := false
 var _sim_time := 0.0
 
@@ -56,9 +56,8 @@ var _sim_time := 0.0
 func _ready() -> void:
 	solver.config = config
 	scene_def = SCENE_TYPES[active_preset.scene_type].new()
-	solver.particle_count = GameManager.get_setting("nbody_particle_count", 262144)
-	solver.tex_width = _tex_width_for(solver.particle_count)
-	solver.self_gravity = GameManager.get_setting("nbody_self_gravity", false)
+	quality.setup(NBodyQualityProfile, "nbody_quality_profile", _apply_quality)
+	quality.restore()
 
 	orbit_cam.target = Vector3.ZERO
 	orbit_cam.distance = 70.0
@@ -179,7 +178,7 @@ func _setup_ui() -> void:
 	_build_scene_params()
 	menu.add_separator()
 
-	menu.add_action_toggle("🪐", "Gravity", solver.self_gravity, _on_self_gravity)
+	gravity_toggle = menu.add_action_toggle("🪐", "Gravity", solver.self_gravity, _on_self_gravity)
 	menu.add_action_toggle("⏸", "Pause", false, func(on: bool) -> void: _paused = on)
 
 	menu.add_section("Simulation")
@@ -197,11 +196,18 @@ func _setup_ui() -> void:
 
 	menu.add_section("Performance")
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
-	menu.add_label("Particles")
-	menu.add_button("65k", func(): _set_particle_count(65536))
-	menu.add_button("262k", func(): _set_particle_count(262144))
-	menu.add_button("1M", func(): _set_particle_count(1048576))
-	menu.add_slider("Render scale", 0.4, 1.0, 1.0, _set_render_scale)
+	var count_labels: Array = []
+	for count in NBodyQualityProfile.PARTICLE_COUNTS:
+		count_labels.append(_count_text(count))
+	var count_option := menu.add_option_button("Particles", count_labels,
+		NBodyQualityProfile.PARTICLE_COUNTS.find(solver.particle_count),
+		func(idx: int): _set_particle_count(NBodyQualityProfile.PARTICLE_COUNTS[idx]))
+	quality.bind("particle_count", count_option,
+		func(count): _set_particle_count(count),
+		func(count): return NBodyQualityProfile.PARTICLE_COUNTS.find(count))
+	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+		_viewport.render_scale(), _set_render_scale)
+	quality.bind("render_scale", scale_slider, _set_render_scale)
 	_update_status()
 
 
@@ -266,9 +272,8 @@ func _on_scene_selected(idx: int) -> void:
 # particles would hang the GPU, so the count comes down with it.
 func _on_self_gravity(on: bool) -> void:
 	solver.self_gravity = on
-	GameManager.set_setting("nbody_self_gravity", on)
-	if on and solver.particle_count > SELF_GRAVITY_MAX:
-		_set_particle_count(SELF_GRAVITY_MAX)
+	if on and solver.particle_count > config.self_gravity_max_particles:
+		_set_particle_count(config.self_gravity_max_particles)
 	else:
 		_update_status()
 
@@ -284,18 +289,37 @@ func _on_substeps(v: float) -> void:
 
 
 func _set_particle_count(n: int) -> void:
-	var target := mini(n, SELF_GRAVITY_MAX) if solver.self_gravity else n
+	var target := mini(n, config.self_gravity_max_particles) if solver.self_gravity else n
 	if target == solver.particle_count:
 		_update_status()
 		return
-	_teardown_solver()
+	if solver.initialized:
+		_teardown_solver()
 	solver.particle_count = target
 	solver.tex_width = _tex_width_for(target)
-	GameManager.set_setting("nbody_particle_count", target)
 	_fill_mm(mm)
 	star_mat.set_shader_parameter("tex_width", solver.tex_width)
 	_apply_scene()
-	RenderingServer.call_on_render_thread(solver.init_render)
+	if solver.initialized:
+		RenderingServer.call_on_render_thread(solver.init_render)
+
+
+## Sets the solver fields a quality tier bundles. Before init (launch restore)
+## the fields land directly; on a tier switch the count rebuilds through the
+## same path as the Particles option.
+func _apply_quality(values: Dictionary) -> void:
+	solver.self_gravity = values.self_gravity
+	config.self_gravity_max_particles = values.self_gravity_max
+	if gravity_toggle != null:
+		gravity_toggle.set_pressed_no_signal(values.self_gravity)
+	var count := mini(int(values.particle_count), int(values.self_gravity_max)) \
+		if values.self_gravity else int(values.particle_count)
+	if solver.initialized:
+		_set_particle_count(count)
+	elif count != solver.particle_count:
+		solver.particle_count = count
+		solver.tex_width = _tex_width_for(count)
+	_set_render_scale(values.render_scale)
 
 
 func _tex_width_for(n: int) -> int:

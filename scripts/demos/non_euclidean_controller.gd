@@ -19,10 +19,14 @@ var _reserve := ExhibitReserve.new()
 var _staircase := ExhibitStaircase.new()
 var _garden := ExhibitGarden.new()
 var _hud := NonEuclideanHud.new()
+var quality := SimQualityState.new()
 
 
 func _ready() -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_BILINEAR, 1.0)
+	quality.setup(NonEuclideanQualityProfile, "non_euclidean_quality_profile",
+		_apply_quality)
+	quality.restore()
 	_build_materials()
 	_cells = Node3D.new()
 	_cells.name = "Cells"
@@ -81,6 +85,15 @@ func _build_materials() -> void:
 
 func _set_render_scale(v: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, v)
+
+
+## Portal views are whole extra world renders, so the tier moves both the pool
+## size and each view's resolution; after the HUD exists the keys are bound to
+## its sliders and a tier switch re-pushes through them.
+func _apply_quality(values: Dictionary) -> void:
+	_set_render_scale(values.render_scale)
+	render_manager.set_portal_view_scale(values.portal_view_scale)
+	render_manager.set_max_views(int(values.portal_views))
 
 
 func _on_menu_panel_toggled(open: bool) -> void:

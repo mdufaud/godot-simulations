@@ -20,6 +20,7 @@ var _view := FractalView.new()
 var config: FractalConfig = FractalConfig.new()
 var _autopilot := FractalAutopilot.new(_camera)
 var _menu_builder: FractalMenu
+var quality := SimQualityState.new()
 
 var _mouse_down := false
 var _is_dragging := false
@@ -39,16 +40,26 @@ func _ready() -> void:
 	_view.rect_high = _rect_high
 	_view.display = _display
 	_view.host = self
+	quality.setup(FractalQualityProfile, "fractal_quality_profile", _apply_quality)
+	quality.restore()
 	_view.start()
 
 	get_window().size_changed.connect(_resize_viewports)
 	_resize_viewports()
 
-	_menu_builder = FractalMenu.new(_camera, _view, _autopilot, reset)
+	_menu_builder = FractalMenu.new(_camera, _view, _autopilot, reset, quality)
 	_menu_builder.build(_menu)
 
 	_autopilot.pick(0)
 	reset()
+
+
+## The cap and band are config the view reads per pass, the AA level a plain
+## view field; all safe to set before _view.start().
+func _apply_quality(values: Dictionary) -> void:
+	config.interaction_iteration_cap = int(values.interaction_cap)
+	config.refine_band_rows = int(values.refine_band_rows)
+	_view.aa_quality = int(values.aa_quality)
 
 
 func _process(delta: float) -> void:

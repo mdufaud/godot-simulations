@@ -98,6 +98,7 @@ var _last_viewport_size := Vector2i.ZERO
 var _viewport_profiling := false
 var _last_metrics_request := -1
 var _mobile_profile := false
+var quality := SimQualityState.new()
 var _stroke_preview_tween: Tween
 var _official_example_index := 0
 
@@ -105,10 +106,10 @@ var _official_example_index := 0
 func _ready() -> void:
 	_mobile_profile = OS.has_feature("mobile") or OS.get_environment("FORCE_TOUCH_UI") == "1"
 	config.source_mode = source_mode
-	config.target_spp = 4 if _mobile_profile else config.target_spp
-	config.preview_scale = 0.35 if _mobile_profile else 0.5
-	config.final_scale = 0.5 if _mobile_profile else 0.75
-	config.gpu_budget_ms = 4.0 if _mobile_profile else config.gpu_budget_ms
+	quality.setup(MixwellQualityProfile, "mixwell_quality_profile", _apply_quality)
+	if _mobile_profile:
+		quality.fallback_tier = MixwellQualityProfile.Tier.LOW
+	quality.restore()
 	_last_viewport_size = _viewport_size()
 	solver.initialize(_render_size(config.final_scale), config, _last_viewport_size)
 	solver.set_source_mode(source_mode)
@@ -235,14 +236,20 @@ func _setup_ui() -> void:
 		_set_midpoint_alpha)
 	menu.add_slider("Cutoff gamma", 1.0, 32.0, config.cutoff_gamma,
 		_set_cutoff_gamma)
-	menu.add_option_button("Target spp", SPP_NAMES,
+	var spp_option: OptionButton = menu.add_option_button("Target spp", SPP_NAMES,
 		MixwellConfig.SPP_TARGETS.find(config.target_spp), _select_target_spp)
-	menu.add_slider("GPU budget (ms)", 0.5, 33.0, config.gpu_budget_ms,
-		_set_gpu_budget)
-	menu.add_slider("Preview scale", 0.25, 1.0, config.preview_scale,
-		_set_preview_scale)
-	menu.add_slider("Final scale", 0.5, 1.0, config.final_scale,
-		_set_final_scale)
+	quality.bind("target_spp", spp_option, _select_target_spp,
+		func(spp: int) -> int: return MixwellConfig.SPP_TARGETS.find(spp))
+	var budget_slider: HSlider = menu.add_slider("GPU budget (ms)", 0.5, 33.0,
+		config.gpu_budget_ms, _set_gpu_budget)
+	quality.bind("gpu_budget_ms", budget_slider, _set_gpu_budget)
+	var preview_slider: HSlider = menu.add_slider("Preview scale", 0.25, 1.0,
+		config.preview_scale, _set_preview_scale)
+	quality.bind("preview_scale", preview_slider, _set_preview_scale)
+	var final_slider: HSlider = menu.add_slider("Final scale", 0.5, 1.0,
+		config.final_scale, _set_final_scale)
+	quality.bind("final_scale", final_slider, _set_final_scale)
+	quality.attach_menu_option(menu)
 	menu.add_slider("Affine strength", -2.0, 2.0, config.affine_strength,
 		_set_affine_strength)
 	menu.add_slider("Affine radius", 16.0, 512.0, config.affine_radius_px,
@@ -620,6 +627,16 @@ func _select_target_spp(index: int) -> void:
 
 func _set_gpu_budget(value: float) -> void:
 	config.gpu_budget_ms = clampf(value, 0.5, 33.0)
+
+
+## Tier launch path: writes the config the solver.initialize() below reads.
+## After the menu exists the four keys are widget-bound, so tier switches go
+## through the user callbacks (reset + resize included) and skip this.
+func _apply_quality(values: Dictionary) -> void:
+	config.target_spp = values.target_spp
+	config.preview_scale = values.preview_scale
+	config.final_scale = values.final_scale
+	config.gpu_budget_ms = values.gpu_budget_ms
 
 
 func _set_profiling(enabled: bool) -> void:
