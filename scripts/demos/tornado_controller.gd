@@ -104,7 +104,11 @@ func _ready() -> void:
 	quality.setup(TornadoQualityProfile, "tornado_quality_profile", _apply_quality)
 	quality.restore()
 	debris_pool.build_pool(debris_pool.debris_cap)
-	debris_pool.scatter_props()
+	# Sparse ground scatter: every scattered prop the wind lifts joins the
+	# ring around the core, and at spawn distance sub-meter pieces render as
+	# white dots — a dense scatter reads as noise veiling the funnel neck.
+	debris_pool.scatter_props(0.15)
+	debris_pool.camera = cam_rig.get_camera()
 	_pool_built = true
 	_funnel_mat = funnel_volume.material_override
 	_funnel_mat.set_shader_parameter("steps", _raymarch_steps)
@@ -113,7 +117,7 @@ func _ready() -> void:
 		dust_particles.process_material as ShaderMaterial,
 		skirt_particles.process_material as ShaderMaterial,
 	])
-	debris_pool.renderer = _renderer
+	_renderer.push_wind(field)
 	var sun: Vector3 = -($DirectionalLight3D as DirectionalLight3D).global_basis.z
 	_funnel_mat.set_shader_parameter("sun_dir", sun)
 	_cloud_mat.set_shader_parameter("sun_dir", sun)
@@ -122,6 +126,18 @@ func _ready() -> void:
 	_update_funnel_bounds()
 	cam_rig.set_pose(Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
 	_setup_ui()
+
+
+## Aspect compensation shared with the framing gate. Portrait pulls back at
+## most x1.5: just enough that the full column clears the frame. The old
+## unbounded (16/9)/aspect put phones at ~3.9x the distance.
+func _camera_distance(base_distance: float) -> float:
+	return camera_distance(base_distance, DisplayServer.window_get_size())
+
+
+static func camera_distance(base_distance: float, window_size: Vector2i) -> float:
+	var aspect := float(window_size.x) / maxf(float(window_size.y), 1)
+	return base_distance * clampf((16.0 / 9.0) / aspect, 1.0, 1.5)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -137,6 +153,11 @@ func _throw_from_camera() -> void:
 
 
 func _process(delta: float) -> void:
+	var cam := cam_rig.get_camera()
+	if cam != null:
+		var cam_pos := cam.global_position
+		for pm: ShaderMaterial in [dust_particles.process_material, skirt_particles.process_material]:
+			pm.set_shader_parameter("camera_position", cam_pos)
 	if not _frozen:
 		_time += delta
 		var wt := _time * wander_speed * 0.02
@@ -147,6 +168,7 @@ func _process(delta: float) -> void:
 		) * wander_radius
 		field.update_centerline(_time * 0.05, s_amount, _wander_noise)
 		field.bake_wind_grid()
+		_renderer.push_wind(field)
 		tornado_node.position = field.base_pos
 	_update_lightning(delta)
 	if _debris_bar:
@@ -201,10 +223,12 @@ func _update_lightning(delta: float) -> void:
 	_flash_energy = maxf(_flash_energy - delta * 6.0, 0.0)
 	if _flash_energy > 0.0 and _rng.randf() < 0.2:
 		_flash_energy = minf(_flash_energy + _rng.randf() * 0.4, 1.0)
-	lightning_light.light_energy = _flash_energy * 40.0
-	_funnel_mat.set_shader_parameter("flash_intensity", _flash_energy * 6.0)
+	lightning_light.light_energy = _flash_energy * 25.0
+	# x3 peak: at x6 the in-scatter saturates the whole column to white and
+	# the storm disappears for the flash duration.
+	_funnel_mat.set_shader_parameter("flash_intensity", _flash_energy * 3.0)
 	_funnel_mat.set_shader_parameter("flash_pos", _flash_pos)
-	_cloud_mat.set_shader_parameter("flash_intensity", _flash_energy * 6.0)
+	_cloud_mat.set_shader_parameter("flash_intensity", _flash_energy * 3.0)
 	_cloud_mat.set_shader_parameter("flash_pos", _flash_pos)
 	var c := Color(_flash_tint, _flash_energy * _flash_energy * 0.3)
 	flash_rect.color = c
@@ -254,7 +278,7 @@ func _build_bolt_mesh() -> void:
 
 # ── UI ───────────────────────────────────────────────────────────────────────
 
-func _apply_preset(idx: int) -> void:
+func apply_preset(idx: int) -> void:
 	var p: Dictionary = PRESETS[idx]
 	field.model = p.model
 	field.height = p.h
@@ -273,10 +297,23 @@ func _apply_preset(idx: int) -> void:
 		_camera_distance(maxf(6.0 * field.r_core0, 380.0))), 0.0, 12.0)
 
 
-func _camera_distance(base_distance: float) -> float:
-	var window_size := DisplayServer.window_get_size()
-	var aspect := float(window_size.x) / maxf(float(window_size.y), 1.0)
-	return base_distance * maxf(1.0, (16.0 / 9.0) / aspect)
+func apply_look(idx: int) -> void:
+	_apply_storm_type(idx)
+
+
+## Named poses for tools/capture.sh (view=near|high|far): controlled angles for
+## visual checks. Anything else keeps the spawn framing untouched.
+func set_capture_view(view: String) -> void:
+	match view:
+		"near":
+			cam_rig.set_pose(Vector3(0.0, 6.0, 240.0), 0.0, 8.0)
+		"high":
+			cam_rig.set_pose(Vector3(0.0, field.height * 0.55,
+				maxf(5.0 * field.r_core0, 420.0)), 0.0, -6.0)
+		"far":
+			cam_rig.set_pose(Vector3(0.0, 60.0, 1600.0), 0.0, 6.0)
+		_:
+			pass
 
 
 func _set_storm_color(col: Color) -> void:
@@ -329,8 +366,8 @@ func _set_dust_color(col: Color) -> void:
 func _setup_ui() -> void:
 	menu.add_section("Tornado")
 	menu.add_option_button("Preset", PRESETS.map(func(p: Dictionary) -> String: return p.name), 0,
-		_apply_preset)
-	_model_btn = menu.add_option_button("Vortex model", ["Rankine", "Burgers-Rott", "Sullivan"],
+		apply_preset)
+	_model_btn = menu.add_option_button("Vortex model", ["Vatistas", "Burgers-Rott", "Sullivan"],
 		field.model, func(idx: int) -> void: field.model = idx)
 	_sliders["r0"] = menu.add_slider("Size R0 (m)", 10.0, 200.0, field.r_core0,
 		func(v: float) -> void:
@@ -353,7 +390,7 @@ func _setup_ui() -> void:
 
 	menu.add_section("Look")
 	menu.add_option_button("Storm type", STORM_TYPES.map(func(t: Dictionary) -> String: return t.name),
-		0, _apply_storm_type)
+		0, apply_look)
 	_sliders["dust"] = menu.add_slider("Dust density", 0.0, 10.0, 1.0,
 		func(v: float) -> void: _funnel_mat.set_shader_parameter("dust_density", v))
 	_sliders["dark"] = menu.add_slider("Darkness", 0.0, 1.0, 0.55,

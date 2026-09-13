@@ -90,7 +90,16 @@ report_demo() {
 	local demo="$1"
 	local status="$2"
 	local output_file="$LOG_DIR/ui-${demo}.stdout.log"
+	local godot_log="$LOG_DIR/ui-${demo}.godot.log"
 
+	# A broken shader still renders (pink/silhouette) and never crashes: catch the
+	# compile errors the driver logs so visual breakage fails the gate.
+	if grep -qi "shader error" "$godot_log" 2>/dev/null; then
+		printf 'SMOKE FAIL %s: shader compile error in godot log\n' "$demo"
+		grep -i -m 3 "shader error" "$godot_log" >&2 || true
+		failed+=("$demo")
+		return
+	fi
 	if (( status == 0 )); then
 		printf 'SMOKE PASS %s\n' "$demo"
 		return

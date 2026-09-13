@@ -40,7 +40,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | 3D Fractal Explorer | 7 distance-estimated fractals, sphere tracing |
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
 | Sand & Snow | Multi-material heightfield terrain: repose-angle sand, water with sediment transport, cohesive snow, weather (snowfall, melt, freeze); dig/pour/smooth/water/pack brushes, throwable balls |
-| Cloth in the Wind | GPU XPBD cloth driven by the tornado wind field |
+| Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
 | Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |

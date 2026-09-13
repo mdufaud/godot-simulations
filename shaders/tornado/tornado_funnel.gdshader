@@ -76,11 +76,14 @@ float funnel_density(vec3 wp, out float skirt_w, out float turb_out) {
 
 	// Differential rotation: inner noise spins fast, outer slow — the shear
 	// is what reads as a real vortex instead of a rotating cylinder.
+	// Pattern phase advances as ang + TIME*omega: atan(z,x) grows toward +Z, while
+	// tw_wind turns swirl_sign*UP x r_dir (toward -Z at +X for +1) — so the visible
+	// spin must ADD time to the angle to match the wind and the advected dust.
 	float ang = atan(rel.y, rel.x);
 	// Shear divisor clamped at 0.3: unbounded inner spin smears the noise into
 	// concentric rings near the axis (moire through both walls).
 	float shear = swirl_sign * swirl_vis * (u_max / max(rc, 1.0)) * tw_v_theta(max(r_bar, 0.05)) / max(r_bar, 0.3);
-	float a = ang - TIME * shear * 0.35;
+	float a = ang + TIME * shear * 0.35;
 	// Vertical stretch (x0.3) elongates the noise into the striations real funnels show.
 	vec3 np = vec3(cos(a) * r, (wp.y - TIME * u_max * 0.25) * 0.3, sin(a) * r) * noise_scale;
 	float n = texture(noise_tex, np).r;
@@ -88,29 +91,46 @@ float funnel_density(vec3 wp, out float skirt_w, out float turb_out) {
 	float turb = 0.4 + 1.1 * (n * 0.65 + n2 * 0.35);
 	turb_out = turb;
 
-	// Noise-wobbled wall radius: breaks the perfect cone silhouette.
-	float rw = r_bar + 0.25 * (n - 0.5);
-	float wall = exp(-pow((rw - 0.85) / 0.25, 2.0));
-	float fill = 0.1 * (1.0 - smoothstep(0.0, 1.0, r_bar));
-	float body = (wall + fill) * smoothstep(0.0, 0.06, y01);
+	// Noise-wobbled wall radius: breaks the perfect cone silhouette. The n2
+	// contrast keeps the wall readable at long range, where a constant-density
+	// shell saturates to a flat black blob.
+	float rw = r_bar + 0.4 * (n - 0.5);
+	float wall = exp(-pow((rw - 0.85) / 0.25, 2.0)) * (0.75 + 0.55 * n2);
+	// Dense low core: near the ground the funnel is a SOLID, dark column. The
+	// neck must stay darker than the sky behind it or the cone reads as
+	// floating above the dust bowl (0.85 vs 0.55: the neck carries the
+	// silhouette down to the apron).
+	float fill = mix(0.85, 0.1, smoothstep(0.15, 0.7, y01)) * (1.0 - smoothstep(0.0, 1.1, r_bar));
+	// Thin guard only: the condensation wall must run down INTO the dust skirt —
+	// a wide bottom fade leaves the funnel neck floating above the ground.
+	float body = (wall + fill) * smoothstep(0.0, 0.008, y01);
 	if (storm_type == 1) {
-		float helix_phase = 3.0 * ang - 0.055 * wp.y - 1.8 * TIME * swirl_sign + 1.4 * (n - 0.5);
+		float helix_phase = 3.0 * ang - 0.055 * wp.y + 1.8 * TIME * swirl_sign + 1.4 * (n - 0.5);
 		body *= 0.55 + 0.45 * smoothstep(-0.65, 0.75, sin(helix_phase));
 	}
-	// Fade into the cloud deck instead of exposing the volume box's flat cap.
-	body *= 1.0 - smoothstep(0.9, 1.0, y01);
+	// Thin cap guard only: the body must run UP INTO the cloud deck. A wide
+	// density dissolve here (0.7->1.0) erases the upper cone and reads as a
+	// floating balloon from afar; the deck-tone color blend below does the
+	// visual blending instead.
+	body *= 1.0 - smoothstep(0.95, 1.0, y01);
 
 	// ── Ground skirt: dust churned FROM the ground — dense at y=0, exponential
 	// falloff upward. The density slider SPREADS the apron outward (low and wide,
 	// never a ball); opacity is capped so the funnel always stays visible.
 	float rr0 = r / max(r_core0, 1e-3);
 	float outer = 3.0 + 1.2 * skirt_density;
-	float h_scale = 0.05 * funnel_height * (1.0 + 0.6 * smoothstep(outer, 0.5, rr0));
+	// Dust curtain peaks as a RING around the neck (1-2.4 core radii), lower
+	// directly in front of it: a tall apron on the axis veils the funnel base
+	// and the column loses its ground contact.
+	float h_scale = 0.05 * funnel_height * (1.0 + 0.6 * smoothstep(0.8, 2.4, rr0));
 	float ground_hug = exp(-wp.y / max(h_scale, 1.0));
-	float skirt_base = smoothstep(outer, 0.4, rr0);
+	// Annular apron: full dust ring around the neck, ~60% hollow on the axis —
+	// an on-axis veil sits directly between the camera and the funnel base and
+	// erases the ground contact.
+	float skirt_base = smoothstep(outer, 0.4, rr0) * (0.4 + 0.6 * smoothstep(0.5, 1.8, rr0));
 	float churn = 0.3 + 1.1 * n;
 	// Angular surge lobes rolling around the base.
-	float lobes = 1.0 + 0.45 * sin(ang * 4.0 - TIME * 1.3 * swirl_sign + rr0 * 2.5);
+	float lobes = 1.0 + 0.45 * sin(ang * 4.0 + TIME * 1.3 * swirl_sign + rr0 * 2.5);
 	float sk = 0.0;
 	if (skirt_style == 1) {
 		// Satellite suction vortices: helical columns corkscrewing around the
@@ -119,7 +139,8 @@ float funnel_density(vec3 wp, out float skirt_w, out float turb_out) {
 		float col_h = exp(-wp.y / max(0.14 * funnel_height, 1.0));
 		float twist = swirl_sign * 0.010 * wp.y;
 		for (int v = 0; v < 5; v++) {
-			float ph = TIME * 0.55 * swirl_sign + float(v) * 1.2566371 + twist;
+			// Negative TIME term: satellites orbit with the wind (swirl_sign*UP x r_dir).
+			float ph = -TIME * 0.55 * swirl_sign + float(v) * 1.2566371 + twist;
 			float orbit = r_core0 * (1.5 + 0.4 * sin(TIME * 0.8 + float(v) * 2.1))
 				+ wp.y * 0.3 + r_core0 * 0.3 * (n - 0.5);
 			vec2 vc = c.xz + vec2(cos(ph), sin(ph)) * orbit;
@@ -139,7 +160,17 @@ float funnel_density(vec3 wp, out float skirt_w, out float turb_out) {
 	} else {
 		sk = ground_hug * skirt_base * churn * lobes;
 	}
-	skirt_w = min(skirt_density * sk, 2.4);
+	// Second-octave break: the vertically-stretched noise forms long curtain
+	// streaks on the apron; n2 breaks them into clumpy churned dust.
+	sk *= 0.75 + 0.5 * n2;
+	// Contact collar: a low dense dust ring right where the neck meets the
+	// ground, so the column plugs into the apron instead of ending as a stub
+	// above the horizon band.
+	sk += (1.0 - smoothstep(0.0, 0.6, rr0)) * exp(-wp.y / 8.0) * 1.2;
+	// Optical mass concentrated near the core: long sight-lines through the
+	// outer apron stay translucent, so the funnel base reads through the dust
+	// instead of hiding behind an opaque bright wall.
+	skirt_w = min(skirt_density * sk, 1.6) * exp(-rr0 / 2.6);
 	return (body * dust_density + skirt_w) * turb;
 }
 
@@ -171,7 +202,21 @@ void fragment() {
 	float nominal_step = (t1 - t0) / float(steps);
 	float min_step = max(1.0, 0.03 * r_core0);
 	float max_step = max(min_step, 3.0 * nominal_step);
-	float t = t0;
+	// Near-ground refinement cap: at long view chords a full 0.06*r_core0
+	// refinement burns the step budget mid-march, and the leftover dithered
+	// samples render as salt-and-pepper over the neck. Never refine below
+	// half the nominal step — full refinement stays available up close, where
+	// the chord is short.
+	float step_cap = max(min_step, max(0.06 * r_core0, nominal_step * 0.5));
+	// White-noise jitter of the ray start: at low step counts the adaptive
+	// stepping quantizes density gradients into bands and terraces. A per-pixel
+	// offset turns them into grain — white noise rather than IGN, whose regular
+	// lattice shows up as a crosshatch on the thin skirt medium. The offset is
+	// capped at the refined skirt step: a full nominal_step of jitter in the
+	// optically thin skirt speckles the funnel base instead.
+	float dither = fract(sin(dot(FRAGCOORD.xy, vec2(12.9898, 78.233))) * 43758.5453);
+	float jitter = min(nominal_step, step_cap);
+	float t = min(t0 + dither * jitter, t1);
 
 	vec3 col = vec3(0.0);
 	float trans = 1.0;
@@ -186,7 +231,7 @@ void fragment() {
 		float step_size = clamp(0.45 * shell_clearance, min_step, max_step);
 		if (probe_wp.y < 0.28 * funnel_height
 				&& probe_r < (3.2 + 1.2 * skirt_density) * r_core0) {
-			step_size = min(step_size, max(min_step, 0.06 * r_core0));
+			step_size = min(step_size, step_cap);
 		}
 		float t_next = min(t + step_size, t1);
 		float segment_ds = t_next - t;
@@ -214,15 +259,18 @@ void fragment() {
 		if (dens > 0.003) {
 			// Specials read lighter/denser: water and plasma are translucent media.
 			float sigma_mul = storm_type == 1 ? 0.85 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
-			// Skirt medium is thinner than the wall: flying debris must silhouette through it.
+			// Skirt medium is thinner than the wall: flying debris must silhouette
+			// through it, and distant aprons must not turn into opaque walls.
 			float sk_pre = clamp(skirt_w / max(dens, 1e-3), 0.0, 1.0);
-			sigma_mul *= mix(1.0, 0.5, sk_pre);
+			sigma_mul *= mix(1.0, 0.35, sk_pre);
 			float sigma = dens * absorption * 0.02 * sigma_mul;
 			// Sun-side brightness + vertical darkening toward the cloud base.
 			vec2 rd2 = normalize(wp.xz - cs.xz);
-			float sun_face = 0.45 + 0.55 * dot(vec3(rd2.x, 0.0, rd2.y), sun_xz);
+				// 0.55 floor: a 0.45 floor splits thick storms into a white flank
+				// against a black flank — too binary to read as one medium.
+				float sun_face = 0.55 + 0.45 * dot(vec3(rd2.x, 0.0, rd2.y), sun_xz);
 			float y01 = wp.y / funnel_height;
-			float vert = mix(1.0, 0.32, clamp(pow(y01, 0.7) * darkness * 1.6, 0.0, 1.0));
+			float vert = mix(1.0, 0.42, clamp(pow(y01, 0.7) * darkness * 1.6, 0.0, 1.0));
 			float skirt_ratio = sk_pre;
 			vec3 alb = mix(funnel_color, dust_color, skirt_ratio);
 			float heat = clamp(turb - 0.4, 0.0, 1.2);
@@ -261,6 +309,21 @@ void fragment() {
 				scat += vec3(1.0) * sparkle_spin(wp, cs, rcs) * 3.0;
 			} else {
 				scat = alb * sun_face * vert;
+			}
+			// Unlit ambient floor: deep sight-lines saturate to the first-layer
+			// color, which reads as pure black on thick storms. A small constant
+			// in-scatter keeps the interior charcoal instead of a black hole.
+			scat += alb * 0.05;
+			// Skirt-dominated samples are dimmed: warm dust at full sun_face
+			// saturates the base into a glowing amber wash under the bloom.
+			scat = mix(scat, scat * 0.5, sk_pre);
+			if (storm_type == 0) {
+				// Storm type 0 only: grade the top of the column toward the
+				// deck's underside tone (a LIGHT gray). Other types have their
+				// own tops — fire darkens with height, and a gray blend reads
+				// as a white cap against an orange deck.
+				scat = mix(scat, mix(funnel_color, vec3(0.60, 0.61, 0.66), 0.55) * sun_face,
+					smoothstep(0.45, 1.0, y01));
 			}
 			// User glow slider: extra self-emission, turbulence-modulated.
 			scat += funnel_color * glow_amount * 1.8 * (1.0 - 0.7 * y01) * heat;

@@ -9,6 +9,14 @@ uniform vec3 particle_color : source_color = vec3(0.55, 0.42, 0.28);
 uniform float size_min = 0.5;
 uniform float size_max = 2.6;
 uniform float follow = 3.0;
+// Camera-driven distance fade, INWARD this time: a 2 m billboard at 400+ m
+// spans ~3 px and aliases into a white dot. Any particle system advected by
+// the wind converges on the core band, so at mid-range those dots stack into
+// a dotted pillar veiling the neck. Real dust is sub-pixel there — fade the
+// sprites out past ~150 m and let the volumetric funnel carry the look.
+uniform vec3 camera_position = vec3(0.0, 80.0, 1000.0);
+uniform float fade_start = 150.0;
+uniform float fade_end = 480.0;
 
 float hash1(uint n) {
 	n = (n << 13u) ^ n;
@@ -29,8 +37,14 @@ void start() {
 		y = r1 * r1 * 0.08 * funnel_height;
 		rad = r_core0 * mix(0.2, 2.6, sqrt(r2));
 	} else {
-		y = pow(r1, 1.4) * funnel_height * 0.98;
-		rad = tw_core_radius(y) * mix(0.55, 1.35, r2);
+		// Sheath spawns above 30% height only: below that, the volumetric
+		// funnel and the dust bowl own the base. Particles advected into the
+		// neck band paint a dotted veil right over it (screen-space, any
+		// radius) — the one defect every steady-state capture kept showing.
+		y = mix(0.3, 0.98, pow(r1, 1.4)) * funnel_height;
+		float y01 = y / max(funnel_height, 1.0);
+		rad = tw_core_radius(y) * mix(0.55, 1.35, r2)
+			+ (1.0 - y01) * (1.0 - y01) * r_core0 * mix(0.3, 1.6, r2);
 	}
 	float ang = r3 * 6.2831853;
 	vec3 c = tw_centerline(y);
@@ -55,11 +69,22 @@ void process() {
 		VELOCITY.y -= 6.0 * DELTA;
 	}
 
+	// Steady-state guard: the wind field converges on the core radius, so any
+	// sheath particle drifting into the neck band stacks into the dotted veil
+	// that hides the lower funnel. Kill it — the base belongs to the volume.
+	if (skirt_mode == 0 && pos.y < 0.28 * funnel_height) {
+		ACTIVE = false;
+	}
+
 	float y01 = clamp(pos.y / funnel_height, 0.0, 1.0);
 	float fade_top = 1.0 - smoothstep(0.75, 1.0, y01);
 	float fade_life = sin(clamp(CUSTOM.w / LIFETIME, 0.0, 1.0) * 3.14159265);
+	float fade_dist = 1.0 - smoothstep(fade_start, fade_end, length(pos - camera_position));
 	float shade = mix(0.85, 0.3, y01);
-	COLOR = vec4(particle_color * shade, 0.35 * fade_top * fade_life);
+	// Low per-particle alpha: at spawn distance each billboard spans a few
+	// pixels, and anything denser turns the column sheath into a dotted pillar
+	// of dots. Faint and many reads as haze.
+	COLOR = vec4(particle_color * shade, 0.13 * fade_top * fade_life * fade_dist);
 	CUSTOM.w += DELTA;
 
 	if (length(w) < 0.3 || pos.y > funnel_height || pos.y < -1.0) {

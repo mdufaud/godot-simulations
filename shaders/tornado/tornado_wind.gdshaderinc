@@ -1,7 +1,7 @@
-// Analytical tornado wind field — GLSL mirror of scripts/demos/tornado_wind_field.gd.
+// Analytical tornado wind field — GLSL mirror of scripts/tornado/tornado_wind_field.gd.
 // Keep the math in sync with wind_at(); the CPU side is the reference.
 
-uniform int wind_model = 1; // 0 Rankine, 1 Burgers-Rott, 2 Sullivan
+uniform int wind_model = 1; // 0 Vatistas n=1, 1 Burgers-Rott, 2 Sullivan
 uniform float u_max = 85.0;
 uniform float r_core0 = 45.0;
 uniform float funnel_height = 550.0;
@@ -11,10 +11,16 @@ uniform float swirl_sign = 1.0;
 uniform vec3 centerline[8];
 uniform sampler2D sullivan_curve : filter_linear, repeat_disable;
 
-const float TW_BR_ALPHA = 1.256643;
-const float TW_BR_NORM = 1.397948;
+// Peak of (1-exp(-a*r^2))/r at a*r^2 = root of (2x+1)*e^-x = 1: u_max at r_bar = 1.
+const float TW_BR_ALPHA = 1.2564312;
+const float TW_BR_NORM = 1.3979525;
 const float TW_SULLIVAN_B = 3.0;
+// Sullivan tangential peak sits 2.4976 viscous core radii out; the baked curve is
+// rescaled by it, and the Sullivan v_r/v_z terms use it below (r_core = RMW).
+const float TW_SULLIVAN_RMW = 2.4976;
 const float TW_R_BAR_MAX = 4.0;
+const float TW_INFLOW_PEAK_R = 1.5;
+const float TW_INFLOW_GROUND_FLOOR = 0.45;
 const float TW_Z_BAR_CAP = 6.0;
 const float TW_INFLUENCE = 8.0;
 
@@ -29,7 +35,7 @@ vec3 tw_centerline(float y) {
 	return mix(centerline[i], centerline[i + 1], t - float(i));
 }
 
-// Normalized tangential profile (peak 1 at r_bar ~ 1).
+// Normalized tangential profile (peak 1 at r_bar = 1, the RMW).
 float tw_v_theta(float r_bar) {
 	float r_safe = max(r_bar, 1e-3);
 	if (wind_model == 0) {
@@ -56,29 +62,32 @@ vec3 tw_wind(vec3 p) {
 	}
 	float z_bar = min(p.y / r_core, TW_Z_BAR_CAP);
 	float z_eff = TW_Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar));
-	float rb = min(r_bar, TW_R_BAR_MAX);
+	float inflow_z = TW_INFLOW_GROUND_FLOOR
+		+ (1.0 - TW_INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar);
 	float r_safe = max(r_bar, 1e-3);
+	float inflow_r = (r_bar / TW_INFLOW_PEAK_R) * exp(1.0 - r_bar / TW_INFLOW_PEAK_R);
+	float sv2 = TW_SULLIVAN_RMW * TW_SULLIVAN_RMW * r_bar * r_bar;
 
 	float v_t = tw_v_theta(r_bar);
 	float v_r = 0.0;
 	float v_z = 0.0;
 	if (wind_model == 1) {
-		v_r = -a_bar * rb;
+		v_r = -a_bar * TW_R_BAR_MAX * inflow_r * inflow_z;
 		v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar);
 	} else if (wind_model == 2) {
-		float e = exp(-r_bar * r_bar);
-		v_r = a_bar * (-rb + (TW_SULLIVAN_B / r_safe) * (1.0 - e));
-		v_z = 2.0 * a_bar * z_eff * (1.0 - TW_SULLIVAN_B * e) * exp(-0.15 * r_bar * r_bar);
+		float e = exp(-sv2);
+		v_r = a_bar * (-TW_R_BAR_MAX * inflow_r * inflow_z
+			+ (TW_SULLIVAN_B / (TW_SULLIVAN_RMW * r_safe)) * (1.0 - e));
+		v_z = 2.0 * a_bar * z_eff * (1.0 - TW_SULLIVAN_B * e) * exp(-0.15 * sv2);
 	}
 	if (wind_model != 0) {
-		// Corner flow: near-ground annular updraft jet + intensified surface inflow.
+		// Corner flow (Lewellen): annular near-ground updraft jet at the RMW.
 		float dr = (r_bar - 1.0) / 0.45;
 		v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar);
-		v_r *= 1.0 + 0.75 * exp(-1.5 * z_bar);
 	}
 
-	v_z *= 1.0 - smoothstep(0.85 * funnel_height, funnel_height, p.y);
-	float fade = 1.0 - smoothstep(6.0, 8.0, r_bar);
+	float fade = (1.0 - smoothstep(0.85 * funnel_height, funnel_height, p.y))
+		* (1.0 - smoothstep(6.0, 8.0, r_bar));
 	v_t *= fade;
 	v_r *= fade;
 	v_z *= fade;

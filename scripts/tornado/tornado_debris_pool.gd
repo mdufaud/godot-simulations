@@ -12,14 +12,16 @@ extends Node3D
 const RHO_AIR := 1.21
 const WAKE_SPEED := 4.0
 const RECYCLE_DIST := 600.0
-const RECYCLE_AGE := 25.0
+# 12 s: steady-state airborne population = spawn_rate * age. At spawn distance
+# sub-meter pieces render as 1 px white dots ringing the neck — a dense swarm
+# reads as noise veiling the funnel, not as debris.
+const RECYCLE_AGE := 12.0
 
 enum Variant { CRATE, ROCK, PLANK, TREE }
 
 var field: TornadoWindField
-var renderer: TornadoRenderer
 var debris_cap := 200
-var spawn_rate := 4.0
+var spawn_rate := 1.5
 var throw_speed := 45.0
 var active_count := 0
 
@@ -28,6 +30,12 @@ var _bodies: Array[RigidBody3D] = []
 # Per-body flat arrays (index = pool slot, always sized to debris_cap).
 var _variants: PackedByteArray          # Variant enum (0-3)
 var _sizes: PackedFloat32Array          # world-size of the body
+## Camera whose view culls sub-pixel debris: a 0.5 m crate at 500 m spans
+## ~1 px and reads as a white dot. The wind rings every airborne piece around
+## the core radius, so an unculled swarm renders as a dotted pillar veiling
+## the funnel neck. Pieces stay simulated; they only stop rendering when
+## smaller than ~3 px.
+var camera: Camera3D
 var _cda: PackedFloat32Array            # drag coefficient × reference area
 var _cp_offsets: PackedVector3Array     # centre-of-pressure offset (local space)
 var _ages: PackedFloat32Array           # seconds since un-parked
@@ -99,10 +107,12 @@ func _make_body(variant: Variant) -> RigidBody3D:
 	var col := CollisionShape3D.new()
 	var size := 1.0
 	var cd := 1.0
+	var area := 1.0
 	match variant:
 		Variant.CRATE:
 			size = _rng.randf_range(0.4, 1.2)
 			cd = 1.05
+			area = 1.5 * size * size  # cube mean projected area = SA/4
 			var m := BoxMesh.new()
 			m.size = Vector3.ONE * size
 			mesh_inst.mesh = m
@@ -110,10 +120,10 @@ func _make_body(variant: Variant) -> RigidBody3D:
 			var s := BoxShape3D.new()
 			s.size = Vector3.ONE * size
 			col.shape = s
-			body.mass = _rng.randf_range(5.0, 60.0)
 		Variant.ROCK:
 			size = _rng.randf_range(0.3, 1.0)
 			cd = 0.47
+			area = 0.25 * PI * size * size  # sphere of radius size/2
 			var m := SphereMesh.new()
 			m.radius = size * 0.5
 			m.height = size * 0.7
@@ -124,10 +134,10 @@ func _make_body(variant: Variant) -> RigidBody3D:
 			var s := SphereShape3D.new()
 			s.radius = size * 0.5
 			col.shape = s
-			body.mass = _rng.randf_range(20.0, 100.0)
 		Variant.PLANK:
 			size = _rng.randf_range(1.0, 2.5)
 			cd = 1.2
+			area = (size * 0.3 + size * 0.06 + 0.3 * 0.06) * 0.5  # thin box: SA/4
 			var m := BoxMesh.new()
 			m.size = Vector3(size, 0.06, 0.3)
 			mesh_inst.mesh = m
@@ -135,10 +145,10 @@ func _make_body(variant: Variant) -> RigidBody3D:
 			var s := BoxShape3D.new()
 			s.size = Vector3(size, 0.06, 0.3)
 			col.shape = s
-			body.mass = _rng.randf_range(1.0, 15.0)
 		Variant.TREE:
 			size = _rng.randf_range(3.0, 6.0)
 			cd = 0.9
+			area = 0.35 * size * size  # canopy cone frontal area approximation
 			var trunk := CylinderMesh.new()
 			trunk.top_radius = size * 0.04
 			trunk.bottom_radius = size * 0.06
@@ -160,10 +170,9 @@ func _make_body(variant: Variant) -> RigidBody3D:
 			s.radius = size * 0.1
 			s.height = size * 0.9
 			col.shape = s
-			body.mass = _rng.randf_range(60.0, 100.0)
+	body.mass = _mass_for_variant(variant, size)
 	body.add_child(mesh_inst)
 	body.add_child(col)
-	var area := size * size
 	_variants.append(variant)
 	_sizes.append(size)
 	_cda.append(cd * area)
@@ -207,19 +216,36 @@ func _unpark(i: int, xform: Transform3D, lin_vel: Vector3, ang_vel: Vector3) -> 
 		_active_slots.append(i)
 	_active_flags[i] = 1
 	if _rng.randf() < 0.7:
-		body.mass = _mass_for_variant(_variants[i] as Variant)
+		body.mass = _mass_for_variant(_variants[i], _sizes[i])
 
 
-func _mass_for_variant(variant: Variant) -> float:
+## Mass bounded by the per-variant gameplay range, but correlated to body size so a
+## small prop is never heavier than a big one of the same kind.
+func _mass_for_variant(variant: Variant, size: float) -> float:
+	var lo := 5.0
+	var hi := 60.0
+	var s_lo := 0.4
+	var s_hi := 1.2
 	match variant:
 		Variant.CRATE:
-			return _rng.randf_range(5.0, 60.0)
+			pass
 		Variant.ROCK:
-			return _rng.randf_range(20.0, 100.0)
+			lo = 20.0
+			hi = 100.0
+			s_lo = 0.3
+			s_hi = 1.0
 		Variant.PLANK:
-			return _rng.randf_range(1.0, 15.0)
-		_:
-			return _rng.randf_range(60.0, 100.0)
+			lo = 1.0
+			hi = 15.0
+			s_lo = 1.0
+			s_hi = 2.5
+		Variant.TREE:
+			lo = 60.0
+			hi = 100.0
+			s_lo = 3.0
+			s_hi = 6.0
+	var t := clampf((size - s_lo) / (s_hi - s_lo) + _rng.randf_range(-0.25, 0.25), 0.0, 1.0)
+	return lerpf(lo, hi, t)
 
 
 func _find_idle() -> int:
@@ -247,7 +273,8 @@ func spawn_debris_random() -> void:
 	var y: float = _rng.randf_range(1.0, 0.25 * field.height)
 	var c: Vector3 = field.centerline_at(y)
 	var pos := Vector3(c.x + cos(ang) * r, y, c.z + sin(ang) * r)
-	var tangent := Vector3(-sin(ang), 0.0, cos(ang)) * field.swirl_sign
+	var t := TornadoWindField.tangent_from_radial(cos(ang), sin(ang), field.swirl_sign)
+	var tangent := Vector3(t.x, 0.0, t.y)
 	var vel: Vector3 = tangent * 0.5 * field.u_max + Vector3(
 		_rng.randf_range(-5.0, 5.0), _rng.randf_range(-5.0, 5.0), _rng.randf_range(-5.0, 5.0)
 	)
@@ -257,10 +284,11 @@ func spawn_debris_random() -> void:
 
 func scatter_props(fraction := 0.6) -> void:
 	var count := int(_bodies.size() * fraction)
+	var c := field.centerline_at(0.0) if field != null else Vector3.ZERO
 	for i in count:
 		var ang := _rng.randf_range(0.0, TAU)
 		var r := _rng.randf_range(30.0, 250.0)
-		var pos := Vector3(cos(ang) * r, _sizes[i] * 0.6 + 0.2, sin(ang) * r)
+		var pos := c + Vector3(cos(ang) * r, _sizes[i] * 0.6 + 0.2, sin(ang) * r)
 		var basis := Basis.from_euler(Vector3(0.0, _rng.randf_range(0.0, TAU), 0.0))
 		_unpark(i, Transform3D(basis, pos), Vector3.ZERO, Vector3.ZERO)
 
@@ -273,8 +301,6 @@ func queue_throw(from: Vector3, dir: Vector3) -> void:
 func _physics_process(delta: float) -> void:
 	if field == null:
 		return
-	if renderer != null:
-		renderer.push_wind(field)
 
 	# ── throw queue ──
 	for t in _throw_queue:
@@ -308,6 +334,9 @@ func _physics_process(delta: float) -> void:
 					and flat_dist > field.influence_radius(0.0)):
 			_park(i)
 			continue
+		# Sub-pixel cull: hide pieces smaller than ~3 px from the camera.
+		if camera != null:
+			body.visible = bpos.distance_to(camera.global_position) < 380.0 * _sizes[i]
 
 		# ── centreline-relative wind lookup ──
 		var c := field.centerline_at(bpos.y)
@@ -322,18 +351,17 @@ func _physics_process(delta: float) -> void:
 		# Sample precomputed cylindrical wind (v_r, v_t, v_z).
 		var v_cyl := field.sample_wind_grid(r_bar, bpos.y)
 
-		# Reconstruct world-space wind.
+		# Reconstruct world-space wind (same convention as wind_at).
 		var r_dir_x := 0.0
 		var r_dir_z := 0.0
 		if r > 1e-4:
 			r_dir_x = rel_x / r
 			r_dir_z = rel_z / r
-		var t_dir_x := -field.swirl_sign * r_dir_z
-		var t_dir_z := field.swirl_sign * r_dir_x
+		var t := TornadoWindField.tangent_from_radial(r_dir_x, r_dir_z, field.swirl_sign)
 		var v_wind := Vector3(
-			r_dir_x * v_cyl.x + t_dir_x * v_cyl.y,
+			r_dir_x * v_cyl.x + t.x * v_cyl.y,
 			v_cyl.z,
-			r_dir_z * v_cyl.x + t_dir_z * v_cyl.y
+			r_dir_z * v_cyl.x + t.y * v_cyl.y
 		)
 
 		var bvel := body.linear_velocity

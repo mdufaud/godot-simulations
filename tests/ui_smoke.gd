@@ -65,6 +65,8 @@ func _run() -> void:
 		await _check_ambient_fluid_actions(menu)
 	if _demo == "mixwell_demo":
 		await _check_mixwell_periodic()
+	if _demo == "tornado_demo":
+		await _check_tornado_actions()
 
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
@@ -173,6 +175,34 @@ func _mixwell_touch_drag(start: Vector2, finish: Vector2) -> void:
 	Input.parse_input_event(release)
 	Input.flush_buffered_events()
 	await get_tree().process_frame
+
+
+## Cycles every tornado preset and storm look, and asserts the auto-framing keeps
+## the camera outside the dust skirt — the regression class where a preset change
+## left the camera engulfed in the funnel volume filling the whole screen.
+func _check_tornado_actions() -> void:
+	var presets: Array = _demo_root.PRESETS
+	for i in presets.size():
+		_demo_root.apply_preset(i)
+		for _frame in 3:
+			await get_tree().process_frame
+		# Slider steps quantize preset values ((max-min)/100 = 1.9 m here).
+		if absf(_demo_root.field.r_core0 - presets[i].r0) > 2.5:
+			_fail("tornado preset %d did not apply its core radius" % i)
+		var cam: Camera3D = _demo_root.cam_rig.get_camera()
+		var flat := Vector2(cam.global_position.x, cam.global_position.z).length()
+		# Widest skirt slider setting with margin.
+		var skirt: float = (3.2 + 1.2 * 2.0) * presets[i].r0
+		if flat < skirt:
+			_fail("tornado preset %d frames the storm from inside the dust skirt" % i)
+	for look in 5:
+		_demo_root.apply_look(look)
+		for _frame in 2:
+			await get_tree().process_frame
+	_demo_root.apply_look(0)
+	_demo_root.apply_preset(0)
+	for _frame in 2:
+		await get_tree().process_frame
 
 
 ## Frees the demo and compares the root viewport against what it looked like before.

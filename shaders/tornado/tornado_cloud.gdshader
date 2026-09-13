@@ -39,9 +39,10 @@ void fragment() {
 	// Differential rotation: collar spins with the funnel top, deck barely moves.
 	// Polar swirl only near the collar — polar mapping far out stretches into
 	// radial streaks, so the deck blends back to plain world coords + slow drift.
+	// ang + TIME*spin: matches the wind direction (see tornado_funnel.gdshader).
 	float ang = atan(rel.y, rel.x);
 	float spin = swirl_sign * (u_max / max(rc_top, 1.0)) * 0.3;
-	float a = ang - TIME * spin / (1.0 + pow(r / max(2.0 * rc_top, 1.0), 1.6));
+	float a = ang + TIME * spin / (1.0 + pow(r / max(2.0 * rc_top, 1.0), 1.6));
 	vec2 nuv_polar = vec2(cos(a), sin(a)) * r;
 	vec2 nuv_flat = rel + vec2(TIME * 4.0, TIME * 1.5);
 	float polar_w = exp(-r / (4.0 * rc_top));

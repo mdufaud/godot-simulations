@@ -27,8 +27,8 @@ shader_parameter/noise_tex = SubResource("NoiseTexture3D_funnel")
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_dust"]
 shader = ExtResource("6_dust_shader")
 shader_parameter/skirt_mode = 0
-shader_parameter/size_min = 1.0
-shader_parameter/size_max = 3.2
+shader_parameter/size_min = 1.6
+shader_parameter/size_max = 4.5
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_skirt"]
 shader = ExtResource("6_dust_shader")

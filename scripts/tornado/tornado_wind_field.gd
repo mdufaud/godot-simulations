@@ -1,21 +1,38 @@
 class_name TornadoWindField
 extends RefCounted
 
-## Analytical tornado wind field (Gillmeier & Sterling, J. Wind Eng. 2018).
-## Single source of truth for the vortex math — shaders/tornado_wind.gdshaderinc
+## Analytical tornado wind field.
+## Single source of truth for the vortex math — shaders/tornado/tornado_wind.gdshaderinc
 ## mirrors wind_at() line-for-line and must stay in sync.
+##
+## Profiles: Burgers-Rott (Burgers 1948 / Rott 1958), Sullivan two-cell (Sullivan 1959)
+## and a Vatistas n=1 tangential core (Vatistas et al. 1991; same shape as Burnham-Hallock).
+## Radial inflow peaks just outside the core radius and is ground-weighted; the near-ground
+## annular updraft jet follows the corner-flow picture of Lewellen & Lewellen (2007).
+## For the model family review see Gillmeier, Sterling, Hemida & Baker, JWEIA 174 (2018).
 ##
 ## Optimisation: bake_wind_grid() precomputes (v_r, v_t, v_z) on a 2D (r_bar, y)
 ## grid once per frame.  Debris then calls sample_wind_grid() — a cheap bilinear
 ## lookup instead of evaluating exp/smoothstep per-body per-tick.
 
-enum Model { RANKINE, BURGERS_ROTT, SULLIVAN }
+enum Model { VATISTAS, BURGERS_ROTT, SULLIVAN }
 
 const NUM_SLICES := 8
 const SULLIVAN_B := 3.0
-const BR_ALPHA := 1.256643
-const BR_NORM := 1.397948  # 1 / peak of (1-exp(-BR_ALPHA*r^2))/r, so u_max is the true peak speed
+## Similarity peak of the Sullivan tangential profile (2*eta*H'(eta) = H(eta) at
+## eta = 6.238): the raw profile peaks 2.4976 viscous core radii out, so the bake
+## rescales r_bar by this to keep "core radius = radius of maximum wind" for all models.
+const SULLIVAN_RMW := 2.4976
+## Peak of (1-exp(-a*r^2))/r sits at a*r^2 = root of (2x+1)*e^-x = 1, so u_max is
+## the tangential speed at r_bar = 1 (the RMW convention of tornado literature).
+const BR_ALPHA := 1.2564312
+const BR_NORM := 1.3979525
 const R_BAR_MAX := 4.0
+## Inflow shape: (r/1.5)*exp(1 - r/1.5) peaks at INFLOW_PEAK_R (just outside the RMW,
+## as in tornado LES) with magnitude a_bar * R_BAR_MAX at the surface, then decays.
+const INFLOW_PEAK_R := 1.5
+## Aloft the inflow relaxes to this fraction of its surface value (LES: near-ground max).
+const INFLOW_GROUND_FLOOR := 0.45
 const Z_BAR_CAP := 6.0
 const INFLUENCE_FACTOR := 8.0
 
@@ -51,8 +68,10 @@ func _init() -> void:
 	_wind_grid.resize(WIND_GRID_R * WIND_GRID_Y)
 
 
-## Bakes normalized Sullivan tangential profile v_theta(r_bar) for r_bar in [0, 8].
-## H(x) = int_0^x exp(-x' + 3*int_0^x' (1-e^-t)/t dt) dx', v_theta = H(r^2)/(r*H(inf)).
+## Bakes the normalized Sullivan tangential profile v_theta(r_bar) for r_bar in [0, 8].
+## H(x) = int_0^x exp(-x' + 3*int_0^x' (1-e^-t)/t dt) dx'; the raw profile peaks at
+## SULLIVAN_RMW viscous core radii, so the bake samples H(SULLIVAN_RMW^2 * r_bar^2)
+## and the baked curve peaks at r_bar = 1 like the other models.
 static func build_sullivan_profile() -> Curve:
 	var dx := 0.01
 	var x_max := 64.0
@@ -72,12 +91,13 @@ static func build_sullivan_profile() -> Curve:
 	var values := PackedFloat64Array()
 	values.resize(points + 1)
 	var v_peak := 0.0
+	var rmw2 := SULLIVAN_RMW * SULLIVAN_RMW
 	for i in points + 1:
 		var r_bar := 8.0 * i / points
 		var v := 0.0
 		if r_bar > 1e-4:
-			var idx := clampi(int(r_bar * r_bar / dx), 0, n)
-			v = h_samples[idx] / (r_bar * h_inf)
+			var idx := mini(int(rmw2 * r_bar * r_bar / dx), n)
+			v = h_samples[idx] / (SULLIVAN_RMW * r_bar * h_inf)
 		values[i] = v
 		v_peak = maxf(v_peak, v)
 	var curve := Curve.new()
@@ -137,46 +157,45 @@ func get_shader_centerline() -> PackedVector3Array:
 func bake_wind_grid() -> void:
 	var inv_gr: float = 1.0 / (WIND_GRID_R - 1)
 	var inv_gy: float = 1.0 / (WIND_GRID_Y - 1)
-	var fade_y0: float = 0.85 * height
 
 	for yi in WIND_GRID_Y:
 		var y := height * yi * inv_gy
 		var r_core := core_radius_at(y)
 		var z_bar := minf(y / r_core, Z_BAR_CAP)
 		var z_eff := Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar))
+		var inflow_z := INFLOW_GROUND_FLOOR \
+			+ (1.0 - INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar)
+		var top_fade := 1.0 - smoothstep(0.85 * height, height, y)
 
 		for ri in WIND_GRID_R:
 			var r_bar := INFLUENCE_FACTOR * ri * inv_gr
-			var rb := minf(r_bar, R_BAR_MAX)
 			var r_safe := maxf(r_bar, 1e-3)
+			var inflow_r := (r_bar / INFLOW_PEAK_R) * exp(1.0 - r_bar / INFLOW_PEAK_R)
 
 			var v_t := 0.0
 			var v_r := 0.0
 			var v_z := 0.0
 			match model:
-				Model.RANKINE:
+				Model.VATISTAS:
 					v_t = 2.0 * r_bar / (1.0 + r_bar * r_bar)
 				Model.BURGERS_ROTT:
 					v_t = BR_NORM * (1.0 - exp(-BR_ALPHA * r_bar * r_bar)) / r_safe
-					v_r = -a_bar * rb
+					v_r = -a_bar * R_BAR_MAX * inflow_r * inflow_z
 					v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
 				Model.SULLIVAN:
-					var e := exp(-r_bar * r_bar)
+					var e := exp(-SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
 					v_t = _sullivan_curve.sample_baked(r_bar)
-					v_r = a_bar * (-rb + (SULLIVAN_B / r_safe) * (1.0 - e))
-					v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) * exp(-0.15 * r_bar * r_bar)
+					v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z
+						+ (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
+					v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) \
+						* exp(-0.15 * SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
 
-			# Corner flow (Lewellen)
-			if model != Model.RANKINE:
+			# Corner flow (Lewellen): annular near-ground updraft jet at the RMW.
+			if model != Model.VATISTAS:
 				var dr := (r_bar - 1.0) / 0.45
 				v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar)
-				v_r *= 1.0 + 0.75 * exp(-1.5 * z_bar)
 
-			# Vertical fade near the top
-			v_z *= 1.0 - smoothstep(fade_y0, height, y)
-
-			# Radial fade at the outer edge
-			var fade := 1.0 - smoothstep(6.0, 8.0, r_bar)
+			var fade := top_fade * (1.0 - smoothstep(6.0, 8.0, r_bar))
 			v_t *= fade
 			v_r *= fade
 			v_z *= fade
@@ -204,7 +223,14 @@ func sample_wind_grid(r_bar: float, y: float) -> Vector3:
 	return v00.lerp(v10, tx).lerp(v01.lerp(v11, tx), ty)
 
 
-# ── Original wind_at (kept for reference / non-debris use) ───────────────────
+# ── Reference wind_at (CPU reference; the GLSL mirror and the grid follow it) ─
+
+## World-space tangential (x, z) direction for a unit radial direction (x, z).
+## Shared convention of wind_at(), the GLSL mirror and the debris pool:
+## swirl_sign * UP.cross(r_dir) — counterclockwise seen from above for +1.
+static func tangent_from_radial(r_dir_x: float, r_dir_z: float, vortex_sign: float) -> Vector2:
+	return Vector2(vortex_sign * r_dir_z, -vortex_sign * r_dir_x)
+
 
 func wind_at(p: Vector3) -> Vector3:
 	if p.y > height or p.y < 0.0:
@@ -220,34 +246,37 @@ func wind_at(p: Vector3) -> Vector3:
 	# Fast near-ground onset saturating at Z_BAR_CAP: the papers' v_z ~ z is too weak
 	# in the corner-flow region to ever loft debris (models are inviscid, no boundary layer).
 	var z_eff := Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar))
-	var rb := minf(r_bar, R_BAR_MAX)
+	# Ground-weighted inflow: full surface strength, relaxing aloft (LES corner region).
+	var inflow_z := INFLOW_GROUND_FLOOR + (1.0 - INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar)
 	var r_safe := maxf(r_bar, 1e-3)
+	var inflow_r := (r_bar / INFLOW_PEAK_R) * exp(1.0 - r_bar / INFLOW_PEAK_R)
+	var sv2 := SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar
 
 	var v_t := 0.0
 	var v_r := 0.0
 	var v_z := 0.0
 	match model:
-		Model.RANKINE:
+		# Vatistas n=1 tangential core, radial/vertical both zero: debris orbit but
+		# never loft under this profile.
+		Model.VATISTAS:
 			v_t = 2.0 * r_bar / (1.0 + r_bar * r_bar)
 		Model.BURGERS_ROTT:
 			v_t = BR_NORM * (1.0 - exp(-BR_ALPHA * r_bar * r_bar)) / r_safe
-			v_r = -a_bar * rb
+			v_r = -a_bar * R_BAR_MAX * inflow_r * inflow_z
 			v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
 		Model.SULLIVAN:
-			var e := exp(-r_bar * r_bar)
+			var e := exp(-sv2)
 			v_t = _sullivan_curve.sample_baked(r_bar)
-			v_r = a_bar * (-rb + (SULLIVAN_B / r_safe) * (1.0 - e))
-			v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) * exp(-0.15 * r_bar * r_bar)
+			v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z + (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
+			v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) * exp(-0.15 * sv2)
 
-	# Corner flow (Lewellen): annular near-ground updraft jet at the core wall plus
-	# intensified surface inflow — this is what lofts debris; absent from the inviscid models.
-	if model != Model.RANKINE:
+	# Corner flow (Lewellen): annular near-ground updraft jet at the core wall —
+	# this is what lofts debris; absent from the inviscid models.
+	if model != Model.VATISTAS:
 		var dr := (r_bar - 1.0) / 0.45
 		v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar)
-		v_r *= 1.0 + 0.75 * exp(-1.5 * z_bar)
 
-	v_z *= 1.0 - smoothstep(0.85 * height, height, p.y)
-	var fade := 1.0 - smoothstep(6.0, 8.0, r_bar)
+	var fade := (1.0 - smoothstep(0.85 * height, height, p.y)) * (1.0 - smoothstep(6.0, 8.0, r_bar))
 	v_t *= fade
 	v_r *= fade
 	v_z *= fade
@@ -255,5 +284,6 @@ func wind_at(p: Vector3) -> Vector3:
 	var r_dir := Vector3.ZERO
 	if r > 1e-4:
 		r_dir = Vector3(rel.x, 0.0, rel.y) / r
-	var t_dir := swirl_sign * Vector3.UP.cross(r_dir)
+	var t := tangent_from_radial(r_dir.x, r_dir.z, swirl_sign)
+	var t_dir := Vector3(t.x, 0.0, t.y)
 	return (r_dir * v_r + t_dir * v_t + Vector3.UP * v_z) * u_max
