@@ -162,10 +162,3 @@ func _add_body(body_name: String, position: Vector3, fluid_enabled: bool) -> Amb
 	body.add_child(shape)
 	_root.add_child(body)
 	return body
-
-
-func _wrench_norm(wrench: PackedFloat64Array) -> float:
-	var sum := 0.0
-	for value in wrench:
-		sum += value * value
-	return sqrt(sum)

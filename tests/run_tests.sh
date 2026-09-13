@@ -6,6 +6,10 @@
 #   GPU=1 tests/run_tests.sh           # + ocean FFT, portal views, scene cycle, UI smoke
 #   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
 #
+# JOBS caps the concurrently running suites in both phases (default 2). All
+# gate runners hold a shared lock on .godot/import.lock so an import rebuild
+# (tools/import.sh) cannot race a running suite's script parsing.
+#
 # Screenshots are evidence tools, not gates: tools/capture.sh (any demo) and
 # tests/run_mixwell_capture.sh (mixwell, GPU oracle) are run by hand.
 set -euo pipefail
@@ -24,6 +28,13 @@ fi
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 export LOG_DIR
+
+# Shared mode: hold this for the whole run so tools/import.sh waits instead of
+# rewriting the script class cache under our feet. Shared locks between runners
+# still let several agents test concurrently.
+mkdir -p "$PROJECT_DIR/.godot"
+exec 9>>"$PROJECT_DIR/.godot/import.lock"
+flock -s 9
 
 source "$SCRIPT_DIR/virtual_display.sh"
 
@@ -111,6 +122,9 @@ for suite in "${CPU_SUITES[@]}"; do
 	run_cpu_suite "$name" "$script" &
 	cpu_pids+=("$!")
 	cpu_names+=("$name")
+	if (( ${#cpu_pids[@]} >= JOBS )); then
+		reap_cpu_suite
+	fi
 done
 while (( ${#cpu_pids[@]} > 0 )); do
 	reap_cpu_suite
@@ -200,6 +214,27 @@ else
 		printf 'TEST FAIL scene_cycle: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$scene_cycle_output" >&2
 		failed+=(scene_cycle)
+	fi
+
+	terrain_output="$LOG_DIR/gpu-terrain.stdout.log"
+	terrain_log="$LOG_DIR/gpu-terrain.godot.log"
+	terrain_status=0
+	physics_test_run_process "${TERRAIN_TIMEOUT:-300}" '^TEST PASS terrain$' "$terrain_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$terrain_log" \
+			-s res://tests/terrain_test.gd || terrain_status=$?
+	if (( terrain_status == 0 )) && grep -q '^TEST PASS terrain$' "$terrain_output"; then
+		printf 'TEST PASS terrain\n'
+	else
+		printf 'TEST FAIL terrain: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$terrain_output" >&2
+		failed+=(terrain)
 	fi
 
 	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \

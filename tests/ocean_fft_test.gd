@@ -1,5 +1,6 @@
 extends "res://tests/test_case.gd"
 
+const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const LOOP_PERIOD := 200.0
 const PRESETS := [0, 1, 2, 3]
 const JONSWAP_BASELINE_WRITE_PREFIX := "--jonswap-baseline-write="
@@ -2223,25 +2224,10 @@ func _texel_vec2(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vec
 
 
 func _read_texture(rid: RID, layer: int) -> PackedByteArray:
-	var state := {"done": false, "data": PackedByteArray()}
-	RenderingServer.call_on_render_thread(func():
-		var rd := RenderingServer.get_rendering_device()
-		rd.texture_get_data_async(rid, layer, func(data: PackedByteArray):
-			call_deferred("_store_readback", state, data)
-		)
-	)
-	var deadline := Time.get_ticks_msec() + 10000
-	while Time.get_ticks_msec() < deadline:
-		await process_frame
-		if state.done:
-			return state.data
-	_check(false, "ocean texture readback timed out")
-	return PackedByteArray()
-
-
-func _store_readback(state: Dictionary, data: PackedByteArray) -> void:
-	state.data = data
-	state.done = true
+	var data: PackedByteArray = await TextureReadback.new().read_layer(rid, layer)
+	if data.is_empty():
+		_check(false, "ocean texture readback timed out")
+	return data
 
 
 func _frames(count: int) -> void:

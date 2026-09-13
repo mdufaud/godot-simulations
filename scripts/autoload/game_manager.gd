@@ -8,6 +8,9 @@ var current_demo: String = ""
 
 # Global settings
 var settings: Dictionary = {
+	# App-wide frame cap applied to Engine.max_fps
+	"fps_limit": 60,
+
 	# Ocean demo
 	"ocean_map_size": 512,
 
@@ -16,7 +19,7 @@ var settings: Dictionary = {
 	# Ocean keeps High, the configuration it shipped with; the other demos
 	# default to Medium.
 	"ocean_quality_profile": 2,
-	"sand_quality_profile": 1,
+	"terrain_quality_profile": 1,
 	"nbody_quality_profile": 1,
 	"planet_quality_profile": 1,
 	"fluid_quality_profile": 1,
@@ -67,8 +70,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/fractal_3d_demo.tscn"},
 	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️", category = "particles",
 		scene = "res://scenes/tornado_demo.tscn"},
-	{key = "sand_demo",     title = "Heightfield Sand", icon = "🏖️", category = "particles",
-		scene = "res://scenes/sand_demo.tscn"},
+	{key = "terrain_demo",  title = "Sand & Snow",  icon = "🏔️", category = "particles",
+		scene = "res://scenes/terrain_demo.tscn"},
 	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid",
 		scene = "res://scenes/cloth_demo.tscn"},
 	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid",
@@ -84,6 +87,15 @@ const DEMOS: Array[Dictionary] = [
 
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
+	apply_fps_limit()
+
+
+## Push settings["fps_limit"] into the engine. Headless runs (tests, CI) rely on
+## uncapped frames, so they keep spinning as fast as the CPU allows.
+func apply_fps_limit() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	Engine.max_fps = int(settings["fps_limit"])
 
 
 ## Scene path for a demo key, or "" when the key is not registered.
@@ -115,6 +127,8 @@ func get_setting(key: String, default = null):
 
 func set_setting(key: String, value) -> void:
 	settings[key] = value
+	if key == "fps_limit":
+		apply_fps_limit()
 	settings_changed.emit()
 
 

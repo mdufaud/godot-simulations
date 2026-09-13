@@ -12,11 +12,10 @@ extends SceneTree
 ## frame_post_draw because a _process grab comes back one frame stale.
 
 const DEFAULT_FRAMES := 120
-const DEFAULT_OUT := "res://tmp/capture.png"
 
 var _frames := DEFAULT_FRAMES
 var _every := 0
-var _out := DEFAULT_OUT
+var _out := ""
 var _size := Vector2i(1280, 720)
 var _scene_path := ""
 var _demo: Node = null
@@ -102,6 +101,9 @@ func _initialize() -> void:
 				var dims := value.split("x")
 				if dims.size() == 2:
 					_size = Vector2i(maxi(16, int(dims[0])), maxi(16, int(dims[1])))
+	# Unique default so concurrent captures never overwrite each other.
+	if _out.is_empty():
+		_out = "res://tmp/capture-%d.png" % OS.get_process_id()
 	if _scene_path == "":
 		push_error("CAPTURE FAIL: no target given")
 		quit(1)

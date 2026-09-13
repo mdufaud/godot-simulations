@@ -23,9 +23,15 @@ fi
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 
+# Shared lock on the import cache: tools/import.sh waits instead of rewriting
+# the script class cache while the smoke processes parse scripts.
+mkdir -p "$PROJECT_DIR/.godot"
+exec 9>>"$PROJECT_DIR/.godot/import.lock"
+flock -s 9
+
 DEMOS=(
 	ssr_demo ocean_demo fire_demo nbody_demo grass_demo parallax_demo
-	fluid_demo mixwell_demo fractal_demo fractal_3d_demo tornado_demo sand_demo
+	fluid_demo mixwell_demo fractal_demo fractal_3d_demo tornado_demo terrain_demo
 	cloth_demo destruction_demo ambient_fluid_demo non_euclidean_demo planet_demo
 )
 if [[ $# -gt 0 ]]; then

@@ -6,7 +6,7 @@ extends "res://tests/test_case.gd"
 ## Assertions here must describe player-visible behaviour. Node names, child counts,
 ## exact scene coordinates and renderer configuration are deliberately not asserted:
 ## they break on every legitimate refactor without catching a single real bug. Portal
-## image correctness is covered by tests/capture_non_euclidean.gd.
+## image correctness is covered by tools/capture_non_euclidean.gd.
 
 const PortalMathScript := preload("res://scripts/non_euclidean/portal_math.gd")
 

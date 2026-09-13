@@ -6,7 +6,7 @@ extends "res://tests/test_case.gd"
 ## no GPU, no window.
 
 const QUALITY_KEYS := [
-	"ocean_quality_profile", "sand_quality_profile", "nbody_quality_profile",
+	"ocean_quality_profile", "terrain_quality_profile", "nbody_quality_profile",
 	"planet_quality_profile", "fluid_quality_profile", "tornado_quality_profile",
 	"cloth_quality_profile", "destruction_quality_profile", "grass_quality_profile",
 	"mixwell_quality_profile", "fractal_quality_profile", "non_euclidean_quality_profile",
@@ -22,7 +22,7 @@ func _profile_table() -> void:
 	_profiles = {
 		OceanQualityProfile: ["fft_size", "foam_near_size", "foam_near_distance",
 			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate"],
-		SandQualityProfile: ["grid_n", "mesh_n", "iterations", "render_scale"],
+		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations", "render_scale"],
 		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max",
 			"render_scale"],
 		FluidQualityProfile: ["particle_count", "texture_width", "water_scale",
@@ -163,11 +163,11 @@ func _test_lever_caps() -> void:
 		var values: Dictionary = tornado.values(tier)
 		_check(values.raymarch_steps in [24, 48, 96, 160],
 			"tornado tier %d steps outside the menu range" % tier)
-	var sand := SandQualityProfile
+	var terrain := TerrainQualityProfile
 	for tier in 4:
-		var values: Dictionary = sand.values(tier)
+		var values: Dictionary = terrain.values(tier)
 		_check(values.mesh_n <= values.grid_n,
-			"sand tier %d: visual mesh finer than the solver grid" % tier)
+			"terrain tier %d: visual mesh finer than the solver grid" % tier)
 	var planet := PlanetQualityProfile
 	for tier in 4:
 		_check(planet.values(tier).resolution <= 256,

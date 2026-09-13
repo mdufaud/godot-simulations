@@ -29,9 +29,13 @@ physics_test_display_start() {
 	chmod 700 "$runtime_dir"
 	socket_name="physics-test-${$}-${RANDOM}"
 
-	XDG_RUNTIME_DIR="$runtime_dir" "$kwin_bin" \
+	# setsid gives the compositor its own process group so the stop path can
+	# take down kwin and its XWayland children together. The socket is an
+	# absolute path: a session XDG_RUNTIME_DIR leaking through setsid would
+	# otherwise resolve the bare name outside the watched runtime dir.
+	XDG_RUNTIME_DIR="$runtime_dir" setsid "$kwin_bin" \
 		--virtual \
-		--socket "$socket_name" \
+		--socket "$runtime_dir/$socket_name" \
 		--width "$width" \
 		--height "$height" \
 		--no-lockscreen \
@@ -50,7 +54,9 @@ physics_test_display_start() {
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
 			return 0
 		fi
-		if ! kill -0 "$PHYSICS_TEST_DISPLAY_PID" 2>/dev/null; then
+		# The setsid wrapper forks and exits when the caller is already a group
+		# leader, so its pid dying says nothing: track kwin by its socket name.
+		if ! pgrep -f -- "--socket $runtime_dir/$socket_name" >/dev/null 2>&1; then
 			break
 		fi
 		sleep 0.1
@@ -65,8 +71,15 @@ physics_test_display_start() {
 
 physics_test_display_stop() {
 	if [[ -n "$PHYSICS_TEST_DISPLAY_PID" ]]; then
-		kill "$PHYSICS_TEST_DISPLAY_PID" 2>/dev/null || true
-		wait "$PHYSICS_TEST_DISPLAY_PID" 2>/dev/null || true
+		# TERM then KILL the whole compositor process group: a bare TERM to the
+		# leader leaks kwin children that keep holding a Vulkan device.
+		physics_test_process_stop "$PHYSICS_TEST_DISPLAY_PID"
+	fi
+	# Safety net for the forked-setsid edge: the socket name is unique per run,
+	# and with an absolute --socket path the name alone still matches the
+	# compositor cmdline (a "--socket <name>" prefix would not).
+	if [[ -n "$PHYSICS_TEST_DISPLAY_SOCKET" ]]; then
+		pkill -KILL -f -- "$PHYSICS_TEST_DISPLAY_SOCKET" 2>/dev/null || true
 	fi
 	if [[ -n "$PHYSICS_TEST_DISPLAY_RUNTIME" && -d "$PHYSICS_TEST_DISPLAY_RUNTIME" ]]; then
 		rm -rf -- "$PHYSICS_TEST_DISPLAY_RUNTIME"

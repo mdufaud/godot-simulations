@@ -58,7 +58,7 @@ run_capture() {
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
 			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
 			--resolution 640x360 --log-file "$LOG_DIR/$(basename "$output").log" \
-			-s res://tests/mixwell_capture.gd -- "$output" "${capture_args[@]}"
+			-s res://tools/mixwell_capture.gd -- "$output" "${capture_args[@]}"
 }
 
 if [[ "${MIXWELL_GPU_ORACLE:-0}" == "1" ]]; then

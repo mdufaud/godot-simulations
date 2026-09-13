@@ -32,7 +32,7 @@ func _test_matrix_operations() -> void:
 	var inverse := MATH.matrix_inverse(diagonal)
 	_check(inverse.size() == MATH.MATRIX_SCALARS, "6x6 diagonal inverse has wrong size")
 	var product := MATH.matrix_multiply(diagonal, inverse)
-	_check(_matrix_near(product, MATH.identity_matrix(), 1.0e-10), "6x6 inverse product is not identity")
+	_check(_array_near(product, MATH.identity_matrix(), 1.0e-10), "6x6 inverse product is not identity")
 	_check(MATH.is_symmetric(diagonal), "diagonal matrix is not symmetric")
 	_check(MATH.cholesky(diagonal).size() == MATH.MATRIX_SCALARS,
 		"positive diagonal matrix failed Cholesky")
@@ -140,12 +140,3 @@ func _test_scene_body() -> void:
 	body.queue_free()
 	await process_frame
 	_finish("ambient_fluid")
-
-
-func _matrix_near(a: PackedFloat64Array, b: PackedFloat64Array, tolerance: float) -> bool:
-	if a.size() != b.size():
-		return false
-	for i in a.size():
-		if absf(a[i] - b[i]) > tolerance:
-			return false
-	return true

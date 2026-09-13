@@ -1,0 +1,67 @@
+// Brush pass, run before the flow steps when a tool is active. Writes the
+// source texture in place: every thread touches only its own texel, so no
+// ping-pong is needed and the following flow step sees the edit immediately.
+// The user brush and the contact brush (props dragging through the surface)
+// are both applied here, in one dispatch.
+
+const int TOOL_NONE = 0;
+const int TOOL_DIG = 1;
+const int TOOL_POUR = 2;
+const int TOOL_SMOOTH = 3;
+const int TOOL_WATER = 4;
+const int TOOL_PACK = 5;
+const int TOOL_SNOW = 6;
+
+// One tool against one cell; returns the cell updated in place.
+vec4 apply_tool(vec4 cell, ivec2 id, int n, vec4 toolp, int mode) {
+	if (mode == TOOL_NONE || toolp.z <= 0.0) {
+		return cell;
+	}
+	float w = brush_weight(id, n, toolp);
+	if (w < 0.004) {
+		return cell;
+	}
+	float amount = toolp.w * params.flow.w * w;
+	if (mode == TOOL_DIG) {
+		// The shovel lifts snow before it bites into sand.
+		float lifted = min(cell.b, amount);
+		cell.b -= lifted;
+		cell.r = max(cell.r - (amount - lifted), 0.0);
+	} else if (mode == TOOL_POUR) {
+		cell.r += amount;
+	} else if (mode == TOOL_SMOOTH) {
+		// Pull sand and snow toward their values under the brush centre — a
+		// trowel, not a bulldozer.
+		ivec2 c = clamp(ivec2((toolp.xy + 0.5 * float(n) * params.flow.z) / params.flow.z), ivec2(0), ivec2(n - 1));
+		vec4 cc = imageLoad(field_src, c);
+		float k = min(2.0 * amount, 1.0);
+		cell.r = mix(cell.r, cc.r, k);
+		cell.b = mix(cell.b, cc.b, k);
+	} else if (mode == TOOL_WATER) {
+		cell.g += amount;
+	} else if (mode == TOOL_SNOW) {
+		// A snowfall in brush form: piles past the local cohesion, and the
+		// flow passes do the slumping.
+		cell.b += amount;
+	} else if (mode == TOOL_PACK) {
+		// Compaction squeezes snow into a denser (shorter) layer the
+		// heightfield cannot store; a fraction surfaces as pressure melt,
+		// which darkens the imprint and reads as a footprint.
+		float packed = cell.b * min(2.0 * amount, 0.9);
+		cell.b -= packed;
+		cell.g += 0.25 * packed;
+	}
+	return cell;
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	cell = apply_tool(cell, id, n, params.tool, params.misc.y);
+	cell = apply_tool(cell, id, n, params.tool2, params.misc.z);
+	imageStore(field_src, id, cell);
+}

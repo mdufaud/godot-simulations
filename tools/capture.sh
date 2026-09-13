@@ -2,13 +2,15 @@
 # Screenshot a demo on an isolated virtual Wayland compositor (real GPU, Vulkan),
 # so no window opens on the desktop. PNGs are meant for visual inspection.
 #
-#   tools/capture.sh ocean_demo                                # res://tmp/capture.png
+#   tools/capture.sh ocean_demo                                # res://tmp/capture-<timestamp>-<pid>.png
 #   tools/capture.sh ocean_demo tmp/ocean.png 240              # after 240 frames
 #   tools/capture.sh ocean_demo tmp/ocean_seq.png 240 80       # shot every 80 frames
 #   tools/capture.sh res://scenes/ocean_demo.tscn out.png 120  # any scene path
 #
-# Output paths are project-relative, res:// paths or absolute. Frame counts beat
-# wall time: the grab happens exactly N process frames after the demo is added.
+# Output paths are project-relative, res:// paths or absolute; the default name
+# is unique per run so concurrent captures never overwrite each other. Frame
+# counts beat wall time: the grab happens exactly N process frames after the
+# demo is added.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +21,7 @@ TIMEOUT="${TIMEOUT:-90}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-capture-$$}"
 
 TARGET="${1:?usage: tools/capture.sh <demo_key|res://scene.tscn> [out.png] [frames] [every]}"
-OUT="${2:-res://tmp/capture.png}"
+OUT="${2:-res://tmp/capture-$(date +%Y%m%d-%H%M%S)-$$.png}"
 FRAMES="${3:-120}"
 EVERY="${4:-0}"
 EXTRA_ARGS=("${@:5}")
@@ -30,6 +32,11 @@ fi
 
 mkdir -p "$LOG_DIR"
 source "$PROJECT_DIR/tests/virtual_display.sh"
+
+# Shared lock on the import cache, same convention as the gate runners.
+mkdir -p "$PROJECT_DIR/.godot"
+exec 9>>"$PROJECT_DIR/.godot/import.lock"
+flock -s 9
 
 cleanup() {
 	local status=$?

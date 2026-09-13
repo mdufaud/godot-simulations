@@ -163,6 +163,7 @@ func _ready() -> void:
 		var current_scene := get_tree().current_scene
 		if current_scene != null:
 			persist_id = current_scene.scene_file_path.get_file().get_basename()
+	_add_fps_limit()
 	_restore_all.call_deferred()
 
 
@@ -215,16 +216,21 @@ func _apply_value(entry: Dictionary, value: Variant) -> void:
 				entry.cb.call(color)
 
 
-func _register(label_text: String, node: Control, cb: Callable, kind: String, default_val: Variant) -> String:
+func _register(label_text: String, node: Control, cb: Callable, kind: String,
+		default_val: Variant, persist: bool = true) -> String:
 	var base := "%s/%s" % [_section, label_text]
 	var key := base
 	var suffix := 2
 	while _entries.has(key):
 		key = "%s#%d" % [base, suffix]
 		suffix += 1
-	_entries[key] = {node = node, cb = cb, kind = kind, default = default_val}
-	if _restored:
-		_restore_one(key)
+	# Non-persisting widgets are excluded from the store entirely: their value
+	# is owned by the scene (a preset, a simulation state), not the user, so a
+	# stale saved value must never override it on load.
+	if persist:
+		_entries[key] = {node = node, cb = cb, kind = kind, default = default_val}
+		if _restored:
+			_restore_one(key)
 	return key
 
 
@@ -353,6 +359,20 @@ func _do_reset() -> void:
 
 # --- Sections & layout ---------------------------------------------------------
 
+## Global FPS cap shown on every demo panel, above the demo sections. The value lives
+## in GameManager.settings (app-wide, auto-persisted), not the per-demo widget store,
+## so it is shared across demos and survives a per-demo factory reset.
+func _add_fps_limit() -> void:
+	var manager := get_node_or_null("/root/GameManager")
+	var default_val := 60.0
+	if manager != null:
+		default_val = float(manager.get_setting("fps_limit", 60))
+	var on_changed := func(value: float) -> void:
+		if manager != null:
+			manager.set_setting("fps_limit", int(round(value)))
+	add_slider("FPS limit", 30.0, 120.0, default_val, on_changed, false, 1.0)
+
+
 ## Collapsible category. Widgets added after this land in the section body until the
 ## next add_section(). Open/closed state is remembered per demo (default collapsed).
 func add_section(text: String) -> Button:
@@ -402,7 +422,8 @@ func add_label(text: String) -> Label:
 	return label
 
 
-func add_slider(label_text: String, min_val: float, max_val: float, default_val: float, cb: Callable) -> HSlider:
+func add_slider(label_text: String, min_val: float, max_val: float, default_val: float,
+		cb: Callable, persist: bool = true, step_val: float = 0.0) -> HSlider:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	hbox.custom_minimum_size.y = 30
@@ -416,7 +437,7 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	var slider := HSlider.new()
 	slider.min_value = min_val
 	slider.max_value = max_val
-	slider.step = (max_val - min_val) / 100.0
+	slider.step = step_val if step_val > 0.0 else (max_val - min_val) / 100.0
 	slider.value = default_val
 	slider.scrollable = false
 	slider.custom_minimum_size = Vector2(60, 18)
@@ -427,24 +448,30 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	slider.add_theme_stylebox_override("grabber_area_highlight", _sb_fill)
 	hbox.add_child(slider)
 
+	var whole_steps := slider.step >= 1.0
 	var value_label := Label.new()
-	value_label.text = "%.2f" % default_val
+	value_label.text = _slider_value_text(default_val, whole_steps)
 	value_label.custom_minimum_size.x = 52
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hbox.add_child(value_label)
 
 	slider.value_changed.connect(func(value: float) -> void:
 		cb.call(value)
-		value_label.text = "%.2f" % value
+		value_label.text = _slider_value_text(value, whole_steps)
 	)
-	var key := _register(label_text, slider, cb, "slider", default_val)
-	slider.value_changed.connect(func(value: float) -> void:
-		_persist(key, value)
-	)
+	var key := _register(label_text, slider, cb, "slider", default_val, persist)
+	if persist:
+		slider.value_changed.connect(func(value: float) -> void:
+			_persist(key, value)
+		)
 	return slider
 
 
-func add_toggle(label_text: String, default_val: bool, cb: Callable) -> CheckButton:
+func _slider_value_text(value: float, whole_steps: bool) -> String:
+	return "%d" % int(round(value)) if whole_steps else "%.2f" % value
+
+
+func add_toggle(label_text: String, default_val: bool, cb: Callable, persist: bool = true) -> CheckButton:
 	var toggle := CheckButton.new()
 	toggle.text = label_text
 	toggle.button_pressed = default_val
@@ -453,10 +480,11 @@ func add_toggle(label_text: String, default_val: bool, cb: Callable) -> CheckBut
 		toggle.add_theme_stylebox_override(s, _sb_empty)
 	toggle.toggled.connect(cb)
 	_host().add_child(toggle)
-	var key := _register(label_text, toggle, cb, "toggle", default_val)
-	toggle.toggled.connect(func(on: bool) -> void:
-		_persist(key, on)
-	)
+	var key := _register(label_text, toggle, cb, "toggle", default_val, persist)
+	if persist:
+		toggle.toggled.connect(func(on: bool) -> void:
+			_persist(key, on)
+		)
 	return toggle
 
 
@@ -606,7 +634,8 @@ func end_group() -> void:
 	_current = null
 
 
-func add_option_button(label_text: String, items: Array, default_idx: int, cb: Callable) -> OptionButton:
+func add_option_button(label_text: String, items: Array, default_idx: int, cb: Callable,
+		persist: bool = true) -> OptionButton:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	hbox.custom_minimum_size.y = 40
@@ -625,8 +654,9 @@ func add_option_button(label_text: String, items: Array, default_idx: int, cb: C
 		option.select(default_idx)
 	option.item_selected.connect(cb)
 	hbox.add_child(option)
-	var key := _register(label_text, option, cb, "option", default_idx)
-	option.item_selected.connect(func(index: int) -> void:
-		_persist(key, index)
-	)
+	var key := _register(label_text, option, cb, "option", default_idx, persist)
+	if persist:
+		option.item_selected.connect(func(index: int) -> void:
+			_persist(key, index)
+		)
 	return option

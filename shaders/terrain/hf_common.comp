@@ -1,0 +1,44 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Multi-material heightfield cell: sand height, water depth, snow depth and
+// suspended sediment. All are metres of column except the sediment, a mass
+// load the water carries. Every stage of a frame shares this layout.
+layout(set = 0, binding = 0, rgba32f) uniform restrict image2D field_src;
+layout(set = 0, binding = 1, rgba32f) uniform restrict image2D field_dst;
+
+layout(push_constant, std430) uniform Params {
+	vec4 tool;      // user brush: world x, world z, radius, strength
+	vec4 tool2;     // contact brush (props): world x, world z, radius, strength
+	vec4 flow;      // sand slope threshold per cell, sand flow rate, cell size, dt
+	vec4 climate;   // melt rate m/s, evap rate m/s, wet cohesion gain, saturation depth
+	vec4 waterflow; // water flow rate, erosion rate, sediment capacity, stochasticity
+	vec4 snowflow;  // snow slope threshold per cell, snow flow rate, unused, unused
+	ivec4 misc;     // grid n, user tool mode, contact tool mode, frame seed
+	vec4 misc2;     // snowfall rate m/s, freeze rate m/s, unused, unused
+} params;
+
+// World-space centre of a cell's column.
+vec2 cell_world(ivec2 id, int n) {
+	return (vec2(id) + 0.5) * params.flow.z - 0.5 * float(n) * params.flow.z;
+}
+
+// Gaussian brush weight; the same falloff every tool uses.
+float brush_weight(ivec2 id, int n, vec4 toolp) {
+	vec2 d = cell_world(id, n) - toolp.xy;
+	float r = max(toolp.z, 1e-4);
+	return exp(-3.0 * dot(d, d) / (r * r));
+}
+
+// Deterministic pair hash in [0, 1): both endpoints of a transfer derive the
+// same jitter from the canonical (min, max) ordering of the pair, so the
+// bit-exact mass conservation of the gather exchange survives stochasticity.
+float pair_hash(ivec2 a, ivec2 b, int frame) {
+	ivec2 lo = min(a, b);
+	ivec2 hi = max(a, b);
+	uint h = uint(lo.x) * 374761393u + uint(lo.y) * 668265263u
+		+ uint(hi.x) * 2246822519u + uint(hi.y) * 3266489917u
+		+ uint(frame) * 2654435761u;
+	h = (h ^ (h >> 16u)) * 2246822519u;
+	h = (h ^ (h >> 13u)) * 3266489917u;
+	return float((h ^ (h >> 16u)) & 0xFFFFFFu) / float(0xFFFFFFu);
+}

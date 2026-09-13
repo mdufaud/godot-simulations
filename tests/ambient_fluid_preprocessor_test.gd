@@ -208,23 +208,6 @@ func _positive_diagonal(matrix: PackedFloat64Array) -> bool:
 	return matrix[21] > 0.0 and matrix[28] > 0.0 and matrix[35] > 0.0
 
 
-func _matrix_near_transpose(matrix: PackedFloat64Array, tolerance: float) -> bool:
-	for row in 6:
-		for col in 6:
-			if absf(matrix[row * 6 + col] - matrix[col * 6 + row]) > tolerance:
-				return false
-	return true
-
-
-func _array_near(a: PackedFloat64Array, b: PackedFloat64Array, tolerance: float) -> bool:
-	if a.size() != b.size():
-		return false
-	for index in a.size():
-		if absf(a[index] - b[index]) > tolerance:
-			return false
-	return true
-
-
 func _mesh(vertices: PackedVector3Array, indices: PackedInt32Array) -> ArrayMesh:
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)

@@ -26,6 +26,8 @@ func _ready() -> void:
 	_config.load(PATH)
 
 	_restore_game_settings()
+	# Restores bypass set_setting, so engine-side settings need an explicit re-apply.
+	GameManager.apply_fps_limit()
 	GameManager.settings_changed.connect(_on_game_settings_changed)
 
 	if not _is_mobile():

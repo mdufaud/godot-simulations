@@ -7,7 +7,7 @@ extends RefCounted
 ##
 ## [codeblock]
 ## var quality := SimQualityState.new()
-## quality.setup(SandQualityProfile, "sand_quality_profile", _apply_quality, _rebuild)
+## quality.setup(TerrainQualityProfile, "terrain_quality_profile", _apply_quality, _rebuild)
 ## quality.restore()                    # in _ready(), before the menu is built
 ## quality.bind("grid", _grid_option, _set_grid_index)
 ## quality.attach_menu_option(menu)     # inside the Performance section

@@ -31,8 +31,13 @@ if [[ ! -f "$OUT_DIR/manifest.tsv" || "${RESET_MANIFEST:-false}" == "true" ]]; t
 		> "$OUT_DIR/manifest.tsv"
 fi
 
-"$GODOT" --path "$PROJECT_DIR" --log-file "$OUT_DIR/import-${PHASE}.godot.log" \
-	--headless --import >/dev/null
+GODOT="$GODOT" "$SCRIPT_DIR/import.sh" \
+	--log-file "$OUT_DIR/import-${PHASE}.godot.log" >/dev/null
+
+# The capture processes hold the import lock in shared mode, same convention as
+# the gate runners, so no import rebuild can race them.
+exec 9>>"$PROJECT_DIR/.godot/import.lock"
+flock -s 9
 
 state_names=(calm breeze swell storm)
 presets=(0 1 2 3)

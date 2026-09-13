@@ -1,0 +1,44 @@
+// Snow creep: the same gather exchange as sand, but over the snow layer and
+// driven by the slope of the TOTAL surface (snow slides over whatever is
+// underneath). The cohesion threshold is far above the sand's repose angle, so
+// snow holds steep walls and only releases as an avalanche past that limit —
+// which is also why a packed footprint stays a footprint.
+
+const ivec2 OFFS[8] = ivec2[8](
+	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+	ivec2(1, 1), ivec2(1, -1), ivec2(-1, 1), ivec2(-1, -1)
+);
+const float DIST[8] = float[8](
+	1.0, 1.0, 1.0, 1.0, 1.41421356, 1.41421356, 1.41421356, 1.41421356
+);
+
+// Snow moved a -> b this step: excess of the total surface beyond the snow
+// cohesion threshold, capped by a fraction of what a holds (the cap bounds
+// how fast a cell can shed, so the release wave has a physical speed).
+float transfer(float total_a, float total_b, float snow_a, float thresh) {
+	return min(params.snowflow.y * max(total_a - total_b - thresh, 0.0),
+		snow_a * params.snowflow.z);
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	float total = cell.r + cell.b;
+	float acc = cell.b;
+	for (int k = 0; k < 8; k++) {
+		ivec2 nb = id + OFFS[k];
+		if (nb.x < 0 || nb.y < 0 || nb.x >= n || nb.y >= n) {
+			continue;
+		}
+		vec4 nbc = imageLoad(field_src, nb);
+		float nb_total = nbc.r + nbc.b;
+		float thresh = params.snowflow.x * DIST[k];
+		acc += transfer(nb_total, total, nbc.b, thresh)
+			- transfer(total, nb_total, cell.b, thresh);
+	}
+	imageStore(field_dst, id, vec4(cell.r, cell.g, max(acc, 0.0), cell.a));
+}

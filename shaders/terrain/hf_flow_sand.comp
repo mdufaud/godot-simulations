@@ -1,0 +1,57 @@
+// One relaxation step toward the angle of repose. Each cell exchanges sand
+// with its 8 neighbours: a column taller than a neighbour by more than the
+// repose threshold sheds a fraction of the excess. Gather form over a
+// ping-pong pair, so no atomics; out-of-bounds neighbours exchange nothing,
+// which makes the domain boundary a wall the sand piles against.
+//
+// Wet sand is cohesive: the repose threshold grows with the cell's water
+// content up to wet-gain at saturation, so wet sand holds steeper walls and
+// slumps back as it dries. The threshold between a pair is a pure function of
+// both cells' state, read identically at both endpoints.
+
+const ivec2 OFFS[8] = ivec2[8](
+	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+	ivec2(1, 1), ivec2(1, -1), ivec2(-1, 1), ivec2(-1, -1)
+);
+// Diagonal neighbours sit sqrt(2) cells away, so their repose threshold scales.
+const float DIST[8] = float[8](
+	1.0, 1.0, 1.0, 1.0, 1.41421356, 1.41421356, 1.41421356, 1.41421356
+);
+
+// Sand moved a -> b this step. A pure function of the two cells: both
+// endpoints compute the identical value (same operands, same order), so mass
+// is conserved bit-exact without a separate flux pass. The 1/8 cap keeps the
+// total outflow of a cell below its content whatever the neighbourhood.
+float transfer(float a, float b, float thresh) {
+	return min(params.flow.y * max(a - b - thresh, 0.0), a * 0.12);
+}
+
+// Repose threshold for sand shedding from a: dry tan(repose) per cell, scaled
+// up by cohesion while a is wet.
+float repose_threshold(float water_a) {
+	float wet = clamp(water_a / max(params.climate.w, 1e-5), 0.0, 1.0);
+	return params.flow.x * (1.0 + params.climate.z * wet);
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	float h = cell.r;
+	float water = cell.g;
+	float acc = h;
+	for (int k = 0; k < 8; k++) {
+		ivec2 nb = id + OFFS[k];
+		if (nb.x < 0 || nb.y < 0 || nb.x >= n || nb.y >= n) {
+			continue;
+		}
+		vec4 nbc = imageLoad(field_src, nb);
+		float hn = nbc.r;
+		acc += transfer(hn, h, repose_threshold(nbc.g) * DIST[k])
+			- transfer(h, hn, repose_threshold(water) * DIST[k]);
+	}
+	imageStore(field_dst, id, vec4(max(acc, 0.0), water, cell.b, cell.a));
+}

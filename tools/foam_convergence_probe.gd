@@ -2,7 +2,7 @@ extends SceneTree
 
 const SAMPLE_FRAMES := [60, 180, 600, 1800, 3600]
 const FIXED_DT := 1.0 / 30.0
-const READBACK_TIMEOUT_MS := 10000
+const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 
 
 func _initialize() -> void:
@@ -21,29 +21,11 @@ func _half(bits: int) -> float:
 
 
 func _read_texture(rid: RID, layer: int, expected_bytes: int = 0) -> PackedByteArray:
-	var state := {"done": false, "data": PackedByteArray()}
-	RenderingServer.call_on_render_thread(func():
-		var rd := RenderingServer.get_rendering_device()
-		rd.texture_get_data_async(rid, layer, func(data: PackedByteArray):
-			call_deferred("_store", state, data)
-		)
-	)
-	var deadline := Time.get_ticks_msec() + READBACK_TIMEOUT_MS
-	while Time.get_ticks_msec() < deadline:
-		await process_frame
-		if state.done:
-			if expected_bytes > 0 and state.data.size() != expected_bytes:
-				push_error("FOAM PROBE FAIL: readback size mismatch (%d != %d)" % [
-					state.data.size(), expected_bytes])
-				return PackedByteArray()
-			return state.data
-	push_error("FOAM PROBE FAIL: texture readback timed out")
-	return PackedByteArray()
-
-
-func _store(state: Dictionary, data: PackedByteArray) -> void:
-	state.data = data
-	state.done = true
+	var data: PackedByteArray = await TextureReadback.new().read_layer(rid, layer,
+		expected_bytes)
+	if data.is_empty():
+		push_error("FOAM PROBE FAIL: texture readback failed (timeout or size mismatch)")
+	return data
 
 
 func _foam_base(data: PackedByteArray, size: int) -> PackedByteArray:

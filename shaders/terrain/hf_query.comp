@@ -1,0 +1,45 @@
+// GPU point queries against the multi-material field: bilinearly samples the
+// sand+snow surface height, the water depth and the snow depth at world xz
+// points. Results are read back asynchronously (max one frame of latency);
+// props never touch the sim textures directly.
+//
+// Result layout: vec4(total_height, water_depth, snow_depth, valid).
+// Standalone shader: own bindings and push constant.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) restrict buffer QueryIn {
+	vec2 query_points[]; // world xz
+};
+layout(std430, set = 0, binding = 1) restrict buffer QueryOut {
+	vec4 query_results[];
+};
+layout(rgba32f, set = 0, binding = 2) restrict uniform image2D field;
+
+layout(push_constant, std430) uniform QueryParams {
+	vec4 info; // cell size, world size, grid n, point count
+} qp;
+
+vec4 sample_field(vec2 world) {
+	float n = qp.info.z;
+	vec2 g = (world / qp.info.y + 0.5) * n - 0.5;
+	ivec2 i0 = ivec2(clamp(floor(g), vec2(0.0), vec2(n - 1.0)));
+	ivec2 i1 = ivec2(clamp(floor(g) + 1.0, vec2(0.0), vec2(n - 1.0)));
+	vec2 t = clamp(g - floor(g), vec2(0.0), vec2(1.0));
+	vec4 c00 = imageLoad(field, i0);
+	vec4 c10 = imageLoad(field, ivec2(i1.x, i0.y));
+	vec4 c01 = imageLoad(field, ivec2(i0.x, i1.y));
+	vec4 c11 = imageLoad(field, i1);
+	return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+void main() {
+	int index = int(gl_GlobalInvocationID.x);
+	if (index >= int(qp.info.w)) {
+		return;
+	}
+	vec4 c = sample_field(query_points[index]);
+	float total = c.r + c.b;
+	float valid = (isnan(total) || isinf(total)) ? 0.0 : 1.0;
+	query_results[index] = vec4(total, c.g, c.b, valid);
+}

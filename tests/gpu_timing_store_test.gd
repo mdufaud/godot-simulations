@@ -1,24 +1,6 @@
-extends SceneTree
+extends "res://tests/test_case.gd"
 ## CPU checks for GpuTimingStore: defensive copies in and out, snapshot
 ## replacement and clear. No RenderingDevice involved.
-
-var _failures := 0
-
-
-func _check(condition: bool, message: String) -> void:
-	if condition:
-		return
-	_failures += 1
-	push_error(message)
-
-
-func _finish() -> void:
-	if _failures == 0:
-		print("TEST PASS gpu_timing_store")
-		quit(0)
-		return
-	printerr("TEST FAIL gpu_timing_store: %d check(s)" % _failures)
-	quit(1)
 
 
 func _init() -> void:
@@ -55,4 +37,4 @@ func _init() -> void:
 	store.clear()
 	_check(store.snapshot().is_empty(), "clear must empty the store")
 
-	_finish()
+	_finish("gpu_timing_store")

@@ -1,0 +1,38 @@
+// Climate pass, pointwise on the source texture: snow melts into water, water
+// evaporates away, standing water freezes back into snow, fresh snowfall
+// accumulates everywhere, and sediment stranded by dried-out water settles
+// onto the sand. Everything happens inside one cell: total mass is conserved
+// except what evaporation hands to the sky and what snowfall drops from it.
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	float dt = params.flow.w;
+
+	float melt = min(params.climate.x * dt, cell.b);
+	cell.b -= melt;
+	cell.g += melt;
+
+	float evap = min(params.climate.y * dt, cell.g);
+	cell.g -= evap;
+
+	// Weather: snowfall adds depth everywhere; freeze caps the standing water
+	// into a snow crust. Both are per-cell moves (freeze conserves, snowfall
+	// is the sky's source term).
+	cell.b += params.misc2.x * dt;
+	float frozen = min(params.misc2.y * dt, cell.g);
+	cell.g -= frozen;
+	cell.b += frozen;
+
+	// No water left to carry the load: it settles where it is.
+	if (cell.g < 1e-5 && cell.a > 0.0) {
+		cell.r += cell.a;
+		cell.a = 0.0;
+	}
+
+	imageStore(field_src, id, cell);
+}

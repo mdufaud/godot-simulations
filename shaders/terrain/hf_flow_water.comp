@@ -1,0 +1,75 @@
+// Water flow over the solid surface (sand + snow). The same gather-exchange
+// structure as the sand pass levels the water surface against the TOTAL
+// column height of each neighbour, much faster (water offers no repose
+// resistance). Suspended sediment rides along: what a pair exchanges in water
+// it also exchanges in sediment, in proportion to the sender's load — again a
+// pure function of both cells, so both endpoints agree bit-exact.
+//
+// Flow activity (total outflow through a cell) drives the capacity model:
+// fast water erodes sand into suspended load, overloaded water deposits it.
+// Both are in-cell R <-> A exchanges, so total mass still cancels exactly.
+// A pair-hashed jitter on the exchange rate makes channels meander instead of
+// running straight — the stochastic part of the transport.
+
+const ivec2 OFFS[8] = ivec2[8](
+	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+	ivec2(1, 1), ivec2(1, -1), ivec2(-1, 1), ivec2(-1, -1)
+);
+const float DIST[8] = float[8](
+	1.0, 1.0, 1.0, 1.0, 1.41421356, 1.41421356, 1.41421356, 1.41421356
+);
+
+// Water moved a -> b: level the total surfaces, capped by what a holds. The
+// jitter is derived from the pair, so both endpoints compute the same value.
+float transfer(float total_a, float total_b, float water_a, float jitter) {
+	return min(params.waterflow.x * jitter * max(total_a - total_b, 0.0), water_a * 0.15);
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	float sand = cell.r;
+	float water = cell.g;
+	float snow = cell.b;
+	float sed = cell.a;
+	float total = sand + snow;
+
+	float acc_water = water;
+	float acc_sed = sed;
+	float outflow = 0.0;
+	for (int k = 0; k < 8; k++) {
+		ivec2 nb = id + OFFS[k];
+		if (nb.x < 0 || nb.y < 0 || nb.x >= n || nb.y >= n) {
+			continue;
+		}
+		vec4 nbc = imageLoad(field_src, nb);
+		float jitter = mix(1.0 - params.waterflow.w, 1.0 + params.waterflow.w,
+			pair_hash(id, nb, params.misc.w));
+		float out_t = transfer(total, nbc.r + nbc.b, water, jitter);
+		float in_t = transfer(nbc.r + nbc.b, total, nbc.g, jitter);
+		outflow += out_t;
+		acc_water += in_t - out_t;
+		acc_sed += (nbc.g > 1e-6 ? nbc.a * in_t / nbc.g : 0.0)
+			- (water > 1e-6 ? sed * out_t / water : 0.0);
+	}
+
+	// Capacity model: flow activity carries sediment; surplus deposits back.
+	float capacity = params.waterflow.z * outflow;
+	if (acc_water > 1e-5) {
+		if (acc_sed < capacity) {
+			float eroded = min(params.waterflow.y * params.flow.w * (capacity - acc_sed), sand);
+			sand -= eroded;
+			acc_sed += eroded;
+		} else {
+			float settled = min(0.6 * (acc_sed - capacity), acc_sed);
+			acc_sed -= settled;
+			sand += settled;
+		}
+	}
+
+	imageStore(field_dst, id, vec4(max(sand, 0.0), max(acc_water, 0.0), snow, max(acc_sed, 0.0)));
+}

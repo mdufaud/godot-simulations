@@ -307,13 +307,6 @@ func _surface_with_profile(profile: AmbientFluidProfile3D, velocity: PackedFloat
 		angle, profile.characteristic_length_m)
 
 
-func _wrench_norm(wrench: PackedFloat64Array) -> float:
-	var sum := 0.0
-	for value in wrench:
-		sum += value * value
-	return sqrt(sum)
-
-
 func _relative_vector_error(first: PackedFloat64Array, second: PackedFloat64Array) -> float:
 	var difference := 0.0
 	var scale := 0.0
