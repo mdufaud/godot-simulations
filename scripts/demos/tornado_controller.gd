@@ -17,19 +17,27 @@ const STORM_TYPES := [
 	{name = "Fire", funnel = Color(0.9, 0.35, 0.08), cloud = Color(0.2, 0.11, 0.08),
 		dust = Color(1.0, 0.5, 0.1), particles = Color(1.0, 0.55, 0.15),
 		bolt = Color(1.0, 0.55, 0.15), glow = 0.12,
-		sky = Color(0.34, 0.2, 0.15), ambient = Color(0.45, 0.3, 0.22)},
+		sky = Color(0.34, 0.2, 0.15), ambient = Color(0.45, 0.3, 0.22),
+		ground_a = Color(0.06, 0.05, 0.045), ground_b = Color(0.16, 0.115, 0.085),
+		ground_accent = Color(1.0, 0.42, 0.08), ground_glow = 0.55},
 	{name = "Water", funnel = Color(0.07, 0.2, 0.33), cloud = Color(0.18, 0.23, 0.3),
 		dust = Color(0.55, 0.7, 0.8), particles = Color(0.7, 0.83, 0.92),
 		bolt = Color(0.6, 0.85, 1.0), glow = 0.0,
-		sky = Color(0.38, 0.45, 0.53), ambient = Color(0.42, 0.48, 0.55)},
+		sky = Color(0.38, 0.45, 0.53), ambient = Color(0.42, 0.48, 0.55),
+		ground_a = Color(0.05, 0.095, 0.145), ground_b = Color(0.1, 0.17, 0.23),
+		ground_accent = Color(0.62, 0.72, 0.8), ground_glow = 0.35},
 	{name = "Ice", funnel = Color(0.62, 0.76, 0.88), cloud = Color(0.55, 0.63, 0.73),
 		dust = Color(0.85, 0.92, 1.0), particles = Color(0.92, 0.97, 1.0),
 		bolt = Color(0.7, 0.9, 1.0), glow = 0.08,
-		sky = Color(0.6, 0.68, 0.77), ambient = Color(0.6, 0.66, 0.74)},
+		sky = Color(0.6, 0.68, 0.77), ambient = Color(0.6, 0.66, 0.74),
+		ground_a = Color(0.8, 0.85, 0.91), ground_b = Color(0.56, 0.64, 0.76),
+		ground_accent = Color(0.88, 0.93, 1.0), ground_glow = 0.0},
 	{name = "Plasma", funnel = Color(0.4, 0.1, 0.62), cloud = Color(0.12, 0.06, 0.19),
 		dust = Color(0.65, 0.28, 0.85), particles = Color(0.85, 0.5, 1.0),
 		bolt = Color(0.9, 0.4, 1.0), glow = 0.3,
-		sky = Color(0.17, 0.11, 0.24), ambient = Color(0.32, 0.24, 0.42)},
+		sky = Color(0.17, 0.11, 0.24), ambient = Color(0.32, 0.24, 0.42),
+		ground_a = Color(0.075, 0.05, 0.125), ground_b = Color(0.13, 0.085, 0.2),
+		ground_accent = Color(0.58, 0.28, 0.95), ground_glow = 0.4},
 ]
 
 @onready var cam_rig: FreeFlyCamera = $CameraRig
@@ -42,6 +50,7 @@ const STORM_TYPES := [
 @onready var flash_rect: ColorRect = $UI/FlashRect
 @onready var menu = $UI/SimMenu
 @onready var debris_pool: TornadoDebrisPool = $DebrisPool
+@onready var ground_mesh: MeshInstance3D = $Ground/MeshInstance3D
 @onready var _viewport := ViewportGuard.attach(self)
 
 var field := TornadoWindField.new()
@@ -50,7 +59,7 @@ var s_amount := 0.15
 var wander_speed := 0.3
 var wander_radius := 120.0
 var lightning_enabled := true
-var dust_color := Color(0.55, 0.42, 0.28)
+var dust_color := Color(0.46, 0.46, 0.48)
 var storm_color := Color(0.3, 0.31, 0.36)
 var storm_type := 0
 
@@ -60,6 +69,7 @@ var _wander_noise := FastNoiseLite.new()
 var _debris_bar: ProgressBar
 var _funnel_mat: ShaderMaterial
 var _cloud_mat: ShaderMaterial
+var _ground_mat: ShaderMaterial
 var _renderer := TornadoRenderer.new()
 var _sliders := {}
 var _model_btn: OptionButton
@@ -100,6 +110,7 @@ func _ready() -> void:
 	wander_speed = config.wander_speed_hz
 	wander_radius = config.wander_radius_m
 	_wander_noise.seed = 1337
+	_rng.seed = 4242
 	debris_pool.field = field
 	quality.setup(TornadoQualityProfile, "tornado_quality_profile", _apply_quality)
 	quality.restore()
@@ -113,6 +124,8 @@ func _ready() -> void:
 	_funnel_mat = funnel_volume.material_override
 	_funnel_mat.set_shader_parameter("steps", _raymarch_steps)
 	_cloud_mat = cloud_deck.material_override
+	_ground_mat = ground_mesh.get_surface_override_material(0) as ShaderMaterial
+	_ground_mat.set_shader_parameter("vortex_radius", field.r_core0)
 	_renderer.setup(_funnel_mat, _cloud_mat, [
 		dust_particles.process_material as ShaderMaterial,
 		skirt_particles.process_material as ShaderMaterial,
@@ -121,11 +134,16 @@ func _ready() -> void:
 	var sun: Vector3 = -($DirectionalLight3D as DirectionalLight3D).global_basis.z
 	_funnel_mat.set_shader_parameter("sun_dir", sun)
 	_cloud_mat.set_shader_parameter("sun_dir", sun)
+	_ground_mat.set_shader_parameter("sun_dir", sun)
+	_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
 	_make_bolt()
-	_set_storm_color(storm_color)
 	_update_funnel_bounds()
 	cam_rig.set_pose(Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
 	_setup_ui()
+	# Boot through the SAME look path as the UI switch: without this the
+	# funnel/particles keep their BROWN shader-default dust at runtime (the
+	# capture harness always calls apply_look, masking the divergence).
+	_apply_storm_type(storm_type)
 
 
 ## Aspect compensation shared with the framing gate. Portrait pulls back at
@@ -170,6 +188,7 @@ func _process(delta: float) -> void:
 		field.bake_wind_grid()
 		_renderer.push_wind(field)
 		tornado_node.position = field.base_pos
+		_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
 	_update_lightning(delta)
 	if _debris_bar:
 		_debris_bar.value = debris_pool.active_count
@@ -177,7 +196,10 @@ func _process(delta: float) -> void:
 		_cap_debounce -= delta
 		if _cap_debounce <= 0.0:
 			debris_pool.build_pool(_pending_cap)
-			debris_pool.scatter_props()
+			# Same sparse fraction as the initial scatter in _ready: the
+			# default 0.6 quadrupled the ground props after every preset,
+			# quality or cap change — the ground visibly changed mid-session.
+			debris_pool.scatter_props(0.15)
 			_debris_bar.max_value = _pending_cap
 			_pending_cap = -1
 
@@ -191,6 +213,8 @@ func _update_funnel_bounds() -> void:
 	(funnel_volume.mesh as BoxMesh).size = size
 	funnel_volume.position = Vector3(0.0, field.height * 0.5, 0.0)
 	_funnel_mat.set_shader_parameter("box_size", size)
+	if _ground_mat != null:
+		_ground_mat.set_shader_parameter("vortex_radius", field.r_core0)
 	cloud_deck.position = Vector3(0.0, field.height, 0.0)
 
 
@@ -307,6 +331,13 @@ func set_capture_view(view: String) -> void:
 	match view:
 		"near":
 			cam_rig.set_pose(Vector3(0.0, 6.0, 240.0), 0.0, 8.0)
+		"macro":
+			cam_rig.set_pose(Vector3(0.0, 210.0, 200.0), 0.0, 0.0)
+		"merge":
+			# Frames the funnel-top-to-deck junction AND the foot in one shot:
+			# the region the default/near/far poses each cut out of frame.
+			cam_rig.set_pose(Vector3(0.0, field.height * 0.28,
+				maxf(3.5 * field.r_core0, 320.0)), 0.0, 25.0)
 		"high":
 			cam_rig.set_pose(Vector3(0.0, field.height * 0.55,
 				maxf(5.0 * field.r_core0, 420.0)), 0.0, -6.0)
@@ -316,22 +347,46 @@ func set_capture_view(view: String) -> void:
 			pass
 
 
+func set_capture_ui(visible: bool) -> void:
+	$UI.visible = visible
+
+
+## The funnel shader's TIME is engine-global, so the capture harness anchors an
+## old-session look by offsetting it instead of waiting minutes of wall clock.
+func set_capture_time(value: float) -> void:
+	_funnel_mat.set_shader_parameter("time_offset", value)
+
+
+func set_quality_profile(tier: int) -> void:
+	quality.set_tier(tier)
+
+
 func _set_storm_color(col: Color) -> void:
 	# One color drives the whole storm: funnel body + cloud deck (deck pulled
-	# slightly toward the sky tint so the horizon still blends).
+	# slightly toward the sky tint so the horizon still blends). The funnel's
+	# top grade targets the SAME deck tone, so the column melts into the deck.
+	var deck_tone: Color = col.lerp(Color(0.5, 0.52, 0.57), 0.22)
 	storm_color = col
 	_funnel_mat.set_shader_parameter("funnel_color", col)
-	_cloud_mat.set_shader_parameter("cloud_color", col.lerp(Color(0.5, 0.52, 0.57), 0.22))
+	_funnel_mat.set_shader_parameter("deck_color", deck_tone)
+	_cloud_mat.set_shader_parameter("cloud_color", deck_tone)
 
 
 func _apply_storm_type(idx: int) -> void:
 	storm_type = idx
 	_funnel_mat.set_shader_parameter("storm_type", idx)
 	_cloud_mat.set_shader_parameter("storm_type", idx)
+	_ground_mat.set_shader_parameter("storm_type", idx)
 	var env: Environment = ($WorldEnvironment as WorldEnvironment).environment
 	if idx == 0:
 		_set_storm_color(storm_color)
-		_set_dust_color(Color(0.55, 0.42, 0.28))
+		# Storm-gray dust: the user reads the warm default as "brown mud" at
+		# the foot; the apron must read as gray storm debris.
+		_set_dust_color(Color(0.46, 0.46, 0.48))
+		# Storm-muted prairie earth: the environment is cool, so warm albedo
+		# lands as gray-brown instead of the pasted-slab orange.
+		_set_ground_colors(Color(0.27, 0.235, 0.19), Color(0.185, 0.17, 0.15),
+			Color(0.14, 0.135, 0.13), 0.0)
 		_sliders["glow"].value = 0.0
 		_flash_tint = Color(0.8, 0.85, 1.0)
 		env.background_color = Color(0.45, 0.47, 0.52)
@@ -340,8 +395,10 @@ func _apply_storm_type(idx: int) -> void:
 	else:
 		var t: Dictionary = STORM_TYPES[idx]
 		_funnel_mat.set_shader_parameter("funnel_color", t.funnel)
+		_funnel_mat.set_shader_parameter("deck_color", t.cloud)
 		_cloud_mat.set_shader_parameter("cloud_color", t.cloud)
 		_set_dust_color(t.dust)
+		_set_ground_colors(t.ground_a, t.ground_b, t.ground_accent, t.ground_glow)
 		for pm: ShaderMaterial in [dust_particles.process_material, skirt_particles.process_material]:
 			pm.set_shader_parameter("particle_color", t.particles)
 		_sliders["glow"].value = t.glow
@@ -361,6 +418,13 @@ func _set_dust_color(col: Color) -> void:
 	_cloud_mat.set_shader_parameter("dust_color", col)
 	for pm: ShaderMaterial in [dust_particles.process_material, skirt_particles.process_material]:
 		pm.set_shader_parameter("particle_color", col)
+
+
+func _set_ground_colors(a: Color, b: Color, accent: Color, glow: float) -> void:
+	_ground_mat.set_shader_parameter("ground_a", a)
+	_ground_mat.set_shader_parameter("ground_b", b)
+	_ground_mat.set_shader_parameter("ground_accent", accent)
+	_ground_mat.set_shader_parameter("ground_glow", glow)
 
 
 func _setup_ui() -> void:

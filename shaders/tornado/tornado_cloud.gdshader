@@ -9,7 +9,7 @@ render_mode unshaded, blend_mix, cull_disabled, depth_draw_never;
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform vec3 cloud_color : source_color = vec3(0.36, 0.38, 0.44);
-uniform vec3 dust_color : source_color = vec3(0.55, 0.42, 0.28);
+uniform vec3 dust_color : source_color = vec3(0.46, 0.46, 0.48);
 uniform vec3 sun_dir = vec3(-0.5, 0.0, -0.6);
 uniform float cloud_opacity : hint_range(0.0, 1.0) = 1.0;
 uniform float deck_radius = 4200.0;
@@ -42,7 +42,14 @@ void fragment() {
 	// ang + TIME*spin: matches the wind direction (see tornado_funnel.gdshader).
 	float ang = atan(rel.y, rel.x);
 	float spin = swirl_sign * (u_max / max(rc_top, 1.0)) * 0.3;
-	float a = ang + TIME * spin / (1.0 + pow(r / max(2.0 * rc_top, 1.0), 1.6));
+	// Bounded differential, same cure as the funnel wall: rotate rigidly at
+	// the mean collar rate and let the DIFFERENTIAL breathe on a slow sine.
+	// The old linear TIME wind accumulated radians forever, winding the
+	// near-axis noise into ever-tighter spaghetti arcs — the "broken sky"
+	// visible under the collar after a few minutes of play.
+	float decay = 1.0 / (1.0 + pow(r / max(2.0 * rc_top, 1.0), 1.6));
+	float omega_rigid = spin * 0.35;
+	float a = ang + TIME * omega_rigid + (spin * decay - omega_rigid) * 6.0 * sin(TIME * 0.09);
 	vec2 nuv_polar = vec2(cos(a), sin(a)) * r;
 	vec2 nuv_flat = rel + vec2(TIME * 4.0, TIME * 1.5);
 	float polar_w = exp(-r / (4.0 * rc_top));
@@ -65,7 +72,10 @@ void fragment() {
 
 	// Deck mottled by noise; heavy dark zone graded toward the tornado so the
 	// ceiling matches the funnel instead of floating light-gray above it.
-	float darkzone = 1.0 - 0.5 * exp(-r / (6.0 * rc_top));
+	// 0.62 depth / 8 rc reach (was 0.5 / 6): the sky right behind the funnel
+	// head must sit close to the head's own dark tone or the merge shows a
+	// brightness step — the user wants the head to melt, not silhouette.
+	float darkzone = 1.0 - 0.62 * exp(-r / (8.0 * rc_top));
 	vec3 col = cloud_color * (0.35 + 0.4 * fbm) * sun_face * darkzone;
 	col = mix(col, cloud_color * 0.2 + dust_color * 0.1, collar * (0.6 + 0.3 * fbm));
 
@@ -73,9 +83,12 @@ void fragment() {
 		// Fire underglow on the collar, flickering with the noise.
 		col += vec3(1.0, 0.35, 0.05) * collar * (0.25 + 0.35 * fbm);
 	} else if (storm_type == 4) {
-		// Plasma veins crawling through the deck near the vortex.
-		float veins = smoothstep(0.62, 0.75, n2);
-		col += vec3(0.7, 0.25, 1.0) * collar * (0.3 + 0.55 * veins);
+		// Plasma veins crawling through the deck near the vortex. Kept SUBTLE
+		// and in the funnel's own purple family: the old wide bright magenta
+		// splats outweighed the dark column and read as a broken, mismatched
+		// sky (narrower threshold, dimmer tint, smaller base wash).
+		float veins = smoothstep(0.7, 0.78, n2);
+		col += vec3(0.45, 0.2, 0.8) * collar * (0.12 + 0.3 * veins);
 	}
 
 	// Intra-cloud lightning glow.

@@ -5,7 +5,7 @@ shader_type particles;
 #include "res://shaders/tornado/tornado_wind.gdshaderinc"
 
 uniform int skirt_mode = 0;
-uniform vec3 particle_color : source_color = vec3(0.55, 0.42, 0.28);
+uniform vec3 particle_color : source_color = vec3(0.46, 0.46, 0.48);
 uniform float size_min = 0.5;
 uniform float size_max = 2.6;
 uniform float follow = 3.0;

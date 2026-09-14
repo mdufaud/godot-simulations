@@ -1,4 +1,4 @@
-[gd_scene load_steps=24 format=3 uid="uid://tornado_demo_scene"]
+[gd_scene load_steps=25 format=3 uid="uid://tornado_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/tornado_controller.gd" id="1_controller"]
 [ext_resource type="Script" path="res://scripts/camera/free_fly_camera.gd" id="2_free_fly"]
@@ -7,6 +7,7 @@
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_funnel.gdshader" id="5_funnel_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_dust.gdshader" id="6_dust_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_cloud.gdshader" id="7_cloud_shader"]
+[ext_resource type="Shader" path="res://shaders/tornado/tornado_ground.gdshader" id="8_ground_shader"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_funnel"]
 frequency = 0.06
@@ -86,9 +87,8 @@ fog_light_color = Color(0.3, 0.32, 0.37, 1.0)
 fog_density = 0.0004
 fog_sky_affect = 0.45
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.3, 0.24, 0.17, 1.0)
-roughness = 1.0
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_ground"]
+shader = ExtResource("8_ground_shader")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(9000, 9000)
@@ -129,7 +129,7 @@ shape = SubResource("BoxShape3D_ground")
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="Ground"]
 mesh = SubResource("PlaneMesh_ground")
-surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+surface_material_override/0 = SubResource("ShaderMaterial_ground")
 
 [node name="Tornado" type="Node3D" parent="."]
 
