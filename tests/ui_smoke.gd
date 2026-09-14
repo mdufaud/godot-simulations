@@ -203,6 +203,27 @@ func _check_tornado_actions() -> void:
 	_demo_root.apply_preset(0)
 	for _frame in 2:
 		await get_tree().process_frame
+	# Action-strip cycles must wrap back to the boot state with their panel
+	# dropdown left on the same entry as the live storm/preset.
+	var preset_count: int = _demo_root.PRESETS.size()
+	for i in preset_count:
+		_demo_root.cycle_genre()
+		if _demo_root._preset_btn.selected != (i + 1) % preset_count:
+			_fail("genre cycle left the preset dropdown out of sync")
+		for _frame in 1:
+			await get_tree().process_frame
+	for _i in _demo_root.STORM_TYPES.size():
+		_demo_root.cycle_storm_type()
+		if _demo_root._look_btn.selected != _demo_root.storm_type:
+			_fail("storm-type cycle left the look dropdown out of sync")
+		for _frame in 1:
+			await get_tree().process_frame
+	if _demo_root._preset_btn.selected != 0:
+		_fail("genre cycle did not wrap back to the first preset")
+	if absf(_demo_root.field.r_core0 - presets[0].r0) > 2.5:
+		_fail("genre cycle did not restore the first preset's core radius")
+	if _demo_root.storm_type != 0:
+		_fail("storm-type cycle did not wrap back to Normal")
 
 
 ## Frees the demo and compares the root viewport against what it looked like before.

@@ -73,6 +73,8 @@ var _ground_mat: ShaderMaterial
 var _renderer := TornadoRenderer.new()
 var _sliders := {}
 var _model_btn: OptionButton
+var _preset_btn: OptionButton
+var _look_btn: OptionButton
 var _rng := RandomNumberGenerator.new()
 
 var _lightning_timer := 3.0
@@ -304,6 +306,7 @@ func _build_bolt_mesh() -> void:
 
 func apply_preset(idx: int) -> void:
 	var p: Dictionary = PRESETS[idx]
+	_preset_btn.selected = idx
 	field.model = p.model
 	field.height = p.h
 	_model_btn.selected = p.model
@@ -322,7 +325,21 @@ func apply_preset(idx: int) -> void:
 
 
 func apply_look(idx: int) -> void:
+	_look_btn.selected = idx
 	_apply_storm_type(idx)
+
+
+## Action-strip cycle across the elemental looks: Normal → Fire → Water →
+## Ice → Plasma → Normal. Wraps and keeps the panel dropdown on the same entry.
+func cycle_storm_type() -> void:
+	apply_look((storm_type + 1) % STORM_TYPES.size())
+
+
+## Action-strip cycle across the funnel genres (presets): EF4 → Wedge →
+## S-curve rope → EF4. The Preset dropdown is the live selection, kept in sync
+## by apply_preset itself.
+func cycle_genre() -> void:
+	apply_preset((_preset_btn.selected + 1) % PRESETS.size())
 
 
 ## Named poses for tools/capture.sh (view=near|high|far): controlled angles for
@@ -429,7 +446,7 @@ func _set_ground_colors(a: Color, b: Color, accent: Color, glow: float) -> void:
 
 func _setup_ui() -> void:
 	menu.add_section("Tornado")
-	menu.add_option_button("Preset", PRESETS.map(func(p: Dictionary) -> String: return p.name), 0,
+	_preset_btn = menu.add_option_button("Preset", PRESETS.map(func(p: Dictionary) -> String: return p.name), 0,
 		apply_preset)
 	_model_btn = menu.add_option_button("Vortex model", ["Vatistas", "Burgers-Rott", "Sullivan"],
 		field.model, func(idx: int) -> void: field.model = idx)
@@ -453,7 +470,7 @@ func _setup_ui() -> void:
 		func(v: float) -> void: wander_speed = v)
 
 	menu.add_section("Look")
-	menu.add_option_button("Storm type", STORM_TYPES.map(func(t: Dictionary) -> String: return t.name),
+	_look_btn = menu.add_option_button("Storm type", STORM_TYPES.map(func(t: Dictionary) -> String: return t.name),
 		0, apply_look)
 	_sliders["dust"] = menu.add_slider("Dust density", 0.0, 10.0, 1.0,
 		func(v: float) -> void: _funnel_mat.set_shader_parameter("dust_density", v))
@@ -493,6 +510,12 @@ func _setup_ui() -> void:
 		func(on: bool) -> void: lightning_enabled = on)
 	# Freezes the funnel's drift and centerline so a shot can be framed; debris keeps flying.
 	menu.add_action_toggle("⏸", "Freeze", false, func(on: bool) -> void: _frozen = on)
+	# One-tap switches so the elemental look and the funnel genre can be stepped
+	# through without opening the panel; both keep their panel dropdown in sync.
+	var type_action: Button = menu.add_action("🧪", "Type", cycle_storm_type)
+	type_action.tooltip_text = "Next storm type: Normal → Fire → Water → Ice → Plasma"
+	var genre_action: Button = menu.add_action("🌪", "Genre", cycle_genre)
+	genre_action.tooltip_text = "Next tornado genre: EF4 → Wedge → Rope"
 	_debris_bar = menu.add_progress_bar("Active debris", float(debris_pool.debris_cap))
 
 	menu.add_section("Performance")
