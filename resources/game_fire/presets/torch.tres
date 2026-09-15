@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="GameFirePreset" format=3 uid="uid://gamefire_torch"]
+
+[ext_resource type="Script" path="res://scripts/game_fire/game_fire_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+flame_width_m = 0.35
+flame_height_m = 0.9
+flame_rate_hz = 24.0
+flame_lifetime_s = 0.7
+flame_tint_hot = Color(1, 0.92, 0.75, 1)
+flame_tint_cool = Color(1, 0.45, 0.16, 1)
+emitter_radius_m = 0.16
+smoke_rate_hz = 2.0
+smoke_lifetime_s = 2.5
+smoke_size_m = 0.9
+smoke_tint = Color(0.14, 0.13, 0.13, 1)
+ember_count = 6
+ember_speed_m = 1.6
+light_energy = 1.4
+light_range_m = 6.0
+light_color = Color(1, 0.55, 0.18, 1)
+haze_radius_m = 1.0

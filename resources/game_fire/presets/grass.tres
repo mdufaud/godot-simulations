@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="GameFirePreset" format=3 uid="uid://gamefire_grass"]
+
+[ext_resource type="Script" path="res://scripts/game_fire/game_fire_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+flame_width_m = 0.9
+flame_height_m = 0.7
+flame_rate_hz = 32.0
+flame_lifetime_s = 0.5
+flame_tint_hot = Color(1, 0.9, 0.68, 1)
+flame_tint_cool = Color(1, 0.5, 0.18, 1)
+emitter_radius_m = 0.7
+smoke_rate_hz = 5.0
+smoke_lifetime_s = 2.6
+smoke_size_m = 1.5
+smoke_tint = Color(0.16, 0.15, 0.14, 1)
+ember_count = 10
+ember_speed_m = 2.0
+light_energy = 1.5
+light_range_m = 7.0
+light_color = Color(1, 0.55, 0.18, 1)
+haze_radius_m = 1.6

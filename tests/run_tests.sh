@@ -107,6 +107,7 @@ declare -a CPU_SUITES=(
 	"ambient_fluid_preprocessor|res://tests/ambient_fluid_preprocessor_test.gd"
 	"portal_math|res://tests/portal_math_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
+	"cell_propagation|res://tests/cell_propagation_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
 	"mixwell|res://tests/mixwell_test.gd"

@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="GameFirePreset" format=3 uid="uid://gamefire_bonfire"]
+
+[ext_resource type="Script" path="res://scripts/game_fire/game_fire_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+flame_width_m = 1.5
+flame_height_m = 2.6
+flame_rate_hz = 56.0
+flame_lifetime_s = 0.85
+flame_tint_hot = Color(1, 0.94, 0.8, 1)
+flame_tint_cool = Color(1, 0.42, 0.14, 1)
+emitter_radius_m = 1.1
+smoke_rate_hz = 9.0
+smoke_lifetime_s = 4.0
+smoke_size_m = 2.6
+smoke_tint = Color(0.15, 0.14, 0.135, 1)
+ember_count = 26
+ember_speed_m = 2.8
+light_energy = 3.4
+light_range_m = 13.0
+light_color = Color(1, 0.55, 0.18, 1)
+haze_radius_m = 2.6
