@@ -71,6 +71,12 @@ func _run() -> void:
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
+	# Drive the profiler overlay through the same setter the demo's toggle wires,
+	# so _check_viewport_restored() proves the measurement flag is restored too.
+	if "profiler" in _demo_root:
+		_demo_root.profiler.set_enabled(true)
+		if not _demo_root._viewport.measure_render_time():
+			_fail("profiler toggle did not turn on root-viewport measurement")
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), true, "gear opens panel")
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false, "gear closes panel")
 	await _check_viewport_restored()
@@ -247,6 +253,11 @@ func _viewport_state() -> Dictionary:
 		scaling_3d_scale = vp.scaling_3d_scale,
 		msaa_3d = vp.msaa_3d,
 		use_taa = vp.use_taa,
+		# No engine getter exists for render-time measurement, so ViewportGuard
+		# counts the viewports it is measuring; size_changed connections catch a
+		# RefCounted target that survives the demo (Nodes disconnect themselves).
+		measure_render_time = ViewportGuard.measured_viewports,
+		size_changed_connections = vp.size_changed.get_connections().size(),
 	}
 
 
@@ -352,7 +363,7 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 	for child in action_bar.get_children():
 		if child is Button and child.visible:
 			buttons[child.tooltip_text] = child
-	for expected in ["Sea", "Throw", "Clear", "Freeze"]:
+	for expected in ["Sea", "Mood", "Palette", "Throw", "Clear", "Freeze"]:
 		if not buttons.has(expected):
 			_fail("ocean action missing: %s" % expected)
 	if _failures.size() > 0:
@@ -363,6 +374,18 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 	await get_tree().process_frame
 	if _demo_root.current_preset_index == initial_preset:
 		_fail("ocean sea action did not cycle the preset")
+
+	var initial_mood: float = _demo_root.storm.mood_target
+	buttons.Mood.pressed.emit()
+	await get_tree().process_frame
+	if is_equal_approx(_demo_root.storm.mood_target, initial_mood):
+		_fail("ocean mood action did not cycle the storm mood")
+
+	var initial_look: int = _demo_root.current_look_index
+	buttons.Palette.pressed.emit()
+	await get_tree().process_frame
+	if _demo_root.current_look_index == initial_look:
+		_fail("ocean palette action did not cycle the look")
 
 	var initial_crates: int = _demo_root._crates.size()
 	buttons.Throw.pressed.emit()

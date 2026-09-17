@@ -2,10 +2,13 @@ class_name FractalView extends RefCounted
 ## Two-pass fractal render pipeline.
 ##
 ## Pass 1 ([code]fractal.gdshader[/code], in the two SubViewports) computes
-## iteration data only when the view changes: the low viewport is a half-res
-## live preview while moving, the high viewport refines at full res in bands.
-## Pass 2 ([code]fractal_colorize.gdshader[/code], on the display rect) maps
-## that data to colour every frame.
+## iteration data only when the view changes: the low viewport is the live
+## preview while moving — always at the full iteration count the view needs,
+## downscaled as far as the frame budget demands; the high viewport refines
+## at full res in bands. Pass 2 ([code]fractal_colorize.gdshader[/code], on
+## the display rect) maps that data to colour every frame, resampling each
+## source through a view transform so the frames where a fresh render is not
+## in yet still show the previous one at the right position.
 ##
 ## The host must assign every field above [method start], which asserts them:
 ##
@@ -22,14 +25,18 @@ class_name FractalView extends RefCounted
 ## [/codeblock]
 
 enum State { MOVING, REFINING, IDLE }
-
-## Beyond this zoom float32 runs out and the shader switches to perturbation.
-const PERT_ZOOM_THRESHOLD := 1.0e3
-## Iteration ceiling of the live preview, so dragging stays responsive.
-const INTERACT_ITER_CAP := 1200
-const REFINE_BAND_ROWS := 256
-## Seconds of stillness before the full-res refinement starts.
-const SETTLE_TIME := 0.25
+## Seconds of the display crossfade toward whichever pass just finished.
+const BLEND_FADE_S := 0.05
+## Preview resolution levels: the preview renders at 2^-level of the window.
+## The cost of motion is paid in resolution, never in iterations — a
+## low-iteration preview paints deep zooms black, a low-resolution one is
+## merely soft while moving.
+const PREVIEW_MIN_LEVEL := 0
+const PREVIEW_MAX_LEVEL := 3
+## Frame-time hysteresis of the level: 3 slow frames drop one level, 30 fast
+## frames climb back one.
+const PREVIEW_DROP_S := 0.030
+const PREVIEW_RAISE_S := 0.014
 
 var camera: FractalCamera
 var config: FractalConfig = FractalConfig.new()
@@ -54,11 +61,24 @@ var _orbit := FractalOrbit.new()
 var _material_low: ShaderMaterial
 var _material_high: ShaderMaterial
 var _material_display: ShaderMaterial
+## View each source viewport was last rendered for; the display transform
+## resamples stale sources into the current view (see _source_xform).
+var _low_cx := 0.0
+var _low_cy := 0.0
+var _low_half := 1.0
+var _low_aspect := 1.0
+var _high_cx := 0.0
+var _high_cy := 0.0
+var _high_half := 1.0
+var _high_aspect := 1.0
 var _settle := 0.0
 var _refine_row := 0
 var _last_hash := 0
 var _julia_theta := 0.0
 var _blend_tween: Tween
+var _preview_level := PREVIEW_MIN_LEVEL
+var _slow_frames := 0
+var _fast_frames := 0
 
 
 func start() -> void:
@@ -82,13 +102,17 @@ func start() -> void:
 
 	_material_display.set_shader_parameter("tex_low", view_low.get_texture())
 	_material_display.set_shader_parameter("tex_high", view_high.get_texture())
+	_material_display.set_shader_parameter("refine_blend", 0.0)
+
+	_store_low_view()
+	_store_high_view()
+	_update_display_xforms()
 
 
 func resize(window_size: Vector2i) -> void:
 	view_high.size = Vector2i(maxi(window_size.x, 8), maxi(window_size.y, 8))
-	view_low.size = Vector2i(maxi(window_size.x / 2, 4), maxi(window_size.y / 2, 4))
+	_apply_preview_level()
 	rect_high.size = Vector2(view_high.size)
-	rect_low.size = Vector2(view_low.size)
 
 
 func set_julia_morph(enabled: bool) -> void:
@@ -113,6 +137,7 @@ func refine_progress() -> float:
 
 func update(delta: float) -> void:
 	_advance_morph(delta)
+	_update_display_xforms()
 
 	var view_hash := _params_hash()
 	var dirty := view_hash != _last_hash
@@ -121,8 +146,12 @@ func update(delta: float) -> void:
 	if dirty:
 		_settle = 0.0
 		state = State.MOVING
+		_adapt_preview(delta)
 		_render_preview()
-		_set_blend(0.0)
+		# The preview holds the current view exactly (full iterations), so
+		# the screen can follow it as soon as it lands; the view transform
+		# covers the single frame it takes to arrive.
+		_fade_blend(0.0, BLEND_FADE_S)
 		return
 
 	match state:
@@ -153,16 +182,50 @@ func _params_hash() -> int:
 
 
 func _render_preview() -> void:
-	_apply_view_uniforms(_material_low, mini(camera.iterations_full(), config.interaction_iteration_cap), 1)
+	_apply_view_uniforms(_material_low, camera.iterations_full(), 1)
 	_material_low.set_shader_parameter("band_y_min", 0)
 	_material_low.set_shader_parameter("band_y_max", 1000000)
+	_store_low_view()
 	view_low.render_target_update_mode = SubViewport.UPDATE_ONCE
+
+
+## Keeps the preview inside the frame budget while moving by trading
+## resolution (the iteration count stays exact). Delta is the previous
+## frame's time — the frame that paid for the last preview.
+func _adapt_preview(delta: float) -> void:
+	if delta > PREVIEW_DROP_S:
+		_slow_frames += 1
+		_fast_frames = 0
+	elif delta < PREVIEW_RAISE_S:
+		_fast_frames += 1
+		_slow_frames = 0
+	else:
+		_slow_frames = 0
+		_fast_frames = 0
+	var level := _preview_level
+	if _slow_frames >= 3 and level < PREVIEW_MAX_LEVEL:
+		level += 1
+		_slow_frames = 0
+	elif _fast_frames >= 30 and level > PREVIEW_MIN_LEVEL:
+		level -= 1
+		_fast_frames = 0
+	if level != _preview_level:
+		_preview_level = level
+		_apply_preview_level()
+
+
+func _apply_preview_level() -> void:
+	view_low.size = Vector2i(
+		maxi(view_high.size.x >> _preview_level, 4),
+		maxi(view_high.size.y >> _preview_level, 4))
+	rect_low.size = Vector2(view_low.size)
 
 
 func _begin_refine() -> void:
 	state = State.REFINING
 	_refine_row = 0
 	_apply_view_uniforms(_material_high, camera.iterations_full(), aa_quality)
+	_store_high_view()
 	_refine_step()
 
 
@@ -176,23 +239,62 @@ func _refine_step() -> void:
 		_fade_blend_to_high()
 
 
-func _set_blend(value: float) -> void:
+func _store_low_view() -> void:
+	_low_cx = camera.center_x
+	_low_cy = camera.center_y
+	_low_half = camera.view_half()
+	_low_aspect = camera.aspect()
+
+
+func _store_high_view() -> void:
+	_high_cx = camera.center_x
+	_high_cy = camera.center_y
+	_high_half = camera.view_half()
+	_high_aspect = camera.aspect()
+
+
+## Screen-UV transform resampling a source rendered for an older view
+## (cx0/cy0/half0/aspect0) into the current one. Computed in float64 here —
+## the deltas are tiny at deep zoom, far under float32 resolution — and only
+## the small result goes to the shader as float32.
+func _source_xform(cx0: float, cy0: float, half0: float, aspect0: float) -> Vector4:
+	var half := camera.view_half()
+	var aspect := camera.aspect()
+	var sx := (half * aspect) / (half0 * aspect0)
+	var sy := half / half0
+	return Vector4(
+		sx, sy,
+		0.5 + (camera.center_x - cx0) / (2.0 * half0 * aspect0) - 0.5 * sx,
+		0.5 + (camera.center_y - cy0) / (2.0 * half0) - 0.5 * sy
+	)
+
+
+func _update_display_xforms() -> void:
+	_material_display.set_shader_parameter("xform_low",
+		_source_xform(_low_cx, _low_cy, _low_half, _low_aspect))
+	_material_display.set_shader_parameter("xform_high",
+		_source_xform(_high_cx, _high_cy, _high_half, _high_aspect))
+
+
+func _fade_blend(value: float, duration: float) -> void:
 	if _blend_tween:
 		_blend_tween.kill()
 		_blend_tween = null
-	_material_display.set_shader_parameter("refine_blend", value)
+	var raw: Variant = _material_display.get_shader_parameter("refine_blend")
+	var from := float(raw) if raw != null else 0.0
+	if absf(from - value) < 0.005:
+		_material_display.set_shader_parameter("refine_blend", value)
+		return
+	_blend_tween = host.create_tween()
+	_blend_tween.tween_method(
+		func(blend: float) -> void:
+			_material_display.set_shader_parameter("refine_blend", blend),
+		from, value, duration
+	)
 
 
 func _fade_blend_to_high() -> void:
-	if _blend_tween:
-		_blend_tween.kill()
-	_blend_tween = host.create_tween()
-	var from: float = _material_display.get_shader_parameter("refine_blend")
-	_blend_tween.tween_method(
-		func(value: float) -> void:
-			_material_display.set_shader_parameter("refine_blend", value),
-		from, 1.0, 0.15
-	)
+	_fade_blend(1.0, BLEND_FADE_S)
 
 
 func _apply_view_uniforms(material: ShaderMaterial, iterations: int, aa: int) -> void:
@@ -211,6 +313,9 @@ func _apply_view_uniforms(material: ShaderMaterial, iterations: int, aa: int) ->
 			Vector2(camera.center_x - _orbit.origin_x, camera.center_y - _orbit.origin_y))
 		material.set_shader_parameter("ref_orbit", _orbit.texture)
 		material.set_shader_parameter("ref_len", _orbit.length)
+		if camera.fractal_type == 1 and _orbit.crit_texture != null:
+			material.set_shader_parameter("ref_orbit_crit", _orbit.crit_texture)
+			material.set_shader_parameter("ref_len_crit", _orbit.crit_length)
 	material.set_shader_parameter("trap_shape", trap_shape)
 	material.set_shader_parameter("trap_scale", trap_scale)
 	material.set_shader_parameter("aa_quality", aa)

@@ -84,6 +84,6 @@ void main() {
     }
     vec3 normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
     float valid = (isnan(height) || isnan(normal.x) || isnan(normal.z)
-        || isinf(height)) ? 0.0 : 1.0;
+        || isinf(height) || isinf(normal.x) || isinf(normal.z)) ? 0.0 : 1.0;
     query_results[index] = vec4(height, normal.x, normal.z, valid);
 }

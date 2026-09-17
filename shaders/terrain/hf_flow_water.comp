@@ -22,7 +22,7 @@ const float DIST[8] = float[8](
 // Water moved a -> b: level the total surfaces, capped by what a holds. The
 // jitter is derived from the pair, so both endpoints compute the same value.
 float transfer(float total_a, float total_b, float water_a, float jitter) {
-	return min(params.waterflow.x * jitter * max(total_a - total_b, 0.0), water_a * 0.15);
+	return min(params.waterflow.x * jitter * max(total_a - total_b, 0.0), water_a * 0.12);
 }
 
 void main() {

@@ -322,7 +322,9 @@ func _physics_process(delta: float) -> void:
 	var base_z := field.base_pos.z
 	var inv_delta: float = 1.0 / delta
 
-	for i in _active_slots:
+	# park() removes from _active_slots: iterate a copy so no body skips its
+	# physics update on a recycle frame.
+	for i in _active_slots.duplicate():
 		var body := _bodies[i]
 		_ages[i] += delta
 

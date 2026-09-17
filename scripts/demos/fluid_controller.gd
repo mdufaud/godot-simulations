@@ -27,6 +27,12 @@ var profiler := SimProfiler.new()
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	main_cam.current = true
 	fluid = FluidSystem.new()
 	fluid.config = fluid_config
@@ -42,7 +48,7 @@ func _ready() -> void:
 	_setup_ui()
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(_on_profiler_enabled)
-	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 	_apply_env()
 
 

@@ -18,6 +18,13 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	# SimMenu restores persisted slider values when its widgets are built. A
+	# previous run (or the real app) leaves a sim.ocean_demo section behind, and
+	# re-setting an already-restored value fires no value_changed, which desyncs
+	# the solver from the sliders the checks assert on. Start from defaults.
+	var settings := root.get_node_or_null("/root/UserSettings")
+	if settings != null:
+		settings.clear_sim("ocean_demo")
 	var demo = load("res://scenes/ocean_demo.tscn").instantiate()
 	root.add_child(demo)
 	await process_frame
@@ -159,9 +166,9 @@ func _run() -> void:
 		"breaking coverage does not separate calm, breeze and rough seas")
 	var swell_state: Dictionary = states[2]
 	var storm_state: Dictionary = states[3]
-	_check(swell_state.dominant_wavelength_m >= 140.0
-		and swell_state.dominant_wavelength_m <= 230.0,
-		"Swell dominant wavelength is %.1f m, expected 140..230 m"
+	_check(swell_state.dominant_wavelength_m >= 180.0
+		and swell_state.dominant_wavelength_m <= 340.0,
+		"Swell dominant wavelength is %.1f m, expected 180..340 m"
 		% swell_state.dominant_wavelength_m)
 	_check(storm_state.dominant_wavelength_m >= 170.0
 		and storm_state.dominant_wavelength_m <= 300.0,
@@ -927,7 +934,7 @@ func _dominant_wavelength(data: PackedByteArray, n: int, tile_length: float) -> 
 			if radius < 1.0:
 				continue
 			var wavelength := tile_length / radius
-			if wavelength < 30.0 or wavelength > 220.0:
+			if wavelength < 30.0 or wavelength > 400.0:
 				continue
 			var i := (y * n + x) * 4
 			var energy := values[i] * values[i] + values[i + 1] * values[i + 1]
@@ -1244,8 +1251,11 @@ func _check_foam_phases(demo: Node) -> void:
 			image.convert(Image.FORMAT_RGH)
 			var morphology := _foam_morphology(image.get_data(), 1, OceanConfig.MEASURE_FOAM_THRESHOLD)
 			print("FOAM PHASE tier=%s layer=%d %s" % [OceanQualityProfile.TIER_NAMES[tier], layer, morphology])
-			_check(morphology.coverage >= 0.07 and morphology.coverage <= 0.14,
-				"Swell coverage outside 7..14 percent on tier %d layer %d" % [tier, layer])
+			# The long-crest swell breaks into finer ribbons than the old steep
+			# wind sea, so Low resolves ~2 pp less foam than Medium: the window
+			# keeps the 0 % / blow-up guards with room for that texture shift.
+			_check(morphology.coverage >= 0.065 and morphology.coverage <= 0.145,
+				"Swell coverage outside 6.5..14.5 percent on tier %d layer %d" % [tier, layer])
 			if tier == OceanQualityProfile.Tier.MEDIUM and layer == 0:
 				_check(morphology.fresh.area < morphology.persistent.area,
 					"Swell active area is not narrower than residual on layer %d" % layer)
@@ -1261,8 +1271,8 @@ func _check_foam_phases(demo: Node) -> void:
 		for tier in [OceanQualityProfile.Tier.LOW, OceanQualityProfile.Tier.HIGH,
 				OceanQualityProfile.Tier.ULTRA]:
 			_check(absf(coverages[tier * 3 + layer]
-					- coverages[OceanQualityProfile.Tier.MEDIUM * 3 + layer]) <= 0.021,
-				"Swell profile coverage differs from Medium by over 2.1 percentage points on tier %d layer %d" % [tier, layer])
+					- coverages[OceanQualityProfile.Tier.MEDIUM * 3 + layer]) <= 0.025,
+				"Swell profile coverage differs from Medium by over 2.5 percentage points on tier %d layer %d" % [tier, layer])
 	demo.orbit_cam.target = camera_state[0]
 	demo.orbit_cam.distance = camera_state[1]
 	demo.orbit_cam.pitch = camera_state[2]
@@ -1627,11 +1637,11 @@ func _check_jonswap_slider_controls(demo: Node) -> void:
 	var swell_preset: OceanPreset = demo.PRESETS[2]
 	var menu: OceanMenu = demo._menu_builder
 	var solver: OceanSolver = demo.solver
-	_check(is_equal_approx(swell_preset.swell, 1.6)
-		and is_equal_approx(swell_preset.spread, 0.12)
-		and is_equal_approx(swell_preset.detail, 0.85)
-		and is_equal_approx(swell_preset.jonswap_gamma, 3.3)
-		and is_equal_approx(swell_preset.choppiness, 0.95),
+	_check(is_equal_approx(swell_preset.swell, 2.0)
+		and is_equal_approx(swell_preset.spread, 0.05)
+		and is_equal_approx(swell_preset.detail, 0.8)
+		and is_equal_approx(swell_preset.jonswap_gamma, 5.0)
+		and is_equal_approx(swell_preset.choppiness, 1.05),
 		"Swell preset does not expose the grouped-wave parameters")
 	_check(is_equal_approx(solver.detail, swell_preset.detail)
 		and is_equal_approx(solver.jonswap_gamma, swell_preset.jonswap_gamma)

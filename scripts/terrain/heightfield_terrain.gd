@@ -101,6 +101,9 @@ func cell_size() -> float:
 ## Hosts call this when the scene (preset) changes, then apply their preset
 ## overrides, so slider drags never leak from one scene into the next.
 func reset_to_config() -> void:
+	# iterations is owned by the quality tier (never preset- or slider-driven),
+	# so it must survive this reset or a tier switch that rebuilds the grid
+	# would lose its settle count.
 	repose_deg = _defaults.repose_angle_deg
 	flow_rate = _defaults.flow_rate
 	water_flow_rate = _defaults.water_flow_rate
@@ -109,6 +112,7 @@ func reset_to_config() -> void:
 	stochasticity = _defaults.stochasticity
 	snow_repose_deg = _defaults.snow_repose_angle_deg
 	snow_flow_rate = _defaults.snow_flow_rate
+	snow_iterations = _defaults.snow_pass_iterations
 	snow_cap = 0.12
 	melt_rate_m_s = _defaults.melt_rate_m_s
 	evap_rate_m_s = _defaults.evap_rate_m_s
@@ -173,6 +177,7 @@ func init_render() -> void:
 	config.stochasticity = stochasticity
 	config.snow_repose_angle_deg = snow_repose_deg
 	config.snow_flow_rate = snow_flow_rate
+	config.snow_pass_iterations = snow_iterations
 	config.melt_rate_m_s = melt_rate_m_s
 	config.evap_rate_m_s = evap_rate_m_s
 	config.snowfall_rate_m_s = snowfall_rate_m_s

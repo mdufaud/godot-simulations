@@ -17,6 +17,7 @@ class_name TerrainConfig extends Resource
 @export_group("Snow")
 @export_range(1.0, 89.0, 0.1) var snow_repose_angle_deg: float = 50.0
 @export_range(0.001, 1.0, 0.001) var snow_flow_rate: float = 0.05
+@export_range(1, 16, 1) var snow_pass_iterations: int = 2
 
 @export_group("Climate")
 @export_range(0.0, 1.0, 0.0001) var melt_rate_m_s: float = 0.0
@@ -39,8 +40,8 @@ func validate() -> String:
 	if snow_repose_angle_deg <= 0.0 or snow_repose_angle_deg >= 90.0:
 		return "snow_repose_angle_deg must be between 0 and 90"
 	if flow_rate <= 0.0 or flow_iterations <= 0 or water_flow_rate <= 0.0 \
-			or snow_flow_rate <= 0.0:
-		return "flow_rate, flow_iterations, water_flow_rate and snow_flow_rate must be positive"
+			or snow_flow_rate <= 0.0 or snow_pass_iterations <= 0:
+		return "flow_rate, flow_iterations, water_flow_rate, snow_flow_rate and snow_pass_iterations must be positive"
 	if erosion_rate < 0.0 or sediment_capacity < 0.0 or stochasticity < 0.0:
 		return "erosion_rate, sediment_capacity and stochasticity cannot be negative"
 	if melt_rate_m_s < 0.0 or evap_rate_m_s < 0.0 or snowfall_rate_m_s < 0.0 \

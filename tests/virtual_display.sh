@@ -3,12 +3,49 @@
 PHYSICS_TEST_DISPLAY_PID=""
 PHYSICS_TEST_DISPLAY_RUNTIME=""
 PHYSICS_TEST_DISPLAY_SOCKET=""
+PHYSICS_TEST_DISPLAY_LOCK_FILE=""
 
 
 physics_test_display_ready() {
 	[[ -n "${PHYSICS_TEST_WAYLAND_DISPLAY:-}" ]] \
 		&& [[ -n "${PHYSICS_TEST_XDG_RUNTIME_DIR:-}" ]] \
 		&& [[ -S "${PHYSICS_TEST_XDG_RUNTIME_DIR}/${PHYSICS_TEST_WAYLAND_DISPLAY}" ]]
+}
+
+
+## Serialize the virtual Wayland display across concurrent agents: the lock is
+## held from start to stop and released by the kernel even if a holder dies.
+## Waiters queue instead of racing the compositor (PHYSICS_TEST_DISPLAY_WAIT
+## caps the wait, default 1800s).
+physics_test_display_lock_acquire() {
+	local lock_file
+	lock_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.godot/virtual-display.lock"
+	mkdir -p "$(dirname "$lock_file")"
+	local wait_seconds="${PHYSICS_TEST_DISPLAY_WAIT:-1800}"
+	exec 8>>"$lock_file"
+	if ! flock -n 8; then
+		local holder
+		holder="$(cat "$lock_file" 2>/dev/null || true)"
+		printf 'GPU TEST: virtual display busy%s; waiting up to %ss\n' \
+			"${holder:+ (holder pid $holder)}" "$wait_seconds" >&2
+		if ! flock -w "$wait_seconds" 8; then
+			printf 'GPU TEST FAIL: virtual display still busy after %ss\n' "$wait_seconds" >&2
+			exec 8>&- 2>/dev/null || true
+			return 1
+		fi
+	fi
+	printf '%s\n' "$$" >"$lock_file"
+	PHYSICS_TEST_DISPLAY_LOCK_FILE="$lock_file"
+}
+
+
+physics_test_display_lock_release() {
+	if [[ -n "$PHYSICS_TEST_DISPLAY_LOCK_FILE" ]]; then
+		: >"$PHYSICS_TEST_DISPLAY_LOCK_FILE" 2>/dev/null || true
+		flock -u 8 2>/dev/null || true
+		exec 8>&- 2>/dev/null || true
+		PHYSICS_TEST_DISPLAY_LOCK_FILE=""
+	fi
 }
 
 
@@ -22,6 +59,10 @@ physics_test_display_start() {
 
 	if ! command -v "$kwin_bin" >/dev/null 2>&1; then
 		printf 'GPU TEST FAIL: %s not found; refusing visible display fallback\n' "$kwin_bin" >&2
+		return 1
+	fi
+
+	if ! physics_test_display_lock_acquire; then
 		return 1
 	fi
 
@@ -70,6 +111,7 @@ physics_test_display_start() {
 
 
 physics_test_display_stop() {
+	physics_test_display_lock_release
 	if [[ -n "$PHYSICS_TEST_DISPLAY_PID" ]]; then
 		# TERM then KILL the whole compositor process group: a bare TERM to the
 		# leader leaks kwin children that keep holding a Vulkan device.
@@ -141,12 +183,16 @@ physics_test_run_process() {
 				sleep 0.1
 			done
 			if physics_test_process_alive "$process_pid"; then
+				# Sentinel printed but the process will not exit on its own:
+				# reap it and honour the sentinel.
 				physics_test_process_stop "$process_pid"
-			else
-				wait "$process_pid" 2>/dev/null || true
+				trap - INT TERM
+				return 0
 			fi
+			# A crash after printing the sentinel is still a failure.
+			wait "$process_pid" 2>/dev/null || status=$?
 			trap - INT TERM
-			return 0
+			return "$status"
 		fi
 
 		if ! physics_test_process_alive "$process_pid"; then

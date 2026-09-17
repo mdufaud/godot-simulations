@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-GODOT="${GODOT:-/home/mdufaud/.local/bin/godot}"
+GODOT="${GODOT:-godot}"
+TIMEOUT="${TIMEOUT:-180}"
 source "$SCRIPT_DIR/virtual_display.sh"
 
 LOG_DIR="${MIXWELL_CAPTURE_DIR:-${TMPDIR:-/tmp}/physics-test-mixwell-capture-$$}"
@@ -53,7 +54,7 @@ run_capture() {
 	env -u DISPLAY \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
+		timeout "$TIMEOUT" "$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
 			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \

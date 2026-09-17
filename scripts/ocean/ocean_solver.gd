@@ -63,11 +63,8 @@ var long_wave_height_m := 2.6
 var long_wave_length_m := 48.0
 var mid_wave_height_m := 0.0
 var mid_wave_length_m := 24.0
-var mid_wave_spread := 0.0
 var wind_wave_height_m := 0.8
 var wind_wave_length_m := 7.5
-var ripple_strength := 0.9
-var crosswind_ratio := 0.14
 var crest_bias := 0.08
 var crest_gain := 2.4
 ## Master wave height multiplier, applied k-weighted in spectrum_init (swell
@@ -413,7 +410,8 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 		return
 	_render_time = sim_time if step_time < 0.0 else step_time
 	_render_center = near_center if not step_center.is_finite() else step_center
-	_read_timings()
+	if profiling:
+		_read_timings()
 	if _foam_reset_pending:
 		_clear_foam_fields()
 		_foam_near_read_index = 0
@@ -441,7 +439,8 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 					or _frame % 2 == 0 or _cascade_dirty[i]:
 				cascade_list.append(i)
 
-	_rd.capture_timestamp("ocean/start")
+	if profiling:
+		_rd.capture_timestamp("ocean/start")
 	var cl := _rd.compute_list_begin()
 	for i in cascade_list:
 		var pc := _pack_push_constant(i, 0.0, 0.0, _render_time)
@@ -459,22 +458,27 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 		cl = _mark(cl, "ocean/foam")
 	# Near-field feedback once per (stride) frames, on the accumulated dt.
 	_foam_near_dt += delta
-	if foam_near_enabled \
-			and _frame % maxi(foam_near_stride, 1) == 0:
-		var near_stage := "foam_near_ab" if _foam_near_read_index == 0 \
-			else "foam_near_ba"
-		for layer in 3:
-			var stage := near_stage if layer == 0 else near_stage + "_%d" % layer
-			_dispatch(cl, stage, _pack_near_push_constant(_foam_near_dt, layer),
-				foam_near_size / 16, foam_near_size / 16, 1)
-		_foam_near_read_index = 1 - _foam_near_read_index
-		_generate_foam_mips(cl, _foam_near_read_index)
-		_near_center_prev = _render_center
+	if foam_near_enabled:
+		if _frame % maxi(foam_near_stride, 1) == 0:
+			var near_stage := "foam_near_ab" if _foam_near_read_index == 0 \
+				else "foam_near_ba"
+			for layer in 3:
+				var stage := near_stage if layer == 0 else near_stage + "_%d" % layer
+				_dispatch(cl, stage, _pack_near_push_constant(_foam_near_dt, layer),
+					foam_near_size / 16, foam_near_size / 16, 1)
+			_foam_near_read_index = 1 - _foam_near_read_index
+			_generate_foam_mips(cl, _foam_near_read_index)
+			_near_center_prev = _render_center
+			_foam_near_dt = 0.0
+			cl = _mark(cl, "ocean/foam_near")
+	else:
+		# Keep the accumulator pinned while the field is off, so re-enabling
+		# never replays the whole off period as one giant decay/injection step.
 		_foam_near_dt = 0.0
-		cl = _mark(cl, "ocean/foam_near")
 	_rd.compute_list_end()
 	_dispatch_pending_queries()
-	_rd.capture_timestamp("ocean/end")
+	if profiling:
+		_rd.capture_timestamp("ocean/end")
 	_frame += 1
 	_foam_state_mutex.lock()
 	_published_foam_state = {"center": _near_center_prev, "index": _foam_near_read_index,
@@ -758,7 +762,9 @@ func _pack_near_push_constant(dt: float, layer: int = 0) -> PackedByteArray:
 	pc.encode_float(76, clampf(whitecap, 0.05, 0.95))
 	pc.encode_float(80, 1.0)
 	pc.encode_float(84, 1.0)
-	var wind_dir := Vector2(sin(wind_direction), cos(wind_direction))
+	# Waves travel world (cos θ, sin θ): the FFT texture axes swap into world
+	# axes, the same convention the rain and spray layers already follow.
+	var wind_dir := Vector2(cos(wind_direction), sin(wind_direction))
 	pc.encode_float(88, wind_dir.x)
 	pc.encode_float(92, wind_dir.y)
 	return pc
@@ -810,13 +816,11 @@ func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float, step
 	pc.encode_float(88, reference.wavelength_m if wave_model == WaveModel.FFT else long_wave_length_m)
 	pc.encode_float(92, wind_wave_height_m)
 	pc.encode_float(96, wind_wave_length_m)
-	pc.encode_float(100, ripple_strength)
 	pc.encode_float(104, jonswap_gamma)
 	pc.encode_float(108, crest_gain)
 	pc.encode_float(112, crest_bias)
 	pc.encode_float(116, mid_wave_height_m)
 	pc.encode_float(120, mid_wave_length_m)
-	pc.encode_float(124, mid_wave_spread)
 	return pc
 
 

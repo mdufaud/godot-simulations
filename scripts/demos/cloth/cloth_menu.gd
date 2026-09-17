@@ -24,22 +24,22 @@ func build(menu: SimMenu, solvers: Array[ClothSolver], state: Dictionary,
 	menu.add_separator()
 
 	menu.add_section("Fabric")
-	menu.add_slider("Drag", 0.0, 3.0, solvers[0].drag, callbacks.set_all.bind("drag"))
+	menu.add_slider("Drag", 0.0, 3.0, solvers[0].drag, callbacks.set_drag)
 	menu.add_slider("Stretch", 0.0, 6.0, 1.0, callbacks.stretch)
 	menu.add_slider("Bending", 0.0, 6.0, 1.0, callbacks.bending)
 	menu.add_slider("Damping", 0.97, 1.0, solvers[0].damping,
-		callbacks.set_all.bind("damping"))
+		callbacks.set_damping)
 	menu.add_separator()
 
 	menu.add_section("Solver")
 	var iterations_slider := menu.add_slider("Iterations", 2.0, 24.0,
-		float(solvers[0].iterations), callbacks.set_all_int.bind("iterations"))
-	quality.bind("iterations", iterations_slider, callbacks.set_all_int.bind("iterations"))
+		float(solvers[0].iterations), callbacks.set_iterations)
+	quality.bind("iterations", iterations_slider, callbacks.set_iterations)
 	var substeps_slider := menu.add_slider("Substeps", 1.0, 6.0, float(solvers[0].substeps),
-		callbacks.set_all_int.bind("substeps"))
-	quality.bind("substeps", substeps_slider, callbacks.set_all_int.bind("substeps"))
+		callbacks.set_substeps)
+	quality.bind("substeps", substeps_slider, callbacks.set_substeps)
 	menu.add_slider("Relaxation", 1.0, 1.9, solvers[0].relaxation,
-		callbacks.set_all.bind("relaxation"))
+		callbacks.set_relaxation)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	menu.add_separator()
 

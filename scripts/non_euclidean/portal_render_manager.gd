@@ -59,10 +59,25 @@ func set_max_views(count: int) -> void:
 	count = clampi(count, 1, MAX_POOL)
 	if count == max_views and not _slots.is_empty():
 		return
+	_preserve_capped_portals(count)
 	max_views = count
 	_teardown_pool()
 	_create_pool()
 	_assign_portal_slots()
+
+
+## Portals losing their slot keep the last image they rendered: the pool
+## teardown frees the viewport their texture points into, so snapshot it first.
+func _preserve_capped_portals(keep: int) -> void:
+	for index in range(keep, _portals.size()):
+		if index >= _slots.size():
+			continue
+		var portal := _portals[index]
+		if portal == null or not is_instance_valid(portal):
+			continue
+		var image := (_slots[index]["viewport"] as SubViewport).get_texture().get_image()
+		if image != null and not image.is_empty():
+			portal.set_render_texture(ImageTexture.create_from_image(image))
 
 
 func set_portal_view_scale(scale: float) -> void:
@@ -90,15 +105,13 @@ func get_debug_text() -> String:
 
 
 ## Binds each portal to its pool slot; portals without a slot (views capped)
-## fall back to their static image.
+## keep the last image they rendered (see _preserve_capped_portals).
 func _assign_portal_slots() -> void:
 	for index in _portals.size():
 		var portal := _portals[index]
 		if index < _slots.size():
 			_slots[index]["portal"] = portal
 			portal.set_render_texture((_slots[index]["viewport"] as SubViewport).get_texture())
-		else:
-			portal.set_render_texture(null)
 
 
 func _create_pool() -> void:

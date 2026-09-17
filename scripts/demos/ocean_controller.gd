@@ -77,13 +77,24 @@ var _profile_foam_samples: Array[float] = []
 var _profile_interaction_capture_samples: Array[float] = []
 var _profile_interaction_feedback_samples: Array[float] = []
 # GPU point queries: crate -> first result slot as submitted last physics tick,
-# and the camera slot's (height, nx, nz, valid) for underwater/capture reads.
+# the camera slot (or -1 when no camera existed at submission time), and the
+# camera slot's (height, nx, nz, valid) for underwater/capture reads.
 var _query_crate_slots: Array = []
+var _camera_query_slot := -1
 var _camera_water := Vector4.ZERO
 var _camera_water_valid := false
+# Set by warmup_foam: _process pauses its own time advance and step queue so
+# the warmup steps are the only ones advancing the simulation.
+var _warmup_active := false
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	solver.config = config
 	quality.setup(OceanQualityProfile, "ocean_quality_profile",
 		_apply_quality, _rebuild_quality_resources)
@@ -132,7 +143,7 @@ func _ready() -> void:
 		foam_window.set_profiling(on)
 		cloudscape.set_profiling(on)
 	)
-	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 
 	_setup_ui()
 	apply_look(0)
@@ -162,8 +173,10 @@ func _process(delta: float) -> void:
 		spray.set_foam_state(state.center, solver.foam_field_domains(), float(state.index))
 	var simulation_delta := _capture_fixed_delta if _capture_fixed_delta > 0.0 else delta
 	var step_scale := 0.0 if _frozen else time_scale
-	_sim_time += simulation_delta * step_scale
+	if not _warmup_active:
+		_sim_time += simulation_delta * step_scale
 	solver.sim_time = _sim_time
+	surface_mat.set_shader_parameter("sim_time", _sim_time)
 
 	var cam := get_viewport().get_camera_3d()
 	if not _capture_measurement:
@@ -181,15 +194,17 @@ func _process(delta: float) -> void:
 		storm.set_rain_wind(Vector3(cos(solver.wind_direction), 0.0,
 			sin(solver.wind_direction)))
 		storm.set_rain_time(_sim_time)
+		# Waves travel world (cos θ, sin θ): the FFT texture axes swap into
+		# world axes (asserted by ocean_fft_test), matching rain and spray.
 		surface_mat.set_shader_parameter("wind_direction", Vector2(
-			sin(solver.wind_direction), cos(solver.wind_direction)))
+			cos(solver.wind_direction), sin(solver.wind_direction)))
 		_sync_wave_filter_uniforms()
 		spray.set_wind_direction(Vector2(cos(solver.wind_direction),
 			sin(solver.wind_direction)))
 		spray.update_state(p, storm.current_mood(), _sim_time)
 
 	var refresh_requested := solver.take_render_refresh_request()
-	if step_scale > 0.0 or refresh_requested:
+	if not _warmup_active and (step_scale > 0.0 or refresh_requested):
 		RenderingServer.call_on_render_thread(solver.step_render.bind(
 			simulation_delta * step_scale, _sim_time, solver.near_center))
 	profiler.poll(delta)
@@ -206,8 +221,10 @@ func _physics_process(_delta: float) -> void:
 		_consume_query_results(solver.latest_results())
 	var points := PackedVector2Array()
 	_query_crate_slots.clear()
+	_camera_query_slot = -1
 	var cam := get_viewport().get_camera_3d()
 	if cam != null:
+		_camera_query_slot = points.size()
 		points.append(Vector2(cam.global_position.x, cam.global_position.z))
 	for crate in _crates:
 		if not is_instance_valid(crate):
@@ -222,8 +239,9 @@ func _physics_process(_delta: float) -> void:
 func _consume_query_results(results: PackedVector4Array) -> void:
 	if results.is_empty():
 		return
-	if results[0].w > 0.5:
-		_camera_water = results[0]
+	if _camera_query_slot >= 0 and _camera_query_slot < results.size() \
+			and results[_camera_query_slot].w > 0.5:
+		_camera_water = results[_camera_query_slot]
 		_camera_water_valid = true
 	for entry in _query_crate_slots:
 		var crate: OceanBuoy = entry[0]
@@ -262,6 +280,7 @@ func apply_preset(index: int) -> void:
 	_sync_wave_filter_uniforms()
 	_sync_foam_material_strength()
 	set_spray_amount(preset.spray_amount)
+	set_storm_mood(preset.storm_mood)
 
 
 func _sync_foam_material_strength() -> void:
@@ -461,6 +480,7 @@ func move_capture_camera(offset: Vector3) -> void:
 func warmup_foam(seconds: float) -> void:
 	var steps := maxi(1, int(ceil(seconds * 60.0)))
 	var step_delta := maxf(seconds, 0.0) / float(steps)
+	_warmup_active = true
 	for i in steps:
 		_sim_time += step_delta
 		solver.sim_time = _sim_time
@@ -469,6 +489,7 @@ func warmup_foam(seconds: float) -> void:
 			await RenderingServer.frame_post_draw
 	# Let the last foam state land in the read texture before any capture.
 	await RenderingServer.frame_post_draw
+	_warmup_active = false
 
 
 func set_capture_wind_direction(value: float) -> void:
@@ -1044,7 +1065,7 @@ func set_capture_profiling(on: bool) -> void:
 	solver.profiling = on
 	foam_window.set_profiling(on)
 	cloudscape.set_profiling(on)
-	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), on)
+	_viewport.set_measure_render_time(on)
 
 
 func set_capture_foam(enabled: bool) -> void:
@@ -1085,6 +1106,8 @@ func set_render_features(on: bool) -> void:
 		look.micro_normal_strength if on else 0.0)
 	surface_mat.set_shader_parameter("sky_reflection_strength",
 		look.sky_reflection_strength if on else 0.0)
+	surface_mat.set_shader_parameter("sun_glitter_strength",
+		look.sun_glitter_strength if on else 0.0)
 
 
 func set_clouds_enabled(on: bool) -> void:

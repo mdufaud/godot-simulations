@@ -56,10 +56,13 @@ func _ready() -> void:
 
 ## The cap and band are config the view reads per pass, the AA level a plain
 ## view field; all safe to set before _view.start().
+## Widget-bound keys (band, AA) reach this only while the menu is still
+## unbuilt — afterwards they arrive through the sliders — so every read
+## defaults to the live config.
 func _apply_quality(values: Dictionary) -> void:
-	config.interaction_iteration_cap = int(values.interaction_cap)
-	config.refine_band_rows = int(values.refine_band_rows)
-	_view.aa_quality = int(values.aa_quality)
+	config.refine_band_rows = int(values.get("refine_band_rows",
+		config.refine_band_rows))
+	_view.aa_quality = int(values.get("aa_quality", _view.aa_quality))
 
 
 func _process(delta: float) -> void:

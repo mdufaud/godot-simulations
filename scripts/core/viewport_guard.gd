@@ -4,7 +4,9 @@ extends Node
 ##
 ## Render scaling and MSAA live on the root viewport, which outlives the demo that
 ## changed them: without this the setting leaks into the main menu and into whatever
-## demo is loaded next. Add one as a child, then route every write through the setters
+## demo is loaded next. Render-time measurement is global the same way, but has no
+## engine getter to restore from and nothing ships with it on, so release() always
+## turns it back off. Add one as a child, then route every write through the setters
 ## instead of touching the viewport directly.
 ##
 ## [codeblock]
@@ -14,11 +16,16 @@ extends Node
 ##     _viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, scale)
 ## [/codeblock]
 
+## Viewports currently timestamp-measured through any guard. RenderingServer has
+## no getter for the flag, so the UI smoke asserts this count returns to zero.
+static var measured_viewports := 0
+
 var _viewport: Viewport = null
 var _scaling_mode: Viewport.Scaling3DMode = Viewport.SCALING_3D_MODE_BILINEAR
 var _scaling_scale := 1.0
 var _msaa: Viewport.MSAA = Viewport.MSAA_DISABLED
 var _taa := false
+var _measure_render_time := false
 
 
 ## Creates a guard and parents it to [param host], capturing the state immediately.
@@ -52,6 +59,7 @@ func release() -> void:
 	_viewport.scaling_3d_scale = _scaling_scale
 	_viewport.msaa_3d = _msaa
 	_viewport.use_taa = _taa
+	set_measure_render_time(false)
 
 
 func set_render_scale(mode: Viewport.Scaling3DMode, scale: float) -> void:
@@ -59,6 +67,16 @@ func set_render_scale(mode: Viewport.Scaling3DMode, scale: float) -> void:
 		return
 	_viewport.scaling_3d_mode = mode
 	_viewport.scaling_3d_scale = scale
+
+
+## Enables the per-frame timestamp pair the GPU render-time read costs, and
+## remembers it so release() can undo exactly this write.
+func set_measure_render_time(enabled: bool) -> void:
+	if _viewport == null or _measure_render_time == enabled:
+		return
+	RenderingServer.viewport_set_measure_render_time(_viewport.get_viewport_rid(), enabled)
+	_measure_render_time = enabled
+	measured_viewports += 1 if enabled else -1
 
 
 func set_msaa(mode: Viewport.MSAA) -> void:
@@ -71,6 +89,11 @@ func set_taa(enabled: bool) -> void:
 	if _viewport == null:
 		return
 	_viewport.use_taa = enabled
+
+
+## Current value, for asserting the demo turned measurement on when it said so.
+func measure_render_time() -> bool:
+	return _measure_render_time
 
 
 ## Current value, for seeding a UI control with what the viewport actually has.

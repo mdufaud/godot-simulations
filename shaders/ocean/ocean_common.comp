@@ -28,8 +28,8 @@ layout(push_constant, std430) uniform Params {
     vec4 foam_p;     // 48: whitecap, foam_gain, decay_rate, time
     ivec4 misc;      // 64: cascade_index, seed_x, seed_y, flags (bit0 tutorial, bit1 jonswap)
     vec4 gains;      // 80: height_gain, long height, long wavelength, wind height
-    vec4 art_a;      // 96: wind wavelength, ripple strength, JONSWAP gamma, crest gain
-    vec4 art_b;      // 112: crest bias, mid height, mid wavelength, mid spread
+    vec4 art_a;      // 96: wind wavelength, unused, JONSWAP gamma, crest gain
+    vec4 art_b;      // 112: crest bias, mid height, mid wavelength, unused
 } params;
 
 // Half 0: spectrum_evolve output / FFT input; half 1: FFT output. Parameter

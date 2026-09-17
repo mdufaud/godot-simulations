@@ -298,28 +298,6 @@ static func vector_dot(a: PackedFloat64Array, b: PackedFloat64Array) -> float:
 	return result
 
 
-static func generalized_gyro_wrench(momentum: PackedFloat64Array,
-		velocity: PackedFloat64Array) -> PackedFloat64Array:
-	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:
-		return PackedFloat64Array()
-	var angular_momentum := Vector3(momentum[0], momentum[1], momentum[2])
-	var linear_momentum := Vector3(momentum[3], momentum[4], momentum[5])
-	var angular_velocity := Vector3(velocity[0], velocity[1], velocity[2])
-	var linear_velocity := Vector3(velocity[3], velocity[4], velocity[5])
-	var wrench := PackedFloat64Array()
-	wrench.resize(MATRIX_SIZE)
-	var torque := angular_momentum.cross(angular_velocity) \
-		+ linear_momentum.cross(linear_velocity)
-	var force := linear_momentum.cross(angular_velocity)
-	wrench[0] = torque.x
-	wrench[1] = torque.y
-	wrench[2] = torque.z
-	wrench[3] = force.x
-	wrench[4] = force.y
-	wrench[5] = force.z
-	return wrench
-
-
 static func semidirect_coupling_wrench(momentum: PackedFloat64Array,
 		velocity: PackedFloat64Array) -> PackedFloat64Array:
 	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:

@@ -126,7 +126,12 @@ func _build_touch_controls(host) -> void:
 	_touch_controls.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_touch_controls.theme = load("res://resources/themes/main_theme.tres")
 	host.ui_layer.add_child(_touch_controls)
+	# The connection targets this RefCounted HUD: drop it with the controls
+	# instead of relying on engine teardown to clean it up.
 	host.get_viewport().size_changed.connect(_layout_touch_controls)
+	_touch_controls.tree_exiting.connect(func() -> void:
+		if host.get_viewport().size_changed.is_connected(_layout_touch_controls):
+			host.get_viewport().size_changed.disconnect(_layout_touch_controls))
 
 	_jump_button = Button.new()
 	_jump_button.text = "Jump"

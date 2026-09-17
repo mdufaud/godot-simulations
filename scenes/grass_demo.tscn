@@ -6,6 +6,8 @@
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
 size = Vector2(200, 200)
+subdivide_width = 128
+subdivide_depth = 128
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
 albedo_color = Color(0.04, 0.11, 0.02, 1)

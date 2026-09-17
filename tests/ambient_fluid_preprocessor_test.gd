@@ -8,6 +8,7 @@ func _initialize() -> void:
 	_test_tetrahedron()
 	_test_cube()
 	_test_icosphere()
+	_test_plate()
 	_test_invalid_meshes()
 	_test_profile_validation()
 	_test_serialization()
@@ -117,6 +118,26 @@ func _test_icosphere() -> void:
 		_check(refined_error < 0.25, "refined icosphere added mass is not bounded")
 		_check(refined_error <= relative_error,
 			"icosphere added mass did not converge under refinement")
+
+
+func _test_plate() -> void:
+	# Regression: the demo plate once generated an inverted tensor (edgewise z
+	# larger than broadside y) because the source offset rode past the opposite
+	# face of the 0.18 m slab. The offset guard must keep broadside dominant.
+	var box := BoxMesh.new()
+	box.size = Vector3(2.4, 0.18, 1.2)
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, box.get_mesh_arrays())
+	var profile: AmbientFluidProfile3D = PREPROCESSOR.build_profile(mesh, 998.0)
+	_check(profile != null, "plate preprocessing failed: %s" % PREPROCESSOR.get_last_error())
+	if profile == null:
+		return
+	_check(profile.source_offset_m <= 0.091,
+		"plate source offset rode past half the plate thickness")
+	var tensor := profile.added_mass_tensor
+	_check(tensor[28] > tensor[21] and tensor[28] > tensor[35],
+		"plate broadside added mass is not dominant on y")
+	_check(_profile_invariants(profile), "plate BEM invariants failed")
 
 
 func _test_invalid_meshes() -> void:

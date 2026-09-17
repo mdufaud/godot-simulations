@@ -6,7 +6,7 @@ class_name SimProfiler extends RefCounted
 ## [codeblock]
 ## profiler.lines_provider = func() -> PackedStringArray: ...
 ## profiler.enabled_changed.connect(func(on): solver.profiling = on)
-## profiler.build(ui_layer, get_viewport().get_viewport_rid())
+## profiler.build(ui_layer, get_viewport().get_viewport_rid(), ViewportGuard.attach(self))
 ## # in _process:
 ## profiler.poll(delta)
 ## [/codeblock]
@@ -22,11 +22,15 @@ var lines_provider := Callable()
 
 var _label: Label
 var _viewport_rid: RID
+## Set by [method build]; when present, the measurement flag is written through
+## the guard so it is disabled again when the demo scene leaves the tree.
+var _guard: ViewportGuard = null
 var _accum := 0.0
 
 
-func build(host: Node, viewport_rid: RID) -> void:
+func build(host: Node, viewport_rid: RID, guard: ViewportGuard = null) -> void:
 	_viewport_rid = viewport_rid
+	_guard = guard
 	_label = Label.new()
 	_label.position = Vector2(8, 8)
 	var mono := SystemFont.new()
@@ -45,7 +49,10 @@ func visible() -> bool:
 
 func set_enabled(on: bool) -> void:
 	_label.visible = on
-	RenderingServer.viewport_set_measure_render_time(_viewport_rid, on)
+	if _guard != null:
+		_guard.set_measure_render_time(on)
+	else:
+		RenderingServer.viewport_set_measure_render_time(_viewport_rid, on)
 	enabled_changed.emit(on)
 
 

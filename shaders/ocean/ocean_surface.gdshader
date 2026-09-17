@@ -23,12 +23,15 @@ uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 uniform float foam_strength : hint_range(0.0, 3.0) = 1.0;
 uniform float sss_strength : hint_range(0.0, 3.0) = 1.0;
 uniform vec3 sun_direction = vec3(0.0, 1.0, 0.0);
-uniform vec2 wind_direction = vec2(0.0, 1.0);
+uniform vec2 wind_direction = vec2(1.0, 0.0);
 uniform float sun_disk_radius = 0.00436;
 uniform float sun_path_width = 0.009;
 uniform float sun_glitter_strength = 0.7;
 uniform float sky_reflection_strength = 0.75;
 uniform float storm_mood = 0.15;
+// Simulation clock pushed by the controller, so freeze/time_scale also stop
+// the micro-relief and foam breakup instead of only the FFT field.
+uniform float sim_time = 0.0;
 uniform float clipmap_cell = 0.25;
 uniform float clipmap_half_extent = 8.0;
 uniform float clipmap_ring_levels = 8.0;
@@ -231,7 +234,9 @@ vec2 sample_foam_near(vec2 world_pos, vec2 dx, vec2 dy) {
 
 void fragment() {
 	float map_size = float(textureSize(normals, 0).x);
-	float dist = length(VERTEX.xz - CAMERA_POSITION_WORLD.xz);
+	// In fragment() VERTEX is view-space even with world_vertex_coords, and the
+	// view transform is rigid: its length is the true camera-to-pixel distance.
+	float dist = length(VERTEX);
 	vec2 gradient = vec2(0.0);
 	vec2 unresolved_gradient = vec2(0.0);
 	vec3 deformation = vec3(0.0);
@@ -338,7 +343,7 @@ void fragment() {
 	vec2 wind_uv = vec2(dot(world_uv, wind), dot(world_uv, across));
 	vec2 macro_gradient = gradient;
 	vec2 micro_a_uv = wind_uv * micro_normal_scales.x
-		+ vec2(TIME * 0.006, -TIME * 0.002);
+		+ vec2(sim_time * 0.006, -sim_time * 0.002);
 	vec2 micro_a_dx = dFdx(wind_uv) * micro_normal_scales.x;
 	vec2 micro_a_dy = dFdy(wind_uv) * micro_normal_scales.x;
 	vec2 micro_a_filter_dx = micro_a_dx * 0.55;
@@ -351,7 +356,7 @@ void fragment() {
 	vec2 crossed_uv = vec2(dot(world_uv, normalize(wind + across * 0.65)),
 		dot(world_uv, normalize(across - wind * 0.65)));
 	vec2 micro_b_uv = crossed_uv * micro_normal_scales.y
-		+ vec2(-TIME * 0.009, TIME * 0.004);
+		+ vec2(-sim_time * 0.009, sim_time * 0.004);
 	vec2 micro_b_dx = dFdx(crossed_uv) * micro_normal_scales.y;
 	vec2 micro_b_dy = dFdy(crossed_uv) * micro_normal_scales.y;
 	vec2 micro_b_filter_dx = micro_b_dx * 0.55;
@@ -376,7 +381,7 @@ void fragment() {
 	float near_fresh_foam = clamp(foam_fresh * foam_strength, 0.0, 1.0);
 	float persistent_foam = near_persistent_foam;
 	float fresh_foam = near_fresh_foam;
-	vec2 breakup_uv = world_uv * 0.08 - wind * TIME * 0.003;
+	vec2 breakup_uv = world_uv * 0.08 - wind * sim_time * 0.003;
 	// Same mip bias: shore/interaction breakup must stay soft clouds, not grain.
 	float breakup = texture(foam_detail, breakup_uv, 2.0).g;
 	float interaction_foam_factor = 0.0;
@@ -437,9 +442,9 @@ void fragment() {
 			ref_uv = clamp(ref_uv, vec2(0.001), vec2(0.999));
 			float r_raw = texture(depth_texture, ref_uv).r;
 			float r_lin = PROJECTION_MATRIX[3][2] / (r_raw + PROJECTION_MATRIX[2][2]);
-			// Refracted sample in front of the surface: fall back to
-			// unrefracted (this is the anti-ghosting guard).
-			if (r_lin + VERTEX.z > 0.0) {
+			// Refracted sample in front of the surface (depth closer than the
+			// water plane): fall back to unrefracted (anti-ghosting guard).
+			if (r_lin + VERTEX.z < 0.0) {
 				ref_uv = SCREEN_UV;
 				r_lin = depth_lin;
 			}

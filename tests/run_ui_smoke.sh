@@ -24,18 +24,30 @@ mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 
 # Shared lock on the import cache: tools/import.sh waits instead of rewriting
-# the script class cache while the smoke processes parse scripts.
+# the script class cache while the smoke processes parse scripts. The virtual
+# display is exclusive instead: agents queue on .godot/virtual-display.lock
+# instead of racing the compositor.
 mkdir -p "$PROJECT_DIR/.godot"
 exec 9>>"$PROJECT_DIR/.godot/import.lock"
 flock -s 9
 
-DEMOS=(
-	ssr_demo ocean_demo fire_demo nbody_demo grass_demo parallax_demo
-	fluid_demo mixwell_demo fractal_demo fractal_3d_demo tornado_demo terrain_demo
-	cloth_demo destruction_demo ambient_fluid_demo non_euclidean_demo planet_demo
-)
+# The demo list comes from the same GameManager registry scene_cycle drives,
+# so a newly registered demo is smoked without touching this script. Keys are
+# grepped out of the engine banner headless godot prints on stdout.
 if [[ $# -gt 0 ]]; then
 	DEMOS=("$@")
+else
+	demo_keys="$(timeout "$TIMEOUT" "$GODOT" --headless --path "$PROJECT_DIR" \
+		--log-file "$LOG_DIR/demo-registry.godot.log" \
+		-s "$SCRIPT_DIR/list_demo_keys.gd")" || {
+		printf 'Could not enumerate the demo registry\n' >&2
+		exit 1
+	}
+	mapfile -t DEMOS < <(printf '%s\n' "$demo_keys" | grep -E '^[a-z0-9_]+$')
+	if (( ${#DEMOS[@]} == 0 )); then
+		printf 'Demo registry enumeration returned no keys\n' >&2
+		exit 1
+	fi
 fi
 
 source "$SCRIPT_DIR/virtual_display.sh"

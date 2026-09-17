@@ -51,13 +51,23 @@ var brightness_slider: HSlider
 var gravity_toggle: Button
 var _paused := false
 var _sim_time := 0.0
+var _step_clock := SimStepClock.new()
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	solver.config = config
 	scene_def = SCENE_TYPES[active_preset.scene_type].new()
 	quality.setup(NBodyQualityProfile, "nbody_quality_profile", _apply_quality)
 	quality.restore()
+	# A merged step on 1M particles can miss the 60 Hz budget; 3 quanta keeps a
+	# lost frame from stalling the galaxy without three O(N²) sweeps per frame.
+	_step_clock.max_quanta_per_frame = 3
 
 	orbit_cam.target = Vector3.ZERO
 	orbit_cam.distance = 70.0
@@ -72,7 +82,7 @@ func _ready() -> void:
 	_setup_ui()
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(_on_profiler_enabled)
-	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 	_apply_scene()
 	RenderingServer.call_on_render_thread(solver.init_render)
 
@@ -156,6 +166,7 @@ func _sync_horizon() -> void:
 func _restart() -> void:
 	_teardown_solver()
 	_apply_scene()
+	_step_clock.reset()
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 
@@ -236,8 +247,10 @@ func _build_scene_params() -> void:
 		param_group.free()
 	param_group = menu.add_group()
 	for p in scene_def.params():
+		# persist=false: a restored value lands after the preset's seed and
+		# leaves the sliders describing a sim that is not the one running.
 		var slider := menu.add_slider(p.label, p.min, p.max, scene_def.get(p.key),
-			_param_setter(p.key))
+			_param_setter(p.key), false)
 		slider.drag_ended.connect(_on_param_drag_ended)
 	menu.end_group()
 	if slot >= 0:
@@ -362,13 +375,17 @@ func _process(delta: float) -> void:
 		return
 	if _paused:
 		return
-	_sim_time += TIME_STEP * time_scale
-	solver.sim_time = _sim_time
-	if scene_def.update_attractors(_sim_time, attractor_list):
-		solver.set_attractors(attractor_list)
-		_sync_horizon()
-	scene_def.update_frame(_sim_time, solver)
-	RenderingServer.call_on_render_thread(solver.step_render)
+	# The leapfrog integrator is fixed-dt (TIME_STEP split over substeps), so a
+	# step per 1/60 s of wall time keeps the sim speed identical at any frame
+	# rate instead of running the galaxy faster on a 144 Hz monitor.
+	for i in _step_clock.advance(delta):
+		_sim_time += TIME_STEP * time_scale
+		solver.sim_time = _sim_time
+		if scene_def.update_attractors(_sim_time, attractor_list):
+			solver.set_attractors(attractor_list)
+			_sync_horizon()
+		scene_def.update_frame(_sim_time, solver)
+		RenderingServer.call_on_render_thread(solver.step_render)
 	profiler.poll(delta)
 
 

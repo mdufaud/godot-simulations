@@ -42,11 +42,8 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 @export_range(5.0, 200.0, 0.5) var long_wave_length_m := 48.0
 @export_range(0.0, 5.0, 0.01) var mid_wave_height_m := 0.0
 @export_range(5.0, 100.0, 0.5) var mid_wave_length_m := 24.0
-@export_range(0.0, 1.0, 0.01) var mid_wave_spread := 0.0
 @export_range(0.0, 5.0, 0.01) var wind_wave_height_m := 0.8
 @export_range(1.0, 30.0, 0.1) var wind_wave_length_m := 7.5
-@export_range(0.0, 3.0, 0.01) var ripple_strength := 0.9
-@export_range(0.0, 0.65, 0.01) var crosswind_ratio := 0.14
 @export_range(0.0, 0.8, 0.01) var crest_bias := 0.08
 @export_range(0.1, 8.0, 0.05) var crest_gain := 2.4
 
@@ -56,6 +53,11 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 @export_range(0.0, 10.0, 0.01) var foam_amount := 3.5
 @export_range(0.1, 15.0, 0.1) var foam_persistence := 5.0
 @export_range(0.0, 2.0, 0.01) var spray_amount := 0.1
+
+@export_group("Mood")
+## Storm mood the host drives on apply: 0 is clear sky, 1 is full storm
+## (overcast, rain, lightning). Solver state it is not; the controller reads it.
+@export_range(0.0, 1.0, 0.01) var storm_mood := 0.0
 
 func validate() -> String:
 	if wind_speed_mps <= 0.0:
@@ -69,13 +71,11 @@ func validate() -> String:
 	if height_gain < 0.0:
 		return "height_gain cannot be negative"
 	if long_wave_height_m < 0.0 or mid_wave_height_m < 0.0 \
-		or wind_wave_height_m < 0.0 or ripple_strength < 0.0:
+		or wind_wave_height_m < 0.0:
 		return "wave-band strengths cannot be negative"
 	if long_wave_length_m <= 0.0 or mid_wave_length_m <= 0.0 \
 		or wind_wave_length_m <= 0.0:
 		return "wave-band lengths must be positive"
-	if mid_wave_spread < 0.0 or mid_wave_spread > 1.0:
-		return "mid_wave_spread must be in 0..1"
 	if foam_persistence <= 0.0:
 		return "foam_persistence must be positive"
 	return ""
@@ -97,11 +97,8 @@ func apply_to(solver: OceanSolver) -> void:
 	solver.long_wave_length_m = long_wave_length_m
 	solver.mid_wave_height_m = mid_wave_height_m
 	solver.mid_wave_length_m = mid_wave_length_m
-	solver.mid_wave_spread = mid_wave_spread
 	solver.wind_wave_height_m = wind_wave_height_m
 	solver.wind_wave_length_m = wind_wave_length_m
-	solver.ripple_strength = ripple_strength
-	solver.crosswind_ratio = crosswind_ratio
 	solver.crest_bias = crest_bias
 	solver.crest_gain = crest_gain
 	solver.whitecap = whitecap

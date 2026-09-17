@@ -16,6 +16,9 @@ class_name PlanetAtmosphere extends RefCounted
 ## air.start()
 ## RenderingServer.call_on_render_thread(air.init_render)
 ## RenderingServer.call_on_render_thread(air.bake_render)
+## # bake_render runs off the main thread and cannot emit or touch materials:
+## # poll the result once per frame instead.
+## # var lut := air.take_baked_lut()  # non-null on the frame a bake landed
 ## [/codeblock]
 
 ## The parameter block was rebuilt. Carries the whole block, not a delta.
@@ -39,6 +42,10 @@ var mobile := false
 
 var _lut := AtmosphereLut.new()
 var _params := {}
+# bake_render runs on the render thread; this is its handoff to the main thread.
+var _bake_lock := Mutex.new()
+var _baked_lut: Texture2D
+var _bake_pending := false
 
 
 func start() -> void:
@@ -73,11 +80,25 @@ func init_render() -> void:
 
 
 ## Rebake after a change to [member shell_fraction] or [member density_falloff]:
-## the table is a function of those two alone.
+## the table is a function of those two alone. Runs on the render thread: it
+## must not emit [signal changed] or write [member _params] there, so the result
+## is handed over through [method take_baked_lut].
 func bake_render() -> void:
 	_lut.bake(1.0 + shell_fraction, density_falloff, LUT_STEPS)
-	_params["baked_optical_depth"] = _lut.texture
-	changed.emit(_params)
+	_bake_lock.lock()
+	_baked_lut = _lut.texture
+	_bake_pending = true
+	_bake_lock.unlock()
+
+
+## Main-thread poll: returns the latest baked optical-depth texture once, then
+## null until the next bake.
+func take_baked_lut() -> Texture2D:
+	_bake_lock.lock()
+	var texture := _baked_lut if _bake_pending else null
+	_bake_pending = false
+	_bake_lock.unlock()
+	return texture
 
 
 func free_render() -> void:

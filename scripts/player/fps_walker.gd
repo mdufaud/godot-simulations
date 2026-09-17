@@ -103,7 +103,7 @@ func _physics_process(delta: float) -> void:
 	velocity.z = move_toward(velocity.z, target.z, acceleration * speed * delta)
 
 	if is_on_floor():
-		if _captured and Input.is_action_just_pressed("move_up"):
+		if (_captured or _touch_ui) and Input.is_action_just_pressed("move_up"):
 			velocity.y = jump_velocity
 	else:
 		velocity.y -= _gravity * delta

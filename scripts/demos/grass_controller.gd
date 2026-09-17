@@ -1,10 +1,10 @@
 extends Node3D
 
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
-const HEIGHTMAP_SCALE := 5.0
 
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var menu: SimMenu = $UI/SimMenu
+@onready var ground_mesh: MeshInstance3D = $Ground/MeshInstance3D
 @onready var grass: GrassRenderer = GrassRenderer.new()
 @onready var _viewport := ViewportGuard.attach(self)
 
@@ -24,12 +24,17 @@ func _ready() -> void:
 	wind_speed = config.wind_speed_mps
 	quality.setup(GrassQualityProfile, "grass_quality_profile", _apply_quality)
 	quality.restore()
-	# The tier owns the density the build just consumed; keep the var the menu
-	# slider seeds from in step with it.
-	density_modifier = grass.density
+	# The Density slider persists its last value and SimMenu's deferred restore
+	# would re-emit it after _ready, running the blade fill a second time; seed
+	# the build from the same stored value so that restore lands on no change.
+	density_modifier = clampf(
+		menu.stored_value("🌿 Grass Properties", "Density",
+			GrassQualityProfile.values(quality.effective).density), 0.0, 2.0)
+	grass.density = density_modifier
 	grass.config = config
 	add_child(grass)
 	grass.build()
+	ground_mesh.material_override = grass.ground_material()
 	_apply_quality(GrassQualityProfile.values(quality.effective))
 	_grass_ready = true
 	orbit_cam.target = Vector3.ZERO
@@ -50,13 +55,15 @@ func _physics_process(delta: float) -> void:
 
 
 func _setup_heightmap_collision() -> void:
-	var noise: FastNoiseLite = HEIGHTMAP.noise
-	var image := noise.get_image(512, 512)
-	var dims := Vector2i(image.get_height(), image.get_width())
+	# The grass samples the seamless heightmap texture, so the collision must
+	# come from the seamless image too — the raw noise disagrees at the seam.
+	# map_data is row-major over (depth, width).
+	var image := HEIGHTMAP.noise.get_seamless_image(512, 512)
+	var dims := Vector2i(image.get_width(), image.get_height())
 	image.convert(Image.FORMAT_RF)
 	var map_data := image.get_data().to_float32_array()
 	for i in map_data.size():
-		map_data[i] = (map_data[i] - 0.5) * HEIGHTMAP_SCALE
+		map_data[i] = (map_data[i] - 0.5) * config.heightmap_scale_m
 	var shape := HeightMapShape3D.new()
 	shape.map_width = dims.x
 	shape.map_depth = dims.y
@@ -111,13 +118,13 @@ func _set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
 
 
-## Before grass.build() the values land on the fields the build reads (density,
-## shadow ring); after, the setters regenerate and re-flag. Set_density runs the
-## GDScript blade fill, so it must not run twice at launch.
+## Before grass.build() the values land on the fields the build reads; density
+## is owned by the persisted slider value at launch (seeded in _ready). After,
+## the setters regenerate and re-flag. Set_density runs the GDScript blade
+## fill, so it must not run twice at launch.
 func _apply_quality(values: Dictionary) -> void:
 	_set_render_scale(values.render_scale)
 	if not _grass_ready:
-		grass.density = values.density
 		grass.shadows_enabled = values.shadows
 		grass.config.shadow_distance_m = values.shadow_distance_m
 		return

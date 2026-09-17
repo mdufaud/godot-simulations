@@ -52,6 +52,12 @@ var _preset: PlanetPreset = PRESETS[0]
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	_mobile = VirtualJoystickScript.is_touch_ui()
 
 	generator.config = config
@@ -110,6 +116,8 @@ func _exit_tree() -> void:
 
 
 func _process(delta: float) -> void:
+	if not _planet_ready:
+		return
 	if sun_auto_rotate:
 		sun_yaw = fmod(sun_yaw + sun_rotate_speed * delta, 360.0)
 	_update_sun()
@@ -121,9 +129,20 @@ func _process(delta: float) -> void:
 		_menu_builder.set_status("%s triangles · %.0f ms" % [
 			String.num_uint64(generator.triangle_count), generator.last_generate_ms,
 		])
-		if _regen_pending:
-			_regen_pending = false
-			start_generation()
+
+	# bake_render lands on the render thread; republish its LUT from here so
+	# the materials are only ever touched on the main thread.
+	var baked_lut := _atmosphere.take_baked_lut()
+	if baked_lut != null:
+		var params := _atmosphere.params()
+		params["baked_optical_depth"] = baked_lut
+		_on_atmosphere_changed(params)
+
+	# A request made before the render-thread init_render landed (first boot) or
+	# while a generation was running is retried once the generator can accept one.
+	if _regen_pending and generator.initialized and not generator.is_busy():
+		_regen_pending = false
+		start_generation()
 
 	_fluid.track_sky(camera.global_position)
 
@@ -207,7 +226,13 @@ func aim_point() -> Vector3:
 	if disc <= 0.0:
 		# Looking past the planet: fall back to the closest approach.
 		return (origin - dir * b).normalized() * r
-	return origin + dir * (-b - sqrt(disc))
+	# Inside the bounding sphere the near root is behind the camera: aim at the
+	# first intersection in front instead.
+	var sqrt_disc := sqrt(disc)
+	var t := -b - sqrt_disc
+	if t <= 0.0:
+		t = -b + sqrt_disc
+	return origin + dir * t
 
 
 func _on_density_texture_changed() -> void:

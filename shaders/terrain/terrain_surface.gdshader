@@ -154,8 +154,6 @@ void fragment() {
 	float snow_glint = smoothstep(0.87, 0.995, vnoise(g * 1150.0 + vec2(1.93, 8.42)));
 	float sparkle = snow_glint * snow_mask * 0.5 * detail;
 	ALBEDO += vec3(0.38, 0.39, 0.42) * sparkle;
-	ALBEDO += vec3(0.38, 0.39, 0.42) * sparkle * snow_mask
-		+ vec3(0.35) * sparkle * (1.0 - snow_mask);
 
 	// --- Roughness ---
 	float rough = 0.94;

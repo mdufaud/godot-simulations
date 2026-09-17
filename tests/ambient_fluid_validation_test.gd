@@ -105,12 +105,36 @@ func _test_scientific_scenario(scenario_index: int) -> void:
 		"vacuum baseline changed initial velocity")
 	_check(fluid.config.initial_spin_rad_s == vacuum.config.initial_spin_rad_s,
 		"vacuum baseline changed initial spin")
-	for _frame in 120:
+	var velocity_divergence := 0.0
+	var fluid_vy_checkpoint := 0.0
+	var vacuum_vy_checkpoint := 0.0
+	for frame in 120:
 		await physics_frame
 		_check(fluid.finite_state() and vacuum.finite_state(),
 			"scientific scenario produced non-finite state")
-	_check(fluid.global_position.distance_to(vacuum.global_position) > 0.1,
-		"fluid and vacuum trajectories collapsed")
+		if frame == 30:
+			velocity_divergence = (fluid.linear_velocity - vacuum.linear_velocity).length()
+			fluid_vy_checkpoint = fluid.linear_velocity.y
+			vacuum_vy_checkpoint = vacuum.linear_velocity.y
+	# The vacuum twin is the no-coupling baseline (same config, spawned 4 m
+	# apart), so raw separation is trivially large. The coupling must instead
+	# push the fluid body's velocity off the baseline's within the first
+	# second, before both bodies settle on the pool floor in scenarios 1/4.
+	# Measured divergence: 0.025 (falling plate), 0.054 (Magnus), 7.4
+	# (balloon), 4.4 (underwater) m/s; the threshold sits under the weakest.
+	_check(velocity_divergence > 0.01,
+		"fluid coupling did not push the trajectory off the vacuum baseline "
+		+ "(%.4f m/s divergence at the checkpoint)" % velocity_divergence)
+	match scenario_index:
+		3:
+			_check(fluid_vy_checkpoint > 0.5 and vacuum_vy_checkpoint < -0.5,
+				"balloon scenario: fluid body must rise while the vacuum baseline falls "
+				+ "(fluid vy=%.2f, vacuum vy=%.2f)" % [fluid_vy_checkpoint, vacuum_vy_checkpoint])
+		4:
+			_check(fluid_vy_checkpoint > vacuum_vy_checkpoint + 1.0,
+				"underwater scenario: fluid drag must slow the body relative to the "
+				+ "vacuum baseline (fluid vy=%.2f, vacuum vy=%.2f)" % [
+					fluid_vy_checkpoint, vacuum_vy_checkpoint])
 	if scenario_index == 2:
 		_check(fluid.integration_substeps() >= 1, "Magnus scenario integration did not run")
 	demo.queue_free()

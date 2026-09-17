@@ -25,9 +25,16 @@ var renderers: Array[ClothRenderer] = []
 var profiler := SimProfiler.new()
 var cloth_menu := ClothMenu.new()
 var _time := 0.0
+var _step_clock := SimStepClock.new()
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	orbit_cam.target = Vector3(0.0, 3.0, 1.0)
 	orbit_cam.distance = 18.0
 	orbit_cam.pitch = -14.0
@@ -43,7 +50,7 @@ func _ready() -> void:
 	props.build(PRESETS)
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(_on_profiler_enabled)
-	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 	cloth_menu.build(menu, solvers, {
 		wind_enabled = wind_enabled,
 		wind_speed = wind.speed,
@@ -60,8 +67,11 @@ func _ready() -> void:
 		turbulence = _set_turbulence,
 		wind_wander = _set_wind_wander,
 		wind_dir = _set_wind_direction,
-		set_all = _set_all,
-		set_all_int = _set_all_int,
+		set_drag = _set_drag,
+		set_damping = _set_damping,
+		set_iterations = _set_iterations,
+		set_substeps = _set_substeps,
+		set_relaxation = _set_relaxation,
 		stretch = _on_stretch,
 		bending = _on_bending,
 		render_scale = _set_render_scale,
@@ -116,6 +126,7 @@ func _restart() -> void:
 		var dims := PRESETS[index].grid_dims(REST_SPACING)
 		solvers[index].set_seed(PRESETS[index].build_seed(dims.x, dims.y))
 	_time = 0.0
+	_step_clock.reset()
 	_init_solvers()
 	cloth_menu.update_status(solvers)
 
@@ -146,15 +157,33 @@ func _set_wind_direction(degrees: float) -> void:
 	wind.direction_rad = deg_to_rad(degrees)
 
 
-func _set_all(value: float, property: String) -> void:
+func _set_drag(value: float) -> void:
 	for solver in solvers:
-		solver.set(property, value)
+		solver.drag = value
 	cloth_menu.update_status(solvers)
 
 
-func _set_all_int(value: float, property: String) -> void:
+func _set_damping(value: float) -> void:
 	for solver in solvers:
-		solver.set(property, int(round(value)))
+		solver.damping = value
+	cloth_menu.update_status(solvers)
+
+
+func _set_iterations(value: float) -> void:
+	for solver in solvers:
+		solver.iterations = int(round(value))
+	cloth_menu.update_status(solvers)
+
+
+func _set_substeps(value: float) -> void:
+	for solver in solvers:
+		solver.substeps = int(round(value))
+	cloth_menu.update_status(solvers)
+
+
+func _set_relaxation(value: float) -> void:
+	for solver in solvers:
+		solver.relaxation = value
 	cloth_menu.update_status(solvers)
 
 
@@ -223,7 +252,11 @@ func _process(delta: float) -> void:
 			renderers[index].bind_texture(solvers[index])
 			return
 
-	_time += delta
+	# Advance sim time in fixed quanta so the sheets run at the same speed at
+	# any frame rate; the wind is sampled at the quantum-aligned _time.
+	var quanta := _step_clock.advance(delta)
+	for i in quanta:
+		_time += 1.0 / 60.0
 	var current_wind := wind.vector(_time)
 	cloth_menu.update_wind(current_wind)
 	for solver in solvers:
@@ -232,7 +265,8 @@ func _process(delta: float) -> void:
 		solver.wind_gust = wind.gustiness
 		solver.wind_turb = wind.turbulence
 		solver.time = _time
-		RenderingServer.call_on_render_thread(solver.step_render.bind(1.0 / 60.0))
+		for i in quanta:
+			RenderingServer.call_on_render_thread(solver.step_render.bind(1.0 / 60.0))
 	profiler.poll(delta)
 
 

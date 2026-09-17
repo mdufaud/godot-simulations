@@ -51,6 +51,7 @@ var _reset_dialog: ConfirmationDialog = null
 var _actions: Array[Button] = []
 var _action_shortcuts: Dictionary = {}
 var _action_layout_key := ""
+var _layout_check_frame := 0
 
 const ACTION_BUTTON_SIZE := Vector2(56.0, 52.0)
 const AZERTY_ACTION_KEYS := "&é\"'(-è_ç"
@@ -176,24 +177,36 @@ func _restore_all() -> void:
 
 
 func _restore_one(key: String) -> void:
-	if _settings == null or not _settings.has_sim_value(persist_id, key):
+	# An anonymous menu (no GameManager demo, standalone scene) must not share one
+	# state bucket with every other anonymous menu, so it never persists.
+	if persist_id.is_empty() or _settings == null \
+			or not _settings.has_sim_value(persist_id, key):
 		return
 	var stored: Variant = _settings.get_sim_value(persist_id, key, null)
 	var entry: Dictionary = _entries[key]
 	_apply_value(entry, stored)
 
 
-# --- Persistence (no-ops without the UserSettings autoload) ---------------------
+# --- Persistence (no-ops without the UserSettings autoload or an identity) -----
 
 func _persist(key: String, value: Variant) -> void:
-	if _settings != null:
+	if _settings != null and not persist_id.is_empty():
 		_settings.set_sim_value(persist_id, key, value)
 
 
 func _persisted(key: String, default_val: Variant) -> Variant:
-	if _settings == null:
+	if _settings == null or persist_id.is_empty():
 		return default_val
 	return _settings.get_sim_value(persist_id, key, default_val)
+
+
+## Stored value the widget under [param section]/[param label] would restore to,
+## or [param default] when nothing was persisted. Owners of expensive launch
+## state (a rebuild-heavy setter behind a persisted slider) read this before
+## building, so the deferred restore finds the widget already at its value and
+## its change signal never fires.
+func stored_value(section: String, label: String, default: Variant) -> Variant:
+	return _persisted("%s/%s" % [section, label], default)
 
 
 ## Push a value into a widget, re-emitting so the callback runs (mirrors the kinds).
@@ -235,7 +248,14 @@ func _register(label_text: String, node: Control, cb: Callable, kind: String,
 
 
 func _process(_delta: float) -> void:
-	_fps_label.text = "%d" % Engine.get_frames_per_second()
+	var fps_text := "%d" % Engine.get_frames_per_second()
+	if _fps_label.text != fps_text:
+		_fps_label.text = fps_text
+	# The action lane only needs to react to viewport resizes and visibility
+	# flips; checking a few times per second is plenty and keeps _process cheap.
+	_layout_check_frame += 1
+	if _layout_check_frame % 4 != 0:
+		return
 	var vp_size := get_viewport_rect().size
 	var layout_key := "%d:%d:%s" % [int(vp_size.x), int(vp_size.y), _visible_action_signature()]
 	if layout_key != _action_layout_key:
@@ -353,7 +373,7 @@ func _do_reset() -> void:
 		var entry: Dictionary = _entries[key]
 		_apply_value(entry, entry.default)
 	# Wipe persisted values last, after the per-widget writes triggered above.
-	if _settings != null:
+	if _settings != null and not persist_id.is_empty():
 		_settings.clear_sim(persist_id)
 
 

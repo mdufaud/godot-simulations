@@ -17,6 +17,7 @@ func _initialize() -> void:
 	_test_skin_friction()
 	_test_shape_dissipation()
 	_test_convergence_and_terminal_speed()
+	_test_semidirect_coupling_contract()
 	call_deferred("_test_runtime_quality")
 
 
@@ -107,6 +108,8 @@ func _test_runtime_quality() -> void:
 	await _test_galilean_invariance()
 	await _test_demo_scenarios()
 	await _test_rotational_convergence()
+	await _test_torque_free_angular_momentum()
+	await _test_coupled_gyroscopic_stability()
 	_finish("ambient_fluid_phase3")
 
 
@@ -250,6 +253,134 @@ func _test_rotational_convergence() -> void:
 		"60/240 Hz rotational trajectories do not converge")
 	_check(_relative_vector_error(results[2], results[3]) < 0.04,
 		"120/240 Hz rotational trajectories do not converge")
+
+
+func _test_torque_free_angular_momentum() -> void:
+	var config := CONFIG.new()
+	config.body_density_kg_m3 = 500.0
+	config.initial_velocity_m_s = Vector3(2.0, 0.0, 0.0)
+	config.initial_spin_rad_s = Vector3(3.0, 5.0, 2.0)
+	var body := BODY.new()
+	body.profile = PROFILE
+	body.config = config
+	body.fluid_enabled = false
+	body.contacts_enabled = false
+	body.body_inertia_diagonal_kg_m2 = Vector3(2.0, 3.0, 4.0)
+	root.add_child(body)
+	await process_frame
+	while body._pending_reset:
+		await physics_frame
+	var reference := _world_angular_momentum(body)
+	var reference_norm := reference.length()
+	var worst_norm_drift := 0.0
+	var worst_direction := 1.0
+	for _frame in 120:
+		await physics_frame
+		_check(body.finite_state(), "torque-free gyro body became non-finite")
+		var angular := _world_angular_momentum(body)
+		worst_norm_drift = maxf(worst_norm_drift,
+			absf(angular.length() - reference_norm) / reference_norm)
+		worst_direction = minf(worst_direction,
+			angular.normalized().dot(reference.normalized()))
+	body.queue_free()
+	await process_frame
+	# No external torque acts on the vacuum anisotropic top, so the real loop's
+	# R^T momentum propagation must conserve world-frame angular momentum up to
+	# first-order integration error (measured: 0.8% norm drift, 0.9996
+	# direction). Dropping or misapplying the rotation wobbles the direction by
+	# radians as the body tumbles.
+	_check(worst_norm_drift < 0.03,
+		"torque-free angular momentum norm drifted %.4f on the real loop" % worst_norm_drift)
+	_check(worst_direction > 0.99,
+		"torque-free angular momentum direction drifted on the real loop (%.5f)" % worst_direction)
+
+
+func _test_coupled_gyroscopic_stability() -> void:
+	# Semidirect coupling only acts when the combined tensor couples linear and
+	# angular blocks, so this drives the real loop with an analytic profile
+	# whose added mass has off-diagonal blocks. Neutral buoyancy removes every
+	# external wrench: the loop must stay energy-bounded and land on the
+	# calibrated body-frame spin (removing the semidirect term multiplies the
+	# energy drift by ~13x and moves the final spin by 10-40% per component).
+	var profile := AmbientFluidProfile3D.new()
+	profile.format_version = AmbientFluidProfile3D.FORMAT_ANALYTIC
+	profile.volume_m3 = 1.0
+	profile.reference_density_kg_m3 = 998.0
+	profile.added_mass_tensor = _coupled_added_mass_tensor()
+	var config := CONFIG.new()
+	config.fluid_density_kg_m3 = 998.0
+	config.dynamic_viscosity_pa_s = 0.001002
+	config.body_density_kg_m3 = 998.0
+	config.initial_velocity_m_s = Vector3(1.5, 0.0, -0.4)
+	config.initial_spin_rad_s = Vector3(1.0, 1.6, 0.7)
+	var body := BODY.new()
+	body.profile = profile
+	body.config = config
+	body.contacts_enabled = false
+	body.body_inertia_diagonal_kg_m2 = Vector3(2.0, 3.0, 4.0)
+	root.add_child(body)
+	await process_frame
+	while body._pending_reset:
+		await physics_frame
+	var first_energy := body.kinetic_energy_j()
+	var worst_energy_drift := 0.0
+	for _frame in 120:
+		await physics_frame
+		_check(body.finite_state(), "coupled gyro body became non-finite")
+		worst_energy_drift = maxf(worst_energy_drift,
+			absf(body.kinetic_energy_j() - first_energy) / absf(first_energy))
+	var final_spin: Vector3 = body.global_transform.basis.transposed() * body.angular_velocity
+	body.queue_free()
+	await process_frame
+	_check(worst_energy_drift < 0.015,
+		"coupled gyroscopic step pumped %.4f of the energy on the real loop" % worst_energy_drift)
+	_check_spin_near(final_spin, Vector3(1.87036, 1.229739, 0.047268),
+		"coupled gyroscopic loop diverged from the calibrated spin")
+
+
+func _check_spin_near(actual: Vector3, expected: Vector3, message: String) -> void:
+	for index in 3:
+		var tolerance := maxf(absf(expected[index]) * 0.15, 0.02)
+		_check(absf(actual[index] - expected[index]) <= tolerance,
+			"%s (spin[%d]=%.4f, expected %.4f +/- %.4f)" % [
+				message, index, actual[index], expected[index], tolerance])
+
+
+func _world_angular_momentum(body: AmbientFluidBody3D) -> Vector3:
+	var momentum := body.current_generalized_momentum()
+	return body.global_transform.basis * Vector3(momentum[0], momentum[1], momentum[2])
+
+
+func _coupled_added_mass_tensor() -> PackedFloat64Array:
+	var tensor := MATH.zero_matrix()
+	tensor[21] = 500.0
+	tensor[28] = 550.0
+	tensor[35] = 450.0
+	tensor[0] = 80.0
+	tensor[7] = 100.0
+	tensor[14] = 70.0
+	tensor[4] = 0.3
+	tensor[24] = 0.3
+	tensor[11] = -0.25
+	tensor[31] = -0.25
+	tensor[15] = 0.2
+	tensor[20] = 0.2
+	return tensor
+
+
+func _test_semidirect_coupling_contract() -> void:
+	# The runtime gyroscopic term is semidirect_coupling_wrench: torque equals
+	# the linear momentum crossed with the linear velocity, force stays zero.
+	var momentum := PackedFloat64Array([0.0, 0.0, 0.0, 3.0, -1.0, 2.0])
+	var velocity := PackedFloat64Array([0.5, -0.25, 1.0, 0.3, 0.0, -0.6])
+	var wrench := MATH.semidirect_coupling_wrench(momentum, velocity)
+	var expected_torque := Vector3(3.0, -1.0, 2.0).cross(Vector3(0.3, 0.0, -0.6))
+	_check(absf(wrench[0] - expected_torque.x) < 1.0e-12
+		and absf(wrench[1] - expected_torque.y) < 1.0e-12
+		and absf(wrench[2] - expected_torque.z) < 1.0e-12,
+		"semidirect coupling torque is not p_linear x v_linear")
+	_check(absf(wrench[3]) + absf(wrench[4]) + absf(wrench[5]) < 1.0e-12,
+		"semidirect coupling produced a force")
 
 
 func _test_convergence_and_terminal_speed() -> void:

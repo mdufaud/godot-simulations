@@ -256,9 +256,48 @@ static func _choose_sources(vertices: PackedVector3Array, triangles: Array,
 		minimum = minimum.min(vertex)
 		maximum = maximum.max(vertex)
 	var shape_extent := (maximum - minimum).length()
+	# Sources ride vertex normals inward. On a thin shape a deep offset pushes
+	# them past the opposite face, which corrupts the potentials (the demo
+	# plate once got an inverted broadside/edgewise added mass), so cap the
+	# offset at half the smallest face-centroid-to-opposite-plane distance.
+	var min_face_gap := INF
+	for triangle_index in triangles.size():
+		var ids: PackedInt32Array = triangles[triangle_index]
+		var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+		var normal: Vector3 = face_normals[triangle_index]
+		for other_index in triangles.size():
+			if other_index == triangle_index:
+				continue
+			var other_ids: PackedInt32Array = triangles[other_index]
+			# Facing pairs measure the shape's thinness; a triangle centroid
+			# hugging an edge would understate the gap to a perpendicular face.
+			if face_normals[other_index].dot(normal) >= -0.5:
+				continue
+			var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
+			if gap > 1.0e-9:
+				min_face_gap = minf(min_face_gap, gap)
+	if not is_finite(min_face_gap):
+		# No facing pair (nonconvex mesh): keep the conservative all-pairs bound.
+		for triangle_index in triangles.size():
+			var ids: PackedInt32Array = triangles[triangle_index]
+			var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+			for other_index in triangles.size():
+				if other_index == triangle_index:
+					continue
+				var other_ids: PackedInt32Array = triangles[other_index]
+				var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
+				if gap > 1.0e-9:
+					min_face_gap = minf(min_face_gap, gap)
+	if not is_finite(min_face_gap):
+		return _fail_dict("mesh interior is too thin to place BEM sources")
+	var max_offset := 0.5 * min_face_gap
 	var factors := [0.2, 0.15, 0.1, 0.075, 0.05, 0.025]
+	var previous_offset := -1.0
 	for factor in factors:
-		var offset := shape_extent * float(factor)
+		var offset := minf(shape_extent * float(factor), max_offset)
+		if is_equal_approx(offset, previous_offset):
+			continue
+		previous_offset = offset
 		var sources := PackedVector3Array()
 		var all_inside := true
 		for vertex_index in vertices.size():

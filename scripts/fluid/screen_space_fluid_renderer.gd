@@ -78,6 +78,7 @@ func start() -> void:
 	_setup_filters()
 	_setup_foam_render()
 	_setup_composite()
+	camera.get_viewport().size_changed.connect(_apply_sizes)
 
 
 func composite_material() -> ShaderMaterial:
@@ -108,6 +109,16 @@ func set_particle_count(n: int) -> void:
 	_fill_mm(mm)
 
 
+## A tier hot-switch re-inits the solver with a new texture side; the prepass
+## materials index the position/thickness textures with it and must follow.
+func set_texture_width(value: int) -> void:
+	if value == tex_width:
+		return
+	tex_width = value
+	depth_mat.set_shader_parameter("tex_width", value)
+	thick_mat.set_shader_parameter("tex_width", value)
+
+
 func set_visible_count(n: int) -> void:
 	if mm != null:
 		mm.visible_instance_count = n
@@ -124,11 +135,22 @@ func set_foam_visible(on: bool) -> void:
 
 func set_render_scale(v: float) -> void:
 	render_scale = v
+	_apply_sizes()
+
+
+## Resize every pass to the main viewport's current size. Runs at start and on
+## every window resize: the composite samples these targets in screen UVs, so a
+## stale size or proj_scale misaligns the surface after an aspect change.
+func _apply_sizes() -> void:
+	if depth_vp == null:
+		return
 	var scaled := _scaled_size()
 	depth_vp.size = scaled
 	thick_vp.size = _thick_size(scaled)
 	filter_h_vp.size = scaled
 	filter_v_vp.size = scaled
+	if foam_vp != null:
+		foam_vp.size = _foam_size()
 	var proj_scale := _proj_scale(scaled)
 	filter_h_mat.set_shader_parameter("proj_scale", proj_scale)
 	filter_v_mat.set_shader_parameter("proj_scale", proj_scale)

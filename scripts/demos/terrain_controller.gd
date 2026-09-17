@@ -66,6 +66,7 @@ var texture_bound := false
 var _menu_builder := TerrainMenu.new()
 var _preset: TerrainPreset = PRESETS[0]
 var _time := 0.0
+var _step_clock := SimStepClock.new()
 var _dragging := false
 var _aim := Vector2.ZERO
 var _strength := 1.2
@@ -77,6 +78,12 @@ var _grab_target := Vector3.ZERO
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	solver.config = config
 	quality.setup(TerrainQualityProfile, "terrain_quality_profile", _apply_quality)
 	quality.restore()
@@ -97,7 +104,7 @@ func _ready() -> void:
 
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(func(on: bool): solver.profiling = on)
-	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid())
+	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 
 	_setup_ui()
 	# apply_preset seeds the field and brings the solver up; no separate init here.
@@ -120,7 +127,10 @@ func _process(delta: float) -> void:
 		texture_bound = true
 		return
 
-	_time += delta
+	# Sim time and transports advance in fixed quanta so pours, melt, erosion
+	# and the orbiting sources run at the same speed at any frame rate.
+	var quanta := _step_clock.advance(delta)
+	_time += _step_clock.reference_step * float(quanta)
 	var watering := _preset.waters_by_itself() and auto_water and not _dragging
 	var pouring := not watering and _preset.pours_by_itself() and auto_pour and not _dragging
 	if _dragging:
@@ -150,7 +160,9 @@ func _process(delta: float) -> void:
 	var digging := solver.brush.mode == TerrainBrush.DIG or solver.brush.mode == TerrainBrush.POUR
 	view.dust.emitting = digging and not solver.brush.idle()
 
-	RenderingServer.call_on_render_thread(solver.step_render.bind(delta))
+	for i in quanta:
+		RenderingServer.call_on_render_thread(
+			solver.step_render.bind(_step_clock.reference_step))
 	profiler.poll(delta)
 
 
@@ -195,6 +207,7 @@ func restart() -> void:
 	view.sand_mat.set_shader_parameter("color_dark", _preset.sand_dark)
 	view.sand_mat.set_shader_parameter("grid_n", float(solver.grid_n))
 	_time = 0.0
+	_step_clock.reset()
 	_menu_builder.sync_tool(tool_choice)
 	_menu_builder.sync_params()
 	_menu_builder.set_hint(_preset.hint)

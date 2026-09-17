@@ -35,7 +35,7 @@ func _profile_table() -> void:
 		GrassQualityProfile: ["density", "shadows", "shadow_distance_m", "render_scale"],
 		MixwellQualityProfile: ["target_spp", "preview_scale", "final_scale",
 			"gpu_budget_ms"],
-		FractalQualityProfile: ["aa_quality", "interaction_cap", "refine_band_rows"],
+		FractalQualityProfile: ["aa_quality", "refine_band_rows"],
 		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale", "render_scale"],
 		SsrQualityProfile: ["render_scale", "msaa", "ssr_steps", "max_objects",
 			"ssao", "ssil", "glow"],
@@ -150,8 +150,6 @@ func _test_lever_caps() -> void:
 	var fractal := FractalQualityProfile
 	for tier in 4:
 		var values: Dictionary = fractal.values(tier)
-		_check(values.interaction_cap <= 10000,
-			"fractal tier %d cap above FractalConfig range" % tier)
 		_check(values.refine_band_rows <= 4096,
 			"fractal tier %d band above FractalConfig range" % tier)
 		_check(values.aa_quality in [1, 2, 3], "fractal AA level out of shader range")

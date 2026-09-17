@@ -3,6 +3,8 @@ class_name GrassRenderer extends Node3D
 const GRASS_MESH_HIGH := preload("res://resources/grass/grass_high.obj")
 const GRASS_MESH_LOW := preload("res://resources/grass/grass_low.obj")
 const GRASS_MAT := preload("res://resources/grass/grass_material.tres")
+const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
+const GROUND_SHADER := preload("res://shaders/grass/ground.gdshader")
 const GrassMultimeshBuilder := preload("res://scripts/grass/grass_multimesh_builder.gd")
 
 const TILE_SIZE := 10.0
@@ -17,6 +19,8 @@ var material: ShaderMaterial
 var _tiles: Array[Array] = []
 var _previous_tile_id := Vector3.ZERO
 var _gust := 0.0
+var _lod_meshes: Array[MultiMesh] = []
+var _rank_target := Vector3.ZERO
 
 
 func build() -> void:
@@ -25,11 +29,22 @@ func build() -> void:
 		push_error("Grass config: %s" % config_error)
 		return
 	material = GRASS_MAT.duplicate() as ShaderMaterial
-	material.set_shader_parameter("heightmap", preload("res://resources/grass/grass_heightmap.tres"))
+	material.set_shader_parameter("heightmap", HEIGHTMAP)
 	material.set_shader_parameter("heightmap_scale", config.heightmap_scale_m)
 	set_crush_center(Vector3.ZERO)
 	_build_tiles()
 	generate()
+
+
+## Soil material displacing a ground mesh with the same heightmap the blades
+## sample; assign it to a subdivided ground plane so the visible ground
+## matches the field the grass grows on.
+func ground_material() -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = GROUND_SHADER
+	mat.set_shader_parameter("heightmap", HEIGHTMAP)
+	mat.set_shader_parameter("heightmap_scale", config.heightmap_scale_m)
+	return mat
 
 
 func set_crush_center(world_position: Vector3) -> void:
@@ -54,9 +69,11 @@ func tick(delta: float, camera_target: Vector3) -> void:
 		/ config.tile_size_m * Vector3(1, 0, 1)).floor()
 	if tile_id == _previous_tile_id:
 		return
+	_rank_target = camera_target
 	for data in _tiles:
 		data[0].global_position = data[1] + Vector3(1, 0, 1) * config.tile_size_m * tile_id
 	_previous_tile_id = tile_id
+	_rank_tiles()
 
 
 func set_density(value: float) -> void:
@@ -87,7 +104,7 @@ func set_shadow_distance(distance_m: float) -> void:
 
 func _apply_tile_shadows() -> void:
 	for data in _tiles:
-		var near: bool = data[1].length() < config.shadow_distance_m
+		var near: bool = _flat_distance(data[0]) < config.shadow_distance_m
 		data[0].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
 			if shadows_enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
@@ -110,7 +127,7 @@ func _build_tiles() -> void:
 
 
 func generate() -> void:
-	var multimesh_lods: Array[MultiMesh] = [
+	_lod_meshes = [
 		GrassMultimeshBuilder.build(1.0 * density, config.tile_size_m, GRASS_MESH_HIGH),
 		GrassMultimeshBuilder.build(0.5 * density, config.tile_size_m, GRASS_MESH_HIGH),
 		GrassMultimeshBuilder.build(0.25 * density, config.tile_size_m, GRASS_MESH_LOW),
@@ -118,15 +135,31 @@ func generate() -> void:
 		GrassMultimeshBuilder.build(0.02 * (1.0 if density != 0.0 else 0.0),
 			config.tile_size_m, GRASS_MESH_LOW),
 	]
+	_rank_tiles()
+
+
+## LOD and shadow rings follow the camera focus, not the carpet origin: tiles
+## reposition on every tile step and must be re-ranked or grass visibly thins
+## around the player.
+func _rank_tiles() -> void:
 	for data in _tiles:
-		var distance: float = data[1].length()
-		if distance < 12.0:
-			data[0].multimesh = multimesh_lods[0]
-		elif distance < 40.0:
-			data[0].multimesh = multimesh_lods[1]
-		elif distance < 55.0:
-			data[0].multimesh = multimesh_lods[2]
-		elif distance < 70.0:
-			data[0].multimesh = multimesh_lods[3]
+		var instance: MultiMeshInstance3D = data[0]
+		var flat := _flat_distance(instance)
+		if flat < 12.0:
+			instance.multimesh = _lod_meshes[0]
+		elif flat < 40.0:
+			instance.multimesh = _lod_meshes[1]
+		elif flat < 55.0:
+			instance.multimesh = _lod_meshes[2]
+		elif flat < 70.0:
+			instance.multimesh = _lod_meshes[3]
 		else:
-			data[0].multimesh = multimesh_lods[4]
+			instance.multimesh = _lod_meshes[4]
+		var near := flat < config.shadow_distance_m
+		instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON \
+			if shadows_enabled and near else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func _flat_distance(instance: MultiMeshInstance3D) -> float:
+	return Vector2(instance.global_position.x - _rank_target.x,
+		instance.global_position.z - _rank_target.z).length()

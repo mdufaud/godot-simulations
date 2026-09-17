@@ -71,6 +71,7 @@ var renderer: ScreenSpaceFluidRenderer
 var _radius := RADIUS[Method.SPH]
 var _pour_cursor := 0
 var _last_pour_ms := -POUR_COOLDOWN_MS
+var _step_clock := SimStepClock.new()
 
 
 func active() -> Object:
@@ -101,7 +102,7 @@ func start() -> void:
 	_setup_renderer()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func _setup_renderer() -> void:
@@ -138,7 +139,7 @@ func set_method(m: Method) -> void:
 	_configure_solver()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func set_scenario(value: Scenario) -> void:
@@ -155,7 +156,7 @@ func set_scenario(value: Scenario) -> void:
 	_configure_solver()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func set_cascade_flow(value: float) -> void:
@@ -170,7 +171,7 @@ func set_mode(m: float) -> void:
 	renderer.set_mode(mode)
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func set_particle_count(n: int) -> void:
@@ -180,8 +181,11 @@ func set_particle_count(n: int) -> void:
 	active_solver.particle_count = n
 	particle_count = n
 	renderer.set_particle_count(n)
+	# The solver re-reads config.texture_width on the queued re-init; keep the
+	# renderer's impostor/thickness samplers on the same side.
+	renderer.set_texture_width(config.texture_width)
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 # The pool is allocated with the solver, so toggling only gates the foam stages
@@ -211,8 +215,9 @@ func restart() -> void:
 	_teardown()
 	_pour_cursor = 0
 	_last_pour_ms = -POUR_COOLDOWN_MS
+	_step_clock.reset()
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init)
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func set_profiling(on: bool) -> void:
@@ -440,16 +445,18 @@ func _foam_billboard_size() -> float:
 
 # --- Render-thread lifecycle ----------------------------------------------
 
-func _render_init() -> void:
-	active_solver.init_render()
+# The solver is captured at queue time: the render thread drains the queue
+# later, after the main thread may have nulled or reassigned active_solver.
+func _render_init(solver) -> void:
+	solver.init_render()
 
 
-func _render_free() -> void:
-	active_solver.free_render()
+func _render_free(solver) -> void:
+	solver.free_render()
 
 
-func _render_step(dt: float) -> void:
-	active_solver.step_render(dt)
+func _render_step(solver, dt: float) -> void:
+	solver.step_render(dt)
 
 
 # --- Seeding ---------------------------------------------------------------
@@ -630,19 +637,23 @@ func _build_dam_seed() -> PackedFloat32Array:
 
 # --- Per-frame -------------------------------------------------------------
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if active_solver == null or not active_solver.initialized:
 		return
 	var visible: int = sph_solver.live_count() if method == Method.SPH else active_solver.particle_count
 	var foam_rid: RID = sph_solver.get_foam_tex_rid() if method == Method.SPH else RID()
 	renderer.update(active_solver.get_position_tex_rid(), visible, foam_rid)
-	RenderingServer.call_on_render_thread(_render_step.bind(1.0 / 60.0))
+	for i in _step_clock.advance(delta):
+		RenderingServer.call_on_render_thread(_render_step.bind(active_solver, 1.0 / 60.0))
 
 
 func _teardown() -> void:
 	if renderer != null:
 		renderer.rebind()
-	RenderingServer.call_on_render_thread(_render_free)
+	var solver = active_solver
+	if solver == null:
+		return
+	RenderingServer.call_on_render_thread(solver.free_render)
 
 
 func stop() -> void:

@@ -31,7 +31,8 @@ export LOG_DIR
 
 # Shared mode: hold this for the whole run so tools/import.sh waits instead of
 # rewriting the script class cache under our feet. Shared locks between runners
-# still let several agents test concurrently.
+# still let several agents test concurrently. The virtual display is exclusive
+# instead: agents queue on .godot/virtual-display.lock for the whole GPU phase.
 mkdir -p "$PROJECT_DIR/.godot"
 exec 9>>"$PROJECT_DIR/.godot/import.lock"
 flock -s 9
@@ -114,6 +115,7 @@ declare -a CPU_SUITES=(
 	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
 	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
 	"cloth_wind|res://tests/cloth_wind_test.gd"
+	"sim_step_clock|res://tests/sim_step_clock_test.gd"
 	"quality_profiles|res://tests/quality_profiles_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do
@@ -146,8 +148,8 @@ if [[ "${GPU:-0}" != "1" ]]; then
 	exit 0
 fi
 
-if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-	failed+=(non_euclidean ocean_fft scene_cycle ui_smoke)
+	if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
+		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look ui_smoke)
 else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
@@ -214,6 +216,27 @@ else
 		printf 'TEST FAIL scene_cycle: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$scene_cycle_output" >&2
 		failed+=(scene_cycle)
+	fi
+
+	tornado_look_output="$LOG_DIR/gpu-tornado_boot_look.stdout.log"
+	tornado_look_log="$LOG_DIR/gpu-tornado_boot_look.godot.log"
+	tornado_look_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS tornado_boot_look$' "$tornado_look_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$tornado_look_log" \
+			-s res://tests/tornado_boot_look_probe.gd || tornado_look_status=$?
+	if (( tornado_look_status == 0 )) && grep -q '^TEST PASS tornado_boot_look$' "$tornado_look_output"; then
+		printf 'TEST PASS tornado_boot_look\n'
+	else
+		printf 'TEST FAIL tornado_boot_look: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$tornado_look_output" >&2
+		failed+=(tornado_boot_look)
 	fi
 
 	terrain_output="$LOG_DIR/gpu-terrain.stdout.log"

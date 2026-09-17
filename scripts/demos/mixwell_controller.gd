@@ -43,6 +43,7 @@ const OFFICIAL_EXAMPLE_HELP := [
 
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var display: ColorRect = $Display
+@onready var _viewport := ViewportGuard.attach(self)
 @onready var experience: Control = $UI/Experience
 @onready var stroke_preview: Line2D = $UI/Experience/StrokePreview
 @onready var guide_title: Label = $UI/Experience/Guide/Text/Title
@@ -78,6 +79,8 @@ var capability_label: Label
 var comparison_label: Label
 var progress_bar: ProgressBar
 var gallery_option: OptionButton
+var source_option: OptionButton
+var display_option: OptionButton
 var strokes: Array[MixwellStroke] = []
 var stroke_batches: Array[int] = []
 var active_stroke: MixwellStroke
@@ -95,8 +98,9 @@ var _preview_active := false
 var _render_transition := false
 var _requested_size := Vector2i.ZERO
 var _last_viewport_size := Vector2i.ZERO
-var _viewport_profiling := false
 var _last_metrics_request := -1
+var _status_last_msec := -1000000
+var _last_status_text := ""
 var _mobile_profile := false
 var quality := SimQualityState.new()
 var _stroke_preview_tween: Tween
@@ -104,6 +108,12 @@ var _official_example_index := 0
 
 
 func _ready() -> void:
+	# No RenderingDevice means every compute dispatch silently no-ops: say so
+	# instead of booting into a black screen.
+	if not GpuPreflight.available():
+		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
+		return
+
 	_mobile_profile = OS.has_feature("mobile") or OS.get_environment("FORCE_TOUCH_UI") == "1"
 	config.source_mode = source_mode
 	quality.setup(MixwellQualityProfile, "mixwell_quality_profile", _apply_quality)
@@ -154,7 +164,10 @@ func _process(delta: float) -> void:
 		sample_index += batch
 		RenderingServer.call_on_render_thread(solver.render_samples.bind(index, batch,
 			solver.create_render_snapshot()))
-	if solver.diagnostics_enabled() and sample_index != _last_metrics_request and (sample_index == 1 \
+	# update_metrics costs full-texture readbacks and O(pixels) CPU analysis on
+	# the render thread: only pay it while the panel can display the numbers.
+	if menu.is_panel_open() and solver.diagnostics_enabled() and \
+			sample_index != _last_metrics_request and (sample_index == 1 \
 			or sample_index % 4 == 0 or sample_index >= spp_limit):
 		_last_metrics_request = sample_index
 		RenderingServer.call_on_render_thread(solver.update_metrics)
@@ -170,8 +183,6 @@ func _exit_tree() -> void:
 		source_texture.texture_rd_rid = RID()
 	if diagnostic_texture != null:
 		diagnostic_texture.texture_rd_rid = RID()
-	if _viewport_profiling:
-		RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), false)
 	RenderingServer.call_on_render_thread(solver.free_render)
 
 
@@ -208,7 +219,7 @@ func _setup_ui() -> void:
 	]:
 		var info_label := menu.add_label(info)
 		info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	menu.add_option_button("Source", SOURCE_NAMES, source_mode, _select_source)
+	source_option = menu.add_option_button("Source", SOURCE_NAMES, source_mode, _select_source)
 	source_info_label = menu.add_label(SOURCE_DESCRIPTIONS[source_mode])
 	source_info_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	menu.add_button("Load source texture", _open_source_texture)
@@ -224,7 +235,7 @@ func _setup_ui() -> void:
 	menu.add_button("Next pass", _next_pattern_step)
 	menu.add_button("Show all passes", _show_all_pattern_steps)
 	menu.add_section("Rendering")
-	menu.add_option_button("Display", DISPLAY_NAMES, display_mode, _select_display)
+	display_option = menu.add_option_button("Display", DISPLAY_NAMES, display_mode, _select_display)
 	menu.add_option_button("Boundary", BOUNDARY_NAMES, config.boundary_mode,
 		_set_boundary_mode)
 	menu.add_button("Run periodic A/B", _run_periodic_gpu_ab)
@@ -238,7 +249,7 @@ func _setup_ui() -> void:
 		_set_cutoff_gamma)
 	var spp_option: OptionButton = menu.add_option_button("Target spp", SPP_NAMES,
 		MixwellConfig.SPP_TARGETS.find(config.target_spp), _select_target_spp)
-	quality.bind("target_spp", spp_option, _select_target_spp,
+	quality.bind("target_spp", spp_option, _apply_target_spp,
 		func(spp: int) -> int: return MixwellConfig.SPP_TARGETS.find(spp))
 	var budget_slider: HSlider = menu.add_slider("GPU budget (ms)", 0.5, 33.0,
 		config.gpu_budget_ms, _set_gpu_budget)
@@ -274,7 +285,11 @@ func _setup_experience() -> void:
 	next_pass.pressed.connect(_next_official_pass)
 	restart_example.pressed.connect(_restart_official_example)
 	experience_undo.pressed.connect(_undo)
-	menu.panel_toggled.connect(func(open: bool): experience.visible = not open)
+	menu.panel_toggled.connect(func(open: bool) -> void:
+		experience.visible = not open
+		if open:
+			_last_metrics_request = -1
+	)
 	_set_comparison_overlay(false)
 	_set_freehand_actions(false)
 	_update_official_panel()
@@ -299,6 +314,8 @@ func _select_official_example(index: int) -> void:
 	_preview_active = false
 	if gallery_option != null:
 		gallery_option.select(motion_mode)
+	if source_option != null and source_option.selected != source_mode:
+		source_option.select(source_mode)
 	_update_source_info()
 	_update_pattern_panel()
 	_update_exhibit_panel()
@@ -417,6 +434,9 @@ func _select_comparison(index: int) -> void:
 		display_mode = 0
 		if display_material != null:
 			display_material.set_shader_parameter("display_mode", display_mode)
+		if display_option != null and display_option.selected != 0:
+			display_option.select(0)
+		solver.set_diagnostics_enabled(solver.is_profiling())
 	before_label.visible = comparison_mode == 1
 	after_label.visible = comparison_mode == 1
 	comparison_divider.visible = comparison_mode == 1
@@ -620,7 +640,13 @@ func _set_cutoff_gamma(value: float) -> void:
 func _select_target_spp(index: int) -> void:
 	if index < 0 or index >= MixwellConfig.SPP_TARGETS.size():
 		return
-	config.target_spp = MixwellConfig.SPP_TARGETS[index]
+	_apply_target_spp(MixwellConfig.SPP_TARGETS[index])
+
+
+## Receives the spp itself, not a menu index: quality tiers push the raw tier
+## table value through bound callbacks, same number the menu shows.
+func _apply_target_spp(spp: int) -> void:
+	config.target_spp = spp
 	progress_bar.max_value = config.target_spp if not _preview_active else 1.0
 	_request_reset()
 
@@ -642,8 +668,7 @@ func _apply_quality(values: Dictionary) -> void:
 func _set_profiling(enabled: bool) -> void:
 	solver.set_profiling(enabled)
 	solver.set_diagnostics_enabled(enabled or display_mode != 0)
-	_viewport_profiling = enabled
-	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), enabled)
+	_viewport.set_measure_render_time(enabled)
 
 
 func _run_periodic_gpu_ab() -> void:
@@ -830,7 +855,10 @@ func _stroke_spacing() -> float:
 
 
 func _stroke_segment_capacity() -> int:
-	return maxi(_segment_limit() - _committed_segment_count(), 0)
+	# Mirrors the solver's set_strokes budget: the preset's own segments share
+	# the same buffer as user strokes.
+	return maxi(_segment_limit() - solver.get_preset_segment_count()
+		- _committed_segment_count(), 0)
 
 
 func _committed_segment_count() -> int:
@@ -899,6 +927,13 @@ func _is_ui_position(position: Vector2) -> bool:
 func _update_status() -> void:
 	if status_label == null:
 		return
+	# The text build serializes solver state and the autowrap label relayouts on
+	# every assignment: refresh a few times per second, and only on change.
+	var now := Time.get_ticks_msec()
+	if now - _status_last_msec < 200:
+		_update_progress_bar()
+		return
+	_status_last_msec = now
 	var segment_count := _committed_segment_count()
 	if active_stroke != null:
 		segment_count += active_stroke.segment_count()
@@ -955,12 +990,19 @@ func _update_status() -> void:
 		float(metrics.get("convergence_rms", 0.0)), float(metrics.get("convergence_p99", 0.0)),
 		solver.get_wall_calibration(),
 	]
-	status_label.text = "%s · %s · %d strokes · %d/%d segments · passes %d/%d · %s · %s\n%s\n%s" % [
+	var status_text := "%s · %s · %d strokes · %d/%d segments · passes %d/%d · %s · %s\n%s\n%s" % [
 		SOURCE_NAMES[source_mode], "%s / %s / %s" % [mode, DISPLAY_NAMES[display_mode],
 			Gallery.compensation_names()[config.drift_compensation]],
 		strokes.size(), segment_count, _segment_limit(), pattern_active, pattern_total, phase,
 		boundary, timing_line, quality_line,
 	]
+	if status_text != _last_status_text:
+		_last_status_text = status_text
+		status_label.text = status_text
+	_update_progress_bar()
+
+
+func _update_progress_bar() -> void:
 	if progress_bar != null:
 		progress_bar.max_value = 1.0 if _preview_active else config.target_spp
 		progress_bar.value = minf(float(sample_index), progress_bar.max_value)

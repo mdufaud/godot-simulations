@@ -11,7 +11,7 @@ const MEASURE_BREAKING_THRESHOLD := 0.15
 const MEASURE_VERSION := 5
 
 @export_range(8, 2048, 1) var map_size: int = 512
-@export var clipmap_tile_lengths_m: PackedFloat32Array = PackedFloat32Array([2039.0, 257.0, 67.0])
+@export var clipmap_tile_lengths_m: PackedFloat32Array = PackedFloat32Array([2039.0, 111.0, 25.0])
 @export_range(1, 32, 1) var clipmap_levels: int = 8
 @export_range(0.001, 100.0, 0.001) var finest_cell_m: float = 0.125
 
@@ -19,8 +19,10 @@ const MEASURE_VERSION := 5
 func validate() -> String:
 	if map_size < 8 or (map_size & (map_size - 1)) != 0:
 		return "map_size must be a power of two >= 8"
-	if clipmap_levels < 1 or clipmap_tile_lengths_m.size() < 3:
-		return "clipmap levels and tile lengths are incomplete"
+	# The whole pipeline is 3-cascade: CHOP_PER_CASCADE, MAX_CASCADES uniform
+	# arrays, the query/near push constants and the 3-layer foam field.
+	if clipmap_levels < 1 or clipmap_tile_lengths_m.size() != 3:
+		return "clipmap requires exactly 3 cascade tile lengths"
 	for i in range(clipmap_tile_lengths_m.size() - 1):
 		if clipmap_tile_lengths_m[i] <= clipmap_tile_lengths_m[i + 1]:
 			return "clipmap tile lengths must descend"

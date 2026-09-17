@@ -3,6 +3,8 @@ class_name OceanMenu extends RefCounted
 ## sea-state sliders are the single path a preset travels through: applying a
 ## preset moves the sliders, and the sliders move the solver.
 
+const MOOD_LEVELS: Array[float] = [0.0, 0.5, 1.0]
+
 var solver: OceanSolver
 var surface_mat: ShaderMaterial
 var world_env: WorldEnvironment
@@ -96,6 +98,8 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	menu.add_separator()
 
 	menu.add_action("🌊", "Sea", cycle_preset)
+	menu.add_action("🌗", "Mood", cycle_mood)
+	menu.add_action("🎨", "Palette", cycle_look)
 	menu.add_action("📦", "Throw", host.throw_crate)
 	menu.add_action("🧹", "Clear", host.clear_crates)
 	menu.add_action_toggle("⏸", "Freeze", false, host.set_frozen)
@@ -171,6 +175,7 @@ func sync_to_preset(preset: OceanPreset) -> void:
 	_foam_amount.value = preset.foam_amount
 	_foam_persistence.value = preset.foam_persistence
 	_spray_amount.value = preset.spray_amount
+	_mood.set_value_no_signal(preset.storm_mood)
 	_updating = false
 
 
@@ -224,6 +229,28 @@ func cycle_preset() -> void:
 	var next := (_preset_option.selected + 1) % _preset_option.item_count
 	_preset_option.select(next)
 	_preset_option.item_selected.emit(next)
+
+
+## Action-strip mood cycle: Clear → Building → Storm. The slider's signal owns
+## storm.mood_target, so writing the slider is the whole update.
+func cycle_mood() -> void:
+	if _mood == null:
+		return
+	var closest := 0
+	for i in range(1, MOOD_LEVELS.size()):
+		if absf(storm.mood_target - MOOD_LEVELS[i]) \
+				< absf(storm.mood_target - MOOD_LEVELS[closest]):
+			closest = i
+	_mood.value = MOOD_LEVELS[(closest + 1) % MOOD_LEVELS.size()]
+
+
+## Action-strip palette cycle: Golden Hour → Tropical Day → Storm Overcast → …
+func cycle_look() -> void:
+	if _look_option == null:
+		return
+	var next := (_look_option.selected + 1) % _look_option.item_count
+	_look_option.select(next)
+	_look_option.item_selected.emit(next)
 
 
 ## Spectrum-shaping sliders flip the dirty flag: regeneration is one cheap

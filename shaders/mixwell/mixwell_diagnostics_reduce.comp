@@ -11,8 +11,8 @@ shared float convergence_sum_shared[256];
 shared float convergence_max_shared[256];
 shared float category_sum_shared[5][256];
 shared uint category_count_shared[5][256];
-shared uint area_hist_shared[16][256];
-shared uint convergence_hist_shared[16][256];
+shared uint area_hist_shared[16];
+shared uint convergence_hist_shared[16];
 
 
 uint metric_bin(float value, float scale) {
@@ -51,15 +51,15 @@ void main() {
 				valid && zone == category ? area_error : 0.0;
 		category_count_shared[category][local_index] = valid && zone == category ? 1u : 0u;
 	}
-	for (uint bin = 0u; bin < 16u; bin++) {
-		area_hist_shared[bin][local_index] = 0u;
-		convergence_hist_shared[bin][local_index] = 0u;
+	if (local_index < 16u) {
+		area_hist_shared[local_index] = 0u;
+		convergence_hist_shared[local_index] = 0u;
 	}
 	barrier();
 	if (valid) {
-		atomicAdd(area_hist_shared[metric_bin(area_error, max(params.diagnostic.z, 1.0))][local_index], 1u);
+		atomicAdd(area_hist_shared[metric_bin(area_error, max(params.diagnostic.z, 1.0))], 1u);
 		atomicAdd(convergence_hist_shared[metric_bin(convergence_error,
-				max(params.diagnostic.w, 1.0))][local_index], 1u);
+				max(params.diagnostic.w, 1.0))], 1u);
 	}
 	barrier();
 	for (uint stride = 128u; stride > 0u; stride >>= 1u) {
@@ -93,14 +93,8 @@ void main() {
 		diagnostic_reduction.values[output_base + 9u + category] = float(category_count);
 	}
 	for (uint bin = 0u; bin < 16u; bin++) {
-		uint area_count = 0u;
-		uint convergence_count = 0u;
-		for (uint lane = 0u; lane < 256u; lane++) {
-			area_count += area_hist_shared[bin][lane];
-			convergence_count += convergence_hist_shared[bin][lane];
-		}
-		diagnostic_reduction.values[output_base + 14u + bin] = float(area_count);
-		diagnostic_reduction.values[output_base + 30u + bin] = float(convergence_count);
+		diagnostic_reduction.values[output_base + 14u + bin] = float(area_hist_shared[bin]);
+		diagnostic_reduction.values[output_base + 30u + bin] = float(convergence_hist_shared[bin]);
 	}
 	diagnostic_reduction.values[output_base + 46u] = 0.0;
 	diagnostic_reduction.values[output_base + 47u] = 0.0;
