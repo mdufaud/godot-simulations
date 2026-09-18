@@ -8,6 +8,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 // fields FIRE_CONFIG_FIELDS and the physical constants R_GAS and SIGMA_SB are
 // owned by FireGpuSolver and prepended as defines (FireGpuSolver.glsl_defines),
 // together with the tile-pool layout of FireTilePool.glsl_header.
+// STAT_DIAG heads the diagnostic block, all gated by cfg.diag.x so an inactive
+// bit costs one uniform branch: 0 reactant-clamp events, 1 temperature-clamp
+// events, 2 fraction renormalisations, 3 chemical heat [mJ], 4 fuel burned [ng],
+// 5 pilot heat [mJ], 6..9 the pure-species molar Cp probe at cfg.diag.y
+// [mJ/(mol.K)] (N2, O2, CO2, H2O), 10 the wood cap-clipped fuel [ng at unit
+// density], 11 the evaporated liquid [ng] and 12 the H2O mass the mixture gained
+// [ng] (equal by Eq. 31); mJ are STAT_SCALE, ng STAT_MASS_SCALE. Cleared with the
+// rest by fire_advect, so every value is one substep.
 
 // Field textures ping-pong: *_src is the current state, *_dst receives the
 // advected result, after which the solver flips parity.
@@ -48,7 +56,14 @@ layout(FMT_CURL, set = 0, binding = 6) uniform restrict image3D curl_tex;
 layout(r32f, set = 0, binding = 7) uniform restrict image3D press_src;
 layout(r32f, set = 0, binding = 8) uniform restrict image3D press_dst;
 layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
-layout(rgba8, set = 0, binding = 10) uniform restrict image3D display_tex;
+// Display field encoding. rgba8 keeps the legacy 4-byte texel; FIRE_DISPLAY_F16
+// (A/B of the lot-K baseline) switches the soot channel to half float so the
+// finely visible smoke band survives quantisation. The texture format on the
+// GDScript side must match whatever lands here.
+#ifndef FMT_DISPLAY
+#define FMT_DISPLAY rgba8
+#endif
+layout(FMT_DISPLAY, set = 0, binding = 10) uniform restrict image3D display_tex;
 layout(r32f, set = 0, binding = 29) uniform restrict image3D visual_activity_tex;
 
 layout(std430, set = 0, binding = 11) restrict buffer Stats {

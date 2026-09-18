@@ -105,7 +105,11 @@ void main() {
 
 	// Eq. 26-28. Everything the liquid holds above ambient is spent boiling off
 	// whatever mass that energy covers, capped by the mass actually present.
-	float e_per_kg = cp_g * (T_B - t_amb) + dvH; // Eq. 27 / (rho_d.V_d)
+	// cfg.diag.z (diagnostic A/B) selects the phase of the Eq. 27 Cp: the shipped
+	// convention charges the gas Cp, the paper leaves it ambiguous — see the
+	// header note above and tests/fire_water_balance_test.gd for the comparison.
+	float cp_b = (cfg.diag.z > 0.5) ? cp_l : cp_g;
+	float e_per_kg = cp_b * (T_B - t_amb) + dvH; // Eq. 27 / (rho_d.V_d)
 	float available = heat_liq * (T_l - t_amb); // Eq. 26 / V_c
 	float d_rho = clamp(available / e_per_kg, 0.0, rho_l);
 	float remaining = rho_l - d_rho;
@@ -119,6 +123,7 @@ void main() {
 	// built-in, but not in a file anyone has to read.
 	float rho_prime = rho / (rho + d_rho); // Eq. 29
 	float T_new = clamp((1.0 - rho_prime) * T_B + rho_prime * T, t_amb, cfg.thermo.w); // Eq. 30
+	float h2o_mass_old = rho * s2.x; // gas-phase H2O mass per volume, before Eq. 31
 	s.yzw *= rho_prime; // Eq. 31: fuel, O2, CO2
 	s2.x = rho_prime * s2.x + (1.0 - rho_prime); // Eq. 11 + 31: H2O
 	s2.y *= rho_prime; // residuals
@@ -156,4 +161,18 @@ void main() {
 		uint(clamp(abs(dE_gas + dE_liq + latent) * STAT_SCALE, 0.0, 4.2e9)));
 	atomicAdd(stats.data[STAT_ENERGY_BUDGET],
 		uint(clamp((abs(dE_gas) + abs(dE_liq) + latent) * STAT_SCALE, 0.0, 4.2e9)));
+
+	// Mass ledger, gated like the rest of the diagnostic block: what this stage
+	// evaporates, and the H2O mass the mixture actually gained. Eq. 31 makes the
+	// two identical by algebra ((rho + d_rho).Y'_H2O = rho.Y_H2O + d_rho), so the
+	// pair is a wiring check, not a physics claim — it catches any future edit
+	// that applies less vapour than it boiled off.
+	if ((uint(cfg.diag.x) & 1u) != 0u) {
+		float vol = params.cell.x * params.cell.x * params.cell.x;
+		float h2o_gained = (rho + d_rho) * s2.x - h2o_mass_old;
+		atomicAdd(stats.data[STAT_DIAG + 11],
+			uint(clamp(d_rho * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+		atomicAdd(stats.data[STAT_DIAG + 12],
+			uint(clamp(max(h2o_gained, 0.0) * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+	}
 }

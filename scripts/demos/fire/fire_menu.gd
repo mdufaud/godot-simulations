@@ -49,8 +49,11 @@ func build(host) -> void:
 	var pool_quality_names: Array[String] = []
 	for budget in FireGpuSolver.POOL_BUDGETS:
 		pool_quality_names.append("%d tiles" % budget)
-	menu.add_option_button("Pool budget", pool_quality_names,
+	# Registered so presets carry the atlas: rung 2 (2048) for every base preset,
+	# rung 3 (4096) for Ultra.
+	var pool_option := menu.add_option_button("Pool budget", pool_quality_names,
 		FireGpuSolver.POOL_BUDGETS.find(solver.pool_budget), host.set_pool_budget)
+	quality.register("pool", pool_option, host.set_pool_budget)
 
 	menu.add_separator()
 	_wood_section = menu.add_section("Wood")
@@ -166,6 +169,15 @@ func build(host) -> void:
 	# layer under it (see wind_profile in fire_forces.comp).
 	menu.add_slider("Wind X @10 m", -5.0, 5.0, host.wind_vector.x, host.set_wind_x)
 	menu.add_slider("Wind Z @10 m", -5.0, 5.0, host.wind_vector.z, host.set_wind_z)
+	# Look multiplier on the wood bed's energy handoff. Measured on this grid:
+	# 1.0 (the strict physical budget) never reaches stoichiometric fuel and the
+	# bed smolders without a flame; 8 barely holds; 16 reproduces the pre-fix
+	# flame (reaction ~6, T ~2100 K) and is the default.
+	menu.add_slider("Wood flame boost", 1.0, 100.0, 16.0, host.set_wood_flame_boost,
+		true, 1.0)
+	# Budget the Auto ladder aims at; thresholds derive from it.
+	menu.add_slider("Target FPS", 30.0, 240.0, 60.0, host.set_target_fps,
+		true, 5.0)
 
 	_build_performance_section(host, menu, solver, quality)
 
@@ -248,6 +260,21 @@ func _build_performance_section(host, menu: SimMenu, solver: FireGpuSolver,
 	var volume_half := menu.add_toggle("Half-res volume pass", false,
 		presentation.set_half_res)
 	quality.register("volume_half", volume_half, presentation.set_half_res)
+	# Fire/water composition (lot H) and the smoke-light/jitter knobs (lot J).
+	# Deliberate look knobs, not preset keys: they trade realism for cost on
+	# this machine and stay where the user puts them.
+	menu.add_toggle("Water depth composite", presentation.water_depth_composite,
+		host.set_water_depth_composite)
+	var smoke_taps := menu.add_option_button("Smoke light taps", ["0", "1", "2"],
+		1, host.set_smoke_light_taps)
+	smoke_taps.tooltip_text = "Volume samples between smoke and hearth light (0 = unoccluded)"
+	menu.add_slider("Smoke light strength", 0.0, 0.2, presentation.smoke_light_gain,
+		host.set_smoke_light_gain, true, 0.01)
+	menu.add_slider("Light flicker", 0.0, 0.3, presentation.flicker_amount,
+		host.set_light_flicker, true, 0.01)
+	menu.add_toggle("Animated jitter", true, host.set_animated_jitter)
+	menu.add_slider("Upsample depth tolerance", 0.005, 0.08, 0.05,
+		host.set_depth_tolerance, true, 0.005)
 	# Apply the default preset rather than only labelling it. Every slider above was
 	# built with the Reference value baked into its constructor, so a demo that never
 	# applied its own default ran the reference configuration whatever the preset

@@ -129,6 +129,10 @@ var _set_tiles := RID()
 var _cached_scal_rid := RID()
 
 var _grid_dims := Vector3i.ZERO
+## Atlas layout of the solver this instance couples to; its accumulators are
+## sized to the atlas, not to the virtual map.
+var _atlas_tiles := FireTilePool.ATLAS_TILES
+var _atlas_slots := FireTilePool.NSLOTS
 var _cell_size := 0.1
 var _ambient_temperature := 0.0
 var _h_liquid := 0.15  # 1.5 * cell_size: one particle covers a 3³ block of cells
@@ -185,7 +189,8 @@ const MEASURE_INTERVAL := 30
 ## which is only sensible when that domain is a box. [param ambient_temperature] is
 ## the fire solver's, the temperature an empty cell's liquid reads as.
 func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temperature: float,
-		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
+		indir_tex := RID(), sph_box := Vector3.ZERO,
+		atlas_tiles := FireTilePool.ATLAS_TILES) -> void:
 	if _rd != null:
 		return
 	_rd = GpuPreflight.device("FireWater")
@@ -193,6 +198,8 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temper
 		return
 
 	_grid_dims = fire_grid_dims
+	_atlas_tiles = atlas_tiles
+	_atlas_slots = atlas_tiles.x * atlas_tiles.y * atlas_tiles.z
 	particle_cap = particle_count
 	_cell_size = fire_cell_size
 	_ambient_temperature = ambient_temperature
@@ -208,7 +215,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temper
 	_sph_origin = Vector3(-0.5 * sph_domain.x, 0.0, -0.5 * sph_domain.z)
 	_init_sph(sph_domain)
 
-	_accum_dims = FireTilePool.ATLAS_CELLS
+	_accum_dims = atlas_tiles * FireTilePool.TILE
 	var num_cells := _accum_dims.x * _accum_dims.y * _accum_dims.z
 	var empty_accum := PackedByteArray()
 	empty_accum.resize(num_cells * 16)
@@ -247,8 +254,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temper
 ## raises and the list membership carried from last frame — plus the compacted list
 ## and the three-word indirect dispatch header it is counted into.
 func _init_tile_list() -> void:
-	var slots: int = FireTilePool.ATLAS_TILES.x * FireTilePool.ATLAS_TILES.y \
-		* FireTilePool.ATLAS_TILES.z
+	var slots: int = _atlas_slots
 	var zeros := PackedByteArray()
 	zeros.resize(slots * 2 * 4)
 	_ssbo_tile_flags = _rd.storage_buffer_create(zeros.size(), zeros)
@@ -324,7 +330,7 @@ func _compile(name: String, with_common: bool) -> RID:
 	var src: String = "#version 460\n" + str(FireGpuSolver.scratch_formats(_rd)["preamble"])
 	for scale in FIXED_POINT_SCALES:
 		src += "#define %s %s\n" % [scale, FireGpuSolver.glsl_float(FIXED_POINT_SCALES[scale])]
-	src += FireTilePool.glsl_header()
+	src += FireTilePool.glsl_header(_atlas_slots)
 	if with_common:
 		src += FileAccess.get_file_as_string("res://shaders/fire/sparse/water_common.comp") + "\n"
 	src += FileAccess.get_file_as_string("res://shaders/fire/sparse/%s.comp" % name)
@@ -660,8 +666,7 @@ func scatter_render() -> void:
 		var tiles_cl := _rd.compute_list_begin()
 		_rd.compute_list_bind_compute_pipeline(tiles_cl, _pipeline_tiles)
 		_rd.compute_list_bind_uniform_set(tiles_cl, _set_tiles, 0)
-		_rd.compute_list_dispatch(tiles_cl, FireTilePool.ATLAS_TILES.x
-			* FireTilePool.ATLAS_TILES.y * FireTilePool.ATLAS_TILES.z / 256, 1, 1)
+		_rd.compute_list_dispatch(tiles_cl, _atlas_slots / 256, 1, 1)
 		_rd.compute_list_add_barrier(tiles_cl)
 		_rd.compute_list_end()
 	if profiling:
@@ -784,8 +789,13 @@ func _measure_particle_mass() -> void:
 		return
 
 	var parity := sph.current_parity()
+	# The speed maximum feeds sph.stability_speed, so the velocity readback runs
+	# in play; the position readback and the mass/height bookkeeping behind it
+	# are diagnostics and only pay their bytes while profiling.
 	var vel_data := _rd.buffer_get_data(sph.parity_velocities_rid(parity), 0, particles_active * 16)
-	var pos_data := _rd.buffer_get_data(sph.parity_positions_rid(parity), 0, particles_active * 16)
+	var pos_data := PackedByteArray()
+	if profiling:
+		pos_data = _rd.buffer_get_data(sph.parity_positions_rid(parity), 0, particles_active * 16)
 	var domain_size := Vector3(_grid_dims) * _cell_size
 	var total := 0.0
 	var coupled := 0
@@ -798,6 +808,13 @@ func _measure_particle_mass() -> void:
 	var speed_max := 0.0
 
 	for i in particles_active:
+		var velocity := Vector3(
+			vel_data.decode_float(i * 16),
+			vel_data.decode_float(i * 16 + 4),
+			vel_data.decode_float(i * 16 + 8))
+		speed_max = maxf(speed_max, velocity.length())
+		if not profiling:
+			continue
 		total += vel_data.decode_float(i * 16 + 12)
 		var local := Vector3(
 			pos_data.decode_float(i * 16),
@@ -809,16 +826,16 @@ func _measure_particle_mass() -> void:
 			coupled += 1
 		y_min = minf(y_min, local.y)
 		y_max = maxf(y_max, local.y)
-		speed_max = maxf(speed_max, Vector3(
-			vel_data.decode_float(i * 16),
-			vel_data.decode_float(i * 16 + 4),
-			vel_data.decode_float(i * 16 + 8)).length())
 
-	measured_mass = total
-	mass_error = abs(measured_mass - initial_mass) / initial_mass
-	coupled_count = coupled
-	droplet_y_min = y_min
-	droplet_y_max = y_max
+	# When not profiling the mass/height fields keep their last values rather
+	# than being zeroed: consumers treat "stale diagnostic" differently from
+	# "measurement says zero".
+	if profiling:
+		measured_mass = total
+		mass_error = abs(measured_mass - initial_mass) / initial_mass
+		coupled_count = coupled
+		droplet_y_min = y_min
+		droplet_y_max = y_max
 	droplet_speed_max = speed_max
 	mass_measured_once = true
 	# GDScript's formatter has no %e, so the relative error goes through str().
@@ -856,8 +873,7 @@ func set_indirection_rid(indir_tex: RID) -> void:
 	# that was about to be zeroed, and the new pool zeroes its slots in fire_clear.
 	if _ssbo_tile_flags.is_valid():
 		var zeros := PackedByteArray()
-		zeros.resize(FireTilePool.ATLAS_TILES.x * FireTilePool.ATLAS_TILES.y
-			* FireTilePool.ATLAS_TILES.z * 2 * 4)
+		zeros.resize(_atlas_slots * 2 * 4)
 		_rd.buffer_update(_ssbo_tile_flags, 0, zeros.size(), zeros)
 	for parity in 2:
 		var uniforms: Array[RDUniform] = [
@@ -892,3 +908,6 @@ func free_render() -> void:
 	if sph != null and sph.initialized:
 		sph.free_render()
 	initialized = false
+	# init_render refuses a second run while _rd is set; clearing it here is what
+	# makes a free/init cycle possible (atlas resize, demo teardown).
+	_rd = null

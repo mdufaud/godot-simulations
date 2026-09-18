@@ -84,6 +84,18 @@ void main() {
 		atomicAdd(stats.data[STAT_COLUMN_CELLS], 1u);
 	}
 
+	// Cp probe (cfg.diag.x bit 1): the four pure-species molar heat capacities at
+	// cfg.diag.y, written by one cell so the readback sees exactly one write per
+	// substep. This is what makes the GLSL Shomate bands observable from a test —
+	// the anchors live in tests/fire_cp_probe_test.gd, not in a mirror copy.
+	if ((uint(cfg.diag.x) & 2u) != 0u && c.x == centre.x && c.y == 0 && c.z == centre.z) {
+		float tp = clamp(cfg.diag.y, 100.0, 6000.0) * 0.001;
+		atomicAdd(stats.data[STAT_DIAG + 6], uint(cp_n2(tp) * STAT_SCALE));
+		atomicAdd(stats.data[STAT_DIAG + 7], uint(cp_o2(tp) * STAT_SCALE));
+		atomicAdd(stats.data[STAT_DIAG + 8], uint(cp_co2(tp) * STAT_SCALE));
+		atomicAdd(stats.data[STAT_DIAG + 9], uint(cp_h2o(tp) * STAT_SCALE));
+	}
+
 	// Keep signal for the tile pool, reduced per tile by tile_mark at the head of
 	// the next frame. A tile stays resident while any of these says its cells are
 	// not still ambient air; each term is divided by the smallest value worth

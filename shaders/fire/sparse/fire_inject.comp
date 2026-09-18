@@ -99,6 +99,7 @@ void main() {
 			float falloff = 1.0 - dist / radius;
 			float rate = cfg.wood_rate[i].x;
 			float pilot = cfg.wood_rate[i].y;
+			float vol = params.cell.x * params.cell.x * params.cell.x;
 			if (rate > 0.0) {
 				// NON-PAPER: a solid bed cannot build the fuel-rich premixed charge
 				// a gas leak can, so the local fraction is capped near stoichiometric
@@ -107,7 +108,16 @@ void main() {
 				// displacement bookkeeping as add_fuel, inlined so modes 1/2/6 (gas)
 				// keep the uncapped path.
 				const float Y_WOOD_MAX = 0.08;
-				float add = min(rate * dt * falloff, max(Y_WOOD_MAX - s.y, 0.0));
+				float wanted = rate * dt * falloff;
+				float add = min(wanted, max(Y_WOOD_MAX - s.y, 0.0));
+				// Fuel the cap refused, booked as a unit-density mass proxy so
+				// the gap between the solid's handoff and the injected total is
+				// measurable rather than silent. It is a diagnostic signal, not
+				// a balance term.
+				if ((uint(cfg.diag.x) & 1u) != 0u && wanted > add) {
+					atomicAdd(stats.data[STAT_DIAG + 10],
+						uint(clamp((wanted - add) * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+				}
 				s.y += add;
 				float shrink = 1.0 - add;
 				s.z *= shrink;
@@ -116,8 +126,18 @@ void main() {
 			}
 			// Pilot heats a wide shell around the log rather than a hot core, so the
 			// combustion wraps the wood and the raymarcher shows flame enveloping it.
+			// The diagnostic counter books the energy this floor injects — the
+			// "infinite heat reservoir" side of the wood hack, measured rather than
+			// assumed negligible.
 			if (pilot > 0.0 && falloff > 0.25) {
-				s.x = max(s.x, mix(t_amb, pilot, smoothstep(0.25, 0.9, falloff)));
+				float t_target = mix(t_amb, pilot, smoothstep(0.25, 0.9, falloff));
+				if ((uint(cfg.diag.x) & 1u) != 0u && t_target > s.x) {
+					float vol = params.cell.x * params.cell.x * params.cell.x;
+					atomicAdd(stats.data[STAT_DIAG + 5],
+						uint(clamp((t_target - s.x) * gas_density(s, s2)
+							* mixture_cp(s, s2) * vol * STAT_SCALE, 0.0, 4.2e9)));
+				}
+				s.x = max(s.x, t_target);
 			}
 		}
 		store_scal_src(c, s);

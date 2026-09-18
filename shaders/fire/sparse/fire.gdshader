@@ -155,6 +155,17 @@ void fragment() {
 		discard;
 	}
 
+	// The water surface splits the accumulation (lot H): samples in front of it
+	// go on top of the water shading already in the framebuffer, samples behind
+	// are added back through the water's own transmittance. The plane does not
+	// truncate the ray — the water is transparent, unlike the scene depth above.
+	float t_water = water_ray_distance(SCREEN_UV, ray_dir, INV_VIEW_MATRIX);
+	vec3 water_tw = water_transmittance(SCREEN_UV);
+	// Hearth light in object space, once per fragment: the march mixes tap
+	// positions in object coordinates and the model is unrotated, so distances
+	// are unchanged.
+	vec3 light_obj = (inverse(MODEL_MATRIX) * vec4(fire_light_pos, 1.0)).xyz;
+
 	// A zero direction component would make the DDA's 1/d infinite and its first
 	// boundary crossing a NaN; nudged off zero it is merely enormous, which is
 	// what "never crosses a plane on this axis" should compute as.
@@ -177,12 +188,18 @@ void fragment() {
 	// The sample lattice is global along the ray rather than restarted per tile:
 	// re-phasing it at every boundary would print the tile grid into the jitter.
 	float ds = cell_size * march_step;
-	float jitter = fract(52.9829189 * fract(dot(FRAGCOORD.xy, vec2(0.06711056, 0.00583715))) + TIME * 0.61);
+	float jitter = march_jitter(FRAGCOORD.xy);
 	float t_cursor = t0 + ds * jitter;
 
 	vec3 col = vec3(0.0);
 	float trans = 1.0;
 	float debug_max = 0.0;
+	// Accumulation snapshot at the water plane (lot H): col - col_front is then
+	// exactly the behind-the-water contribution, gathered with the same scalar
+	// transmittance and attenuated once at the end.
+	vec3 col_front = vec3(0.0);
+	float trans_front = 1.0;
+	bool crossed_water = false;
 
 	// One flat loop: an iteration either takes a sample inside the tile the ray is
 	// in, or skips to the next tile. Flat rather than a fine loop nested in the
@@ -212,6 +229,11 @@ void fragment() {
 			vec3 p = cam_obj + ray_dir * t_cursor;
 			vec3 sample_pos = p + volume_center;
 			vec3 virtual_pos = (sample_pos - virtual_origin) / cell_size;
+			if (!crossed_water && t_cursor >= t_water) {
+				crossed_water = true;
+				col_front = col;
+				trans_front = trans;
+			}
 			vec4 s = sample_virtual(virtual_pos, ti, current_slot, current_atlas, false);
 			if (use_prev) {
 				vec4 previous = sample_virtual(virtual_pos, ti, previous_slot,
@@ -221,7 +243,35 @@ void fragment() {
 			if (debug_mode == 1) {
 				debug_max = max(debug_max, s.r);
 			} else {
-				accumulate(s, p, sample_pos.y, ds, TIME, col, trans);
+				// Self-shadow taps for the lit smoke: 1 or 2 samples of the
+				// volume between this point and the hearth, read through the
+				// same virtual-grid fetch the march itself uses. The light
+				// path is clamped to a short range — beyond it the inverse-
+				// square has already killed the term.
+				vec4 light_a = vec4(0.0);
+				vec4 light_b = vec4(0.0);
+				float light_dist = 0.0;
+				if (smoke_light_taps > 0 && s.g > 0.001
+						&& fire_light_rgb.r + fire_light_rgb.g + fire_light_rgb.b > 1e-5) {
+					light_dist = min(distance(sample_pos, fire_light_pos), 8.0);
+					float frac = smoke_light_taps == 1 ? 0.5 : 0.33;
+					light_a = sample_virtual(
+						(mix(p, light_obj, frac) + volume_center - virtual_origin) / cell_size,
+						ti, current_slot, current_atlas, false);
+					if (smoke_light_taps == 2) {
+						light_b = sample_virtual(
+							(mix(p, light_obj, 0.66) + volume_center - virtual_origin) / cell_size,
+							ti, current_slot, current_atlas, false);
+					}
+				}
+				float blue = 0.0;
+				accumulate(s, p, sample_pos, sample_pos.y, ds, TIME, light_a,
+					light_b, light_dist, col, trans, blue);
+				if (debug_mode == 2) {
+					debug_max = max(debug_max, s.b);
+				} else if (debug_mode == 3) {
+					debug_max = max(debug_max, blue);
+				}
 			}
 			t_cursor += ds;
 			if (trans < 0.01) {
@@ -266,9 +316,23 @@ void fragment() {
 		}
 	}
 
-	if (debug_mode == 1) {
+	if (debug_mode >= 1) {
 		ALBEDO = vec3(debug_max);
 		ALPHA = debug_max > 0.005 ? 0.85 : 0.0;
+	} else if (crossed_water) {
+		// The water composite is already in the framebuffer (it draws at a
+		// lower render priority), so blending with alpha = 1 - trans_front
+		// leaves the water — and everything behind it — multiplied by exactly
+		// the fire's transmittance at the plane, while the behind-the-water
+		// fire is added back through the water's own per-channel extinction:
+		//   out = col_front + trans_front * T_water * col_behind
+		//       + trans_front * framebuffer
+		// The 0.02 floor keeps ALBEDO * ALPHA exact without dividing a
+		// vanishing alpha into an overflow.
+		float a = max(1.0 - trans_front, 0.02);
+		vec3 behind = col - col_front;
+		ALBEDO = (col_front + trans_front * water_tw * behind) / a;
+		ALPHA = a;
 	} else {
 		float alpha = 1.0 - trans;
 		ALBEDO = col / max(alpha, 1e-4);

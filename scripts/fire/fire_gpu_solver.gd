@@ -14,7 +14,9 @@ extends RefCounted
 ## rendering thread (RenderingDevice is not thread safe).
 
 const SHADER_DIR := "res://shaders/fire/sparse/"
-const POOL_BUDGETS := [1536, 1792, FireTilePool.NSLOTS]
+## Logical pool budgets the menu cycles through. The last rung asks for the large
+## 4096-slot atlas; see [member atlas_slots] and [method atlas_slots_for_budget].
+const POOL_BUDGETS := [1536, 1792, FireTilePool.NSLOTS, FireTilePool.NSLOTS_LARGE]
 const STAGES: Array[String] = [
 	"inject", "advect", "maccormack", "forces", "curl", "vorticity", "vortapply",
 	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
@@ -47,8 +49,12 @@ const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
 const MAX_LOGS := 12
 ## Stats buffer words, reduced by fire_display and fire_evaporate: 11 scalars, then
 ## one probed gas temperature per wood emitter, then the six words of the
-## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to.
-## Fractional quantities are stored as fixed point at STAT_SCALE.
+## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to,
+## then the thirteen-word diagnostic block (STAT_DIAG in fire_common.comp: three
+## protection counters, three energy/mass ledgers, four Cp-probe words, one
+## wood-cap clip proxy, two evaporation mass ledgers).
+## Fractional quantities are stored as fixed point at STAT_SCALE, diagnostic
+## masses at STAT_MASS_SCALE.
 const STAT_MAX_T := 0
 const STAT_REACTION_SUM := 1
 const STAT_REACTION_MAX := 2
@@ -62,8 +68,10 @@ const STAT_ENERGY_RESIDUAL := 9
 const STAT_ENERGY_BUDGET := 10
 const STAT_WOOD := 11
 const STAT_BOUNDS := STAT_WOOD + MAX_LOGS
-const STATS_WORDS := STAT_BOUNDS + 6
+const STAT_DIAG := STAT_BOUNDS + 6
+const STATS_WORDS := STAT_DIAG + 13
 const STAT_SCALE := 1000.0
+const STAT_MASS_SCALE := 1e9
 ## std430 layout of fire_common.comp's Config buffer: [name, vec4 count] in order.
 ## The GLSL block body is generated from this list (FIRE_CONFIG_FIELDS) and
 ## [method _upload_config] writes by name, so the order lives only here.
@@ -76,7 +84,7 @@ const STAT_SCALE := 1000.0
 ##   vort       vel_lo, vel_hi, temp_lo, h2o_coeff  Fire-X Tab. 3
 ##   wind       wind.xyz, residual_dissipation
 ##   molar      M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
-##   misc       o2_replenish, display_temperature, reaction_reference, emitter_T
+##   misc       reserved, display_temperature, reaction_reference, emitter_T
 ##   liquid     T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
 ##   liquid2    d_d [m], h_conv [W/(m^2.K)], wet_suppression, wood_shelter_rate
 ##   wood       per log: pos.xyz, radius [m] (radius 0 = free slot)
@@ -84,6 +92,8 @@ const STAT_SCALE := 1000.0
 ##   torch      pos.xyz, nozzle radius
 ##   torch2     direction * length, fuel rate
 ##   torch3     tip radius, temperature, speed, pilot fraction
+##   diag       flags (bit0 counters, bit1 Cp probe), probe T [K],
+##              Eq. 27 evaporation Cp A/B (0 gas [shipped], 1 liquid)
 ## NON-PAPER wood tail: Fire-X only has the gas grid emitter of Tab. 3; the solid
 ## fuel bed lives on the CPU (wood_pile.gd). The release goes down through
 ## fire_inject (mode 5), the gas temperature that drives it comes back up through
@@ -92,7 +102,7 @@ const CONFIG_LAYOUT := [
 	["kinetics", 1], ["fuel", 1], ["stoich", 1], ["coeffs", 1], ["thermo", 1],
 	["transport", 1], ["vort", 1], ["wind", 1], ["molar", 1], ["misc", 1],
 	["liquid", 1], ["liquid2", 1], ["wood", MAX_LOGS], ["wood_rate", MAX_LOGS],
-	["torch", 1], ["torch2", 1], ["torch3", 1],
+	["torch", 1], ["torch2", 1], ["torch3", 1], ["diag", 1],
 ]
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
@@ -189,10 +199,30 @@ var cell_size := 0.2 ## Grid length 12.8 x 19.2 x 12.8 m; Tab. 3 allows 0.1-10.0
 var fuel_index := 0
 var units_convention := UNITS_CGS
 
+## Gates the per-substep diagnostic atomics (fire_common.comp STAT_DIAG): the
+## protection counters and the chemical-heat/fuel/pilot ledgers. Off by default;
+## each gated site is one uniform test per cell when off.
+var diagnostic_counters := false
+## Enables the pure-species molar Cp probe at [member diagnostic_probe_temperature]
+## (one cell of fire_display writes four words per substep).
+var diagnostic_cp_probe := false
+var diagnostic_probe_temperature := 300.0
+## Diagnostic A/B on the Eq. 27 evaporation Cp (cfg.diag.z): false charges the
+## gas mixture Cp (the shipped convention), true the liquid Cp the paper's
+## symbol table arguably names. Tests/fire_water_balance_test.gd measures the
+## difference; flip nothing without that measurement in hand.
+var diagnostic_evap_liquid_cp := false
+
 var ambient_temperature := 300.0 ## Fire-X Tab. 3
 var simulation_hz := 30
 var timestep := 1.0 / 30.0
 var max_catchup_steps := 4
+## Game policy: the clock's debt never exceeds what the catchup can clear in one
+## frame, and wall time beyond that is counted in dropped_time instead of
+## queueing an invisible catch-up sprint the frame rate pays for later.
+## Validation runs that must reconcile wall == sim + accumulator + dropped
+## across a recovery set this false to keep the old unbounded debt.
+var clock_debt_capped := true
 var pressure_iterations := 64 ## Fire-X Tab. 3, range 64-128
 ## Relaxation sweeps run inside one pressure dispatch, against the
 ## halo the workgroup cached on entry (block-Jacobi / additive Schwarz). They ride
@@ -239,7 +269,6 @@ var drag := 0.0 ## NON-PAPER: stability aid, 0 = disabled
 ## Only acts inside the wood emitter spheres (see wood_shelter in fire_common),
 ## so it is a no-op in gas mode. 0 disables it.
 var wood_shelter_rate := 8.0
-var oxygen_replenish := 6.0 ## NON-PAPER: open-boundary inflow rate [1/s]
 var residual_dissipation := 0.03 ## NON-PAPER: soot settling in cold cells
 ## Evaporation (Eq. 9-11, 26-32). Water at 1 atm, from the NIST Chemistry
 ## WebBook [Linstrom & Mallard], which is the source Fire-X Tab. 4 names for the
@@ -290,6 +319,12 @@ var torch_ignite_fraction := 0.3
 ## The fire roams a 409.6 x 102.4 x 409.6 m virtual domain at a cost set by how
 ## much of it is burning, rather than a fixed box at a cost set by the box.
 var pool_budget := FireTilePool.NSLOTS
+## Atlas capacity the solver was compiled for: 2048 slots (16x8x16 tiles) by
+## default, 4096 (16x16x16) when asked. The larger atlas doubles every field
+## texture and needs 16 KB of compute shared memory for the coarse pressure
+## solve; init_render validates the device limit and falls back to the base
+## atlas, so this can be set freely before init and read after it.
+var atlas_slots := FireTilePool.NSLOTS
 
 # Tile pool policy. The dilation band has to exceed the distance the fire can
 # travel between topology updates: velocity is clamped to 50 m/s, so at the
@@ -323,6 +358,7 @@ var dropped_time := 0.0
 
 var _rd: RenderingDevice
 var _pool: FireTilePool
+var _display_format := RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
 var _stages: Array[String] = []
 var _frame := 0
 var _shaders := {}
@@ -361,6 +397,7 @@ var _pool_stats_cache := {}
 var _pool_stats_mutex := Mutex.new()
 var _bootstrap_bounds := AABB()
 var _display_bounds_ready := false
+var _display_hyst := DisplayBoxHysteresis.new()
 var _timing_store := GpuTimingStore.new()
 var _time_accumulator := 0.0
 
@@ -437,6 +474,10 @@ func schedule_steps(delta: float) -> int:
 		dropped_time += frame_delta - 0.1
 		frame_delta = 0.1
 	_time_accumulator += frame_delta
+	var cap := max_catchup_steps * timestep if clock_debt_capped else 0.0
+	if cap > 0.0 and _time_accumulator > cap:
+		dropped_time += _time_accumulator - cap
+		_time_accumulator = cap
 	var available := int(floor(_time_accumulator / timestep + CLOCK_EPSILON))
 	var count := mini(available, max_catchup_steps)
 	_time_accumulator -= float(count) * timestep
@@ -568,10 +609,32 @@ func get_stats() -> Dictionary:
 		# opposite-signed errors in different cells cannot cancel into a pass.
 		"energy_residual": float(s[STAT_ENERGY_RESIDUAL]) / maxf(float(s[STAT_ENERGY_BUDGET]), 1.0),
 		"energy_budget": float(s[STAT_ENERGY_BUDGET]) / STAT_SCALE, # millijoules -> J
+		# Diagnostic block, one substep's worth (fire_advect clears it each step).
+		# The counters are events per substep; the ledgers are J and kg.
+		"diag_reactant_clamps": float(s[STAT_DIAG + 0]),
+		"diag_temperature_clamps": float(s[STAT_DIAG + 1]),
+		"diag_renormalisations": float(s[STAT_DIAG + 2]),
+		"diag_chemical_heat_j": float(s[STAT_DIAG + 3]) / STAT_SCALE,
+		"diag_fuel_burned_kg": float(s[STAT_DIAG + 4]) / STAT_MASS_SCALE,
+		"diag_pilot_heat_j": float(s[STAT_DIAG + 5]) / STAT_SCALE,
+		"diag_cp_n2": float(s[STAT_DIAG + 6]) / STAT_SCALE,
+		"diag_cp_o2": float(s[STAT_DIAG + 7]) / STAT_SCALE,
+		"diag_cp_co2": float(s[STAT_DIAG + 8]) / STAT_SCALE,
+		"diag_cp_h2o": float(s[STAT_DIAG + 9]) / STAT_SCALE,
+		# Unit-density mass proxy for the fuel Y_WOOD_MAX refused, per substep.
+		"diag_wood_cap_clipped": float(s[STAT_DIAG + 10]) / STAT_MASS_SCALE,
+		"diag_evaporated_kg": float(s[STAT_DIAG + 11]) / STAT_MASS_SCALE,
+		"diag_h2o_gained_kg": float(s[STAT_DIAG + 12]) / STAT_MASS_SCALE,
 	}
 
 
 ## Simulation-space box for the volume proxy. Safe to call from the main thread.
+##
+## The readback bounds are the raw resident set, which flickers: a tile drops
+## out for one frame and the proxy — and every shader keyed to it — pumps. The
+## hysteresis (lot I) grows the published box the instant the bounds demand it,
+## but only shrinks after a quiet delay and then at a bounded speed, so cuts
+## are still impossible while the box bleeds off slowly instead of jumping.
 func display_clip_box(margin := 1.6) -> AABB:
 	var box := Vector3(sim_dims()) * cell_size
 	var origin := Vector3(-box.x * 0.5, 0.0, -box.z * 0.5)
@@ -592,7 +655,55 @@ func display_clip_box(margin := 1.6) -> AABB:
 		return AABB(initial_p0, initial_p1 - initial_p0)
 	var p0 := (origin + lo * cell_size - Vector3.ONE * margin).clamp(full.position, full.end)
 	var p1 := (origin + hi * cell_size + Vector3.ONE * margin).clamp(full.position, full.end)
-	return AABB(p0, p1 - p0)
+	return _display_hyst.update(AABB(p0, p1 - p0), Time.get_ticks_msec())
+
+
+## Grow-now, shrink-late-and-slow hysteresis for the display proxy box.
+## Deliberately dumb and time-explicit so it is unit-testable headless: update()
+## is the whole policy.
+class DisplayBoxHysteresis:
+	## Quiet time since the last grow before any face may move in.
+	const SHRINK_DELAY := 2.0
+	## Per-face speed limit while shrinking, m/s.
+	const SHRINK_SPEED := 2.0
+
+	var box := AABB()
+	var _last_grow_msec := -1
+	var _last_update_msec := -1
+
+	func update(target: AABB, now_msec: int) -> AABB:
+		var dt := 1.0 / 60.0
+		if _last_update_msec >= 0:
+			dt = clampf(float(now_msec - _last_update_msec) * 0.001, 0.001, 0.25)
+		_last_update_msec = now_msec
+		if box.size == Vector3.ZERO:
+			box = target
+			_last_grow_msec = now_msec
+			return box
+		if not box.encloses(target):
+			# Anything but a pure shrink — growth, translation, both — is
+			# adopted at once: an uncovered sample is a visible cut, a stale
+			# margin is nothing at all.
+			box = target
+			_last_grow_msec = now_msec
+			return box
+		if float(now_msec - _last_grow_msec) * 0.001 < SHRINK_DELAY:
+			return box
+		var step := SHRINK_SPEED * dt
+		var lo := Vector3(
+			_box_axis(box.position.x, target.position.x, step),
+			_box_axis(box.position.y, target.position.y, step),
+			_box_axis(box.position.z, target.position.z, step))
+		var hi := Vector3(
+			_box_axis(box.end.x, target.end.x, step),
+			_box_axis(box.end.y, target.end.y, step),
+			_box_axis(box.end.z, target.end.z, step))
+		box = AABB(lo, hi - lo)
+		return box
+
+	## One face moved toward its target by at most [param step].
+	func _box_axis(current: float, target: float, step: float) -> float:
+		return current + clampf(target - current, -step, step)
 
 
 func _compute_bootstrap_bounds() -> AABB:
@@ -614,6 +725,22 @@ func get_timings() -> Dictionary:
 	return _timing_store.snapshot()
 
 
+## The atlas a pool budget implies: only the 4096-tile rung asks for the large
+## atlas. Coarse pressure at 4096 slots is a 16 KB shared array, twice the
+## guaranteed minimum — callers that want it must go through init's device check.
+static func atlas_slots_for_budget(budget: int) -> int:
+	return FireTilePool.NSLOTS_LARGE if budget > FireTilePool.NSLOTS \
+		else FireTilePool.NSLOTS
+
+
+## Diagnostic A/B for the display soot channel (lot K): when the environment
+## asks for it, display/display_prev are RGBA16F instead of RGBA8, which keeps
+## the finely visible smoke band from quantising into ~5-7 levels. Off by
+## default; adoption is pending the baseline's memory/cost/fumée-fine comparison.
+static func display_fp16_requested() -> bool:
+	return OS.get_environment("FIRE_DISPLAY_F16") == "1"
+
+
 # =========================================================================
 #  SETUP
 # =========================================================================
@@ -629,8 +756,34 @@ func init_render() -> void:
 	if _rd == null:
 		return
 
+	# The large atlas lives or dies on the coarse solve: fire_press_coarse holds
+	# the whole tile-level system in one shared array, 4096 floats = 16 KB.
+	# Anything below that is a fallback to the base atlas, which needs 8 KB.
+	if atlas_slots > FireTilePool.NSLOTS:
+		var shared_limit := _rd.limit_get(
+			RenderingDevice.LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE)
+		if shared_limit < atlas_slots * 4:
+			push_warning(
+				"Fire atlas %d needs %d B of shared memory for the coarse solve (device limit %d B); falling back to %d slots."
+				% [atlas_slots, atlas_slots * 4, shared_limit, FireTilePool.NSLOTS])
+			atlas_slots = FireTilePool.NSLOTS
+	var slots := atlas_slots
+
+	# Soot channel A/B: shader qualifier and texture format must agree, so the
+	# decision is taken once here and both sides read it.
+	_display_format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
+	var display_fmt_name := "rgba8"
+	if display_fp16_requested():
+		var f16 := RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
+		if _rd.texture_is_format_supported_for_usage(f16, TEX_USAGE):
+			_display_format = f16
+			display_fmt_name = "rgba16f"
+		else:
+			push_warning("rgba16f storage unsupported; display stays rgba8.")
+
 	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"]) \
-		+ glsl_defines() + FireTilePool.glsl_header()
+		+ glsl_defines() + FireTilePool.glsl_header(slots) \
+		+ "#define FMT_DISPLAY %s\n" % display_fmt_name
 	_stages = STAGES.duplicate()
 	_stages.append(CLEAR_STAGE)
 	_stages.append_array(COARSE_STAGES)
@@ -663,7 +816,7 @@ func init_render() -> void:
 	# fire_display writes and tile_mark reduces. It has to come up before the
 	# uniform sets, which bind its indirection volume and tile lists.
 	_pool = FireTilePool.new()
-	if not _pool.init_render(_rd, _tex["activity"], pool_budget):
+	if not _pool.init_render(_rd, _tex["activity"], mini(pool_budget, slots), slots):
 		push_error("Fire solver could not bring up the tile pool.")
 		_pool = null
 		return
@@ -680,10 +833,10 @@ func init_render() -> void:
 	# buffers are fixed size: the right-hand side and the correction, then the face
 	# mask, the slot -> unknown map and the six coarse neighbours.
 	var coarse_val_bytes := PackedByteArray()
-	coarse_val_bytes.resize(2 * FireTilePool.NSLOTS * 4)
+	coarse_val_bytes.resize(2 * slots * 4)
 	_coarse_val_buf = _rd.storage_buffer_create(coarse_val_bytes.size(), coarse_val_bytes)
 	var coarse_idx_bytes := PackedByteArray()
-	coarse_idx_bytes.resize(8 * FireTilePool.NSLOTS * 4)
+	coarse_idx_bytes.resize(8 * slots * 4)
 	_coarse_idx_buf = _rd.storage_buffer_create(coarse_idx_bytes.size(), coarse_idx_bytes)
 
 	_build_uniform_sets()
@@ -711,6 +864,16 @@ func dense_domain_size_m() -> Vector3:
 	return config.dense_domain_size_m()
 
 
+## Atlas geometry this instance was built with; the presentation and the water
+## side size their own resources against these instead of the class constants.
+func atlas_tiles() -> Vector3i:
+	return FireTilePool.atlas_tiles_for(atlas_slots)
+
+
+func atlas_cells() -> Vector3i:
+	return FireTilePool.atlas_cells_for(atlas_slots)
+
+
 ## The tile pool's indirection volume, for a coupled stage that lives outside this
 ## class and has to resolve a virtual cell to its atlas texel.
 func indirection_rid() -> RID:
@@ -723,9 +886,10 @@ func indirection_bytes_rid() -> RID:
 	return _pool.indir_bytes_rid() if _pool != null else RID()
 
 
-## Extent of the field textures: a tile atlas, not the domain.
+## Extent of the field textures: a tile atlas, not the domain — sized by the
+## atlas this instance was built with (2048 or 4096 slots).
 func _field_dims() -> Vector3i:
-	return FireTilePool.ATLAS_CELLS
+	return FireTilePool.atlas_cells_for(atlas_slots)
 
 
 ## Seed the pool with the tiles around the emitter and pin them resident.
@@ -753,6 +917,9 @@ func _bootstrap_pool() -> void:
 	_stats_mutex.lock()
 	_display_bounds_ready = false
 	_stats_mutex.unlock()
+	# The hysteresis box belongs to the old resident set; the next ready readback
+	# adopts its target outright rather than shrinking toward it for seconds.
+	_display_hyst = DisplayBoxHysteresis.new()
 	_frame = 0
 
 
@@ -776,7 +943,7 @@ func set_pool_budget(budget: int) -> void:
 	_sets.clear()
 	if _pool != null:
 		_pool.free_render()
-	pool_budget = clampi(budget if budget > 0 else pool_budget, 1, FireTilePool.NSLOTS)
+	pool_budget = clampi(budget if budget > 0 else pool_budget, 1, atlas_slots)
 	_pool = FireTilePool.new()
 	if not _pool.init_render(_rd, _tex["activity"], pool_budget):
 		push_error("Fire solver could not rebuild the tile pool.")
@@ -832,10 +999,10 @@ func _create_textures() -> void:
 		_make_format(scratch["four"], usage, dims), RDTextureView.new(), [])
 
 	_tex["display"] = _rd.texture_create(
-		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
+		_make_format(_display_format, usage, dims),
 		RDTextureView.new(), [])
 	_tex["display_prev"] = _rd.texture_create(
-		_make_format(RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM, usage, dims),
+		_make_format(_display_format, usage, dims),
 		RDTextureView.new(), [])
 	_tex["visual_activity"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
@@ -1075,8 +1242,11 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/end")
-		if _frame % 8 == 0:
-			_update_pool_stats_cache()
+	# The pool counters ride their own tiny synchronous readback every 8 frames
+	# regardless of profiling: the debug overlay and the capture harness both
+	# report occupancy, and a stale zero reads as "empty pool" to both.
+	if _frame % 8 == 0:
+		_update_pool_stats_cache()
 
 
 func poll_render() -> void:
@@ -1303,8 +1473,10 @@ static func glsl_defines() -> String:
 	var lines := PackedStringArray([
 		"#define MAX_LOGS %d" % MAX_LOGS,
 		"#define STAT_BOUNDS %d" % STAT_BOUNDS,
+		"#define STAT_DIAG %d" % STAT_DIAG,
 		"#define STATS_WORDS %d" % STATS_WORDS,
 		"#define STAT_SCALE %s" % glsl_float(STAT_SCALE),
+		"#define STAT_MASS_SCALE %s" % glsl_float(STAT_MASS_SCALE),
 		"#define R_GAS %s" % glsl_float(R_GAS),
 		"#define SIGMA_SB %s" % glsl_float(SIGMA_SB),
 	])
@@ -1349,7 +1521,10 @@ func _upload_config() -> void:
 		vorticity_temperature_lo, h2o_coefficient])
 	_put_config(v, "wind", [wind.x, wind.y, wind.z, residual_dissipation])
 	_put_config(v, "molar", [M_O2, M_CO2, M_H2O, M_N2])
-	_put_config(v, "misc", [oxygen_replenish, display_temperature, reaction_reference,
+	# misc[0] was oxygen_replenish, read by nothing in the sparse shaders (the
+	# dense variant's dead uniform); the slot stays reserved so the shared
+	# CPU/GLSL layout does not shift under the rest of the block.
+	_put_config(v, "misc", [0.0, display_temperature, reaction_reference,
 		emitter_temperature])
 	_put_config(v, "liquid", [boiling_temperature, latent_heat, liquid_heat_capacity,
 		droplet_density])
@@ -1373,6 +1548,11 @@ func _upload_config() -> void:
 	_put_config(v, "torch3", [torch_tip_radius, torch_temperature, torch_speed,
 		torch_ignite_fraction])
 	_torch_mutex.unlock()
+
+	# Diagnostic block: flags in x, the Cp probe temperature in y.
+	_put_config(v, "diag", [(1.0 if diagnostic_counters else 0.0)
+		+ (2.0 if diagnostic_cp_probe else 0.0), diagnostic_probe_temperature,
+		1.0 if diagnostic_evap_liquid_cp else 0.0])
 
 	var bytes := v.to_byte_array()
 	if bytes == _config_cache:

@@ -106,7 +106,12 @@ void main() {
 	float t2 = s.x * s.x;
 	float amb2 = t_amb * t_amb;
 	float radiation = cfg.thermo.y * SIGMA_SB * (amb2 * amb2 - t2 * t2) / mixture_cp(s, s2);
-	s.x = clamp(s.x + radiation * dt, t_amb, cfg.thermo.w);
+	float t_next = s.x + radiation * dt;
+	float t_rad_clamped = clamp(t_next, t_amb, cfg.thermo.w);
+	if ((uint(cfg.diag.x) & 1u) != 0u && t_rad_clamped != t_next) {
+		atomicAdd(stats.data[STAT_DIAG + 1], 1u);
+	}
+	s.x = t_rad_clamped;
 
 	// Project the mass fractions back onto the simplex. The MacCormack limiter
 	// clamps each component against its own eight-tap bounds, which is not a
@@ -118,6 +123,9 @@ void main() {
 	s2.x = clamp(s2.x, 0.0, 1.0);
 	float total = s.y + s.z + s.w + s2.x;
 	if (total > 1.0) {
+		if ((uint(cfg.diag.x) & 1u) != 0u) {
+			atomicAdd(stats.data[STAT_DIAG + 2], 1u);
+		}
 		float inv = 1.0 / total;
 		s.yzw *= inv;
 		s2.x *= inv;

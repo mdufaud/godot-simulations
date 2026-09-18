@@ -90,6 +90,17 @@ func composite_material() -> ShaderMaterial:
 	return composite_mat
 
 
+## Filtered fluid surface depth (RG = floor+fract packed linear eye depth,
+## 0 = no surface) and the thickness prepass, for passes that compose against
+## the water — the fire volume splits its accumulation at this plane.
+func filtered_depth_texture() -> Texture2D:
+	return filter_v_vp.get_texture()
+
+
+func thickness_texture() -> Texture2D:
+	return thick_vp.get_texture()
+
+
 func profiled_viewports() -> Array:
 	# Legacy indices 0-4 are positional contracts (profiler overlay, benchmark):
 	# appended viewports must go after them.

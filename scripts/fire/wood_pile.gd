@@ -9,11 +9,17 @@ const COLOR_CHAR := Color(0.75, 0.7, 0.66)
 const STACK_SLOTS := [Vector2(-0.16, 0.0), Vector2(0.16, 0.0), Vector2(0.0, 0.16)]
 
 var emit_radius := 0.45
+## The solver's cell size, set by the controller. The injection kernel is
+## normalized on the discrete falloff sum at this resolution, so the prescribed
+## volatile flow lands in the gas whatever the grid.
+var cell_size := 0.2
 var log_fuel := 8.0
 var _logs: Array[Dictionary] = []
 var _stacked_log_count := 0
 var _stack_base_top_y := 0.0
 var _pyrolysis := WoodPyrolysis.new()
+var _kernel_cache := -1.0
+var _kernel_cache_key := Vector2.ZERO
 
 
 func add_log(pos: Vector3, yaw: float, tilt := 0.0, radius := 0.09,
@@ -128,13 +134,40 @@ func hottest_surface() -> float:
 
 func update(delta: float, gas_temperatures: PackedFloat32Array,
 		ambient := 300.0) -> void:
+	var kernel_weight := kernel_weight()
+	var cell_volume := cell_size * cell_size * cell_size
 	for i in _logs.size():
 		var entry: Dictionary = _logs[i]
 		var t_gas := ambient
 		if i < gas_temperatures.size():
 			t_gas = maxf(gas_temperatures[i], ambient)
-		_pyrolysis.step(entry, delta, t_gas, ambient, emit_radius)
+		_pyrolysis.step(entry, delta, t_gas, ambient, kernel_weight, cell_volume)
 		_update_look(entry)
+
+
+## Sum of the falloff weights fire_inject mode 5 applies across the emit sphere:
+## one weight per cell centre at the grid resolution, 1 - dist/radius when
+## inside. Aligned-grid approximation (the real field is translation-dependent
+## at half-cell scale); cached per (radius, cell size).
+func kernel_weight() -> float:
+	var key := Vector2(emit_radius, cell_size)
+	if _kernel_cache > 0.0 and key == _kernel_cache_key:
+		return _kernel_cache
+	var reach := int(ceil(emit_radius / cell_size))
+	var total := 0.0
+	for x in range(-reach, reach + 1):
+		for y in range(-reach, reach + 1):
+			for z in range(-reach, reach + 1):
+				var d := Vector3(x, y, z).length() * cell_size
+				if d <= emit_radius:
+					total += 1.0 - d / emit_radius
+	_kernel_cache = maxf(total, 1e-6)
+	_kernel_cache_key = key
+	return _kernel_cache
+
+
+func set_flame_boost(value: float) -> void:
+	_pyrolysis.flame_boost = maxf(value, 0.0)
 
 
 func _update_look(entry: Dictionary) -> void:
