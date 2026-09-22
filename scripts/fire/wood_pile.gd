@@ -1,8 +1,11 @@
 class_name WoodPile extends Node3D
 
 const FUEL_INDEX_METHANE := WoodPyrolysis.FUEL_INDEX_METHANE
-const COLOR_FRESH := Color(0.22, 0.12, 0.06)
-const COLOR_CHAR := Color(0.045, 0.04, 0.038)
+const BARK_TEXTURE := preload("res://resources/generated/materials/charred_wood_tile.png")
+## Multipliers over the photo bark: fresh logs warm it toward living wood,
+## charring pulls it back to the tile's own near-black.
+const COLOR_FRESH := Color(1.5, 0.95, 0.6)
+const COLOR_CHAR := Color(0.75, 0.7, 0.66)
 const COLOR_EMBER := Color(1.0, 0.32, 0.05)
 const STACK_SLOTS := [Vector2(-0.16, 0.0), Vector2(0.16, 0.0), Vector2(0.0, 0.16)]
 
@@ -31,6 +34,8 @@ func add_log(pos: Vector3, yaw: float, tilt := 0.0, radius := 0.09,
 	mesh_instance.mesh = log_mesh
 	var material := StandardMaterial3D.new()
 	material.albedo_color = COLOR_FRESH
+	material.albedo_texture = BARK_TEXTURE
+	material.uv1_scale = Vector3(1.0, 0.4, 1.0)
 	material.roughness = 0.92
 	material.emission_enabled = true
 	material.emission = COLOR_EMBER

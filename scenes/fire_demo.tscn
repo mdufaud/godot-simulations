@@ -1,4 +1,4 @@
-[gd_scene load_steps=35 format=3 uid="uid://fire_demo_scene"]
+[gd_scene load_steps=38 format=3 uid="uid://fire_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/fire_controller.gd" id="1_controller"]
 [ext_resource type="Shader" path="res://shaders/fire/sparse/fire.gdshader" id="2_fire_shader"]
@@ -6,6 +6,7 @@
 [ext_resource type="Script" path="res://scripts/fire/wood_pile.gd" id="4_wood_pile"]
 [ext_resource type="Script" path="res://scripts/fire/fire_weapons.gd" id="5_weapons"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="6_sim_menu"]
+[ext_resource type="Texture2D" path="res://resources/generated/fire/fire_vfx_atlas.png" id="7_fire_atlas"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_volume"]
 frequency = 0.08
@@ -35,9 +36,25 @@ spread = 45.0
 initial_velocity_min = 2.0
 initial_velocity_max = 5.0
 gravity = Vector3(0, -3.0, 0)
-scale_min = 0.02
-scale_max = 0.06
-color = Color(1.0, 0.7, 0.2, 1.0)
+scale_min = 0.06
+scale_max = 0.22
+color = Color(1.0, 0.85, 0.65, 1)
+anim_offset_min = 0.0
+anim_offset_max = 1.0
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_spark_draw"]
+transparency = 1
+shading_mode = 0
+vertex_color_use_as_albedo = true
+billboard_mode = 3
+billboard_keep_scale = true
+albedo_texture = ExtResource("7_fire_atlas")
+particles_anim_h_frames = 4
+particles_anim_v_frames = 4
+particles_anim_loop = false
+
+[sub_resource type="QuadMesh" id="QuadMesh_spark"]
+material = SubResource("StandardMaterial3D_spark_draw")
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
 radius = 0.35
@@ -259,6 +276,7 @@ emitting = false
 amount = 30
 lifetime = 1.5
 process_material = SubResource("ParticleProcessMaterial_sparks")
+draw_pass_1 = SubResource("QuadMesh_spark")
 visibility_aabb = AABB(-6.4, -1, -6.4, 12.8, 20.2, 12.8)
 
 [node name="Campfire" type="Node3D" parent="."]

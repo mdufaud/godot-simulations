@@ -1,5 +1,7 @@
 class_name ClothRenderer extends MeshInstance3D
 
+const FABRIC_TEXTURE := preload("res://resources/generated/materials/canvas_coarse_tile.png")
+
 var material: ShaderMaterial
 var position_texture: Texture2DRD
 
@@ -11,6 +13,7 @@ func setup(solver: ClothSolver, preset: ClothPreset, surface_shader: Shader,
 	mat.set_shader_parameter("grid_size", Vector2(solver.grid_w, solver.grid_h))
 	mat.set_shader_parameter("cloth_color", preset.color)
 	mat.set_shader_parameter("stripe_mix", 1.0 if preset.stripes else 0.0)
+	mat.set_shader_parameter("fabric_tex", FABRIC_TEXTURE)
 	material = mat
 	material_override = mat
 	mesh = _build_grid_mesh(solver.grid_w, solver.grid_h, rest_spacing)

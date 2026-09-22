@@ -9,6 +9,8 @@ TODO.md
 # Third-party binary assets (Poly Haven downloads), fetched separately
 resources/*
 !resources/
+!resources/generated/
+!resources/generated/**
 !resources/ambient_fluid/
 !resources/ambient_fluid/**
 !resources/ocean/

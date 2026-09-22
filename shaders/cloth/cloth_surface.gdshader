@@ -5,11 +5,14 @@ shader_type spatial;
 render_mode cull_disabled;
 
 uniform sampler2D position_tex : filter_nearest;
+uniform sampler2D fabric_tex : filter_linear_mipmap, repeat_enable;
 uniform vec2 grid_size = vec2(96.0, 72.0);
 uniform vec3 cloth_color : source_color = vec3(0.75, 0.15, 0.12);
 uniform vec3 stripe_color : source_color = vec3(0.92, 0.9, 0.85);
 uniform float stripe_count = 5.0;
 uniform float stripe_mix = 0.0;
+// Weave photo tile: one tile spans this many UV units of the sheet.
+uniform float fabric_scale = 24.0;
 
 varying vec3 world_normal;
 
@@ -35,7 +38,10 @@ void fragment() {
 		NORMAL = -NORMAL;
 	}
 	float stripe = step(0.5, fract(UV.y * stripe_count));
-	ALBEDO = mix(cloth_color, stripe_color, stripe * stripe_mix);
+	vec3 albedo = mix(cloth_color, stripe_color, stripe * stripe_mix);
+	// The canvas weave rides as luminance so the preset color stays in charge.
+	float weave = texture(fabric_tex, UV * fabric_scale).g;
+	ALBEDO = albedo * mix(0.78, 1.18, weave);
 	ROUGHNESS = 0.85;
 	SPECULAR = 0.2;
 	// Fabric is thin: let a little light bleed through from behind.

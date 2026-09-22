@@ -73,6 +73,11 @@ func _preset_names() -> Array:
 	return names
 
 
+## Capture-harness hook: same path as picking a preset in the menu.
+func apply_preset(index: int) -> void:
+	_on_preset_selected(index)
+
+
 func _on_preset_selected(index: int) -> void:
 	_settings.adopt_surface(PRESETS[index] as ParallaxConfig)
 	_base_min_layers = _settings.min_layer_count
