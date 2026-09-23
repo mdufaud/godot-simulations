@@ -12,12 +12,13 @@ void main() {
 	}
 	uint layer_width = 6u;
 	uint layer_area = layer_width * layer_width;
+	uint footprint = id % layer_area;
 	float layer_center = float(layer_width - 1u) / 2.0;
 	float spacing = scene.emitter_shape.x;
 	vec3 p = scene.emitter_origin.xyz + vec3(
-		(float(offset % layer_width) - layer_center) * spacing,
+		(float(footprint % layer_width) - layer_center) * spacing,
 		float(offset / layer_area) * spacing,
-		(float((offset / layer_width) % layer_width) - layer_center) * spacing
+		(float(footprint / layer_width) - layer_center) * spacing
 	);
 	vec3 v = scene.emitter_velocity.xyz;
 	positions_src.data[i] = vec4(p, scene.emitter_origin.w);
