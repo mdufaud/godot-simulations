@@ -171,7 +171,8 @@ func _measure(index: int) -> Dictionary:
 		for key in timings:
 			_add_sample(samples, "sim_" + String(key), float(timings[key]))
 		var viewports := _fluid.profiled_viewports()
-		for entry in [["depth", 0], ["thickness", 1], ["filter_h", 2], ["filter_v", 3], ["foam", 4]]:
+		for entry in [["depth", 0], ["thickness", 1], ["filter_h", 2], ["filter_v", 3],
+				["foam", 4], ["thick_filter_h", 5], ["thick_filter_v", 6]]:
 			var viewport: SubViewport = viewports[entry[1]]
 			_add_sample(samples, entry[0], RenderingServer.viewport_get_measured_render_time_gpu(
 				viewport.get_viewport_rid()))

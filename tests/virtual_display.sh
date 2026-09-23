@@ -139,6 +139,79 @@ physics_test_process_alive() {
 }
 
 
+physics_test_pidfile() {
+	printf '%s/.godot/launched.pids' \
+		"$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+}
+
+
+## True when $1 looks like a test/probe godot this project launched: the path
+## must be ours AND the cmdline a headless/script/smoke run — a user's open
+## editor matches the path but never the marker, so kill never touches it.
+physics_test_pid_owned() {
+	local pid="$1"
+	local cmdline
+	cmdline="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null || true)"
+	[[ -n "$cmdline" ]] || return 1
+	local project_dir
+	project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+	[[ "$cmdline" == *"--path $project_dir"* ]] || return 1
+	# tools/import.sh is headless with our --path but the sole cache writer:
+	# never sweep it mid-import.
+	[[ "$cmdline" != *"--import"* ]] || return 1
+	[[ "$cmdline" == *"-s res://"* || "$cmdline" == *"--headless"* \
+		|| "$cmdline" == *"ui_smoke"* || "$cmdline" == *"--display-driver"* ]]
+}
+
+
+## Sweep every test/probe godot this project launched (stale pids in the
+## pidfile after a crashed/aborted run) plus orphaned virtual kwins. Kills the
+## whole process group TERM -> KILL. Nuclear for this project's test processes
+## by design: do not call it while another agent's run matters.
+physics_test_kill_leftovers() {
+	local project_dir
+	project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+	# Shared lock: wait out an in-flight tools/import.sh (exclusive holder)
+	# so the sweep never kills it mid-write.
+	mkdir -p "$project_dir/.godot"
+	exec 9>>"$project_dir/.godot/import.lock"
+	flock -s 9
+	local pidfile
+	pidfile="$(physics_test_pidfile)"
+	local killed=0
+	if [[ -f "$pidfile" ]]; then
+		local pid
+		while read -r pid; do
+			[[ "$pid" =~ ^[0-9]+$ ]] || continue
+			if physics_test_process_alive "$pid" && physics_test_pid_owned "$pid"; then
+				physics_test_process_stop "$pid"
+				killed=$((killed + 1))
+			fi
+		done <"$pidfile"
+		: >"$pidfile"
+	fi
+	# Orphans whose launcher never got to write/reap: match project test
+	# markers directly, same guard as physics_test_pid_owned.
+	local stray
+	while read -r stray; do
+		[[ "$stray" =~ ^[0-9]+$ ]] || continue
+		[[ "$stray" == "$$" ]] && continue
+		if physics_test_process_alive "$stray" && physics_test_pid_owned "$stray"; then
+			physics_test_process_stop "$stray"
+			killed=$((killed + 1))
+		fi
+	done < <(pgrep -f -- "--path $project_dir" 2>/dev/null || true)
+	# Safety net for forked-setsid kwins: match only the compositor so a
+	# concurrent agent's start-loop pgrep (same path in its cmdline) survives.
+	pkill -KILL -f -- "--virtual.*physics-test-wayland" 2>/dev/null || true
+	flock -u 9 2>/dev/null || true
+	exec 9>&- 2>/dev/null || true
+	if (( killed > 0 )); then
+		printf 'kill: reaped %d leftover godot process group(s)\n' "$killed" >&2
+	fi
+}
+
+
 physics_test_process_stop() {
 	local pid="$1"
 	if ! physics_test_process_alive "$pid"; then
@@ -173,6 +246,10 @@ physics_test_run_process() {
 	data_dir="$(mktemp -d "${output_file}.data.XXXXXX")" || return 1
 	XDG_DATA_HOME="$data_dir" setsid "$@" >"$output_file" 2>&1 &
 	process_pid=$!
+	local pidfile
+	pidfile="$(physics_test_pidfile)"
+	mkdir -p "$(dirname "$pidfile")"
+	printf '%s\n' "$process_pid" >>"$pidfile"
 	trap 'if [[ -n "${process_pid:-}" ]]; then physics_test_process_stop "$process_pid"; fi; exit 130' INT TERM
 	deadline=$((SECONDS + timeout_seconds))
 

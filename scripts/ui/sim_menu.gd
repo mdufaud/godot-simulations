@@ -9,6 +9,7 @@ extends Control
 ## value widget persists to UserSettings and restores on load; actions never do.
 
 signal panel_toggled(open: bool)
+signal settings_reset
 
 @export var title: String = "":
 	set(value):
@@ -372,6 +373,7 @@ func _do_reset() -> void:
 	for key in _entries:
 		var entry: Dictionary = _entries[key]
 		_apply_value(entry, entry.default)
+	settings_reset.emit()
 	# Wipe persisted values last, after the per-widget writes triggered above.
 	if _settings != null and not persist_id.is_empty():
 		_settings.clear_sim(persist_id)
@@ -510,7 +512,8 @@ func add_toggle(label_text: String, default_val: bool, cb: Callable, persist: bo
 
 ## Debug/visualisation toggle placed in the always-visible icon strip under the gear,
 ## outside the options panel (for on-device debugging). `icon` is a short glyph.
-func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Callable) -> Button:
+func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Callable,
+		persist: bool = true) -> Button:
 	var button := Button.new()
 	button.toggle_mode = true
 	button.text = icon
@@ -523,11 +526,12 @@ func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Call
 
 	var prev_section := _section
 	_section = "Debug"
-	var key := _register(tooltip, button, cb, "toggle", default_val)
+	var key := _register(tooltip, button, cb, "toggle", default_val, persist)
 	_section = prev_section
-	button.toggled.connect(func(on: bool) -> void:
-		_persist(key, on)
-	)
+	if persist:
+		button.toggled.connect(func(on: bool) -> void:
+			_persist(key, on)
+		)
 	_layout_action_lane.call_deferred()
 	return button
 

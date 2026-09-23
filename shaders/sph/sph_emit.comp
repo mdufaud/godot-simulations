@@ -10,13 +10,14 @@ void main() {
 	if (offset >= uint(scene.counts.y)) {
 		return;
 	}
-	uint layer_width = 4u;
+	uint layer_width = 6u;
 	uint layer_area = layer_width * layer_width;
+	float layer_center = float(layer_width - 1u) / 2.0;
 	float spacing = scene.emitter_shape.x;
 	vec3 p = scene.emitter_origin.xyz + vec3(
-		(float(offset % layer_width) - 1.5) * spacing,
+		(float(offset % layer_width) - layer_center) * spacing,
 		float(offset / layer_area) * spacing,
-		(float((offset / layer_width) % layer_width) - 1.5) * spacing
+		(float((offset / layer_width) % layer_width) - layer_center) * spacing
 	);
 	vec3 v = scene.emitter_velocity.xyz;
 	positions_src.data[i] = vec4(p, scene.emitter_origin.w);

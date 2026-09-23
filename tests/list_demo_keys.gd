@@ -9,4 +9,5 @@ const GAME_MANAGER := preload("res://scripts/autoload/game_manager.gd")
 func _initialize() -> void:
 	for demo in GAME_MANAGER.DEMOS:
 		print(demo.key)
+	print("DEMO KEYS DONE")
 	quit(0)

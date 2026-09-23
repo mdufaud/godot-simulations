@@ -47,8 +47,11 @@ void fragment() {
 	float nz = sqrt(1.0 - r2);
 	vec3 sphere_view = center_view + vec3(quad_uv, nz) * particle_radius;
 	// Split eye depth into integer + fraction: 16F render target quantizes a
-	// raw depth to ~1.6cm at 20m, destroying reconstructed normals.
-	// B = front-surface attribute (lava: temperature) — depth test keeps nearest.
+	// raw depth to ~1.6cm at 20m, destroying reconstructed normals. The split
+	// itself stays exact only while floor(d) fits half-float integers, so clamp
+	// at 2046m — beyond it the fluid is a faint distant sheet, not seam material.
 	float eye_depth = -sphere_view.z;
-	ALBEDO = vec3(floor(eye_depth), eye_depth - floor(eye_depth), attrib);
+	float depth_pack = min(eye_depth, 2046.0);
+	// B = front-surface attribute (lava temperature) — depth test keeps nearest.
+	ALBEDO = vec3(floor(depth_pack), depth_pack - floor(depth_pack), attrib);
 }

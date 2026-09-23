@@ -72,6 +72,11 @@ var _radius := RADIUS[Method.SPH]
 var _pour_cursor := 0
 var _last_pour_ms := -POUR_COOLDOWN_MS
 var _step_clock := SimStepClock.new()
+# Set when a teardown+re-init pair is queued on the render thread; _process
+# skips renderer updates until the queued init has landed (generation observed),
+# or one frame hands the renderer the position RID being freed.
+var _pending_init := false
+var _expected_init_generation := 0
 
 
 func active() -> Object:
@@ -102,6 +107,8 @@ func start() -> void:
 	_setup_renderer()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
+	# First init: there is no live RID to protect, so no pending-init guard —
+	# the renderer has never bound anything.
 	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
@@ -139,7 +146,7 @@ func set_method(m: Method) -> void:
 	_configure_solver()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_queue_init()
 
 
 func set_scenario(value: Scenario) -> void:
@@ -156,7 +163,7 @@ func set_scenario(value: Scenario) -> void:
 	_configure_solver()
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_queue_init()
 
 
 func set_cascade_flow(value: float) -> void:
@@ -171,12 +178,22 @@ func set_mode(m: float) -> void:
 	renderer.set_mode(mode)
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_queue_init()
 
 
 func set_particle_count(n: int) -> void:
 	if n == active_solver.particle_count:
 		return
+	# init_render validates the config before allocating, and every later re-init
+	# (restart, mode/preset switches) validates the same pair, so the config must
+	# describe the new count before the teardown queues it.
+	config.default_particle_count = n
+	# A count above the impostor texture's capacity wraps INSTANCE_ID texel
+	# lookups; grow the texture instead of corrupting the surface.
+	while n > config.texture_width * config.texture_width:
+		config.texture_width *= 2
+		push_warning("Fluid: raised position texture to %dpx for %d particles" % [
+			config.texture_width, n])
 	_teardown()
 	active_solver.particle_count = n
 	particle_count = n
@@ -185,7 +202,7 @@ func set_particle_count(n: int) -> void:
 	# renderer's impostor/thickness samplers on the same side.
 	renderer.set_texture_width(config.texture_width)
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_queue_init()
 
 
 # The pool is allocated with the solver, so toggling only gates the foam stages
@@ -217,7 +234,7 @@ func restart() -> void:
 	_last_pour_ms = -POUR_COOLDOWN_MS
 	_step_clock.reset()
 	active_solver.set_seed_positions(_build_seed())
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_queue_init()
 
 
 func set_profiling(on: bool) -> void:
@@ -297,6 +314,14 @@ func get_sph_substeps() -> int:
 	return sph_solver.substeps
 
 
+func set_sph_cohesion(value: float) -> void:
+	sph_solver.cohesion_strength = value
+
+
+func get_sph_cohesion() -> float:
+	return sph_solver.cohesion_strength
+
+
 func set_sph_foam_amount(value: float) -> void:
 	sph_solver.foam_spawn_rate = value
 
@@ -346,6 +371,25 @@ func set_sky_up_axis(up: Vector3) -> void:
 	renderer.composite_material().set_shader_parameter("sky_up_axis", up)
 
 
+## Points the composite's sun highlight along the scene light, so the reflection
+## matches the actual lighting. `direction` is where the light travels -- for a
+## DirectionalLight3D, that is -basis.z.
+func set_light_direction(direction: Vector3) -> void:
+	if renderer == null:
+		return
+	renderer.composite_material().set_shader_parameter("sun_direction", direction.normalized())
+
+
+## Feeds the composite the scene's real sky gradient, so grazing-angle Fresnel
+## brightens toward the horizon the camera actually sees instead of the baked-in
+## default (which reads as painted plastic on settled water).
+func set_sky_colors(zenith: Color, horizon: Color) -> void:
+	if renderer == null:
+		return
+	renderer.composite_material().set_shader_parameter("sky_zenith", zenith)
+	renderer.composite_material().set_shader_parameter("sky_horizon", horizon)
+
+
 ## Draw order for the full-screen composite quad. Any other transparent full-screen
 ## quad reading SCREEN_TEXTURE (the planet's atmosphere) shares the same screen copy,
 ## so the two do not blend -- the later one overwrites the earlier. Raise this to keep
@@ -389,7 +433,11 @@ func _configure_planet_solver() -> void:
 	sph_solver.foam_spawn_rate = 600.0
 	sph_solver.foam_spawn_fade_start = 4.0
 	sph_solver.foam_spawn_fade_time = 1.0
+	sph_solver.foam_trapped_min = 8.0
 	sph_solver.foam_trapped_max = 15.0
+	# Earth.unity has no surface gate; the orbital pour is violent enough that
+	# the churn it wants foam on sits at low density anyway.
+	sph_solver.foam_surface_gate = 0.0
 	sph_solver.foam_ke_min = 9.0
 	sph_solver.foam_ke_max = 20.0
 	# The impostor radius is tuned against the default spacing, so it has to follow
@@ -415,25 +463,39 @@ func _configure_solver() -> void:
 	if planet_mode():
 		_configure_planet_solver()
 		sph_solver.viscosity_strength = 0.14 if mode < 0.5 else 0.3
+		sph_solver.cohesion_strength = 0.0
 		return
-	# Flat tank: SebLague's "Fluid ScreenSpace 2". Set explicitly rather than left to
-	# the solver defaults, because the planet path above overwrites the same fields.
-	sph_solver.foam_spawn_rate = 120.0
+	# Flat tank: SebLague's spawn structure with thresholds re-fit to OUR scene.
+	# His absolute windows do not transfer: his pool is ~12h deep (wave celerity
+	# ~4.9 m/s) while ours is ~3.5h (celerity 2.94 m/s, so KE tops out at 8.7),
+	# and our measured trapped-air distribution peaks at 32 with p99 = 10. With
+	# his (15, 25)/(15, 30) and a 12 floor, the triple gate multiplies to ~zero
+	# at churn — the foam famine of 2026-09-23. These values follow SPlisHSPlasH's
+	# auto ramp (0.1*max..max ≈ [3, 32] here; the paper's own trapped-air ramp is
+	# 5..20 and 2..8 is wave-crest) and FLIP Fluids' low energy floor
+	# (|v| = 0.63): the
+	# lower ramp edges sit INSIDE the measured distribution, the density gate
+	# (Ihmsen 2011's surface test) keeps interior/wall spawn at zero.
+	sph_solver.foam_spawn_rate = 90.0
 	sph_solver.foam_spawn_fade_start = 0.2
 	sph_solver.foam_spawn_fade_time = 0.35
-	sph_solver.foam_trapped_max = 25.0
-	sph_solver.foam_ke_min = 15.0
-	sph_solver.foam_ke_max = 30.0
+	sph_solver.foam_trapped_min = 2.0
+	sph_solver.foam_trapped_max = 12.0
+	sph_solver.foam_surface_gate = 0.9
+	sph_solver.foam_ke_min = 2.25
+	sph_solver.foam_ke_max = 9.0
 	if mode > 0.5:
 		pbf_solver.xsph_c = 0.35
 		pbf_solver.vorticity_eps = 0.0
 		sph_solver.viscosity_strength = 0.3
 		sph_solver.collision_damping = 0.1
+		sph_solver.cohesion_strength = 800.0
 	else:
 		pbf_solver.xsph_c = 0.05
 		pbf_solver.vorticity_eps = 0.02
 		sph_solver.viscosity_strength = 0.14
 		sph_solver.collision_damping = 0.15
+		sph_solver.cohesion_strength = 400.0
 
 
 ## SebLague's Earth.unity: foam render scale 4, applied as scale * 0.01 * 2, i.e.
@@ -447,8 +509,22 @@ func _foam_billboard_size() -> float:
 
 # The solver is captured at queue time: the render thread drains the queue
 # later, after the main thread may have nulled or reassigned active_solver.
+func _queue_init() -> void:
+	# Read the generation BEFORE queueing: the render thread is parallel and may
+	# run the whole init (bumping the generation) before the next main-thread
+	# line executes, which would make the expected value unreachable.
+	var expected: int = active_solver.init_generation + 1
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	_expected_init_generation = expected
+	_pending_init = true
+
+
 func _render_init(solver) -> void:
 	solver.init_render()
+	# The main thread polls this to learn the queued free+init pair has run;
+	# bumping here (not in the setters) makes the signal deterministic even
+	# when both execute between two main-thread frames.
+	solver.init_generation += 1
 
 
 func _render_free(solver) -> void:
@@ -640,6 +716,14 @@ func _build_dam_seed() -> PackedFloat32Array:
 func _process(delta: float) -> void:
 	if active_solver == null or not active_solver.initialized:
 		return
+	if _pending_init:
+		# A teardown+re-init pair is queued on the render thread. Until its init
+		# has returned (generation observed), update() would re-bind the position
+		# RID being freed. The generation bump makes the clear deterministic even
+		# when free+init execute entirely between two main-thread frames.
+		if active_solver.init_generation < _expected_init_generation:
+			return
+		_pending_init = false
 	var visible: int = sph_solver.live_count() if method == Method.SPH else active_solver.particle_count
 	var foam_rid: RID = sph_solver.get_foam_tex_rid() if method == Method.SPH else RID()
 	renderer.update(active_solver.get_position_tex_rid(), visible, foam_rid)

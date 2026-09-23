@@ -65,13 +65,20 @@ func restore() -> void:
 
 
 ## Select a tier from the menu: apply, persist, rebuild GPU resources. No-op
-## when the tier is already the requested one, so SimMenu's deferred restore
-## never rebuilds resources that were set up in _ready().
+## when the tier is already the requested one.
 func set_tier(tier: int) -> void:
 	if tier == requested:
 		return
 	requested = clampi(tier, 0, profile.tier_count() - 1)
 	_apply_tier(true)
+
+
+func reset_to_default() -> void:
+	requested = profile.default_tier()
+	_apply_tier(true)
+	if _option != null:
+		_option.select(requested)
+		refresh_option(_option)
 
 
 ## Label for menus, profiler overlays and capture metadata; a degraded pick
@@ -98,14 +105,15 @@ func bind(key: String, node: Control, callback: Callable,
 	_controls[key] = {node = node, callback = callback, to_index = to_index}
 
 
-## Add the "Quality profile" option to the open section. The label matches the
-## ocean menu's, so persisted widget keys stay stable across the migration.
+## Add the "Quality profile" option to the open section. GameManager owns its
+## persistence; SimMenu only displays it and requests the profile-owned default.
 ## Returns the OptionButton for demos that want to refresh it themselves.
 func attach_menu_option(menu: SimMenu) -> OptionButton:
 	_option = menu.add_option_button("Quality profile", _tier_names, requested,
 		func(tier_idx: int):
 			set_tier(tier_idx)
-			refresh_option(_option))
+			refresh_option(_option), false)
+	menu.settings_reset.connect(reset_to_default)
 	refresh_option(_option)
 	return _option
 

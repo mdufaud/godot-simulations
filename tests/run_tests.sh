@@ -3,7 +3,7 @@
 # with GPU=1 — the rendering suites in an invisible virtual Wayland display.
 #
 #   tests/run_tests.sh                 # CPU/value gates only (the default gate)
-#   GPU=1 tests/run_tests.sh           # + ocean FFT, portal views, scene cycle, UI smoke
+#   GPU=1 tests/run_tests.sh           # + ocean FFT, portal views, scene cycle, fluid foam, UI smoke
 #   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
 #
 # JOBS caps the concurrently running suites in both phases (default 2). All
@@ -47,7 +47,7 @@ cleanup() {
 	local status=$?
 	local pid
 	for pid in "${cpu_pids[@]:-}"; do
-		kill "$pid" 2>/dev/null || true
+		physics_test_process_stop "$pid"
 	done
 	physics_test_display_stop
 	exit "$status"
@@ -135,9 +135,9 @@ done
 # The GPU phase boots a virtual Wayland compositor and renders real frames —
 # heavy, and it contends with everything else running on the machine. It is a
 # last resort: opt in with GPU=1 for compute suites (ocean FFT, portal views),
-# the full scene cycle and the SimMenu touch smoke. Evidence captures are never
-# part of the gate: use tools/capture.sh and tests/run_mixwell_capture.sh by
-# hand instead.
+# the fluid foam decay gate, the full scene cycle and the SimMenu touch smoke.
+# Evidence captures are never part of the gate: use tools/capture.sh and
+# tests/run_mixwell_capture.sh by hand instead.
 if [[ "${GPU:-0}" != "1" ]]; then
 	if (( ${#failed[@]} > 0 )); then
 		printf 'Failed suites: %s\n' "${failed[*]}" >&2
@@ -149,8 +149,8 @@ if [[ "${GPU:-0}" != "1" ]]; then
 fi
 
 	if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look ui_smoke)
-else
+		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look fluid_foam fluid_tier ui_smoke)
+	else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
 	export PHYSICS_TEST_AUDIO_DRIVER
@@ -230,7 +230,7 @@ else
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
 			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
 			--log-file "$tornado_look_log" \
-			-s res://tests/tornado_boot_look_probe.gd || tornado_look_status=$?
+			-s res://tests/probe.gd -- tornado_boot_look || tornado_look_status=$?
 	if (( tornado_look_status == 0 )) && grep -q '^TEST PASS tornado_boot_look$' "$tornado_look_output"; then
 		printf 'TEST PASS tornado_boot_look\n'
 	else
@@ -258,6 +258,48 @@ else
 		printf 'TEST FAIL terrain: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$terrain_output" >&2
 		failed+=(terrain)
+	fi
+
+	fluid_foam_output="$LOG_DIR/gpu-fluid_foam.stdout.log"
+	fluid_foam_log="$LOG_DIR/gpu-fluid_foam.godot.log"
+	fluid_foam_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_foam$' "$fluid_foam_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$fluid_foam_log" \
+			-s res://tests/probe.gd -- fluid_foam || fluid_foam_status=$?
+	if (( fluid_foam_status == 0 )) && grep -q '^TEST PASS fluid_foam$' "$fluid_foam_output"; then
+		printf 'TEST PASS fluid_foam\n'
+	else
+		printf 'TEST FAIL fluid_foam: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$fluid_foam_output" >&2
+		failed+=(fluid_foam)
+	fi
+
+	fluid_tier_output="$LOG_DIR/gpu-fluid_tier.stdout.log"
+	fluid_tier_log="$LOG_DIR/gpu-fluid_tier.godot.log"
+	fluid_tier_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_tier$' "$fluid_tier_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$fluid_tier_log" \
+			-s res://tests/probe.gd -- fluid_tier || fluid_tier_status=$?
+	if (( fluid_tier_status == 0 )) && grep -q '^TEST PASS fluid_tier$' "$fluid_tier_output"; then
+		printf 'TEST PASS fluid_tier\n'
+	else
+		printf 'TEST FAIL fluid_tier: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$fluid_tier_output" >&2
+		failed+=(fluid_tier)
 	fi
 
 	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \

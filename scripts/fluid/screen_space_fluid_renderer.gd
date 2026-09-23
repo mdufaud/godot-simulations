@@ -45,6 +45,8 @@ var thick_vp: SubViewport
 var foam_vp: SubViewport
 var filter_h_vp: SubViewport
 var filter_v_vp: SubViewport
+var thick_filter_h_vp: SubViewport
+var thick_filter_v_vp: SubViewport
 var depth_mat: ShaderMaterial
 var thick_mat: ShaderMaterial
 var filter_h_mat: ShaderMaterial
@@ -76,6 +78,7 @@ func start() -> void:
 	mm = _build_multimesh()
 	_setup_prepass()
 	_setup_filters()
+	_setup_thickness_filter()
 	_setup_foam_render()
 	_setup_composite()
 	camera.get_viewport().size_changed.connect(_apply_sizes)
@@ -86,7 +89,10 @@ func composite_material() -> ShaderMaterial:
 
 
 func profiled_viewports() -> Array:
-	return [depth_vp, thick_vp, filter_h_vp, filter_v_vp, foam_vp]
+	# Legacy indices 0-4 are positional contracts (profiler overlay, benchmark):
+	# appended viewports must go after them.
+	return [depth_vp, thick_vp, filter_h_vp, filter_v_vp, foam_vp,
+		thick_filter_h_vp, thick_filter_v_vp]
 
 
 # --- Runtime control -------------------------------------------------------
@@ -149,6 +155,9 @@ func _apply_sizes() -> void:
 	thick_vp.size = _thick_size(scaled)
 	filter_h_vp.size = scaled
 	filter_v_vp.size = scaled
+	if thick_filter_h_vp != null:
+		thick_filter_h_vp.size = _thick_size(scaled)
+		thick_filter_v_vp.size = _thick_size(scaled)
 	if foam_vp != null:
 		foam_vp.size = _foam_size()
 	var proj_scale := _proj_scale(scaled)
@@ -165,6 +174,9 @@ func rebind() -> void:
 		foam_pos_texture.texture_rd_rid = RID()
 	_tex_bound = false
 	_foam_bound = false
+	# The impostors keep drawing until the next update() re-raises the count,
+	# sampling the unbound texture (opaque-white fallback) as one blob.
+	set_visible_count(0)
 	if foam_mmi != null:
 		foam_mmi.visible = false
 	_update_foam_viewport()
@@ -198,7 +210,8 @@ func _set_rendering_active(active: bool) -> void:
 		return
 	_rendering_active = active
 	var mode := SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
-	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp]:
+	for vp in [depth_vp, thick_vp, filter_h_vp, filter_v_vp,
+			thick_filter_h_vp, thick_filter_v_vp]:
 		if vp != null:
 			vp.render_target_update_mode = mode
 	depth_mmi.visible = active
@@ -239,13 +252,15 @@ func _build_multimesh() -> MultiMesh:
 
 func _fill_mm(m: MultiMesh) -> void:
 	m.instance_count = particle_count
-	var buf := PackedFloat32Array()
-	buf.resize(particle_count * 12)
-	for i in particle_count:
-		buf[i * 12] = 1.0
-		buf[i * 12 + 5] = 1.0
-		buf[i * 12 + 10] = 1.0
-	m.buffer = buf
+	# One identity transform doubled up to the instance count — the same memcpy
+	# pattern as the foam buffer. The per-instance GDScript loop this replaces
+	# took a noticeable hitch at 131k instances on every tier hot-switch.
+	var one := PackedFloat32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]).to_byte_array()
+	var bytes := one
+	while bytes.size() < particle_count * 48:
+		bytes.append_array(bytes.duplicate())
+	bytes.resize(particle_count * 48)
+	m.buffer = bytes.to_float32_array()
 
 
 func _make_prepass_cam(mask: int) -> Camera3D:
@@ -336,13 +351,41 @@ func _setup_filters() -> void:
 	filter_v_mat = (filter_v_vp.get_child(0) as ColorRect).material
 
 
+## Thickness runs through its own separable gaussian before the composite: the
+## raw accumulation's per-particle ripples are what bands settled water. Same
+## resolution as the thickness pass (half the prepass), where 5 taps per axis
+## is plenty for a low-frequency target.
+func _setup_thickness_filter() -> void:
+	var thick_size := _thick_size(_scaled_size())
+	thick_filter_h_vp = _make_blur_vp(thick_size, Vector2(1, 0), thick_vp.get_texture())
+	thick_filter_v_vp = _make_blur_vp(thick_size, Vector2(0, 1), thick_filter_h_vp.get_texture())
+
+
+func _make_blur_vp(vp_size: Vector2i, dir: Vector2, src: Texture2D) -> SubViewport:
+	var vp := SubViewport.new()
+	vp.size = vp_size
+	vp.disable_3d = true
+	vp.use_hdr_2d = true
+	vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	var rect := ColorRect.new()
+	rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://shaders/fluid/fluid_thickness_filter.gdshader")
+	mat.set_shader_parameter("thickness_tex", src)
+	mat.set_shader_parameter("direction", dir)
+	rect.material = mat
+	vp.add_child(rect)
+	add_child(vp)
+	return vp
+
+
 func _setup_composite() -> void:
 	var quad := QuadMesh.new()
 	quad.size = Vector2(2.0, 2.0)
 	composite_mat = ShaderMaterial.new()
 	composite_mat.shader = load("res://shaders/fluid/fluid_composite.gdshader")
 	composite_mat.set_shader_parameter("fluid_depth_tex", filter_v_vp.get_texture())
-	composite_mat.set_shader_parameter("thickness_tex", thick_vp.get_texture())
+	composite_mat.set_shader_parameter("thickness_tex", thick_filter_v_vp.get_texture())
 	if build_foam:
 		composite_mat.set_shader_parameter("foam_tex", foam_vp.get_texture())
 	else:
@@ -419,10 +462,11 @@ func _scaled_size() -> Vector2i:
 	return Vector2i(maxi(int(s.x), 1), maxi(int(s.y), 1))
 
 
-# Foam sprites are small and high-frequency, so the coverage buffer stays at full
-# resolution regardless of render_scale — at half res they magnify into squares.
+# Foam sprites are the largest target in the chain, and the soft-rim coverage
+# keeps them crisp down to 3/4 window res — below that they magnify into
+# squares, so the scale floors there instead of following render_scale fully.
 func _foam_size() -> Vector2i:
-	var s := Vector2(camera.get_viewport().size)
+	var s := Vector2(camera.get_viewport().size) * maxf(render_scale, 0.75)
 	return Vector2i(maxi(int(s.x), 1), maxi(int(s.y), 1))
 
 

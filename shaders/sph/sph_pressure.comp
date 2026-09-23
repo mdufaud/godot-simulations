@@ -10,6 +10,7 @@ void main() {
 	float near_pressure = near_density * params.sim.w;
 	vec3 vel_i = velocities.data[i].xyz;
 	vec3 force = vec3(0.0);
+	float cohesion = params.sim2.z;
 	int neighbours = 0;
 	bool spawn_foam = foam.flags.x == 1 && params.gravity.w <= 0.5;
 	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
@@ -36,9 +37,14 @@ void main() {
 		float shared_np = (near_pressure + npj) * 0.5;
 		force += dir * sph_density_deriv(dst) * shared_p / dj;
 		force += dir * sph_near_density_deriv(dst) * shared_np / nj;
+		// Akinci-style cohesion (surface tension lite): attracts within h/2,
+		// mildly repels beyond, so free particles bead up without clumping.
+		if (cohesion > 0.0) {
+			force += dir * sph_cohesion_k(dst) / dj * cohesion;
+		}
 
 		if (spawn_foam) {
-			vec3 rel_v = vel_i - velocities.data[j].xyz;
+			vec3 rel_v = vel_i - velocities_snap.data[j].xyz;
 			float rel_mag = length(rel_v);
 			vec3 rel_dir = rel_v / max(rel_mag, 1e-6);
 			// 0 when moving apart, up to 2 when moving straight at each other.
@@ -60,7 +66,14 @@ void main() {
 	if (!spawn_foam) {
 		return;
 	}
+	// Surface gate: interior particles (density near rest) have full kernel
+	// support, so their trapped-air metric comes from wall shear or bulk churn
+	// rather than the free surface — foam born there sticks to the walls. The
+	// gate fades spawning out as density approaches the rest value.
 	float air_factor = foam.spawn.x * remap01(trapped_air, foam.spawn.y, foam.spawn.z);
+	if (foam.render.z > 0.0) {
+		air_factor *= remap01(params.sim.y * foam.render.z - density, 0.0, params.sim.y * 0.1);
+	}
 	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);
 	float spawn_factor = air_factor * ke_factor * params.sim.x;
 	if (spawn_factor <= 0.0) {
@@ -97,6 +110,10 @@ void main() {
 		vec3 spawn_pos = pos + base_off + v * params.sim.x * rand01(rng);
 		float life = mix(foam.spawn2.y, foam.spawn2.z, rand01(rng));
 		foam_pos.data[slot] = vec4(spawn_pos, life);
-		foam_vel.data[slot] = vec4(v + base_off, (foam.motion.z + 1.0) * 0.5);
+		// Spawn small (and varied) and let the update pass grow the scale in:
+		// a full-size sprite popping into existence reads as a blink. Staggered
+		// lifetimes then keep the sheet's sizes spread as it dissolves.
+		float variance = mix(0.75, 1.25, rand01(rng));
+		foam_vel.data[slot] = vec4(v + base_off, (foam.motion.z + 1.0) * 0.5 * variance * 0.3);
 	}
 }

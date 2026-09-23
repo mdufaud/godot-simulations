@@ -253,6 +253,13 @@ func _test_state_machine() -> void:
 	if manager != null:
 		_check(manager.settings.get("test_quality_profile") == 3,
 			"set_tier persists the requested tier")
+	state.reset_to_default()
+	_check(state.requested == TestProfile.default_tier()
+		and state.effective == TestProfile.default_tier(),
+		"factory reset returns to the profile-owned default tier")
+	if manager != null:
+		_check(manager.settings.get("test_quality_profile") == TestProfile.default_tier(),
+			"factory reset persists the profile default through GameManager")
 
 	var count := _apply_count
 	state.fallback_tier = SimQualityProfile.Tier.LOW

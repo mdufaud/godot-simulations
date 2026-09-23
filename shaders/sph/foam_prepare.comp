@@ -4,7 +4,14 @@ void main() {
 	}
 	uint live = foam_live();
 	foam_count.data[1] = 0u;
-	foam_count.data[2] = (live + 255u) / 256u;
+	// Highest live count ever reached: every render texel below it may still
+	// hold a published sprite from a particle that has since died, so
+	// foam_compact must clear down to here, not just to the current live count.
+	// Monotone on purpose: compact runs concurrently over this value, so it can
+	// never shrink mid-dispatch. The indirect dispatch dims cover the bound, not
+	// just live, or the clear range would be truncated on fast pool drains.
+	foam_count.data[6] = max(foam_count.data[6], live);
+	foam_count.data[2] = (max(live, foam_count.data[6]) + 255u) / 256u;
 	foam_count.data[3] = 1u;
 	foam_count.data[4] = 1u;
 	foam_count.data[5] = live;

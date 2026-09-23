@@ -29,6 +29,9 @@ var mode := 0.0
 
 var tex_width := 256
 var initialized := false
+## Bumped on the render thread after each init_render returns -- the main
+## thread's "this queued re-init has landed" signal (see FluidSystem).
+var init_generation := 0
 var profiling := false
 
 var _rd: RenderingDevice
@@ -163,7 +166,8 @@ func step_render(dt: float) -> void:
 	var cells := grid_dims.x * grid_dims.y * grid_dims.z
 	var cell_groups := ceili(float(cells) / WG)
 
-	_rd.capture_timestamp("pbf/start")
+	if profiling:
+		_rd.capture_timestamp("pbf/start")
 	var cl := _rd.compute_list_begin()
 	_dispatch(cl, "grid_clear", pc, cell_groups)
 	_dispatch(cl, "predict", pc, n_groups)
@@ -187,7 +191,8 @@ func step_render(dt: float) -> void:
 	_dispatch(cl, "viscosity", pc, n_groups)
 	cl = _mark(cl, "pbf/viscosity")
 	_rd.compute_list_end()
-	_rd.capture_timestamp("pbf/end")
+	if profiling:
+		_rd.capture_timestamp("pbf/end")
 	_parity = 1 - _parity
 
 

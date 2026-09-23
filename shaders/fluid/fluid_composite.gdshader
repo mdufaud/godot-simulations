@@ -6,13 +6,14 @@
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_never, depth_test_disabled;
 
-uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear;
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_nearest;
 uniform sampler2D fluid_depth_tex : filter_nearest;
 uniform sampler2D thickness_tex : filter_linear;
-// White-particle prepass: R = coverage, G = linear eye depth of the sprite.
+// Foam-particle prepass: R = coverage, G = coverage-weighted eye depth.
 uniform sampler2D foam_tex : filter_linear;
 uniform bool foam_enabled = false;
+uniform vec3 foam_color : source_color = vec3(0.62, 0.78, 0.80);
 
 uniform vec3 absorption = vec3(0.55, 0.18, 0.09);
 uniform float absorption_scale = 0.5;
@@ -104,7 +105,7 @@ void fragment() {
 		fm = vec2(0.0);
 	}
 	float foam = fm.r;
-	float foam_d = fm.g;
+	float foam_d = fm.g / max(foam, 1e-5);
 	// Foam behind opaque scene geometry is hidden by it.
 	if (foam_d > scene_d) {
 		foam = 0.0;
@@ -117,9 +118,16 @@ void fragment() {
 		if (foam <= 0.002) {
 			discard;
 		}
-		ALBEDO = vec3(1.0);
+		ALBEDO = foam_color;
 		ALPHA = foam;
 	} else {
+		// Foam depth split: coverage in FRONT of the surface (foam_d < fd) is
+		// unattenuated white froth composited over everything at the end;
+		// coverage behind it is submerged and must ride the refracted
+		// background so the Beer-Lambert term attenuates it, instead of
+		// white-beading through the thin water near edges and walls.
+		float foam_front = foam * clamp((fd - foam_d) / 0.5, 0.0, 1.0);
+		float foam_under = foam - foam_front;
 
 		// View-space normal from filtered depth; pick the smaller one-sided
 		// difference on each axis so silhouette edges don't smear normals.
@@ -162,20 +170,32 @@ void fragment() {
 			// --- WATER (SebLague-style dielectric surface) ---
 			vec3 in_view = normalize(pc); // camera -> surface, view space
 			float reflectance = dielectric_reflectance(in_view, n, 1.0, ior);
+			// Foam is matte froth, not glass: fade the surface specular out as
+			// front coverage rises so the water does not glint through the
+			// sheet. Submerged coverage does not matte the surface above it.
+			reflectance *= 1.0 - foam_front * 0.85;
 
-			// Snell-bent refraction: offset the screen sample by the lateral bend,
-			// scaled by optical thickness; fall back if the sample is in front.
+			// Snell-bent refraction: offset the screen sample by the lateral
+			// bend, scaled by optical thickness. The bend is divided by the eye
+			// depth so the on-screen shift stays world-constant — unbounded at
+			// grazing angles it used to sample the sky past the tank and paint
+			// a dark band across settled water. The length clamp is the last
+			// resort for extreme cases; fall back if the sample is in front.
 			vec3 rdir = snell_refract(in_view, n, 1.0, ior);
-			vec2 refr_uv = SCREEN_UV + (rdir.xy - in_view.xy) * refraction_strength * clamp(thickness, 0.0, 2.0);
-			refr_uv = clamp(refr_uv, vec2(0.001), vec2(0.999));
+			vec2 bend = (rdir.xy - in_view.xy)
+					* (refraction_strength * clamp(thickness, 0.0, 2.0) / max(fd, 0.5));
+			float bend_len = length(bend);
+			if (bend_len > 0.08) {
+				bend *= 0.08 / bend_len;
+			}
+			vec2 refr_uv = clamp(SCREEN_UV + bend, vec2(0.001), vec2(0.999));
 			if (scene_eye_depth(refr_uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
 				refr_uv = SCREEN_UV;
 			}
-			// Foam is opaque white coverage (SebLague): it goes into what is seen
-			// through the water BEFORE absorption, so froth deep in the body is
-			// attenuated by the water above it instead of showing as hard beads.
+			// Submerged froth is part of what the water tints and absorbs;
+			// front froth skips the water entirely and composites last.
 			vec3 scene_col = textureLod(SCREEN_TEXTURE, refr_uv, 0.0).rgb;
-			scene_col = scene_col * (1.0 - foam) + foam;
+			scene_col = mix(scene_col, foam_color, foam_under);
 			vec3 trans = exp(-absorption * thickness * absorption_scale);
 			vec3 refr_col = scene_col * trans + tint_color * (1.0 - trans);
 
@@ -185,13 +205,11 @@ void fragment() {
 			vec3 to_sun = normalize(-sun_direction);
 			vec3 refl_col = sample_sky(refl_world, to_sun, normalize(sky_up_axis));
 
-			// Foam in front of the surface also takes over the reflection.
-			if (foam_d < fd) {
-				refl_col = refl_col * (1.0 - foam) + foam;
-			}
+			// Front froth takes over the sky reflection too (it is diffuse).
+			refl_col = mix(refl_col, foam_color, foam_front);
 
-			ALBEDO = mix(refr_col, refl_col, reflectance);
-			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam);
+			ALBEDO = mix(mix(refr_col, refl_col, reflectance), foam_color, foam_front);
+			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam_front);
 		}
 	}
 

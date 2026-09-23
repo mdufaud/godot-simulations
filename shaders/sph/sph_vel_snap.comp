@@ -1,0 +1,7 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	velocities_snap.data[i] = velocities.data[i];
+}

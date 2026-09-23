@@ -4,7 +4,11 @@
 //   spray  (airborne, few neighbours) - ballistic, quadratic air drag
 //   bubble (submerged, many neighbours) - buoyant, dragged toward fluid velocity
 //   foam   (on the surface, in between) - carried by the fluid, dissolves
-// Publishes xyz = position, w = render size (0 = dead, the billboard collapses).
+// Every class ages (SebLague only ages surface foam, which leaves spray and
+// bubbles immortal -- particles trapped at a settled interface oscillate
+// between those classes and crust over permanently). Bubbles age slowest:
+// they are mostly hidden behind the surface and churning zones keep spawning
+// fresh ones. Publishes xyz = position, w = render size (0 = dead).
 void main() {
 	uint s = gl_GlobalInvocationID.x;
 	// Only the live run is walked: dead slots were dropped by the last compaction
@@ -50,22 +54,21 @@ void main() {
 		float sp2 = dot(v, v);
 		vec3 drag = sp2 > 1e-8 ? -normalize(v) * sp2 * foam.motion.y : vec3(0.0);
 		v += (g + drag) * dt;
+		life -= dt * foam.aging.x;
 	} else if (is_bubble) {
 		// Buoyancy > 1 flips gravity, so bubbles rise.
 		vec3 buoyancy = g * (1.0 - foam.motion.x);
 		v += (buoyancy + (fluid_v - v) * 3.0) * dt;
+		life -= dt * foam.aging.z;
 	} else {
 		// Surface foam is carried by the fluid, not merely accelerated by it.
 		v = fluid_v;
-		// Only surface foam ages: airborne spray and submerged bubbles are
-		// consumed by reclassifying into foam once they reach the surface.
-		life -= dt;
+		life -= dt * foam.aging.y;
 	}
 
-	// Planet-mode addition of SebLague's own fork: spray with no neighbours at all
-	// has left the fluid for good. On a planet it would otherwise coast on a ballistic
-	// arc for its full lifetime and fill the sky, since only surface foam ages.
-	if (planet_mode() && neighbours == 0) {
+	// Spray with no neighbours at all has left the fluid for good and dissolves
+	// five times faster (SebLague's own rule).
+	if (neighbours == 0) {
 		life -= dt * 5.0;
 	}
 

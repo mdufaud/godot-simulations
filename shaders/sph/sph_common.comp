@@ -84,15 +84,16 @@ foam_count;
 
 layout(rgba32f, set = 0, binding = 15) uniform restrict writeonly image2D foam_tex;
 
-layout(std140, set = 0, binding = 16) uniform FoamParams {
-	vec4 spawn; // x = trapped_air_rate, y = trapped_min, z = trapped_max, w = ke_min
-	vec4 spawn2; // x = ke_max, y = life_min, z = life_max, w = frame_dt
-	vec4 motion; // x = bubble_buoyancy, y = spray_drag, z = bubble_scale, w = scale_speed
-	vec4 render; // x = dissolve_time, y = spawn_radius_scale, zw = pad
-	ivec4 cls; // x = spray_max_neighbours, y = bubble_min_neighbours, z = cap, w = tex_width
-	ivec4 flags; // x = enabled, yzw = pad
-}
-foam;
+	layout(std140, set = 0, binding = 16) uniform FoamParams {
+		vec4 spawn; // x = trapped_air_rate, y = trapped_min, z = trapped_max, w = ke_min
+		vec4 spawn2; // x = ke_max, y = life_min, z = life_max, w = frame_dt
+		vec4 motion; // x = bubble_buoyancy, y = spray_drag, z = bubble_scale, w = scale_speed
+		vec4 aging; // x = spray_rate, y = foam_rate, z = bubble_rate, w = pad
+		vec4 render; // x = dissolve_time, y = spawn_radius_scale, z = surface_density_gate (0 = off), w = pad
+		ivec4 cls; // x = spray_max_neighbours, y = bubble_min_neighbours, z = cap, w = tex_width
+		ivec4 flags; // x = enabled, yzw = pad
+	}
+	foam;
 
 // Planet mode. The push constant is already at the 128-byte Vulkan minimum, so
 // these live in their own block. Disabled (flags.x == 0) leaves every call site on
@@ -135,6 +136,17 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 }
 scene;
 
+// Pre-pressure velocity snapshot (binding 22). Kernels that read NEIGHBOUR
+// velocities (pressure's trapped-air metric, viscosity's XSPH sum) must read
+// this copy, not the live `velocities`: those kernels also write velocities
+// in place, and unsynchronised read/write on the same buffer is a data race.
+// sph_vel_snap refreshes it right after grid_scatter, so it always holds this
+// sub-step's post-sort velocities.
+layout(std430, set = 0, binding = 22) restrict buffer VelocitiesSnap {
+	vec4 data[];
+}
+velocities_snap;
+
 // Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
 // request, so it can read past the cap for the rest of the frame.
 uint foam_live() {
@@ -147,7 +159,7 @@ layout(push_constant, std430) uniform Params {
 	vec4 kernel; // x = h, y = h^2, z = K_SpikyPow2, w = K_SpikyPow3
 	vec4 kernel2; // x = K_SpikyPow2Grad, y = K_SpikyPow3Grad, z = K_Poly6, w = pad
 	vec4 sim; // x = dt, y = target_density, z = pressure_mult, w = near_pressure_mult
-	vec4 sim2; // x = viscosity_strength, y = collision_damping, zw = pad
+	vec4 sim2; // x = viscosity_strength, y = collision_damping, z = cohesion_strength, w = pad
 	vec4 gravity; // xyz = gravity, w = mode (0 water, 1 lava)
 	ivec4 misc; // x = tex_width, y = num_blocks, z = last_substep flag, w = pad
 }
@@ -180,6 +192,19 @@ float sph_near_density_deriv(float dst) {
 float sph_poly6(float r2) {
 	float v = params.kernel.y - r2;
 	return v * v * v * params.kernel2.z;
+}
+
+// Akinci 2013 cohesion spline ("Versatile Surface Tension and Adhesion"):
+// repulsive inside h/2 so touching particles do not clump, attractive from h/2
+// out to the cutoff, decaying smoothly to zero at h. Normalization constant
+// 32/(pi*h^9) baked CPU-side into kernel2.w.
+float sph_cohesion_k(float dst) {
+	float a = params.kernel.x - dst;
+	float v = a * a * a * dst * dst * dst;
+	if (2.0 * dst <= params.kernel.x) {
+		v = v * 2.0 - params.kernel.y * params.kernel.y * params.kernel.y * 0.015625;
+	}
+	return v * params.kernel2.w;
 }
 
 ivec3 cell_of(vec3 p) {

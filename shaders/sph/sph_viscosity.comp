@@ -4,7 +4,8 @@ void main() {
 		return;
 	}
 	vec3 pos = predicted.data[i].xyz;
-	vec3 vi = velocities.data[i].xyz;
+	vec3 v_live = velocities.data[i].xyz;
+	vec3 vi_snap = velocities_snap.data[i].xyz;
 	vec3 visc = vec3(0.0);
 	// XSPH velocity smoothing with the Poly6 kernel.
 	FOREACH_NEIGHBOR(pos,
@@ -16,9 +17,9 @@ void main() {
 		if (r2 >= params.kernel.y) {
 			continue;
 		}
-		visc += (velocities.data[j].xyz - vi) * sph_poly6(r2);
+		visc += (velocities_snap.data[j].xyz - vi_snap) * sph_poly6(r2);
 	)
-	vec3 v = vi + visc * params.sim2.x * params.sim.x;
+	vec3 v = v_live + visc * params.sim2.x * params.sim.x;
 	vec3 p = positions.data[i].xyz + v * params.sim.x;
 	float damp = params.sim2.y;
 	if (planet_mode()) {

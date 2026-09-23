@@ -31,5 +31,5 @@ __pycache__/
 tmp/
 CLAUDE.md
 AGENTS.md
-.zcode
+.zcode*
 .agents
