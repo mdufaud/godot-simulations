@@ -3,12 +3,14 @@
 android/
 bin/
 docs/*
+!docs/third_party_licenses_and_credits.md
 .editorconfig
 TODO.md
 
 # Third-party binary assets (Poly Haven downloads), fetched separately
 resources/*
 !resources/
+!resources/lfm/
 !resources/generated/
 !resources/generated/**
 !resources/ambient_fluid/

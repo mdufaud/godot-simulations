@@ -111,6 +111,7 @@ declare -a CPU_SUITES=(
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
 	"mixwell|res://tests/mixwell_test.gd"
+	"lfm_schedule|res://tests/lfm_schedule_test.gd"
 	"gpu_timing_store|res://tests/gpu_timing_store_test.gd"
 	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
 	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
@@ -149,7 +150,7 @@ if [[ "${GPU:-0}" != "1" ]]; then
 fi
 
 	if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look fluid_foam fluid_tier ui_smoke)
+		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look fluid_foam fluid_tier lfm ui_smoke)
 	else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
@@ -279,6 +280,27 @@ fi
 		printf 'TEST FAIL fluid_foam: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$fluid_foam_output" >&2
 		failed+=(fluid_foam)
+	fi
+
+	lfm_output="$LOG_DIR/gpu-lfm.stdout.log"
+	lfm_log="$LOG_DIR/gpu-lfm.godot.log"
+	lfm_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS lfm$' "$lfm_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$lfm_log" \
+			-s res://tests/probe.gd -- lfm || lfm_status=$?
+	if (( lfm_status == 0 )) && grep -q '^TEST PASS lfm$' "$lfm_output"; then
+		printf 'TEST PASS lfm\n'
+	else
+		printf 'TEST FAIL lfm: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$lfm_output" >&2
+		failed+=(lfm)
 	fi
 
 	fluid_tier_output="$LOG_DIR/gpu-fluid_tier.stdout.log"

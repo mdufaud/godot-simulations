@@ -1,0 +1,345 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0, std430) buffer DataBuffer { float v[]; };
+layout(set = 0, binding = 1, std430) readonly buffer ParameterBuffer { int q[]; };
+layout(r32f, set = 0, binding = 2) uniform image3D density_out;
+layout(r32f, set = 0, binding = 3) uniform image3D vorticity_out;
+layout(push_constant, std430) uniform Push {
+    ivec4 p0;
+    ivec4 p1;
+    vec4 f0;
+} pc;
+
+#include "lfm_common.comp"
+
+shared float sums[256];
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    int mode = pc.p0.x;
+    if (mode == 0) {
+        if (id < q[8]) v[id] = 0.0;
+        return;
+    }
+    if (mode == 1 && id < faces()) {
+        int axis = id < q[3] ? 0 : (id < q[3] + q[4] ? 1 : 2);
+        ivec3 c = face_coords(axis, id);
+        int coordinate = axis == 0 ? c.x : (axis == 1 ? c.y : c.z);
+        int extent = axis == 0 ? q[0] : (axis == 1 ? q[1] : q[2]);
+        bool fixed_face = coordinate == 0 || coordinate == extent;
+        float value = 0.0;
+        if (pc.p1.w == 0 && fixed_face) {
+            value = axis == 0 ? pc.f0.z : (axis == 1 ? pc.f0.w : 0.0);
+        }
+        ivec3 before = c - ivec3(axis == 0 ? 1 : 0,
+            axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+        if ((in_cell(before) && v[offset_of(SDF) + cell_index(before)] < 0.0) ||
+            (in_cell(c) && v[offset_of(SDF) + cell_index(c)] < 0.0)) {
+            fixed_face = true;
+            value = 0.0;
+        }
+        v[offset_of(BC_MASK) + id] = fixed_face ? 1.0 : 0.0;
+        v[offset_of(BC_VALUE) + id] = value;
+        return;
+    }
+    if (mode == 2 && id < faces()) {
+        int axis = id < q[3] ? 0 : (id < q[3] + q[4] ? 1 : 2);
+        ivec3 c = face_coords(axis, id);
+        vec3 back = trace_rk2(pc.p1.x, face_position(axis, c), pc.f0.x);
+        v[offset_of(pc.p0.w) + id] = sample_component(pc.p0.z, axis, back, false).x;
+        return;
+    }
+    if (mode == 3 && id < faces()) {
+        if (v[offset_of(BC_MASK) + id] > 0.5)
+            v[offset_of(pc.p0.w) + id] = v[offset_of(BC_VALUE) + id];
+        return;
+    }
+    if (mode == 4 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        if (v[offset_of(SDF) + id] < 0.0) {
+            v[offset_of(B) + id] = 0.0;
+            v[offset_of(DIAG) + id] = 0.0;
+            return;
+        }
+        float rhs = 0.0;
+        float degree = 0.0;
+        for (int axis = 0; axis < 3; axis++) {
+            ivec3 unit = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+            rhs += read_face(pc.p0.z, axis, c) - read_face(pc.p0.z, axis, c + unit);
+            if (in_cell(c - unit) && read_face(BC_MASK, axis, c) < 0.5) degree += 1.0;
+            if (in_cell(c + unit) && read_face(BC_MASK, axis, c + unit) < 0.5) degree += 1.0;
+        }
+        v[offset_of(B) + id] = rhs;
+        v[offset_of(DIAG) + id] = degree;
+        return;
+    }
+    if (mode == 5 && id < cells()) {
+        float rhs = v[offset_of(B) + id];
+        float diagonal = v[offset_of(DIAG) + id];
+        v[offset_of(PRESSURE) + id] = 0.0;
+        v[offset_of(RESIDUAL) + id] = rhs;
+        v[offset_of(Z_FIELD) + id] = diagonal > 0.0 ? rhs / diagonal : 0.0;
+        v[offset_of(D_FIELD) + id] = v[offset_of(Z_FIELD) + id];
+        return;
+    }
+    if (mode == 6 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        v[offset_of(pc.p0.w) + id] = v[offset_of(DIAG) + id] > 0.0 ?
+            pressure_apply(pc.p0.z, c) : 0.0;
+        return;
+    }
+    if (mode == 7 || mode == 8) {
+        uint lane = gl_LocalInvocationID.x;
+        float value = 0.0;
+        if (mode == 7 && id < cells())
+            value = v[offset_of(pc.p0.z) + id] * v[offset_of(pc.p0.w) + id];
+        if (mode == 8) {
+            for (int j = int(lane); j < q[10]; j += 256)
+                value += v[offset_of(REDUCE) + j];
+        }
+        sums[lane] = value;
+        barrier();
+        for (uint stride = 128; stride > 0; stride >>= 1) {
+            if (lane < stride) sums[lane] += sums[lane + stride];
+            barrier();
+        }
+        if (lane == 0) {
+            if (mode == 7) v[offset_of(REDUCE) + int(gl_WorkGroupID.x)] = sums[0];
+            else v[offset_of(SCALARS) + pc.p1.x] = sums[0];
+        }
+        return;
+    }
+    if (mode == 9 && id == 0) {
+        float denom = v[offset_of(SCALARS) + 1];
+        v[offset_of(SCALARS) + 2] = abs(denom) > 1e-30 ? v[offset_of(SCALARS)] / denom : 0.0;
+        return;
+    }
+    if (mode == 10 && id < cells()) {
+        float alpha = v[offset_of(SCALARS) + 2];
+        v[offset_of(PRESSURE) + id] += alpha * v[offset_of(D_FIELD) + id];
+        v[offset_of(RESIDUAL) + id] -= alpha * v[offset_of(AP) + id];
+        float diagonal = v[offset_of(DIAG) + id];
+        if (pc.p1.w == 0)
+            v[offset_of(Z_FIELD) + id] = diagonal > 0.0 ?
+                v[offset_of(RESIDUAL) + id] / diagonal : 0.0;
+        return;
+    }
+    if (mode == 11 && id == 0) {
+        float old_rz = v[offset_of(SCALARS)];
+        float new_rz = v[offset_of(SCALARS) + 3];
+        v[offset_of(SCALARS) + 4] = abs(old_rz) > 1e-30 ? new_rz / old_rz : 0.0;
+        v[offset_of(SCALARS)] = new_rz;
+        return;
+    }
+    if (mode == 12 && id < cells()) {
+        v[offset_of(D_FIELD) + id] = v[offset_of(Z_FIELD) + id] +
+            v[offset_of(SCALARS) + 4] * v[offset_of(D_FIELD) + id];
+        return;
+    }
+    if (mode == 13 && id < faces()) {
+        int axis = id < q[3] ? 0 : (id < q[3] + q[4] ? 1 : 2);
+        ivec3 c = face_coords(axis, id);
+        if (v[offset_of(BC_MASK) + id] > 0.5) return;
+        ivec3 left = c - ivec3(axis == 0 ? 1 : 0,
+            axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+        float pl = in_cell(left) ? v[offset_of(PRESSURE) + cell_index(left)] : 0.0;
+        float pr = in_cell(c) ? v[offset_of(PRESSURE) + cell_index(c)] : 0.0;
+        v[offset_of(pc.p0.w) + id] += pl - pr;
+        return;
+    }
+    if (mode == 14 && id < faces()) {
+        int axis = id < q[3] ? 0 : (id < q[3] + q[4] ? 1 : 2);
+        ivec3 c = face_coords(axis, id);
+        map_write(pc.p1.y, id, face_position(axis, c));
+        map_write(pc.p1.z, id, vec3(axis == 0 ? 1.0 : 0.0,
+            axis == 1 ? 1.0 : 0.0, axis == 2 ? 1.0 : 0.0));
+        return;
+    }
+    if (mode == 15 && id < faces()) {
+        vec3 pos = map_read(pc.p1.y, id);
+        vec3 axis_vector = map_read(pc.p1.z, id);
+        vec3 u1, u2, u3, u4;
+        mat3 g1, g2, g3, g4;
+        sample_mac_grad(pc.p0.z, pos, u1, g1);
+        vec3 k1 = g1 * axis_vector;
+        float half_dt = 0.5 * pc.f0.x;
+        sample_mac_grad(pc.p0.z, pos - half_dt * u1, u2, g2);
+        vec3 k2 = g2 * (axis_vector - half_dt * k1);
+        if (pc.p1.w == 1) {
+            map_write(pc.p1.y, id, pos - pc.f0.x * u2);
+            map_write(pc.p1.z, id, axis_vector - pc.f0.x * k2);
+            return;
+        }
+        sample_mac_grad(pc.p0.z, pos - half_dt * u2, u3, g3);
+        vec3 k3 = g3 * (axis_vector - half_dt * k2);
+        sample_mac_grad(pc.p0.z, pos - pc.f0.x * u3, u4, g4);
+        vec3 k4 = g4 * (axis_vector - pc.f0.x * k3);
+        map_write(pc.p1.y, id, pos - pc.f0.x / 6.0 * (u1 + 2.0 * u2 + 2.0 * u3 + u4));
+        map_write(pc.p1.z, id, axis_vector - pc.f0.x / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4));
+        return;
+    }
+    if (mode == 16 && id < faces()) {
+        vec3 pos = map_read(pc.p1.y, id);
+        vec3 transported = map_read(pc.p1.z, id);
+        v[offset_of(pc.p0.w) + id] = dot(transported, sample_mac(pc.p0.z, pos));
+        return;
+    }
+    if (mode == 17 && id < faces()) {
+        v[offset_of(pc.p0.w) + id] = v[offset_of(pc.p0.z) + id] +
+            pc.f0.x * v[offset_of(pc.p1.x) + id];
+        return;
+    }
+    if (mode == 18 && id < faces()) {
+        int axis = id < q[3] ? 0 : (id < q[3] + q[4] ? 1 : 2);
+        ivec3 c = face_coords(axis, id);
+        float lo = 1e30, hi = -1e30;
+        for (int a = 0; a < 3; a++) for (int sign_dir = -1; sign_dir <= 1; sign_dir += 2) {
+            ivec3 n = c + sign_dir * ivec3(a == 0 ? 1 : 0,
+                a == 1 ? 1 : 0, a == 2 ? 1 : 0);
+            if (in_face(axis, n)) {
+                float value = read_face(pc.p0.z, axis, n);
+                lo = min(lo, value); hi = max(hi, value);
+            }
+        }
+        v[offset_of(pc.p0.w) + id] = clamp(v[offset_of(pc.p0.w) + id], lo, hi);
+        return;
+    }
+    if (mode == 19 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        vec3 sum = map_read(pc.p1.y, face_index(0, c)) +
+            map_read(pc.p1.y, face_index(0, c + ivec3(1, 0, 0))) +
+            map_read(pc.p1.y, face_index(1, c)) +
+            map_read(pc.p1.y, face_index(1, c + ivec3(0, 1, 0))) +
+            map_read(pc.p1.y, face_index(2, c)) +
+            map_read(pc.p1.y, face_index(2, c + ivec3(0, 0, 1)));
+        map_write(pc.p0.w, id, sum / 6.0);
+        return;
+    }
+    if (mode == 20 && id < cells()) {
+        vec3 pos = map_read(pc.p1.y, id);
+        v[offset_of(pc.p0.w) + id] = sample_smoke(pc.p0.z, pos);
+        return;
+    }
+    if (mode == 21 && id < cells()) {
+        v[offset_of(pc.p0.w) + id] = v[offset_of(pc.p0.z) + id] +
+            pc.f0.x * v[offset_of(pc.p1.x) + id];
+        return;
+    }
+    if (mode == 22 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        vec3 pos = center_position(c);
+        vec3 back = trace_rk2(pc.p1.x, pos, pc.f0.x);
+        v[offset_of(pc.p0.w) + id] = sample_smoke(pc.p0.z, back);
+        return;
+    }
+    if (mode == 23 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        float density = max(0.0, v[offset_of(SMOKE_INIT) + id]);
+        vec3 pos = center_position(c);
+        float h = pc.f0.y;
+        vec3 xp = sample_mac(pc.p0.z, pos + vec3(h, 0, 0));
+        vec3 xm = sample_mac(pc.p0.z, pos - vec3(h, 0, 0));
+        vec3 yp = sample_mac(pc.p0.z, pos + vec3(0, h, 0));
+        vec3 ym = sample_mac(pc.p0.z, pos - vec3(0, h, 0));
+        vec3 zp = sample_mac(pc.p0.z, pos + vec3(0, 0, h));
+        vec3 zm = sample_mac(pc.p0.z, pos - vec3(0, 0, h));
+        vec3 curl = vec3(yp.z - ym.z - zp.y + zm.y,
+            zp.x - zm.x - xp.z + xm.z, xp.y - xm.y - yp.x + ym.x) / (2.0 * h);
+        v[offset_of(SMOKE_TMP) + id] = curl.x;
+        v[offset_of(SMOKE_ERR) + id] = length(curl);
+        imageStore(density_out, c, vec4(density, 0, 0, 1));
+        imageStore(vorticity_out, c, vec4(pc.p1.w == 0 ? curl.x : length(curl), 0, 0, 1));
+        return;
+    }
+    if (mode == 24 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        float div = 0.0;
+        for (int axis = 0; axis < 3; axis++) {
+            ivec3 unit = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+            div += read_face(pc.p0.z, axis, c + unit) - read_face(pc.p0.z, axis, c);
+        }
+        v[offset_of(B) + id] = div;
+        return;
+    }
+    if (mode == 25 && id < cells()) {
+        ivec3 c = cell_coords(id);
+        if (c.x > 1) return;
+        vec3 pos = center_position(c);
+        float dy = (pos.y - 0.17) / 0.045;
+        float dz0 = (pos.z - 0.38) / 0.045;
+        float dz1 = (pos.z - 0.62) / 0.045;
+        float stripe = max(exp(-0.5 * (dy * dy + dz0 * dz0)),
+            exp(-0.5 * (dy * dy + dz1 * dz1)));
+        v[offset_of(SMOKE_INIT) + id] = max(v[offset_of(SMOKE_INIT) + id], stripe);
+        return;
+    }
+    if (mode >= 26 && mode <= 33) {
+        int level = pc.p0.y;
+        ivec3 md = mg_dims(level);
+        int count = md.x * md.y * md.z;
+        if (id >= count) return;
+        ivec3 c = mg_coords(level, id);
+        if (mode == 26) {
+            float fluid = 0.0;
+            if (level == 0) fluid = v[offset_of(SDF) + id] >= 0.0 ? 1.0 : 0.0;
+            else {
+                for (int x = 0; x < 2; x++) for (int y = 0; y < 2; y++) for (int z = 0; z < 2; z++) {
+                    ivec3 child = 2 * c + ivec3(x, y, z);
+                    if (mg_fluid(level - 1, child)) fluid = 1.0;
+                }
+            }
+            v[mg_param(level, 7) + id] = fluid;
+        } else if (mode == 27) {
+            v[mg_param(level, 4) + id] = 0.0;
+            v[mg_param(level, 5) + id] = 0.0;
+            v[mg_param(level, 6) + id] = 0.0;
+            if (level == 0) v[mg_param(level, 3) + id] = v[offset_of(RESIDUAL) + id];
+        } else if (mode == 28) {
+            float result = 0.0;
+            if (mg_fluid(level, c)) {
+                float diagonal = level == 0 ? v[offset_of(DIAG) + id] : 0.0;
+                float sum = 0.0;
+                for (int axis = 0; axis < 3; axis++) {
+                    ivec3 step_axis = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+                    bool neg;
+                    bool pos;
+                    if (level == 0) {
+                        neg = read_face(BC_MASK, axis, c) < 0.5;
+                        pos = read_face(BC_MASK, axis, c + step_axis) < 0.5;
+                    } else {
+                        neg = mg_fluid(level, c - step_axis);
+                        pos = mg_fluid(level, c + step_axis);
+                    }
+                    if (neg) { diagonal += level == 0 ? 0.0 : 1.0; sum += mg_field(level, pc.p0.z, c - step_axis); }
+                    if (pos) { diagonal += level == 0 ? 0.0 : 1.0; sum += mg_field(level, pc.p0.z, c + step_axis); }
+                }
+                float old_value = mg_field(level, pc.p0.z, c);
+                result = diagonal > 0.0 ? mix(old_value,
+                    (mg_field(level, 3, c) + sum) / diagonal, 0.7) : 0.0;
+            }
+            v[mg_param(level, pc.p0.w) + id] = result;
+        } else if (mode == 30) {
+            v[mg_param(level, 6) + id] = mg_fluid(level, c) ?
+                mg_field(level, 3, c) - mg_operator(level, c) : 0.0;
+        } else if (mode == 31) {
+            float sum = 0.0;
+            for (int x = 0; x < 2; x++) for (int y = 0; y < 2; y++) for (int z = 0; z < 2; z++) {
+                ivec3 child = 2 * c + ivec3(x, y, z);
+                if (mg_fluid(level - 1, child))
+                    sum += mg_field(level - 1, 6, child);
+            }
+            v[mg_param(level, 3) + id] = 0.25 * sum;
+        } else if (mode == 32) {
+            if (mg_fluid(level, c))
+                v[mg_param(level, 4) + id] += mg_field(level + 1, 4, c / 2);
+        } else if (mode == 33) {
+            v[offset_of(Z_FIELD) + id] = mg_field(0, 4, c);
+        }
+        return;
+    }
+    if (mode == 34 && id < cells()) {
+        v[offset_of(D_FIELD) + id] = v[offset_of(Z_FIELD) + id];
+        return;
+    }
+}

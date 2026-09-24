@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="LfmConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/lfm/lfm_config.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+scenario = 0
+grid_dims = Vector3i(128, 64, 64)
+domain_size_m = Vector3(2, 1, 1)
+frame_dt_s = 0.0166666666666667
+reinit_every = 4
+map_rk4 = false
+inlet_speed_mps = 0.6
+inlet_angle_deg = 20.0
+bfecc_clamp = true

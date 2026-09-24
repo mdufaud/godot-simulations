@@ -64,6 +64,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/fluid_demo.tscn"},
 	{key = "mixwell_demo",  title = "Mixwell 2D Mixing",     icon = "🌀", category = "fluids",
 		scene = "res://scenes/mixwell_demo.tscn"},
+	{key = "lfm_demo",      title = "Leapfrog Flow Maps 3D", icon = "🌀", category = "fluids",
+		scene = "res://scenes/lfm_demo.tscn"},
 	{key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠", category = "other",
 		scene = "res://scenes/fractal_demo.tscn"},
 	{key = "fractal_3d_demo",  title = "3D Fractal Explorer",  icon = "🧊", category = "other",

@@ -138,6 +138,18 @@ func _boot_frames(count: int) -> void:
 		await process_frame
 
 
+func _run_lfm() -> void:
+	var result: Dictionary = await preload("res://tests/lfm_solver_probe.gd").new().run(self)
+	print("LFM PROBE %s" % str(result))
+	if result.has("error") or int(result.get("nonfinite", -1)) != 0 \
+			or not bool(result.get("boot", false)):
+		print("TEST FAIL lfm")
+		quit(1)
+		return
+	print("TEST PASS lfm")
+	quit(0)
+
+
 func _run_ocean_freeze() -> void:
 	await _boot_frames(2)
 	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
@@ -1362,6 +1374,9 @@ func _run_fps() -> void:
 	Engine.max_fps = 0
 	for frame in _warmup:
 		await process_frame
+	var step_counter: Object = _demo.solver if "solver" in _demo \
+		and _demo.solver.has_method("get_step_count") else null
+	var steps_before: int = step_counter.get_step_count() if step_counter != null else 0
 	var frames := 0
 	var t0 := Time.get_ticks_usec()
 	var deadline := t0 + int(_seconds * 1_000_000.0)
@@ -1369,9 +1384,12 @@ func _run_fps() -> void:
 		await process_frame
 		frames += 1
 	var elapsed := float(Time.get_ticks_usec() - t0) / 1_000_000.0
-	print("FPS PROBE target=%s tier=%s fps=%.1f frames=%d seconds=%.2f size=%dx%d" % [
+	var solve_rate := " solve_hz=%.1f steps=%d" % [
+		float(step_counter.get_step_count() - steps_before) / elapsed,
+		step_counter.get_step_count() - steps_before] if step_counter != null else ""
+	print("FPS PROBE target=%s tier=%s fps=%.1f frames=%d seconds=%.2f size=%dx%d%s" % [
 		_scene_path.get_file().get_basename(), TIER_NAMES[_tier],
-		float(frames) / elapsed, frames, elapsed, _size.x, _size.y])
+		float(frames) / elapsed, frames, elapsed, _size.x, _size.y, solve_rate])
 	quit(0)
 
 

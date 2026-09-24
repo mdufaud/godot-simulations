@@ -28,6 +28,7 @@ source "$SCRIPT_DIR/virtual_display.sh"
 # name|timeout|pass sentinel (matched against probe stdout)|summary tag (grep
 # -E fragment matching the probe's own diagnostics lines)
 PROBE_TABLE=(
+	"lfm|180|^TEST PASS lfm$|LFM PROBE "
 	"fluid_foam|180|^TEST PASS fluid_foam$|FLUFOAM "
 	"fluid_resize|120|^FLU3 PROBE DONE|FLU3 "
 	"fluid_tier|180|^TEST PASS fluid_tier$|FLUTIER "

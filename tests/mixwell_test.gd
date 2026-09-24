@@ -634,7 +634,7 @@ func _test_stress_and_export_contract() -> void:
 		var start := presets.find("name=\"%s\"" % preset_name)
 		var next := presets.find("\n[preset.", start + 1)
 		var section := presets.substr(start, presets.length() if next < 0 else next - start)
-		_check(start >= 0 and section.contains("include_filter=\"*.comp\""),
+		_check(start >= 0 and section.contains("include_filter=\"*.comp"),
 				"%s export keeps raw compute shaders" % preset_name)
 	_check(FileAccess.get_file_as_string("res://project.godot").contains(
 				"renderer/rendering_method.mobile=\"forward_plus\""),

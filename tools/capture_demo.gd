@@ -28,6 +28,7 @@ var _quality := -1
 var _features := true
 var _clouds := true
 var _view := ""
+var _method := ""
 var _hide_ui := true
 var _freeze := false
 var _capture_time := -1.0
@@ -74,6 +75,7 @@ func _initialize() -> void:
 			"features": _features = value != "0" and value.to_lower() != "false"
 			"clouds": _clouds = value != "0" and value.to_lower() != "false"
 			"view": _view = value
+			"method": _method = value
 			"ui": _hide_ui = value == "0" or value.to_lower() == "false"
 			"freeze": _freeze = value == "1" or value.to_lower() == "true"
 			"time": _capture_time = float(value)
@@ -159,6 +161,18 @@ func _run() -> void:
 		_demo.set_capture_spray(_spray)
 	if not _view.is_empty() and _demo.has_method("set_capture_view"):
 		_demo.set_capture_view(_view)
+	if not _method.is_empty() and _demo.has_method("set_capture_method"):
+		if _fixed_delta > 0.0 and _demo.has_method("set_capture_fixed_delta"):
+			_demo.set_capture_fixed_delta(_fixed_delta)
+		_demo.set_capture_method(_method)
+		ready_deadline = Time.get_ticks_msec() + 20000
+		while _demo.has_method("capture_ready") and not _demo.capture_ready() \
+				and Time.get_ticks_msec() < ready_deadline:
+			await process_frame
+		if _demo.has_method("capture_ready") and not _demo.capture_ready():
+			push_error("CAPTURE FAIL: method resources did not become ready")
+			quit(1)
+			return
 	if _demo.has_method("set_capture_interaction"):
 		_demo.set_capture_interaction(_interaction)
 	if _capture_time >= 0.0 and _demo.has_method("set_capture_time"):
@@ -188,6 +202,8 @@ func _run() -> void:
 	root.size = _size
 	if _demo.has_method("set_capture_fixed_delta"):
 		_demo.set_capture_fixed_delta(_fixed_delta)
+	if _demo.has_method("capture_start"):
+		_demo.capture_start()
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
 	for frame in _warmup:
@@ -235,6 +251,9 @@ func _run() -> void:
 	var final_numbered := _out if _every <= 0 else _numbered(waited)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
+	if _demo.has_method("capture_stop"):
+		_demo.capture_stop()
+		await process_frame
 	if _demo.has_method("capture_metadata_async"):
 		print(await _demo.capture_metadata_async(final_numbered))
 	elif _demo.has_method("capture_metadata"):

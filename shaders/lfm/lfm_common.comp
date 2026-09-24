@@ -1,0 +1,185 @@
+const int INIT = 0;
+const int TMP = 1;
+const int ERR = 2;
+const int U = 3;
+const int MID = 4;
+const int PSI = 5;
+const int T_MAP = 6;
+const int PHI = 7;
+const int F_MAP = 8;
+const int SDF = 9;
+const int SMOKE_INIT = 10;
+const int SMOKE = 11;
+const int SMOKE_TMP = 12;
+const int SMOKE_ERR = 13;
+const int B = 14;
+const int PRESSURE = 15;
+const int RESIDUAL = 16;
+const int Z_FIELD = 17;
+const int D_FIELD = 18;
+const int AP = 19;
+const int DIAG = 20;
+const int BC_MASK = 21;
+const int BC_VALUE = 22;
+const int CENTER_PSI = 23;
+const int CENTER_PHI = 24;
+const int REDUCE = 25;
+const int SCALARS = 26;
+
+ivec3 dims() { return ivec3(q[0], q[1], q[2]); }
+int cells() { return q[7]; }
+int faces() { return q[6]; }
+int offset_of(int slot) {
+    return slot >= 100 ? q[16 + MID] + (slot - 100) * faces() : q[16 + slot];
+}
+ivec3 face_dims(int axis) { return dims() + ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0); }
+int face_start(int axis) { return axis == 0 ? 0 : (axis == 1 ? q[3] : q[3] + q[4]); }
+int cell_index(ivec3 c) { return (c.x * q[1] + c.y) * q[2] + c.z; }
+int face_index(int axis, ivec3 c) {
+    ivec3 d = face_dims(axis);
+    return face_start(axis) + (c.x * d.y + c.y) * d.z + c.z;
+}
+ivec3 cell_coords(int id) { return ivec3(id / (q[1] * q[2]), (id / q[2]) % q[1], id % q[2]); }
+ivec3 face_coords(int axis, int id) {
+    int local = id - face_start(axis);
+    ivec3 d = face_dims(axis);
+    return ivec3(local / (d.y * d.z), (local / d.z) % d.y, local % d.z);
+}
+float read_face(int slot, int axis, ivec3 c) { return v[offset_of(slot) + face_index(axis, c)]; }
+void write_face(int slot, int axis, ivec3 c, float value) { v[offset_of(slot) + face_index(axis, c)] = value; }
+bool in_cell(ivec3 c) { return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, dims())); }
+bool in_face(int axis, ivec3 c) { return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, face_dims(axis))); }
+vec3 face_position(int axis, ivec3 c) {
+    return (vec3(c) + vec3(axis == 0 ? 0.0 : 0.5, axis == 1 ? 0.0 : 0.5,
+        axis == 2 ? 0.0 : 0.5)) * pc.f0.y;
+}
+vec3 center_position(ivec3 c) { return (vec3(c) + vec3(0.5)) * pc.f0.y; }
+vec3 map_read(int slot, int index) {
+    int base = offset_of(slot) + 4 * index;
+    return vec3(v[base], v[base + 1], v[base + 2]);
+}
+void map_write(int slot, int index, vec3 value) {
+    int base = offset_of(slot) + 4 * index;
+    v[base] = value.x; v[base + 1] = value.y; v[base + 2] = value.z; v[base + 3] = 0.0;
+}
+float n2(float x) {
+    x = abs(x);
+    if (x < 0.5) return 0.75 - x * x;
+    if (x < 1.5) return 0.5 * (1.5 - x) * (1.5 - x);
+    return 0.0;
+}
+float dn2(float x) {
+    float a = abs(x);
+    if (a < 0.5) return -2.0 * x;
+    if (a < 1.5) return -sign(x) * (1.5 - a);
+    return 0.0;
+}
+vec4 sample_component(int slot, int axis, vec3 pos, bool gradient) {
+    ivec3 fd = face_dims(axis);
+    vec3 stagger = vec3(axis == 0 ? 0.0 : 0.5, axis == 1 ? 0.0 : 0.5,
+        axis == 2 ? 0.0 : 0.5);
+    vec3 f = clamp(pos / pc.f0.y - stagger, vec3(0.5001), vec3(fd) - vec3(1.5001));
+    ivec3 base = ivec3(f - vec3(0.5));
+    float wx[3], wy[3], wz[3];
+    float dx[3], dy[3], dz[3];
+    for (int i = 0; i < 3; i++) {
+        float fx = f.x - float(base.x + i);
+        float fy = f.y - float(base.y + i);
+        float fz = f.z - float(base.z + i);
+        wx[i] = n2(fx); wy[i] = n2(fy); wz[i] = n2(fz);
+        if (gradient) {
+            dx[i] = dn2(fx); dy[i] = dn2(fy); dz[i] = dn2(fz);
+        }
+    }
+    vec4 result = vec4(0.0);
+    for (int x = 0; x < 3; x++) for (int y = 0; y < 3; y++) for (int z = 0; z < 3; z++) {
+        ivec3 c = base + ivec3(x, y, z);
+        float value = read_face(slot, axis, c);
+        result.x += value * wx[x] * wy[y] * wz[z];
+        if (gradient) {
+            result.y += value * dx[x] * wy[y] * wz[z];
+            result.z += value * wx[x] * dy[y] * wz[z];
+            result.w += value * wx[x] * wy[y] * dz[z];
+        }
+    }
+    result.yzw /= pc.f0.y;
+    return result;
+}
+vec3 sample_mac(int slot, vec3 pos) {
+    return vec3(sample_component(slot, 0, pos, false).x,
+        sample_component(slot, 1, pos, false).x,
+        sample_component(slot, 2, pos, false).x);
+}
+void sample_mac_grad(int slot, vec3 pos, out vec3 velocity, out mat3 gradient) {
+    vec4 x = sample_component(slot, 0, pos, true);
+    vec4 y = sample_component(slot, 1, pos, true);
+    vec4 z = sample_component(slot, 2, pos, true);
+    velocity = vec3(x.x, y.x, z.x);
+    gradient = mat3(vec3(x.y, y.y, z.y), vec3(x.z, y.z, z.z), vec3(x.w, y.w, z.w));
+}
+float sample_smoke(int slot, vec3 pos) {
+    vec3 f = clamp(pos / pc.f0.y - vec3(0.5), vec3(0.5001), vec3(dims()) - vec3(1.5001));
+    ivec3 base = ivec3(f - vec3(0.5));
+    float result = 0.0;
+    for (int x = 0; x < 3; x++) for (int y = 0; y < 3; y++) for (int z = 0; z < 3; z++) {
+        ivec3 c = base + ivec3(x, y, z);
+        vec3 delta = f - vec3(c);
+        result += v[offset_of(slot) + cell_index(c)] * n2(delta.x) * n2(delta.y) * n2(delta.z);
+    }
+    return result;
+}
+vec3 trace_rk2(int velocity_slot, vec3 pos, float dt) {
+    vec3 midpoint = pos - 0.5 * dt * sample_mac(velocity_slot, pos);
+    return pos - dt * sample_mac(velocity_slot, midpoint);
+}
+float pressure_apply(int field_slot, ivec3 c) {
+    int i = cell_index(c);
+    float value = v[offset_of(DIAG) + i] * v[offset_of(field_slot) + i];
+    for (int axis = 0; axis < 3; axis++) {
+        ivec3 unit = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+        if (read_face(BC_MASK, axis, c) < 0.5)
+            value -= v[offset_of(field_slot) + cell_index(c - unit)];
+        if (read_face(BC_MASK, axis, c + unit) < 0.5)
+            value -= v[offset_of(field_slot) + cell_index(c + unit)];
+    }
+    return value;
+}
+int mg_param(int level, int field) { return q[64 + level * 8 + field]; }
+ivec3 mg_dims(int level) { return ivec3(mg_param(level, 0), mg_param(level, 1), mg_param(level, 2)); }
+int mg_index(int level, ivec3 c) {
+    ivec3 d = mg_dims(level);
+    return (c.x * d.y + c.y) * d.z + c.z;
+}
+ivec3 mg_coords(int level, int index) {
+    ivec3 d = mg_dims(level);
+    return ivec3(index / (d.y * d.z), (index / d.z) % d.y, index % d.z);
+}
+bool mg_inside(int level, ivec3 c) {
+    return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, mg_dims(level)));
+}
+float mg_field(int level, int field, ivec3 c) { return v[mg_param(level, field) + mg_index(level, c)]; }
+bool mg_fluid(int level, ivec3 c) {
+    return mg_inside(level, c) && mg_field(level, 7, c) > 0.5;
+}
+float mg_operator(int level, ivec3 c) {
+    if (!mg_fluid(level, c)) return 0.0;
+    float center = mg_field(level, 4, c);
+    if (level == 0) {
+        float value = v[offset_of(DIAG) + cell_index(c)] * center;
+        for (int axis = 0; axis < 3; axis++) {
+            ivec3 step_axis = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+            if (read_face(BC_MASK, axis, c) < 0.5)
+                value -= mg_field(0, 4, c - step_axis);
+            if (read_face(BC_MASK, axis, c + step_axis) < 0.5)
+                value -= mg_field(0, 4, c + step_axis);
+        }
+        return value;
+    }
+    float value = 0.0;
+    for (int axis = 0; axis < 3; axis++) {
+        ivec3 step_axis = ivec3(axis == 0 ? 1 : 0, axis == 1 ? 1 : 0, axis == 2 ? 1 : 0);
+        if (mg_fluid(level, c - step_axis)) value += center - mg_field(level, 4, c - step_axis);
+        if (mg_fluid(level, c + step_axis)) value += center - mg_field(level, 4, c + step_axis);
+    }
+    return value;
+}
