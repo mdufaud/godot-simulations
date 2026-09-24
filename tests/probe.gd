@@ -138,6 +138,185 @@ func _boot_frames(count: int) -> void:
 		await process_frame
 
 
+func _run_ocean_freeze() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	demo.quality.fallback_tier = OceanQualityProfile.Tier.LOW
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready(), "ocean_freeze: ocean did not initialize")
+	if not demo.capture_ready():
+		demo.queue_free()
+		_finish("ocean_freeze")
+		return
+	var foam: OceanFoamWindow = demo.foam_window
+	_check(foam._enabled and foam._ocean_bound, "ocean_freeze: interaction foam is inactive")
+	demo.set_frozen(false)
+	demo.set_time_scale(1.0)
+	await _boot_frames(2)
+	var live_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
+	var live_decay := float(live_material.get_shader_parameter("decay"))
+	_check(live_decay < 1.0
+		and float(live_material.get_shader_parameter("injection_strength")) > 0.0,
+		"ocean_freeze: live interaction foam did not advance")
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	var frozen_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
+	_check(is_equal_approx(float(frozen_material.get_shader_parameter("decay")), 1.0)
+		and is_zero_approx(float(frozen_material.get_shader_parameter("blur_amount")))
+		and is_zero_approx(float(frozen_material.get_shader_parameter("injection_strength"))),
+		"ocean_freeze: paused waves still evolve interaction foam")
+	demo.set_frozen(false)
+	demo.set_time_scale(0.0)
+	await _boot_frames(2)
+	var paused_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
+	_check(is_equal_approx(float(paused_material.get_shader_parameter("decay")), 1.0)
+		and is_zero_approx(float(paused_material.get_shader_parameter("blur_amount")))
+		and is_zero_approx(float(paused_material.get_shader_parameter("injection_strength"))),
+		"ocean_freeze: zero time scale still evolves interaction foam")
+	print("OCEAN FREEZE live_decay=%.6f frozen_decay=%.6f paused_decay=%.6f" % [
+		live_decay,
+		float(frozen_material.get_shader_parameter("decay")),
+		float(paused_material.get_shader_parameter("decay"))])
+	demo.queue_free()
+	await process_frame
+	_finish("ocean_freeze")
+
+
+func _run_ocean_ultra() -> void:
+	await _boot_frames(2)
+	var setting_key := "ocean_quality_profile"
+	var manager: Node = root.get_node("/root/GameManager")
+	var saved_tier: int = manager.get_setting(setting_key,
+		OceanQualityProfile.Tier.HIGH)
+	manager.settings[setting_key] = OceanQualityProfile.Tier.HIGH
+	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	root.add_child(demo)
+	manager.settings[setting_key] = saved_tier
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready(), "ocean_ultra: High boot did not initialize")
+	if not demo.capture_ready():
+		demo.queue_free()
+		_finish("ocean_ultra")
+		return
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	var displacement_rid: RID = demo.solver.get_displacement_tex_rid()
+	var foam_rid: RID = demo.solver.get_foam_near_tex_rid(0)
+	var frame_before: int = demo.solver._frame
+	_check(is_zero_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail"))),
+		"ocean_ultra: High boot has Ultra surface detail")
+	demo.set_quality_profile(OceanQualityProfile.Tier.ULTRA)
+	await _boot_frames(2)
+	_check(demo.quality.effective == OceanQualityProfile.Tier.ULTRA
+		and is_equal_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail")), 1.0),
+		"ocean_ultra: Ultra profile did not update the material")
+	_check(demo.solver.short_cascade_half_rate,
+		"ocean_ultra: Ultra restored the expensive full-rate short cascade")
+	_check(demo.solver.initialized and demo.texture_bound
+		and demo.solver.get_displacement_tex_rid() == displacement_rid
+		and demo.solver.get_foam_near_tex_rid(0) == foam_rid
+		and demo.solver._frame == frame_before,
+		"ocean_ultra: High to Ultra rebuilt GPU resources or cleared foam")
+	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
+	await _boot_frames(2)
+	_check(is_zero_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail")))
+		and demo.solver.get_displacement_tex_rid() == displacement_rid
+		and demo.solver.get_foam_near_tex_rid(0) == foam_rid,
+		"ocean_ultra: Ultra to High did not preserve GPU resources")
+	manager.set_setting(setting_key, saved_tier)
+	demo.queue_free()
+	await _boot_frames(2)
+
+	manager.settings[setting_key] = OceanQualityProfile.Tier.ULTRA
+	var ultra_demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	root.add_child(ultra_demo)
+	manager.settings[setting_key] = saved_tier
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not ultra_demo.capture_ready():
+		await process_frame
+	_check(ultra_demo.capture_ready(), "ocean_ultra: Ultra boot did not initialize")
+	if ultra_demo.capture_ready():
+		_check(ultra_demo.quality.effective == OceanQualityProfile.Tier.ULTRA
+			and is_equal_approx(float(ultra_demo.surface_mat.get_shader_parameter(
+				"ultra_detail")), 1.0),
+			"ocean_ultra: direct Ultra boot missed the material setting")
+		_check(ultra_demo.solver.short_cascade_half_rate,
+			"ocean_ultra: direct Ultra boot missed the efficient cascade cadence")
+	ultra_demo.queue_free()
+	await process_frame
+	print("OCEAN ULTRA resources_preserved=true boot_detail=1")
+	_finish("ocean_ultra")
+
+
+func _run_ocean_single_wave() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	demo.quality.fallback_tier = OceanQualityProfile.Tier.LOW
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready(), "ocean_single_wave: ocean did not initialize")
+	if not demo.capture_ready():
+		demo.queue_free()
+		_finish("ocean_single_wave")
+		return
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	var solver: OceanSolver = demo.solver
+	var n := solver.map_size
+	var spectrum := PackedByteArray()
+	spectrum.resize(n * n * 16)
+	var positive := Vector2i(n / 2 + 3, n / 2 + 4)
+	var negative := Vector2i(n / 2 - 3, n / 2 - 4)
+	spectrum.encode_float((positive.y * n + positive.x) * 16, 0.5)
+	spectrum.encode_float((negative.y * n + negative.x) * 16 + 8, 0.5)
+	solver.take_render_refresh_request()
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		rd.texture_update(solver._spectrum_tex, 0, spectrum)
+		var pc := solver._pack_push_constant(0, 0.0, 0.0)
+		pc.encode_float(60, 0.0)
+		var cl := rd.compute_list_begin()
+		solver._dispatch(cl, "spectrum_evolve", pc, n / 16, n / 16, 1)
+		solver._dispatch(cl, "fft", pc, 1, n, OceanSolver.NUM_SPECTRA)
+		solver._dispatch(cl, "transpose", pc, n / 32, n / 32, OceanSolver.NUM_SPECTRA)
+		solver._dispatch(cl, "fft", pc, 1, n, OceanSolver.NUM_SPECTRA)
+		solver._dispatch(cl, "map_assemble", pc, n / 16, n / 16, 1)
+		rd.compute_list_end()
+	)
+	var derivative_bytes: PackedByteArray = await TextureReadback.new().read_layer(
+		solver.get_derivative_tex_rid(), 0, n * n * 8)
+	var displacement_bytes: PackedByteArray = await TextureReadback.new().read_layer(
+		solver.get_displacement_tex_rid(), 0, n * n * 8)
+	if derivative_bytes.is_empty() or displacement_bytes.is_empty():
+		_check(false, "ocean_single_wave: GPU readback failed")
+		demo.queue_free()
+		_finish("ocean_single_wave")
+		return
+	var derivative := Image.create_from_data(n, n, false, Image.FORMAT_RGBAH, derivative_bytes)
+	var displacement := Image.create_from_data(n, n, false, Image.FORMAT_RGBAH, displacement_bytes)
+	var crest := derivative.get_pixel(0, 0)
+	var trough := derivative.get_pixel(n / 8, 0)
+	var crest_divergence := crest.r + crest.g
+	var trough_divergence := trough.r + trough.g
+	_check(displacement.get_pixel(0, 0).g > 0.9
+		and displacement.get_pixel(n / 8, 0).g < -0.9,
+		"ocean_single_wave: analytic crest and trough heights are wrong")
+	_check(crest_divergence < -0.001 and trough_divergence > 0.001,
+		"ocean_single_wave: chop does not compress crests and expand troughs")
+	print("OCEAN WAVE crest_divergence=%.6f trough_divergence=%.6f" % [
+		crest_divergence, trough_divergence])
+	demo.queue_free()
+	await process_frame
+	_finish("ocean_single_wave")
+
+
 ## ── fluid_foam ──────────────────────────────────────────────────────────
 ## Regression gate for the white-particle (foam) aging rule. SebLague ages
 ## spray stranded with no fluid neighbours unconditionally; our port gated that

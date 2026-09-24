@@ -273,6 +273,11 @@ func init_render() -> void:
 	_rd = GpuPreflight.device("OceanSolver")
 	if _rd == null:
 		return
+	var texture_limit := _rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
+	if map_size > texture_limit or foam_near_size > texture_limit \
+			or not OceanQualityProfile.fft_size_supported(map_size, _rd):
+		push_error("Ocean GPU resources exceed texture or compute limits")
+		return
 
 	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n\n" % [
 		map_size, map_size,

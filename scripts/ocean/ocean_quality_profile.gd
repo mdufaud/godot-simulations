@@ -4,17 +4,16 @@ extends SimQualityProfile
 ## resolution, the near-foam texture size and reach, the cascade rotation and
 ## the feedback cadences, so "Low / Medium / High / Ultra" always describes one
 ## reproducible configuration instead of loose toggles. Switching tier
-## recreates the GPU resources (clearing foam history) but keeps the preset,
-## wind and simulation time. Higher tiers also widen the visible detail
+## recreates GPU resources only when their sizes change; the preset, wind and
+## simulation time remain. Higher tiers also widen the visible detail
 ## distance so the far water keeps readable relief.
 ##
 ## The FFT resolution is capped at 1024: the FFT pass compiles one workgroup
 ## row per invocation (local_size_x = MAP_SIZE), and 2048 exceeds every GPU's
 ## maxComputeWorkGroupSize. The near-foam pipeline is calibrated per texel
 ## density (its coverage contracts are pinned per tier), so Ultra keeps the
-## High foam configuration and spends its budget where nothing is held back:
-## the short cascade steps every frame and the ripple detail reaches its
-## maximum distance. The default tier is High, the configuration the demo
+## High foam configuration and adds surface detail without extra FFT work or
+## GPU allocations. The default tier is High, the configuration the demo
 ## shipped with.
 static func default_tier() -> int:
 	return Tier.HIGH
@@ -71,15 +70,14 @@ const FOAM_NEAR_STRIDE := {
 	Tier.ULTRA: 1,
 }
 
-## Finest cascade steps every other frame on MEDIUM/HIGH (wave periods there
-## are seconds long and phases stay continuous; the foam decay compensates).
-## LOW already rotates all cascades, so the flag stays off; Ultra runs the
-## short cascade at full rate.
+## Finest cascade steps every other frame on MEDIUM/HIGH/ULTRA (wave periods
+## there are seconds long and phases stay continuous; the foam decay compensates).
+## LOW already rotates all cascades, so the flag stays off.
 const SHORT_CASCADE_HALF_RATE := {
 	Tier.LOW: false,
 	Tier.MEDIUM: true,
 	Tier.HIGH: true,
-	Tier.ULTRA: false,
+	Tier.ULTRA: true,
 }
 
 
@@ -93,6 +91,7 @@ static func values(tier: int) -> Dictionary:
 		amortize = AMORTIZE[tier],
 		foam_near_stride = FOAM_NEAR_STRIDE[tier],
 		short_cascade_half_rate = SHORT_CASCADE_HALF_RATE[tier],
+		surface_detail = 1.0 if tier == Tier.ULTRA else 0.0,
 	}
 
 
@@ -104,22 +103,21 @@ static func detail_distance_m(tier: int) -> float:
 	return DETAIL_DISTANCE_M[tier]
 
 
-## Largest 2D texture dimension the active GPU supports; -1 when unavailable
-## (headless/unsupported), in which case no clamping happens.
-static func max_texture_dimension() -> int:
-	var rd := RenderingServer.get_rendering_device()
-	if rd == null:
-		return -1
-	return rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
-
-
-## False when the tier's textures do not fit the GPU; SimQualityState then
+## False when the tier's GPU resources exceed device limits; SimQualityState then
 ## degrades the request (never silently: the menu shows "requested / active").
 static func tier_supported(tier: int) -> bool:
-	var limit := max_texture_dimension()
-	if limit <= 0:
+	var rd := RenderingServer.get_rendering_device()
+	if rd == null:
 		return true
-	return FFT_SIZE[tier] <= limit and FOAM_NEAR_SIZE[tier] <= limit
+	var limit := rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
+	return FFT_SIZE[tier] <= limit and FOAM_NEAR_SIZE[tier] <= limit \
+		and fft_size_supported(FFT_SIZE[tier], rd)
+
+
+static func fft_size_supported(size: int, rd: RenderingDevice) -> bool:
+	return size <= rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_WORKGROUP_INVOCATIONS) \
+		and size <= rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_WORKGROUP_SIZE_X) \
+		and size * 16 <= rd.limit_get(RenderingDevice.LIMIT_MAX_COMPUTE_SHARED_MEMORY_SIZE)
 
 
 ## Estimate the solver's VRAM footprint from the actual allocation sizes in

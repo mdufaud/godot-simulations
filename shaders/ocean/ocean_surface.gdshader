@@ -61,6 +61,7 @@ uniform float micro_normal_strength = 0.42;
 uniform float micro_normal_fade_start = 70.0;
 uniform float micro_normal_fade_end = 360.0;
 uniform float detail_distance_m = 1500.0;
+uniform float ultra_detail = 0.0;
 uniform sampler2D cloud_reflection : filter_linear, repeat_disable, hint_default_black;
 uniform bool cloud_reflection_enabled = true;
 uniform vec3 sky_zenith : source_color = vec3(0.055, 0.18, 0.43);
@@ -130,7 +131,7 @@ void vertex() {
 	// the silhouette cascade keeps a fade floor instead of dying at 2.1 km.
 	// The floor applies to every vertex including the skirt, so the join stays
 	// crack-free by construction; aerial_density dissolves the far termination.
-	float dist = length(VERTEX);
+	float dist = length(VERTEX - CAMERA_POSITION_WORLD);
 	vec3 displacement = vec3(0.0);
 	geometry_weights = vec3(0.0);
 	for (int i = 0; i < num_cascades; i++) {
@@ -375,15 +376,16 @@ void fragment() {
 		max(length(micro_b_dx), length(micro_b_dy))) * max(micro_size.x, micro_size.y);
 	float micro_pixel_fade = 1.0 - smoothstep(6.0, 18.0, micro_texel_footprint);
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
-		* micro_distance_fade * micro_pixel_fade;
+		* micro_distance_fade * micro_pixel_fade * mix(1.0, 1.18, ultra_detail);
 	gradient += wind * micro_slope.x + across * micro_slope.y;
 	float near_persistent_foam = clamp(foam_history * foam_strength, 0.0, 1.0);
 	float near_fresh_foam = clamp(foam_fresh * foam_strength, 0.0, 1.0);
 	float persistent_foam = near_persistent_foam;
 	float fresh_foam = near_fresh_foam;
 	vec2 breakup_uv = world_uv * 0.08 - wind * sim_time * 0.003;
-	// Same mip bias: shore/interaction breakup must stay soft clouds, not grain.
-	float breakup = texture(foam_detail, breakup_uv, 2.0).g;
+	float breakup_bias = mix(2.0, mix(1.0, 2.0,
+		smoothstep(40.0, 180.0, dist)), ultra_detail);
+	float breakup = texture(foam_detail, breakup_uv, breakup_bias).g;
 	float interaction_foam_factor = 0.0;
 	if (foam_feedback_enabled) {
 		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
@@ -396,18 +398,24 @@ void fragment() {
 			}
 		}
 	}
-	float fresh_aa = max(fwidth(fresh_foam), 0.0005);
-	float persistent_aa = max(fwidth(persistent_foam), 0.0005);
-	float fresh_visible = smoothstep(0.022 - fresh_aa, 0.160 + fresh_aa, fresh_foam);
+	float fresh_visual = fresh_foam * mix(1.0, mix(0.55, 1.45, breakup),
+		ultra_detail);
+	float persistent_visual = persistent_foam * mix(1.0,
+		mix(0.8, 1.2, breakup), ultra_detail);
+	float fresh_aa = max(fwidth(fresh_visual), 0.0005);
+	float persistent_aa = max(fwidth(persistent_visual), 0.0005);
+	float fresh_visible = smoothstep(0.022 - fresh_aa,
+		mix(0.160, 0.135, ultra_detail) + fresh_aa, fresh_visual);
 	float persistent_visible = smoothstep(0.018 - persistent_aa,
-		0.110 + persistent_aa, persistent_foam) * 0.35;
+		0.110 + persistent_aa, persistent_visual) * 0.35;
 	foam_factor = 1.0 - (1.0 - fresh_visible) * (1.0 - persistent_visible);
 	foam_factor = max(foam_factor, interaction_foam_factor);
 	gradient = mix(gradient, macro_gradient, clamp(foam_factor * 0.8, 0.0, 0.8));
 	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
 	// decoupling specularity from detail keeps the sun path bright without
 	// dragging micro normals back behind a corridor gate.
-	glitter_factor = mix(0.28, 0.92, smoothstep(0.08, 0.84, peak_mask));
+	glitter_factor = mix(0.28, 0.92, smoothstep(0.08, 0.84, peak_mask))
+		* mix(1.0, 1.12, ultra_detail);
 
 	vec3 world_normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
 	vec3 roughness_normal = world_normal;
@@ -415,9 +423,11 @@ void fragment() {
 	vec3 normal_dy = dFdy(roughness_normal);
 	float normal_variance = min(0.5 * (dot(normal_dx, normal_dx)
 		+ dot(normal_dy, normal_dy)), 1.0);
-	filtered_roughness = clamp(sqrt(roughness_base * roughness_base
+	float water_roughness = roughness_base * mix(1.0, 0.82,
+		ultra_detail * (1.0 - 0.45 * storm_mood));
+	filtered_roughness = clamp(sqrt(water_roughness * water_roughness
 		+ min(normal_variance + unresolved_slope_variance, 1.0) * 0.18),
-		roughness_base, 0.65);
+		water_roughness, 0.65);
 	NORMAL = normalize((VIEW_MATRIX * vec4(world_normal, 0.0)).xyz);
 
 	float depth_raw = texture(depth_texture, SCREEN_UV).r;
@@ -482,7 +492,8 @@ void fragment() {
 		// raw sky in the troughs reads as an empty mirror, not a water column.
 		vec3 reflection_tinted = mix(reflected_sky, deep_water * 1.6, 0.25);
 		vec3 reflection_emission = reflection_tinted * fresnel
-			* sky_reflection_strength * (1.0 - foam_factor * 0.72);
+			* sky_reflection_strength * mix(1.0, 1.10, ultra_detail)
+			* (1.0 - foam_factor * 0.72);
 
 		float fresh_ratio = fresh_visible / max(persistent_visible + fresh_visible, 1e-3);
 		// Foam is rougher than open water and fresh foam roughest of all; the
@@ -595,12 +606,10 @@ void light() {
 	float narrow_roughness = max(ROUGHNESS * 0.46, 0.026);
 	float narrow_distribution = ggx_distribution(max(dot(NORMAL, narrow_halfway), 0.0),
 		narrow_roughness);
-	// P2: stronger narrow lobe for glints, reinforced at low sun (hundreds of
-	// white-gold fragments instead of one molten ribbon); the 4.0 product cap
-	// keeps fireflies out.
-	float narrow_weight = min(glitter_factor
-		* mix(1.0, 2.2, 1.0 - smoothstep(0.05, 0.35, sun_direction.y)), 4.0);
-	float path = d_ggx * 0.24 + narrow_distribution * glitter_factor * 0.045;
+	float low_sun = 1.0 - smoothstep(0.05, 0.35, sun_direction.y);
+	float narrow_weight = min(glitter_factor * (1.0 + ultra_detail
+		* (0.15 + 0.60 * low_sun) * (1.0 - 0.75 * storm_mood)), 4.0);
+	float path = d_ggx * 0.24 + narrow_distribution * narrow_weight * 0.045;
 	SPECULAR_LIGHT += fresnel * path * geometric_attenuation / (4.0 * dot_nv + 0.1)
 		* ATTENUATION * LIGHT_COLOR / PI * sun_glitter_strength * (1.0 - foam_factor);
 

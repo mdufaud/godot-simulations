@@ -45,6 +45,7 @@ var derivative_texture: Texture2DArrayRD
 var foam_near_texture_a: Texture2DArrayRD
 var foam_near_texture_b: Texture2DArrayRD
 var texture_bound := false
+var _allocated_foam_near_size := 0
 var time_scale := 1.0
 var sun_elevation := 32.0
 var sun_azimuth := 140.0
@@ -94,12 +95,16 @@ func _ready() -> void:
 	if not GpuPreflight.available():
 		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
 		return
+	if not OceanQualityProfile.tier_supported(OceanQualityProfile.Tier.LOW):
+		menu.add_label("This GPU cannot run the minimum ocean quality profile.")
+		return
 
 	solver.config = config
 	quality.setup(OceanQualityProfile, "ocean_quality_profile",
 		_apply_quality, _rebuild_quality_resources)
 	quality.restore()
 	solver.map_size = OceanQualityProfile.FFT_SIZE[quality.effective]
+	_allocated_foam_near_size = solver.foam_near_size
 
 	orbit_cam.target = Vector3(0, 1.8, 0)
 	orbit_cam.distance = 50.0
@@ -189,7 +194,7 @@ func _process(delta: float) -> void:
 		ocean_mesh.global_position = Vector3(p.x, 0.0, p.z)
 		solver.near_center = Vector2(p.x, p.z)
 		_update_underwater(p)
-		foam_window.update(simulation_delta, p)
+		foam_window.update(simulation_delta * step_scale, p)
 		surface_mat.set_shader_parameter("storm_mood", storm.current_mood())
 		storm.set_rain_wind(Vector3(cos(solver.wind_direction), 0.0,
 			sin(solver.wind_direction)))
@@ -533,16 +538,21 @@ func _apply_quality(values: Dictionary) -> void:
 	if _menu_builder.sync_detail_distance(values.detail_distance_m):
 		set_detail_distance(values.detail_distance_m)
 	solver.quality_tier = quality.effective
+	if surface_mat != null:
+		surface_mat.set_shader_parameter("ultra_detail", values.surface_detail)
 	_menu_builder.sync_foam_layout()
 
 
-## Profile switch: recreate every GPU resource cleanly (foam history cleared,
-## preset/wind/simulation time kept) with the new tier's sizes.
+## Profile switch: keep existing GPU resources when the texture sizes match.
 func _rebuild_quality_resources() -> void:
+	var target_map_size: int = OceanQualityProfile.FFT_SIZE[quality.effective]
+	if solver.initialized and solver.map_size == target_map_size and _allocated_foam_near_size == solver.foam_near_size:
+		return
 	_release_textures()
 	solver.initialized = false
 	RenderingServer.call_on_render_thread(solver.free_render)
-	solver.map_size = OceanQualityProfile.FFT_SIZE[quality.effective]
+	solver.map_size = target_map_size
+	_allocated_foam_near_size = solver.foam_near_size
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 
@@ -599,6 +609,8 @@ func _setup_ocean_mesh() -> void:
 		config.finest_cell_m * OceanClipmap.GRID * 0.5)
 	surface_mat.set_shader_parameter("clipmap_ring_levels", float(config.clipmap_levels))
 	surface_mat.set_shader_parameter("detail_distance_m", detail_distance_m)
+	surface_mat.set_shader_parameter("ultra_detail",
+		OceanQualityProfile.values(quality.effective).surface_detail)
 	_sync_wave_filter_uniforms()
 	surface_mat.set_shader_parameter("geometry_cascade", -1)
 	surface_mat.set_shader_parameter("sun_direction", sun.global_transform.basis.z.normalized())

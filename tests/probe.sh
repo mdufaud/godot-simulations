@@ -39,6 +39,9 @@ PROBE_TABLE=(
 	"fps|120|^FPS PROBE target=|FPS PROBE "
 	"foam_convergence|600|^FOAM CONVERGENCE DONE|FOAM "
 	"foam_histogram|300|^HISTO DONE|HISTO "
+	"ocean_freeze|120|^TEST PASS ocean_freeze$|OCEAN FREEZE "
+	"ocean_ultra|180|^TEST PASS ocean_ultra$|OCEAN ULTRA "
+	"ocean_single_wave|120|^TEST PASS ocean_single_wave$|OCEAN WAVE "
 )
 
 usage() {

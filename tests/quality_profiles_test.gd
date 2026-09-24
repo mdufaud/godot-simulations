@@ -21,7 +21,8 @@ var _profiles := {}
 func _profile_table() -> void:
 	_profiles = {
 		OceanQualityProfile: ["fft_size", "foam_near_size", "foam_near_distance",
-			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate"],
+			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate",
+			"surface_detail"],
 		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations", "render_scale"],
 		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max",
 			"render_scale"],
@@ -106,17 +107,26 @@ func _test_ocean_tables() -> void:
 			"ocean FFT %s exceeds the workgroup-size ceiling" % values.fft_size)
 		_check(values.foam_near_size in [512, 1024, 2048],
 			"ocean foam near size %s outside the calibrated set" % values.foam_near_size)
+	var ocean_config := OceanConfig.new()
+	for size in [32, 256, 512, 1024]:
+		ocean_config.map_size = size
+		_check(ocean_config.validate() == "", "ocean FFT size %d should be valid" % size)
+	for size in [8, 16, 48, 2048]:
+		ocean_config.map_size = size
+		_check(ocean_config.validate() != "", "ocean FFT size %d should be rejected" % size)
 	_check(OceanQualityProfile.default_tier() == OceanQualityProfile.Tier.HIGH,
 		"ocean ships with High (its original configuration)")
-	# Ultra keeps High's calibrated foam pipeline (density, not size, is the
-	# contract) and distinguishes itself by full-rate short cascade + distance.
+	# Ultra keeps High's calibrated foam pipeline and FFT cadence, with
+	# additional surface detail and a longer detail distance.
 	var high: Dictionary = OceanQualityProfile.values(2)
 	var ultra: Dictionary = OceanQualityProfile.values(3)
 	_check(ultra.foam_near_size == high.foam_near_size
 		and ultra.foam_near_distance == high.foam_near_distance,
 		"Ultra foam near must stay on High's calibrated config")
-	_check(not ultra.short_cascade_half_rate and high.short_cascade_half_rate,
-		"Ultra runs the short cascade at full rate")
+	_check(ultra.short_cascade_half_rate == high.short_cascade_half_rate,
+		"Ultra keeps High's short-cascade cadence")
+	_check(ultra.surface_detail > high.surface_detail,
+		"Ultra adds surface detail")
 	_check(ultra.detail_distance_m > high.detail_distance_m,
 		"Ultra pushes the detail distance further")
 	_check(OceanQualityProfile.tier_supported(3),

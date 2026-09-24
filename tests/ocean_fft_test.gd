@@ -1629,6 +1629,12 @@ func _check_single_wave(solver: OceanSolver) -> void:
 			var expected := cos(TAU * float(mode.y * x + mode.x * y) / n)
 			vertical_error = maxf(vertical_error, absf(disp[(y * n + x) * 4 + 1] - expected))
 	_check(vertical_error < 0.001, "horizontal correction changed the analytic wave height")
+	var crest_divergence := deriv[0] + deriv[1]
+	var trough_offset := (n / 8) * 4
+	var trough_divergence := deriv[trough_offset] + deriv[trough_offset + 1]
+	_check(crest_divergence < -0.001 and trough_divergence > 0.001,
+		"single-wave chop must compress crests and expand troughs: %.5f / %.5f" % [
+			crest_divergence, trough_divergence])
 	solver.mark_spectrum_dirty()
 
 
