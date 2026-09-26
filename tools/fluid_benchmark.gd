@@ -7,8 +7,7 @@ const DEFAULT_REPETITIONS := 5
 var _demo: Node3D
 var _fluid: FluidSystem
 var _options := {
-	"method": "sph",
-	"scenario": "dam",
+	"scene": "pool",
 	"particles": 65536,
 	"foam": true,
 	"mode": "water",
@@ -40,8 +39,7 @@ func _parse_args() -> void:
 			return
 		var value: String = args[i + 1]
 		match key:
-			"--method": _options.method = value.to_lower()
-			"--scenario": _options.scenario = value.to_lower()
+			"--scene": _options.scene = value.to_lower()
 			"--particles": _options.particles = value.to_int()
 			"--foam": _options.foam = value.to_lower() in ["1", "true", "on"]
 			"--mode": _options.mode = value.to_lower()
@@ -57,12 +55,8 @@ func _parse_args() -> void:
 				quit(2)
 				return
 		i += 2
-	if _options.method not in ["sph", "pbf"]:
-		_fail_option("--method must be sph or pbf")
-	if _options.scenario not in ["dam", "cascade"]:
-		_fail_option("--scenario must be dam or cascade")
-	if _options.scenario == "cascade" and _options.method != "sph":
-		_fail_option("--scenario cascade requires --method sph")
+	if _options.scene not in ["pool", "cascade", "basin"]:
+		_fail_option("--scene must be pool, cascade, or basin")
 	if _options.mode not in ["water", "lava"]:
 		_fail_option("--mode must be water or lava")
 	if _options.particles not in [16384, 32768, 65536]:
@@ -86,30 +80,26 @@ func _run() -> void:
 	for _i in 3:
 		await process_frame
 	_fluid = _demo.fluid
-	var wanted_scenario := FluidSystem.Scenario.CASCADE \
-		if _options.scenario == "cascade" else FluidSystem.Scenario.DAM
-	if _fluid.scenario != wanted_scenario:
-		_demo._on_scenario_selected(wanted_scenario)
-		await _settle_rebuild()
-	var wanted_method := FluidSystem.Method.PBF if _options.method == "pbf" else FluidSystem.Method.SPH
-	if _fluid.method != wanted_method:
-		_fluid.set_method(wanted_method)
+	var scene_ids := {
+		"pool": FluidSystem.Scenario.POOL,
+		"cascade": FluidSystem.Scenario.CASCADE,
+		"basin": FluidSystem.Scenario.BASIN,
+	}
+	var wanted_scene: int = scene_ids[_options.scene]
+	var wanted_mode := 1 if _options.mode == "lava" else 0
+	if int(_fluid.scenario) != wanted_scene or int(_fluid.mode) != wanted_mode:
+		_demo.configure_fluid(wanted_mode, wanted_scene)
 		await _settle_rebuild()
 	if _fluid.particle_count != _options.particles:
 		_fluid.set_particle_count(_options.particles)
 		await _settle_rebuild()
-	var wanted_mode := 1.0 if _options.mode == "lava" else 0.0
-	if not is_equal_approx(_fluid.mode, wanted_mode):
-		_fluid.set_mode(wanted_mode)
-		await _settle_rebuild()
 	_fluid.set_foam_enabled(_options.foam)
 	_fluid.set_render_scale(_options.render_scale)
-	if _fluid.method == FluidSystem.Method.SPH:
-		_fluid.sph_solver.hash_grid_enabled = _options.hash_grid
-		_fluid.sph_solver.hash_grid_load_factor = _options.hash_load_factor
-		if _options.hash_grid:
-			_fluid.restart()
-			await _settle_rebuild()
+	_fluid.sph_solver.hash_grid_enabled = _options.hash_grid
+	_fluid.sph_solver.hash_grid_load_factor = _options.hash_load_factor
+	if _options.hash_grid:
+		_fluid.restart()
+		await _settle_rebuild()
 	_fluid.set_profiling(true)
 	for viewport in _fluid.profiled_viewports() + [root]:
 		RenderingServer.viewport_set_measure_render_time(viewport.get_viewport_rid(), true)
@@ -147,8 +137,7 @@ func _run() -> void:
 
 func _benchmark_config() -> Dictionary:
 	var config := _options.duplicate()
-	config["effective_foam"] = _fluid.method == FluidSystem.Method.SPH \
-		and _fluid.foam_enabled and _fluid.mode < 0.5
+	config["effective_foam"] = _fluid.foam_enabled and _fluid.mode == FluidSystem.FluidKind.WATER
 	return config
 
 

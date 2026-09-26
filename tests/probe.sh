@@ -29,6 +29,10 @@ source "$SCRIPT_DIR/virtual_display.sh"
 # -E fragment matching the probe's own diagnostics lines)
 PROBE_TABLE=(
 	"fluid_foam|180|^TEST PASS fluid_foam$|FLUFOAM "
+	"fluid_honey_fall|180|^TEST PASS fluid_honey_fall$|FLUHONEY "
+	"fluid_materials|180|^TEST PASS fluid_materials$|FLUMAT "
+	"fluid_pool|180|^TEST PASS fluid_pool$|FLUPOOL "
+	"fluid_scene_retention|120|^TEST PASS fluid_scene_retention$|FLUSCENE "
 	"fluid_resize|120|^FLU3 PROBE DONE|FLU3 "
 	"fluid_tier|180|^TEST PASS fluid_tier$|FLUTIER "
 	"fractal_policy|300|^POLICY PROBE PASS$|POLICY "

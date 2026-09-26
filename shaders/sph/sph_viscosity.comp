@@ -7,6 +7,7 @@ void main() {
 	vec3 v_live = velocities.data[i].xyz;
 	vec3 vi_snap = velocities_snap.data[i].xyz;
 	vec3 visc = vec3(0.0);
+	float weight_sum = 0.0;
 	// XSPH velocity smoothing with the Poly6 kernel.
 	FOREACH_NEIGHBOR(pos,
 		if (j == i) {
@@ -17,9 +18,38 @@ void main() {
 		if (r2 >= params.kernel.y) {
 			continue;
 		}
-		visc += (velocities_snap.data[j].xyz - vi_snap) * sph_poly6(r2);
+		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
+		float weight = 1.0;
+		if (params.material == MATERIAL_HONEY) {
+			float shear = length(relative) / params.kernel.x;
+			weight = 0.25 + 0.75 / (1.0 + 0.15 * shear);
+		} else if (params.material == MATERIAL_OIL && abs(positions.data[i].w - positions.data[j].w) > 0.5) {
+			weight = 0.1;
+		}
+		float kernel_weight = sph_poly6(r2) * weight;
+		visc += relative * kernel_weight;
+		weight_sum += kernel_weight;
 	)
-	vec3 v = v_live + visc * params.sim2.x * params.sim.x;
+	float viscosity = params.sim2.x;
+	if (params.material == MATERIAL_OIL && positions.data[i].w > 0.5) {
+		viscosity *= 2.0;
+	} else if (params.material == MATERIAL_LAVA) {
+		float heat = clamp(positions.data[i].w, 0.0, 1.0);
+		viscosity *= mix(8.0, 1.5, heat);
+	}
+	vec3 v;
+	if (params.material == MATERIAL_HONEY || params.material == MATERIAL_LAVA) {
+		float rate = params.material == MATERIAL_HONEY ? 150.0 : 20.0;
+		vec3 target = vi_snap + visc / max(weight_sum, 1e-6);
+		v = mix(v_live, target, 1.0 - exp(-rate * viscosity * params.sim.x));
+	} else {
+		v = v_live + visc * viscosity * params.sim.x;
+	}
+	if (params.material == MATERIAL_HONEY) {
+		float floor_distance = pos.y - params.grid_origin.y;
+		float floor_contact = 1.0 - smoothstep(0.12, 1.6, floor_distance);
+		v.xz *= exp(-10.0 * viscosity * floor_contact * params.sim.x);
+	}
 	vec3 p = positions.data[i].xyz + v * params.sim.x;
 	float damp = params.sim2.y;
 	if (planet_mode()) {
@@ -27,7 +57,18 @@ void main() {
 		p = clamp_domain(p);
 	} else {
 		if (scene_mode()) {
-			resolve_scene_collisions(p, v, 0.985);
+			resolve_scene_collisions(p, v, positions.data[i].xyz, 0.985);
+			// Below the second ramp the chute has no side obstacles, so soft
+			// walls keep the stream in the tank. Keyed on the scene id, not on
+			// the obstacle count: any geometry edit would silently change a
+			// count fingerprint.
+			if (scene.scene_meta.x == SCENE_CASCADE && p.y < 4.4) {
+				vec2 limit = vec2(5.35, 2.85);
+				vec2 inside = clamp(p.xz, -limit, limit);
+				if (inside.x != p.x) { v.x = 0.0; }
+				if (inside.y != p.z) { v.z = 0.0; }
+				p.xz = inside;
+			}
 		}
 		vec3 lo = params.grid_origin.xyz + vec3(0.02);
 		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
@@ -39,7 +80,7 @@ void main() {
 		else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * damp; }
 	}
 	float temp = positions.data[i].w;
-	if (params.gravity.w > 0.5) {
+	if (params.material == MATERIAL_LAVA) {
 		float surf = clamp(1.0 - densities.data[i] / params.sim.y, 0.0, 1.0);
 		temp = max(temp - params.sim.x * (0.05 + 0.45 * surf), 0.0);
 	}
@@ -48,6 +89,7 @@ void main() {
 	if (params.misc.z == 1) {
 		uint w = uint(params.misc.x);
 		ivec2 texel = ivec2(int(i % w), int(i / w));
-		imageStore(position_tex, texel, vec4(p, mix(length(v), temp, params.gravity.w)));
+		float attrib = params.material == MATERIAL_OIL || params.material == MATERIAL_LAVA ? temp : length(v);
+		imageStore(position_tex, texel, vec4(p, attrib));
 	}
 }

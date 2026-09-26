@@ -1,35 +1,28 @@
 class_name FluidSystem
 extends Node3D
-## Reusable GPU fluid: a screen-space liquid surface driven by either a PBF or a
-## dual-density SPH solver (switchable at runtime for A/B comparison), plus an
-## optional white-particle (foam/spray/bubble) layer. Self-contained — instance it
-## in any scene, assign a `camera`, call start(). Water/lava via `mode`. The scene
-## owns the camera rig, environment and ground; this node owns the simulation and
-## drives a ScreenSpaceFluidRenderer for its surface/foam rendering.
-##
-## Both solvers expose the same interface (init_render/step_render/free_render/
-## get_position_tex_rid/set_seed_positions/get_timings) and publish the same
-## position texture (xyz = world pos, w = speed for water / temperature for lava),
-## so the surface render chain is solver-agnostic. Foam is not: spawning needs the
-## per-neighbour relative velocities of the SPH pressure pass, so it lives inside
-## SphFluidSolver and is available in SPH water mode only.
+## Reusable GPU fluid: one dual-density SPH simulation with a screen-space surface
+## and optional foam. Instance it in a scene, assign a camera, and call start().
+## The host scene owns its camera, environment and ground; this node owns the fluid.
 
-enum Method { PBF, SPH }
-enum Scenario { DAM, CASCADE }
+enum Scenario { POOL, CASCADE, BASIN }
+enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL }
 
-const RADIUS := {Method.PBF: 0.12, Method.SPH: 0.16}
+const RADIUS := 0.16
 const POUR_COOLDOWN_MS := 400
+const POOL_START_MULTIPLIER := 1
+const POOL_CAPACITY_MULTIPLIER := 3
+const POOL_ADD_BATCH_DIVISOR := 4
+const HONEY_CASCADE_FLOW_MAX := 1.3
 
 # --- Public configuration (set before start(); use the setters afterwards). ---
 @export var config: FluidConfig = FluidConfig.new()
 
-var method: Method = Method.SPH
-var scenario: Scenario = Scenario.DAM
-var mode := 0.0 # 0 = water, 1 = lava
+var scenario: Scenario = Scenario.POOL
+var mode: FluidKind = FluidKind.WATER
 var particle_count := 65536
 var foam_enabled := true
 var render_scale := 0.5
-var cascade_flow := 1.0
+var flow_rate := 1.0
 var camera: Camera3D # REQUIRED: the main camera the prepass cameras track.
 var domain_origin := Vector3(-8.0, 0.0, -8.0)
 var domain_size := Vector3(16.0, 16.0, 16.0)
@@ -61,14 +54,11 @@ var pour_cap_degrees := 10.0
 ## Share of the particle buffer recycled per pour.
 var pour_fraction := 0.15
 
-# Both solvers are kept alive so UI sliders can bind to the concrete one; only the
-# active solver holds GPU resources at a time. Foam runs only in SPH water mode.
-var pbf_solver := PbfFluidSolver.new()
 var sph_solver := SphFluidSolver.new()
-var active_solver # PbfFluidSolver | SphFluidSolver
+var active_solver: SphFluidSolver
 
 var renderer: ScreenSpaceFluidRenderer
-var _radius := RADIUS[Method.SPH]
+var _radius := RADIUS
 var _pour_cursor := 0
 var _last_pour_ms := -POUR_COOLDOWN_MS
 var _step_clock := SimStepClock.new()
@@ -77,6 +67,7 @@ var _step_clock := SimStepClock.new()
 # or one frame hands the renderer the position RID being freed.
 var _pending_init := false
 var _expected_init_generation := 0
+var _base_texture_width := 0
 
 
 func active() -> Object:
@@ -84,7 +75,7 @@ func active() -> Object:
 
 
 func _foam_active() -> bool:
-	return method == Method.SPH and foam_enabled and mode < 0.5
+	return foam_enabled and mode == FluidKind.WATER
 
 
 func start() -> void:
@@ -94,22 +85,14 @@ func start() -> void:
 		return
 	assert(camera != null, "FluidSystem.camera must be set before start()")
 	particle_count = config.default_particle_count
-	cascade_flow = config.default_flow
+	_base_texture_width = config.texture_width
+	_ensure_texture_capacity(_solver_particle_capacity())
+	flow_rate = config.default_flow
 	domain_origin = config.domain_origin
 	domain_size = config.domain_size_m
-	pbf_solver.config = config
 	sph_solver.config = config
-	renderer = null
-	active_solver = sph_solver if method == Method.SPH else pbf_solver
-	_radius = RADIUS[method]
-	active_solver.particle_count = particle_count
-	_configure_solver()
-	_setup_renderer()
-	renderer.set_foam_visible(_foam_active())
-	active_solver.set_seed_positions(_build_seed())
-	# First init: there is no live RID to protect, so no pending-init guard —
-	# the renderer has never bound anything.
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	active_solver = sph_solver
+	_initialize_runtime()
 
 
 func _setup_renderer() -> void:
@@ -132,77 +115,100 @@ func _setup_renderer() -> void:
 
 # --- Runtime control -------------------------------------------------------
 
-func set_method(m: Method) -> void:
-	if scenario == Scenario.CASCADE and m != Method.SPH:
+
+func set_configuration(next_mode: FluidKind, next_scenario: Scenario) -> void:
+	if next_mode == mode and next_scenario == scenario:
 		return
-	if m == method:
-		return
-	_teardown()
-	method = m
-	active_solver = sph_solver if method == Method.SPH else pbf_solver
-	_radius = RADIUS[method]
-	active_solver.particle_count = particle_count
-	renderer.set_radius(_radius)
-	_configure_solver()
-	renderer.set_foam_visible(_foam_active())
-	active_solver.set_seed_positions(_build_seed())
-	_queue_init()
+	mode = next_mode
+	scenario = next_scenario
+	_rebuild()
 
 
-func set_scenario(value: Scenario) -> void:
-	if value == scenario:
-		return
-	_teardown()
-	scenario = value
-	if scenario == Scenario.CASCADE:
-		method = Method.SPH
-	active_solver = sph_solver if method == Method.SPH else pbf_solver
-	_radius = RADIUS[method]
-	active_solver.particle_count = particle_count
-	renderer.set_radius(_radius)
-	_configure_solver()
-	renderer.set_foam_visible(_foam_active())
-	active_solver.set_seed_positions(_build_seed())
-	_queue_init()
-
-
-func set_cascade_flow(value: float) -> void:
-	cascade_flow = clampf(value, config.flow_min, config.flow_max)
-	sph_solver.cascade_flow = cascade_flow
-
-
-func set_mode(m: float) -> void:
-	mode = m
-	_teardown()
-	_configure_solver()
-	renderer.set_mode(mode)
-	renderer.set_foam_visible(_foam_active())
-	active_solver.set_seed_positions(_build_seed())
-	_queue_init()
+func set_flow(value: float) -> void:
+	flow_rate = clampf(value, config.flow_min,
+		HONEY_CASCADE_FLOW_MAX if mode == FluidKind.HONEY and scenario == Scenario.CASCADE
+		else config.flow_max)
+	sph_solver.emission_rate = flow_rate
 
 
 func set_particle_count(n: int) -> void:
-	if n == active_solver.particle_count:
-		return
+	var count_changed := n != particle_count
 	# init_render validates the config before allocating, and every later re-init
 	# (restart, mode/preset switches) validates the same pair, so the config must
 	# describe the new count before the teardown queues it.
 	config.default_particle_count = n
-	# A count above the impostor texture's capacity wraps INSTANCE_ID texel
-	# lookups; grow the texture instead of corrupting the surface.
-	while n > config.texture_width * config.texture_width:
+	particle_count = n
+	_ensure_texture_capacity(_solver_particle_capacity())
+	if active_solver == null or not count_changed:
+		return
+	_rebuild()
+
+
+func can_add_pool_liquid() -> bool:
+	return scenario == Scenario.POOL and active_solver != null \
+		and active_solver.initialized and not _pending_init \
+		and active_solver.active_count >= 0 \
+		and active_solver.active_count < active_solver.particle_count
+
+
+func add_pool_liquid() -> bool:
+	if not can_add_pool_liquid():
+		return false
+	var from: int = active_solver.active_count
+	var initial_count := particle_count * POOL_START_MULTIPLIER
+	# Each Add pours one DIVISORth of the headroom above the initial fill, so
+	# DIVISOR presses take the pool from its start count to full capacity.
+	@warning_ignore("integer_division")
+	var batch_capacity := maxi(1, (active_solver.particle_count - initial_count) / POOL_ADD_BATCH_DIVISOR)
+	var count := mini(batch_capacity, active_solver.particle_count - from)
+	var side := ceili(pow(float(count), 1.0 / 3.0))
+	var initial_side := ceili(pow(float(initial_count), 1.0 / 3.0))
+	var initial_layers := ceili(float(initial_count) / float(initial_side * initial_side))
+	var spacing: float = active_solver.spacing
+	@warning_ignore("integer_division")
+	var batch_index := (from - initial_count) / batch_capacity
+	var patch_span := float(side - 1) * spacing
+	var left_x := domain_origin.x + 0.4
+	var right_x := domain_origin.x + domain_size.x - 0.4 - patch_span
+	var near_z := domain_origin.z + 0.4
+	var far_z := domain_origin.z + domain_size.z - 0.4 - patch_span
+	var start_x := left_x if batch_index % 2 == 0 else right_x
+	var start_z := near_z if batch_index < 2 else far_z
+	var start_y := seed_origin.y + float(initial_layers) * spacing + 1.4
+	var batch := PackedFloat32Array()
+	batch.resize(count * 4)
+	for i in count:
+		var x := i % side
+		@warning_ignore("integer_division")
+		var y := (i / side) % side
+		@warning_ignore("integer_division")
+		var z := i / (side * side)
+		var p := Vector3(start_x + float(x) * spacing,
+			start_y + float(y) * spacing, start_z + float(z) * spacing)
+		batch[i * 4] = p.x
+		batch[i * 4 + 1] = p.y
+		batch[i * 4 + 2] = p.z
+		var phase := 1.0 if mode == FluidKind.LAVA else 0.0
+		if mode == FluidKind.WATER_OIL:
+			@warning_ignore("integer_division")
+			phase = float(((from + i) / 216) % 2)
+		batch[i * 4 + 3] = phase
+	active_solver.active_count = from + count
+	renderer.set_visible_count(active_solver.active_count)
+	RenderingServer.call_on_render_thread(sph_solver.respawn_range.bind(from, batch))
+	return true
+
+
+func _solver_particle_capacity() -> int:
+	return particle_count * POOL_CAPACITY_MULTIPLIER \
+		if scenario == Scenario.POOL and not planet_mode() else particle_count
+
+
+func _ensure_texture_capacity(count: int) -> void:
+	while count > config.texture_width * config.texture_width:
 		config.texture_width *= 2
 		push_warning("Fluid: raised position texture to %dpx for %d particles" % [
-			config.texture_width, n])
-	_teardown()
-	active_solver.particle_count = n
-	particle_count = n
-	renderer.set_particle_count(n)
-	# The solver re-reads config.texture_width on the queued re-init; keep the
-	# renderer's impostor/thickness samplers on the same side.
-	renderer.set_texture_width(config.texture_width)
-	active_solver.set_seed_positions(_build_seed())
-	_queue_init()
+			config.texture_width, count])
 
 
 # The pool is allocated with the solver, so toggling only gates the foam stages
@@ -210,7 +216,8 @@ func set_particle_count(n: int) -> void:
 func set_foam_enabled(on: bool) -> void:
 	foam_enabled = on
 	sph_solver.foam_enabled = _foam_active()
-	renderer.set_foam_visible(_foam_active())
+	if renderer != null:
+		renderer.set_foam_visible(_foam_active())
 
 
 ## Planet mode: the composite draws after the atmosphere quad and both read the
@@ -229,49 +236,15 @@ func set_render_scale(v: float) -> void:
 
 
 func restart() -> void:
-	_teardown()
 	_pour_cursor = 0
 	_last_pour_ms = -POUR_COOLDOWN_MS
 	_step_clock.reset()
-	active_solver.set_seed_positions(_build_seed())
-	_queue_init()
+	_rebuild()
+
 
 
 func set_profiling(on: bool) -> void:
-	pbf_solver.profiling = on
 	sph_solver.profiling = on
-
-
-func set_pbf_viscosity(value: float) -> void:
-	pbf_solver.xsph_c = value
-
-
-func get_pbf_viscosity() -> float:
-	return pbf_solver.xsph_c
-
-
-func set_pbf_vorticity(value: float) -> void:
-	pbf_solver.vorticity_eps = value
-
-
-func get_pbf_vorticity() -> float:
-	return pbf_solver.vorticity_eps
-
-
-func set_pbf_cohesion(value: float) -> void:
-	pbf_solver.scorr_k = value
-
-
-func get_pbf_cohesion() -> float:
-	return pbf_solver.scorr_k
-
-
-func set_pbf_iterations(value: float) -> void:
-	pbf_solver.solver_iterations = int(round(value))
-
-
-func get_pbf_iterations() -> int:
-	return pbf_solver.solver_iterations
 
 
 func set_sph_pressure(value: float) -> void:
@@ -364,7 +337,7 @@ func profiled_viewports() -> Array:
 # --- Solver tuning ---------------------------------------------------------
 
 func planet_mode() -> bool:
-	return method == Method.SPH and planet_gravity > 0.0 and planet_field.is_valid()
+	return planet_gravity > 0.0 and planet_field.is_valid()
 
 
 func set_sky_up_axis(up: Vector3) -> void:
@@ -440,31 +413,51 @@ func _configure_planet_solver() -> void:
 	sph_solver.foam_surface_gate = 0.0
 	sph_solver.foam_ke_min = 9.0
 	sph_solver.foam_ke_max = 20.0
+	sph_solver.foam_life_min = 5.0
+	sph_solver.foam_life_max = 15.0
 	# The impostor radius is tuned against the default spacing, so it has to follow
 	# the spacing up or the surface reconstructs full of holes.
-	_radius = RADIUS[Method.SPH] * (sph_solver.spacing / 0.12)
+	_radius = RADIUS * (sph_solver.spacing / 0.12)
 	# Keeps the MultiMesh from being frustum-culled as a whole while fluid orbits.
 	domain_origin = sph_solver.grid_origin
 	domain_size = Vector3.ONE * planet_field_world_size
 
 
 func _configure_solver() -> void:
-	pbf_solver.mode = mode
-	sph_solver.mode = mode
+	sph_solver.material = mode
+	sph_solver.scene_id = scenario
+	# Everything that distinguishes one liquid from another comes from the
+	# FluidMaterial spec; nothing below re-derives per-material numbers.
+	var spec := FluidMaterial.for_kind(mode)
+	sph_solver.material_density_kg_m3 = spec.density_kg_m3
+	sph_solver.stiffness_scale = spec.stiffness_scale
+	sph_solver.cohesion_kernel_scale = spec.cohesion_kernel_scale
+	sph_solver.collision_inflation = spec.collision_inflation
 	sph_solver.foam_enabled = _foam_active()
-	sph_solver.cascade_enabled = scenario == Scenario.CASCADE and not planet_mode()
-	sph_solver.cascade_flow = cascade_flow
-	sph_solver.emitter_origin = Vector3(-3.0, 13.6, 0.0)
-	sph_solver.emitter_velocity = Vector3(0.0, -2.0, 0.0)
-	var obstacles: Array[Dictionary] = []
-	if sph_solver.cascade_enabled:
-		obstacles = cascade_obstacles()
-	sph_solver.set_scene_obstacles(obstacles)
+	var basin_pour := scenario == Scenario.BASIN
+	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()
+	sph_solver.emitter_width = 4 if basin_pour else 6
+	sph_solver.recycle_emission = not (basin_pour and mode == FluidKind.WATER_OIL)
+	sph_solver.emission_cycle_seconds = spec.emission_cycle_seconds
+	set_flow(flow_rate)
+	sph_solver.emitter_origin = emitter_origin_for_scene(scenario)
+	var launch_speed := 6.0 if basin_pour else 2.0
+	sph_solver.emitter_velocity = Vector3(0.0, -launch_speed, 0.0)
+	sph_solver.set_scene_obstacles(obstacles_for_scene(scenario))
 	if planet_mode():
 		_configure_planet_solver()
-		sph_solver.viscosity_strength = 0.14 if mode < 0.5 else 0.3
+		sph_solver.viscosity_strength = 0.14 if mode != FluidKind.LAVA else 0.3
 		sph_solver.cohesion_strength = 0.0
+		sph_solver.extension_strength = 0.0
 		return
+	_radius = spec.radius
+	# Tuning sliders ride the preset: a material or scene switch yields the
+	# documented defaults rather than whatever the previous liquid was dialled
+	# to -- the same rule viscosity and cohesion already followed. The menu
+	# resyncs its widgets from the solver right after a switch.
+	sph_solver.pressure_mult = SphFluidSolver.DEFAULT_PRESSURE_MULT
+	sph_solver.near_pressure_mult = SphFluidSolver.DEFAULT_NEAR_PRESSURE_MULT
+	sph_solver.substeps = SphFluidSolver.DEFAULT_SUBSTEPS
 	# Flat tank: SebLague's spawn structure with thresholds re-fit to OUR scene.
 	# His absolute windows do not transfer: his pool is ~12h deep (wave celerity
 	# ~4.9 m/s) while ours is ~3.5h (celerity 2.94 m/s, so KE tops out at 8.7),
@@ -484,18 +477,12 @@ func _configure_solver() -> void:
 	sph_solver.foam_surface_gate = 0.9
 	sph_solver.foam_ke_min = 2.25
 	sph_solver.foam_ke_max = 9.0
-	if mode > 0.5:
-		pbf_solver.xsph_c = 0.35
-		pbf_solver.vorticity_eps = 0.0
-		sph_solver.viscosity_strength = 0.3
-		sph_solver.collision_damping = 0.1
-		sph_solver.cohesion_strength = 800.0
-	else:
-		pbf_solver.xsph_c = 0.05
-		pbf_solver.vorticity_eps = 0.02
-		sph_solver.viscosity_strength = 0.14
-		sph_solver.collision_damping = 0.15
-		sph_solver.cohesion_strength = 400.0
+	sph_solver.foam_life_min = 5.0
+	sph_solver.foam_life_max = 15.0
+	sph_solver.extension_strength = spec.extension_strength
+	sph_solver.viscosity_strength = spec.viscosity
+	sph_solver.collision_damping = spec.collision_damping
+	sph_solver.cohesion_strength = spec.cohesion
 
 
 ## SebLague's Earth.unity: foam render scale 4, applied as scale * 0.01 * 2, i.e.
@@ -503,6 +490,38 @@ func _configure_solver() -> void:
 ## the smaller sprite of his "Fluid ScreenSpace 2" scene.
 func _foam_billboard_size() -> float:
 	return sph_solver.h * 0.4 if planet_mode() else 0.05
+
+
+func emitter_origin_for_scene(value: Scenario) -> Vector3:
+	return Vector3(-2.4, 7.0, 0.0) if value == Scenario.BASIN else Vector3(-2.4, 13.6, 0.0)
+
+
+func _rebuild() -> void:
+	if active_solver != null:
+		_initialize_runtime()
+
+
+func _initialize_runtime() -> void:
+	var first_start := renderer == null
+	if not first_start:
+		_teardown()
+	active_solver.particle_count = _solver_particle_capacity()
+	if scenario != Scenario.POOL and not planet_mode():
+		config.texture_width = _base_texture_width
+	_ensure_texture_capacity(active_solver.particle_count)
+	_configure_solver()
+	if first_start:
+		_setup_renderer()
+	renderer.set_mode(mode)
+	renderer.set_radius(_radius)
+	renderer.set_particle_count(active_solver.particle_count)
+	renderer.set_texture_width(config.texture_width)
+	renderer.set_foam_visible(_foam_active())
+	active_solver.set_seed_positions(_build_seed())
+	if first_start:
+		RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
+	else:
+		_queue_init()
 
 
 # --- Render-thread lifecycle ----------------------------------------------
@@ -551,27 +570,39 @@ func _build_seed() -> PackedFloat32Array:
 		if renderer != null:
 			renderer.set_visible_count(0)
 		return seed
-	if scenario == Scenario.CASCADE:
+	if scenario != Scenario.POOL:
 		return _build_cascade_seed()
-	if method == Method.SPH:
-		sph_solver.active_count = -1
-	return _build_dam_seed()
+	sph_solver.active_count = -1
+	return _build_pool_seed()
 
 
-func cascade_obstacles() -> Array[Dictionary]:
+
+func obstacles_for_scene(value: Scenario) -> Array[Dictionary]:
 	var obstacles: Array[Dictionary] = []
+	if value == Scenario.CASCADE:
+		_add_cascade_obstacles(obstacles)
+	elif value == Scenario.BASIN:
+		obstacles.append(_cascade_box(Vector3(0.0, -0.12, 0.0), Vector3(7.1, 0.36, 7.1)))
+		for side in [-1.0, 1.0]:
+			obstacles.append(_cascade_box(Vector3(side * 3.25, 2.9, 0.0),
+				Vector3(0.6, 6.2, 7.1)))
+			obstacles.append(_cascade_box(Vector3(0.0, 2.9, side * 3.25),
+				Vector3(7.1, 6.2, 0.6)))
+	return obstacles
+
+
+func _add_cascade_obstacles(obstacles: Array[Dictionary]) -> void:
 	_add_ramp(obstacles, Vector3(-2.0, 9.4, 0.0), Vector3(7.0, 0.35, 3.8), -0.30)
 	_add_ramp_stop(obstacles, Vector3(-2.0, 9.4, 0.0), Vector3(7.0, 0.35, 3.8),
 		-0.30, -1.0)
 	_add_ramp(obstacles, Vector3(1.5, 5.0, 0.0), Vector3(8.5, 0.45, 3.8), 0.28)
 	_add_ramp_stop(obstacles, Vector3(1.5, 5.0, 0.0), Vector3(8.5, 0.45, 3.8),
 		0.28, 1.0)
-	obstacles.append(_cascade_box(Vector3(0.0, 0.35, 0.0), Vector3(12.0, 0.5, 7.0)))
-	obstacles.append(_cascade_box(Vector3(-6.0, 2.25, 0.0), Vector3(0.6, 4.3, 7.0)))
-	obstacles.append(_cascade_box(Vector3(6.0, 2.25, 0.0), Vector3(0.6, 4.3, 7.0)))
-	obstacles.append(_cascade_box(Vector3(0.0, 2.25, -3.5), Vector3(12.0, 4.3, 0.6)))
-	obstacles.append(_cascade_box(Vector3(0.0, 1.1, 3.5), Vector3(12.0, 2.0, 0.6)))
-	return obstacles
+	obstacles.append(_cascade_box(Vector3(0.0, 0.3, 0.0), Vector3(12.6, 0.6, 7.6)))
+	obstacles.append(_cascade_box(Vector3(-6.0, 2.15, 0.0), Vector3(0.7, 4.7, 7.6)))
+	obstacles.append(_cascade_box(Vector3(6.0, 2.15, 0.0), Vector3(0.7, 4.7, 7.6)))
+	obstacles.append(_cascade_box(Vector3(0.0, 2.15, -3.5), Vector3(12.6, 4.7, 0.7)))
+	obstacles.append(_cascade_box(Vector3(0.0, 2.15, 3.5), Vector3(12.6, 4.7, 0.7)))
 
 
 func _add_ramp(obstacles: Array[Dictionary], center: Vector3, size: Vector3,
@@ -607,7 +638,7 @@ func _build_cascade_seed() -> PackedFloat32Array:
 	var seed := PackedFloat32Array()
 	seed.resize(n * 4)
 	for i in n:
-		seed[i * 4 + 3] = mode
+		seed[i * 4 + 3] = 1.0 if mode == FluidKind.LAVA else 0.0
 	sph_solver.active_count = 0
 	if renderer != null:
 		renderer.set_visible_count(0)
@@ -656,7 +687,8 @@ func pour_at(point: Vector3) -> void:
 ## Fills seed[from, to) with points on a spherical cap of half-angle `half_deg`
 ## about `axis`, hovering above the terrain. Directions come from a Fibonacci
 ## sphere and radii from a t^(1/3) remap so the shell is volume-uniform, as in
-## SebLague's Spawner3D. `seed` is xyzw per particle, w = mode.
+## SebLague's Spawner3D. `seed` is xyzw per particle, w = material attribute
+## (lava heat; 0 for materials without one).
 func _write_cap(seed: PackedFloat32Array, from: int, to: int, axis: Vector3,
 		half_deg: float, inner_r: float, outer_r: float) -> void:
 	var count := to - from
@@ -688,16 +720,17 @@ func _write_cap(seed: PackedFloat32Array, from: int, to: int, axis: Vector3,
 		seed[i * 4] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z
-		seed[i * 4 + 3] = mode
+		seed[i * 4 + 3] = 1.0 if mode == FluidKind.LAVA else 0.0
 
 
-func _build_dam_seed() -> PackedFloat32Array:
-	var n: int = active_solver.particle_count
+func _build_pool_seed() -> PackedFloat32Array:
+	var capacity: int = active_solver.particle_count
+	var initial_count: int = particle_count * POOL_START_MULTIPLIER
 	var s: float = active_solver.spacing
-	var w := ceili(pow(float(n), 1.0 / 3.0))
+	var w := ceili(pow(float(initial_count), 1.0 / 3.0))
 	var seed := PackedFloat32Array()
-	seed.resize(n * 4)
-	for i in n:
+	seed.resize(capacity * 4)
+	for i in initial_count:
 		var x := i % w
 		@warning_ignore("integer_division")
 		var y := (i / w) % w
@@ -707,7 +740,14 @@ func _build_dam_seed() -> PackedFloat32Array:
 		seed[i * 4] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z
-		seed[i * 4 + 3] = mode
+		var phase := 1.0 if mode == FluidKind.LAVA else 0.0
+		if mode == FluidKind.WATER_OIL:
+			@warning_ignore("integer_division")
+			phase = float((i / 216) % 2)
+		seed[i * 4 + 3] = phase
+	sph_solver.active_count = initial_count
+	if renderer != null:
+		renderer.set_visible_count(initial_count)
 	return seed
 
 
@@ -724,9 +764,8 @@ func _process(delta: float) -> void:
 		if active_solver.init_generation < _expected_init_generation:
 			return
 		_pending_init = false
-	var visible: int = sph_solver.live_count() if method == Method.SPH else active_solver.particle_count
-	var foam_rid: RID = sph_solver.get_foam_tex_rid() if method == Method.SPH else RID()
-	renderer.update(active_solver.get_position_tex_rid(), visible, foam_rid)
+	renderer.update(active_solver.get_position_tex_rid(), sph_solver.live_count(),
+			sph_solver.get_foam_tex_rid())
 	for i in _step_clock.advance(delta):
 		RenderingServer.call_on_render_thread(_render_step.bind(active_solver, 1.0 / 60.0))
 

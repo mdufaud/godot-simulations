@@ -126,13 +126,34 @@ layout(std430, set = 0, binding = 20) restrict buffer FoamVelSurvivors {
 foam_vel_c;
 
 const int MAX_SCENE_OBSTACLES = 14;
+
+// Must match FluidSystem.FluidKind: values AND order. The id travels as a plain
+// int through the push constant and the composite uniform, so nothing here can
+// tolerate the enum being reshuffled.
+const int MATERIAL_WATER = 0;
+const int MATERIAL_LAVA = 1;
+const int MATERIAL_MERCURY = 2;
+const int MATERIAL_HONEY = 3;
+const int MATERIAL_OIL = 4;
+
+// Must match FluidSystem.Scenario.
+const int SCENE_POOL = 0;
+const int SCENE_CASCADE = 1;
+const int SCENE_BASIN = 2;
+
 layout(std140, set = 0, binding = 21) uniform SceneParams {
-	vec4 emitter_origin;
-	vec4 emitter_velocity;
-	vec4 emitter_shape;
-	ivec4 counts;
+	vec4 emitter_origin; // xyz = nozzle position, w = pad
+	vec4 emitter_velocity; // xyz = launch velocity, w = emitter enabled flag (scene_mode)
+	vec4 emitter_shape; // x = particle spacing, y = emitter layer width
+	ivec4 counts; // x = emit start, y = emit count, z = live count, w = obstacle count
 	mat4 world_to_local[MAX_SCENE_OBSTACLES];
-	vec4 half_extents[MAX_SCENE_OBSTACLES];
+	vec4 half_extents[MAX_SCENE_OBSTACLES]; // xyz = half size, w = velocity retention
+	// Per-material kernel constants derived CPU-side by FluidMaterial and packed
+	// by SphFluidSolver. The kernels branch on the material id only where the
+	// PHYSICS MODEL differs (dual-phase oil, lava heat, honey extension); every
+	// tunable number comes from here.
+	vec4 fluid_material; // x = density kg/m3, y = pressure stiffness scale, z = collision inflation, w = pad
+	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 }
 scene;
 
@@ -157,11 +178,12 @@ layout(push_constant, std430) uniform Params {
 	vec4 grid_origin; // xyz = origin, w = cell_size
 	ivec4 grid_dims; // xyz = dims, w = particle_count
 	vec4 kernel; // x = h, y = h^2, z = K_SpikyPow2, w = K_SpikyPow3
-	vec4 kernel2; // x = K_SpikyPow2Grad, y = K_SpikyPow3Grad, z = K_Poly6, w = pad
+	vec4 kernel2; // x = K_SpikyPow2Grad, y = K_SpikyPow3Grad, z = K_Poly6, w = K_Cohesion
 	vec4 sim; // x = dt, y = target_density, z = pressure_mult, w = near_pressure_mult
-	vec4 sim2; // x = viscosity_strength, y = collision_damping, z = cohesion_strength, w = pad
-	vec4 gravity; // xyz = gravity, w = mode (0 water, 1 lava)
-	ivec4 misc; // x = tex_width, y = num_blocks, z = last_substep flag, w = pad
+	vec4 sim2; // x = viscosity_strength, y = collision_damping, z = cohesion_strength (kernel-scaled), w = extension_strength
+	vec3 gravity;
+	int material; // FluidSystem.FluidKind id; compare against MATERIAL_* only
+	ivec4 misc; // x = tex_width, y = num_blocks, z = last_substep flag, w = rng seed
 }
 params;
 
@@ -290,13 +312,52 @@ void resolve_planet_collision(inout vec3 p, inout vec3 v, float friction) {
 }
 
 bool scene_mode() {
-	return scene.emitter_velocity.w > 0.5;
+	return scene.emitter_velocity.w > 0.5 || scene.counts.w > 0;
 }
 
-void resolve_scene_collisions(inout vec3 p, inout vec3 v, float retention) {
+void resolve_scene_collisions(inout vec3 p, inout vec3 v, vec3 from, float retention) {
 	for (int k = 0; k < scene.counts.w; k++) {
+		vec3 local_from = (scene.world_to_local[k] * vec4(from, 1.0)).xyz;
 		vec3 local_p = (scene.world_to_local[k] * vec4(p, 1.0)).xyz;
-		vec3 half_size = scene.half_extents[k].xyz;
+		vec3 half_size = scene.half_extents[k].xyz + vec3(scene.fluid_material.z);
+		vec3 inside_from = half_size - abs(local_from);
+		if (any(lessThanEqual(inside_from, vec3(0.0)))) {
+			vec3 delta = local_p - local_from;
+			float enter = 0.0;
+			float leave = 1.0;
+			vec3 local_n = vec3(0.0);
+			bool hit = true;
+			for (int axis = 0; axis < 3; axis++) {
+				if (abs(delta[axis]) < 1e-6) {
+					if (abs(local_from[axis]) > half_size[axis]) { hit = false; }
+					continue;
+				}
+				float near_t = (-half_size[axis] - local_from[axis]) / delta[axis];
+				float far_t = (half_size[axis] - local_from[axis]) / delta[axis];
+				float side = -1.0;
+				if (near_t > far_t) {
+					float swap_t = near_t;
+					near_t = far_t;
+					far_t = swap_t;
+					side = 1.0;
+				}
+				if (near_t > enter) {
+					enter = near_t;
+					local_n = vec3(0.0);
+					local_n[axis] = side;
+				}
+				leave = min(leave, far_t);
+			}
+			if (hit && enter <= leave && enter <= 1.0 && dot(local_n, local_n) > 0.0) {
+				vec3 world_n = normalize(transpose(mat3(scene.world_to_local[k])) * local_n);
+				p = mix(from, p, max(enter - 0.001, 0.0)) + world_n * 0.02;
+				if (dot(v, world_n) < 0.0) {
+					v -= world_n * dot(v, world_n);
+					v *= min(retention, scene.half_extents[k].w);
+				}
+				continue;
+			}
+		}
 		vec3 inside = half_size - abs(local_p);
 		if (any(lessThanEqual(inside, vec3(0.0)))) {
 			continue;

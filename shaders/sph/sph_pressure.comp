@@ -6,13 +6,18 @@ void main() {
 	vec3 pos = predicted.data[i].xyz;
 	float density = densities.data[i];
 	float near_density = near_densities.data[i];
-	float pressure = (density - params.sim.y) * params.sim.z;
-	float near_pressure = near_density * params.sim.w;
+	float stiffness_scale = scene.fluid_material.y;
+	float pressure = (density - params.sim.y) * params.sim.z * stiffness_scale;
+	float near_pressure = near_density * params.sim.w * stiffness_scale;
 	vec3 vel_i = velocities.data[i].xyz;
 	vec3 force = vec3(0.0);
+	vec3 surface_force = vec3(0.0);
 	float cohesion = params.sim2.z;
+	float phase = positions.data[i].w;
+	vec3 extension = vec3(0.0);
+	float interface_weight = 0.0;
 	int neighbours = 0;
-	bool spawn_foam = foam.flags.x == 1 && params.gravity.w <= 0.5;
+	bool spawn_foam = foam.flags.x == 1 && params.material == MATERIAL_WATER;
 	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
 	// converges with its neighbours. High only where fluid slams into itself,
 	// which is exactly where air is entrained and foam is born.
@@ -31,16 +36,25 @@ void main() {
 		vec3 dir = dst > 1e-6 ? off / dst : vec3(0.0, 1.0, 0.0);
 		float dj = densities.data[j];
 		float nj = near_densities.data[j];
-		float pj = (dj - params.sim.y) * params.sim.z;
-		float npj = nj * params.sim.w;
+		float pj = (dj - params.sim.y) * params.sim.z * stiffness_scale;
+		float npj = nj * params.sim.w * stiffness_scale;
 		float shared_p = (pressure + pj) * 0.5;
 		float shared_np = (near_pressure + npj) * 0.5;
 		force += dir * sph_density_deriv(dst) * shared_p / dj;
 		force += dir * sph_near_density_deriv(dst) * shared_np / nj;
 		// Akinci-style cohesion (surface tension lite): attracts within h/2,
 		// mildly repels beyond, so free particles bead up without clumping.
-		if (cohesion > 0.0) {
-			force += dir * sph_cohesion_k(dst) / dj * cohesion;
+		bool unlike = params.material == MATERIAL_OIL && abs(phase - positions.data[j].w) > 0.5;
+		if (cohesion > 0.0 && !unlike) {
+			surface_force += dir * sph_cohesion_k(dst) / dj * cohesion;
+		}
+		if (unlike) {
+			interface_weight += 1.0 - dst / params.kernel.x;
+		}
+		if (params.material == MATERIAL_HONEY) {
+			float separation = max(dot(velocities_snap.data[j].xyz - vel_i, dir), 0.0);
+			extension += dir * separation * smoothstep(0.2, 0.65, dst / params.kernel.x)
+				* (1.0 - smoothstep(0.8, 1.0, dst / params.kernel.x));
 		}
 
 		if (spawn_foam) {
@@ -54,10 +68,20 @@ void main() {
 		}
 	)
 	vec3 accel = force / max(density, 1e-6);
+	accel += surface_force / max(density, 1e-6);
+	if (params.material == MATERIAL_HONEY) {
+		accel += extension * params.sim2.w / max(float(neighbours), 1.0);
+	}
+	if (params.material == MATERIAL_OIL) {
+		float buoyancy = 9.8 * (1000.0 / scene.fluid_material.x - 1.0);
+		float contact = min(interface_weight / 4.0, 1.0);
+		accel.y += phase > 0.5 ? buoyancy * smoothstep(0.3, 0.8, density / params.sim.y) : 0.0;
+		accel.y += (phase > 0.5 ? 1.0 : -1.0) * buoyancy * 4.0 * contact;
+	}
 	vec3 v = vel_i + accel * params.sim.x;
 	// Airborne particles (few neighbors) get drag so spray doesn't fling away.
 	if (neighbours < 8) {
-		v -= v * params.sim.x * 0.75;
+		v -= v * params.sim.x * (params.material == MATERIAL_MERCURY ? 0.75 * 1000.0 / scene.fluid_material.x : 0.75);
 	}
 	velocities.data[i] = vec4(v, velocities.data[i].w);
 

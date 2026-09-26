@@ -32,7 +32,6 @@ func rebuild(atmosphere: Dictionary) -> void:
 		return
 	_system = FluidSystem.new()
 	_system.camera = camera
-	_system.method = FluidSystem.Method.SPH
 	# start() resets particle_count from config.default_particle_count, so the
 	# mobile budget must land in the config, not on the field alone.
 	_system.config.default_particle_count = 16384 if mobile else 65536

@@ -10,24 +10,29 @@ void main() {
 	if (offset >= uint(scene.counts.y)) {
 		return;
 	}
-	uint layer_width = 6u;
+	uint layer_width = uint(scene.emitter_shape.y);
 	uint layer_area = layer_width * layer_width;
 	uint footprint = id % layer_area;
 	float layer_center = float(layer_width - 1u) / 2.0;
 	float spacing = scene.emitter_shape.x;
 	vec3 p = scene.emitter_origin.xyz + vec3(
 		(float(footprint % layer_width) - layer_center) * spacing,
-		float(offset / layer_area) * spacing,
+		params.material == MATERIAL_HONEY ? 0.0 : float(offset / layer_area) * spacing,
 		(float(footprint / layer_width) - layer_center) * spacing
 	);
 	vec3 v = scene.emitter_velocity.xyz;
-	positions_src.data[i] = vec4(p, scene.emitter_origin.w);
+	// position.w carries the per-material attribute (oil phase, lava heat) and 0
+	// for materials that have none -- never the material id itself.
+	float phase = params.material == MATERIAL_OIL ? float((id / 216u) % 2u)
+		: params.material == MATERIAL_LAVA ? 1.0 : 0.0;
+	positions_src.data[i] = vec4(p, phase);
 	predicted_src.data[i] = vec4(p, 0.0);
 	velocities_src.data[i] = vec4(v, float(id));
-	positions.data[i] = vec4(p, scene.emitter_origin.w);
+	positions.data[i] = vec4(p, phase);
 	predicted.data[i] = vec4(p, 0.0);
 	velocities.data[i] = vec4(v, float(id));
 	uint w = uint(params.misc.x);
 	ivec2 texel = ivec2(int(i % w), int(i / w));
-	imageStore(position_tex, texel, vec4(p, mix(length(v), scene.emitter_origin.w, params.gravity.w)));
+	float attrib = params.material == MATERIAL_OIL || params.material == MATERIAL_LAVA ? phase : length(v);
+	imageStore(position_tex, texel, vec4(p, attrib));
 }

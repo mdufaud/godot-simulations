@@ -24,7 +24,7 @@ var particle_count := 0
 var config: FluidConfig = FluidConfig.new()
 var tex_width := 256
 var radius := 0.16
-var mode := 0.0 # 0 = water, 1 = lava
+var mode := 0 # FluidSystem.FluidKind id: selects the composite look (fluid_composite.gdshader).
 var render_scale := 0.5
 var domain_aabb := AABB(Vector3(-8.0, 0.0, -8.0), Vector3(16.0, 16.0, 16.0))
 ## Build the foam coverage pass. When false the composite gets a black foam
@@ -105,7 +105,7 @@ func set_radius(r: float) -> void:
 	filter_v_mat.set_shader_parameter("particle_radius", radius)
 
 
-func set_mode(m: float) -> void:
+func set_mode(m: int) -> void:
 	mode = m
 	composite_mat.set_shader_parameter("mode", mode)
 

@@ -1,10 +1,8 @@
 class_name SphFluidSolver
 extends RefCounted
-## GPU dual-density SPH (SebLague / Clavet: density + near-density equation of
-## state). Shares the PBF solver's dense counting-sort grid, ping-pong reorder,
-## Texture2DRD bridge and capture_timestamp profiling, but replaces the physics.
-## Unlike PBF, velocity is physically reordered by the sort (SPH reads old
-## velocity after the sort), so velocities are ping-ponged too.
+## GPU dual-density SPH based on SebLague and Clavet's density equations. It uses
+## a dense counting-sort grid, a Texture2DRD position buffer and GPU profiling.
+## Particle velocity is reordered with position and preserved between frames.
 
 const SHADER_DIR := "res://shaders/sph/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"
@@ -18,7 +16,13 @@ const WG := 256
 const FOAM_UBO_SIZE := 112
 const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
-const SCENE_UBO_SIZE := 1184
+const SCENE_UBO_SIZE := 1216
+
+# Tuning defaults; _configure_solver() restores them on every material/scene
+# switch so a preset change cannot inherit the previous liquid's slider state.
+const DEFAULT_PRESSURE_MULT := 180.0
+const DEFAULT_NEAR_PRESSURE_MULT := 12.0
+const DEFAULT_SUBSTEPS := 3
 
 var config: FluidConfig = FluidConfig.new()
 var particle_count := 65536
@@ -31,16 +35,28 @@ var grid_origin := Vector3(-8.0, 0.0, -8.0)
 var cell_size := 0.25
 var h := 0.25
 var spacing := 0.12
-var substeps := 3
 var gravity := Vector3(0.0, -9.8, 0.0)
-var pressure_mult := 180.0
-var near_pressure_mult := 12.0
+var pressure_mult := DEFAULT_PRESSURE_MULT
+var near_pressure_mult := DEFAULT_NEAR_PRESSURE_MULT
 var viscosity_strength := 0.14
+var extension_strength := 0.0
+var material_density_kg_m3 := 1000.0
+# Derived kernel constants from FluidMaterial; packed into the SceneParams
+# block (density, stiffness, inflation) and the push constant (cohesion scale).
+var stiffness_scale := 1.0
+var cohesion_kernel_scale := 1.0
+var collision_inflation := 0.14
 # Akinci-style cohesion multiplier. 0 disables the term entirely (no kernel
 # work in the pressure pass); see sph_cohesion_k in sph_common.comp.
 var cohesion_strength := 0.0
 var collision_damping := 0.15
-var mode := 0.0
+## FluidSystem.FluidKind value (0 water, 1 lava, 2 mercury, 3 honey, 4 oil).
+## Plain int on purpose: the solver must not depend on FluidSystem.
+var material := 0
+## FluidSystem.Scenario value for the loaded tank (0 pool, 1 cascade, 2 basin);
+## the shaders use it for the cascade's soft chute walls.
+var scene_id := 0
+var substeps := DEFAULT_SUBSTEPS
 var hash_grid_enabled := false
 var hash_grid_load_factor := 2.0
 var adaptive_substeps := false
@@ -109,9 +125,11 @@ var planet_field_world_size := 0.0
 var planet_skin := 0.1
 var planet_normal_offset := 0.5
 
-var cascade_enabled := false
-var cascade_flow := 1.0
-var cascade_cycle_seconds := 240.0
+var emitter_enabled := false
+var recycle_emission := true
+var emission_rate := 1.0
+var emission_cycle_seconds := 240.0
+var emitter_width := 6
 var emitter_origin := Vector3(-5.0, 13.6, 0.0)
 var emitter_velocity := Vector3(0.0, -2.0, 0.0)
 var scene_obstacles: Array[Dictionary] = []
@@ -207,13 +225,16 @@ func respawn_range(from: int, data: PackedFloat32Array) -> void:
 	if from < 0 or count <= 0 or from + count > particle_count:
 		return
 	var bytes := data.to_byte_array()
-	var zero := PackedByteArray()
-	zero.resize(bytes.size())
+	var velocities := PackedFloat32Array()
+	velocities.resize(count * 4)
+	for i in count:
+		velocities[i * 4 + 3] = float(from + i)
+	var velocity_bytes := velocities.to_byte_array()
 	var off := from * 16
 	for key in ["positions_a", "positions_b", "predicted_a", "predicted_b"]:
 		_rd.buffer_update(_buffers[key], off, bytes.size(), bytes)
 	for key in ["velocities_a", "velocities_b"]:
-		_rd.buffer_update(_buffers[key], off, zero.size(), zero)
+		_rd.buffer_update(_buffers[key], off, velocity_bytes.size(), velocity_bytes)
 
 
 func init_render() -> void:
@@ -226,7 +247,6 @@ func init_render() -> void:
 	cell_size = config.cell_size_m
 	h = config.cell_size_m
 	tex_width = config.texture_width
-	cascade_flow = config.default_flow
 	_rd = GpuPreflight.device("SphFluidSolver")
 	if _rd == null:
 		return
@@ -434,19 +454,24 @@ func step_render(dt: float) -> void:
 	_rd.buffer_update(_foam_ubo, 0, FOAM_UBO_SIZE, _pack_foam_ubo(dt))
 	var emit_count := 0
 	var emit_start := _emit_cursor
-	if cascade_enabled:
-		var cycle := maxf(cascade_cycle_seconds / maxf(cascade_flow, 0.01), 0.1)
+	if emitter_enabled:
+		var cycle := maxf(emission_cycle_seconds / maxf(emission_rate, 0.01), 0.1)
 		_emit_fraction += float(particle_count) * dt / cycle
 		emit_count = mini(int(_emit_fraction), particle_count)
-		_emit_fraction -= float(emit_count)
+		if emitter_width < 6:
+			emit_count = mini(emit_count, emitter_width * emitter_width)
+		_emit_fraction = minf(_emit_fraction - float(emit_count), 1.0)
 		if active_count >= 0 and active_count < particle_count:
 			emit_start = active_count
 			emit_count = mini(emit_count, particle_count - active_count)
 			active_count += emit_count
 			_emit_cursor = active_count % particle_count
-		else:
+		elif recycle_emission:
 			emit_count = mini(emit_count, live_count())
 			_emit_cursor = (_emit_cursor + emit_count) % maxi(live_count(), 1)
+		else:
+			emit_count = 0
+			_emit_fraction = 0.0
 	_rd.buffer_update(_scene_ubo, 0, SCENE_UBO_SIZE, _pack_scene_ubo(emit_start, emit_count))
 	var planet_hash := _current_planet_params_hash()
 	if planet_hash != _planet_params_hash:
@@ -463,7 +488,7 @@ func step_render(dt: float) -> void:
 	if profiling:
 		_rd.capture_timestamp("sph/start")
 	var cl := _rd.compute_list_begin()
-	if cascade_enabled and emit_count > 0:
+	if emitter_enabled and emit_count > 0:
 		var emit_pc := _pack_push_constant(dt_sub, 0, _frame * step_count)
 		_dispatch(cl, "sph_emit", emit_pc, n_groups)
 		cl = _mark(cl, "sph/emit")
@@ -677,12 +702,14 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	pc.encode_float(76, near_pressure_mult)
 	pc.encode_float(80, viscosity_strength)
 	pc.encode_float(84, collision_damping)
-	pc.encode_float(88, cohesion_strength)
-	pc.encode_float(92, 0.0)
+	# The cohesion slider value is unscaled; the mercury kernel boost lives here,
+	# so the shader reads one plain strength with no per-material re-derivation.
+	pc.encode_float(88, cohesion_strength * cohesion_kernel_scale)
+	pc.encode_float(92, extension_strength)
 	pc.encode_float(96, gravity.x)
 	pc.encode_float(100, gravity.y)
 	pc.encode_float(104, gravity.z)
-	pc.encode_float(108, mode)
+	pc.encode_s32(108, material)
 	pc.encode_s32(112, tex_width)
 	pc.encode_s32(116, -num_blocks if hash_grid_enabled else num_blocks)
 	pc.encode_s32(120, last)
@@ -737,8 +764,9 @@ func planet_mode() -> bool:
 func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	# Only the emit window and the live count change per step; the 1.2 KB pack
 	# (13 affine_inverse on the cascade) reruns only when a static input does.
-	var static_hash := hash([mode, emitter_origin, emitter_velocity, cascade_enabled,
-		spacing, scene_obstacles])
+	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
+		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
+		stiffness_scale, collision_inflation, scene_id])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
 		_scene_ubo_cache_hash = static_hash
@@ -752,15 +780,22 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 func _pack_scene_ubo_static() -> PackedByteArray:
 	var b := PackedByteArray()
 	b.resize(SCENE_UBO_SIZE)
+	# emitter_origin.w stays pad: the material id used to be smuggled there.
 	b.encode_float(0, emitter_origin.x)
 	b.encode_float(4, emitter_origin.y)
 	b.encode_float(8, emitter_origin.z)
-	b.encode_float(12, mode)
 	b.encode_float(16, emitter_velocity.x)
 	b.encode_float(20, emitter_velocity.y)
 	b.encode_float(24, emitter_velocity.z)
-	b.encode_float(28, 1.0 if cascade_enabled else 0.0)
+	b.encode_float(28, 1.0 if emitter_enabled else 0.0)
 	b.encode_float(32, spacing)
+	b.encode_float(36, float(emitter_width))
+	# Tail of the block (after half_extents[14]): per-material kernel constants
+	# and the scene id the shaders key their scene-specific behavior on.
+	b.encode_float(1184, material_density_kg_m3)
+	b.encode_float(1188, stiffness_scale)
+	b.encode_float(1192, collision_inflation)
+	b.encode_s32(1200, scene_id)
 	b.encode_s32(60, mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES))
 	for i in mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES):
 		var obstacle: Dictionary = scene_obstacles[i]

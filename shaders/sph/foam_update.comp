@@ -74,6 +74,7 @@ void main() {
 
 	float target_scale = is_bubble ? foam.motion.z : 1.0;
 	scale = mix(scale, target_scale, clamp(dt * foam.motion.w, 0.0, 1.0));
+	vec3 previous_p = p;
 	p += v * dt;
 
 	// Foam keeps almost none of its tangential speed on impact, unlike the fluid.
@@ -83,7 +84,7 @@ void main() {
 		p = clamp_domain(p);
 	} else {
 		if (scene_mode()) {
-			resolve_scene_collisions(p, v, bounce);
+			resolve_scene_collisions(p, v, previous_p, bounce);
 		}
 		vec3 lo = params.grid_origin.xyz + vec3(0.02);
 		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);

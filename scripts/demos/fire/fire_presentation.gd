@@ -309,7 +309,7 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.particle_count = water.particle_count
 	fluid_renderer.tex_width = water.sph_tex_width()
 	fluid_renderer.radius = 0.05
-	fluid_renderer.mode = 0.0
+	fluid_renderer.mode = 0
 	fluid_renderer.render_scale = 1.0
 	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
 	var domain_size := solver.dense_domain_size_m()

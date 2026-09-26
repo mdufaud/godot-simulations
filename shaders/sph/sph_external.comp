@@ -8,6 +8,9 @@ void main() {
 	vec3 pos = positions_src.data[i].xyz;
 	vec3 g = planet_mode() ? planet_gravity(pos) : params.gravity.xyz;
 	vec3 v = velocities_src.data[i].xyz + g * params.sim.x;
+	if (params.material == MATERIAL_HONEY) {
+		v.xz *= exp(-3.0 * params.sim2.x * params.sim.x);
+	}
 	velocities_src.data[i] = vec4(v, velocities_src.data[i].w);
 	vec3 pred = clamp_domain(pos + v * (1.0 / 120.0));
 	predicted_src.data[i] = vec4(pred, 0.0);

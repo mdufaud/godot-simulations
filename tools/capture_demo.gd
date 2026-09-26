@@ -38,6 +38,8 @@ var _sun_elevation := -1.0
 var _sun_azimuth := -1.0
 var _debug_view := -1
 var _cascade := -1
+var _scene := -1
+var _flow := -1.0
 var _foam_feedback := true
 var _micro_normals := true
 var _reflection := true
@@ -84,6 +86,8 @@ func _initialize() -> void:
 			"sun_azimuth": _sun_azimuth = float(value)
 			"debug": _debug_view = int(value)
 			"cascade": _cascade = int(value)
+			"scene": _scene = int(value)
+			"flow": _flow = float(value)
 			"foam": _foam_feedback = value != "0" and value.to_lower() != "false"
 			"micro": _micro_normals = value != "0" and value.to_lower() != "false"
 			"reflection": _reflection = value != "0" and value.to_lower() != "false"
@@ -175,8 +179,22 @@ func _run() -> void:
 		_demo.set_capture_reflection(_reflection)
 	if _demo.has_method("set_capture_debug"):
 		_demo.set_capture_debug(_debug_view if _debug_view >= 0 else 0)
+	if _scene >= 0 and _demo.has_method("set_capture_scene"):
+		_demo.set_capture_scene(_scene)
 	if _demo.has_method("set_capture_cascade"):
 		_demo.set_capture_cascade(_cascade)
+	elif _cascade >= 0:
+		# The fluid demo replaced its cascade hook with set_capture_scene
+		# (pool/cascade/basin share the indices); fail loudly rather than
+		# capturing the wrong scene silently.
+		if _demo.has_method("set_capture_scene") and _cascade <= 2:
+			_demo.set_capture_scene(_cascade)
+		else:
+			push_error("CAPTURE FAIL: cascade=%d has no hook on this demo" % _cascade)
+			quit(1)
+			return
+	if _flow >= 0.0 and _demo.has_method("set_capture_flow"):
+		_demo.set_capture_flow(_flow)
 	if _demo.has_method("set_capture_foam"):
 		_demo.set_capture_foam(_foam_feedback)
 	if _foam_distance >= 0.0 and _demo.has_method("set_foam_distance"):
@@ -214,13 +232,13 @@ func _run() -> void:
 		_demo.set_capture_profiling(true)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(_freeze)
-	print("CAPTURE CONFIG preset=%d look=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f foam_distance=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d cascade=%d" % [
+	print("CAPTURE CONFIG preset=%d look=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f foam_distance=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d scene=%d cascade=%d" % [
 		_preset, _look, _view,
 		OceanQualityProfile.tier_name(_quality) if _quality >= 0 else "default",
 		_capture_time, _fixed_delta, _warmup,
 		_foam_warmup, _foam_distance, _wind_direction, _sun_elevation, _sun_azimuth, _frames,
 		_every, _size.x, _size.y, _foam_feedback, _micro_normals, _reflection,
-		_debug_view, _cascade])
+		_debug_view, _scene, _cascade])
 	var waited := 0
 	var toss_frame := maxi(1, int(_frames / 3))
 	while waited < _frames:
@@ -247,10 +265,15 @@ func _run() -> void:
 func _set_target(value: String) -> void:
 	if "://" in value:
 		_scene_path = value
+		for entry in GameManager.DEMOS:
+			if entry.scene == value:
+				root.get_node("GameManager").set("current_demo", entry.key)
+				break
 		return
 	for entry in GameManager.DEMOS:
 		if entry.key == value:
 			_scene_path = entry.scene
+			root.get_node("GameManager").set("current_demo", entry.key)
 			return
 	push_error("CAPTURE FAIL: unknown demo key %s" % value)
 	quit(1)

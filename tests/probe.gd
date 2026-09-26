@@ -317,6 +317,360 @@ func _run_ocean_single_wave() -> void:
 	_finish("ocean_single_wave")
 
 
+func _run_fluid_scene_retention() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/fluid_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid == null or
+			demo.fluid.renderer == null or not demo.fluid.renderer._tex_bound):
+		await process_frame
+	var ready: bool = demo.fluid != null and demo.fluid.renderer != null \
+		and demo.fluid.renderer._tex_bound
+	_check(ready, "fluid_scene_retention: demo did not initialize")
+	if not ready:
+		demo.queue_free()
+		_finish("fluid_scene_retention")
+		return
+	demo.menu.visible = false
+	demo.configure_fluid(FluidSystem.FluidKind.WATER_OIL, FluidSystem.Scenario.BASIN)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and demo.fluid._pending_init:
+		await process_frame
+	demo._on_material_selected(FluidSystem.FluidKind.WATER)
+	_check(demo.fluid.scenario == FluidSystem.Scenario.BASIN,
+		"fluid_scene_retention: changing liquid reset the selected scene")
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	_check(not demo.fluid._pending_init and demo.fluid.active_solver.initialized,
+		"fluid_scene_retention: solver did not reinitialize")
+	print("FLUSCENE scene=%d mode=%d initialized=%s" % [
+		int(demo.fluid.scenario), int(demo.fluid.mode),
+		str(demo.fluid.active_solver.initialized)])
+	demo.queue_free()
+	await process_frame
+	_finish("fluid_scene_retention")
+
+
+func _run_fluid_pool() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/fluid_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid == null or
+			demo.fluid.renderer == null or not demo.fluid.renderer._tex_bound):
+		await process_frame
+	_check(demo.fluid != null and demo.fluid.renderer != null and
+		demo.fluid.renderer._tex_bound, "fluid_pool: demo did not initialize")
+	if _failures > 0:
+		demo.queue_free()
+		_finish("fluid_pool")
+		return
+	demo.menu.visible = false
+	demo.fluid.set_particle_count(16384)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	var base_count: int = demo.fluid.particle_count
+	var initial_count := base_count * FluidSystem.POOL_START_MULTIPLIER
+	var capacity := base_count * FluidSystem.POOL_CAPACITY_MULTIPLIER
+	_check(demo.fluid.active_solver.particle_count == capacity and
+		demo.fluid.active_solver.active_count == initial_count,
+		"fluid_pool: Pool did not start at the base count with the 3x add capacity")
+	var reference: PackedFloat32Array = demo.fluid.sph_solver._seed_data.duplicate()
+	var positions_match := true
+	for kind in range(1, FluidSystem.FluidKind.size()):
+		demo.configure_fluid(kind, FluidSystem.Scenario.POOL)
+		deadline = Time.get_ticks_msec() + 30000
+		while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+				not demo.fluid.active_solver.initialized):
+			await process_frame
+		var seed: PackedFloat32Array = demo.fluid.sph_solver._seed_data
+		for i in range(0, 256, 4):
+			for axis in 3:
+				if not is_equal_approx(seed[i + axis], reference[i + axis]):
+					positions_match = false
+		if kind == FluidSystem.FluidKind.WATER_OIL:
+			var water_phase_count := 0
+			var oil_phase_count := 0
+			for particle in initial_count:
+				if seed[particle * 4 + 3] > 0.5:
+					oil_phase_count += 1
+				else:
+					water_phase_count += 1
+			_check(water_phase_count > 0 and oil_phase_count > 0,
+				"fluid_pool: Water + Oil did not seed both phases")
+		_check(demo.fluid.active_solver.active_count == initial_count,
+			"fluid_pool: a liquid starts with a different particle amount")
+	_check(positions_match, "fluid_pool: liquid modes use different Pool seed positions")
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.POOL)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	demo._cycle_material()
+	_check(demo.fluid.mode == FluidSystem.FluidKind.LAVA and
+		demo.fluid.scenario == FluidSystem.Scenario.POOL and
+		str(demo.material_action.find_child("ActionCaption", true, false).text) == "Lava",
+		"fluid_pool: the single liquid action failed to cycle in Pool")
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.BASIN)
+	_check(not demo.pool_add_action.visible,
+		"fluid_pool: add action is visible outside Pool")
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.POOL)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	var solver: SphFluidSolver = demo.fluid.active_solver
+	var generation_before: int = solver.init_generation
+	var count_before: int = solver.active_count
+	for i in FluidSystem.POOL_ADD_BATCH_DIVISOR:
+		demo.pool_add_action.emit_signal("pressed")
+	await _wait_sim(demo, 0.2)
+	var ids := await _sample_fluid_id_integrity(solver, capacity)
+	_check(solver.active_count == capacity and solver.active_count > count_before,
+		"fluid_pool: Add did not append liquid to the running simulation")
+	_check(int(ids.get("missing", -1)) == 0 and int(ids.get("duplicates", -1)) == 0,
+		"fluid_pool: adding particles overwrote or duplicated live particle ids")
+	_check(not demo.fluid.can_add_pool_liquid() and demo.pool_add_action.disabled,
+		"fluid_pool: Add did not stop at reserved capacity")
+	_check(solver.init_generation == generation_before and solver.initialized and
+		demo.fluid.scenario == FluidSystem.Scenario.POOL,
+		"fluid_pool: Add restarted the solver or changed scene")
+	print("FLUPOOL base=%d initial=%d capacity=%d after_add=%d same_seed=%s ids_missing=%d ids_duplicate=%d init=%d" % [
+		base_count, initial_count, capacity, solver.active_count,
+		str(positions_match), int(ids.get("missing", -1)),
+		int(ids.get("duplicates", -1)), generation_before])
+	demo.queue_free()
+	await process_frame
+	_finish("fluid_pool")
+
+
+func _run_fluid_materials() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/fluid_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid == null or
+			demo.fluid.renderer == null or not demo.fluid.renderer._tex_bound):
+		await process_frame
+	_check(demo.fluid != null and demo.fluid.renderer != null and
+		demo.fluid.renderer._tex_bound, "fluid_materials: demo did not initialize")
+	if _failures > 0:
+		_finish("fluid_materials")
+		return
+	demo.menu.visible = false
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.BASIN)
+	await _wait_sim(demo, 0.5)
+	demo.apply_look(4)
+	await _wait_sim(demo, 0.5)
+	var pouring := await _sample_fluid_phases(demo.fluid.sph_solver)
+	await _wait_sim(demo, 18.0)
+	var filled := await _sample_fluid_phases(demo.fluid.sph_solver)
+	demo.fluid.sph_solver.emitter_enabled = false
+	await _wait_sim(demo, 2.0)
+	var final := await _sample_fluid_phases(demo.fluid.sph_solver)
+	print("FLUMAT water=%d oil=%d pouring_oil=%d settled_delta=%.3f sim=%.2f" % [
+		int(final.get("water_count", 0)), int(final.get("oil_count", 0)),
+		int(pouring.get("oil_count", 0)),
+		float(final.get("oil_y", 0.0)) - float(final.get("water_y", 0.0)),
+		demo.fluid.sph_solver._sim_time])
+	_check(int(pouring.get("oil_count", 0)) > 0 and
+		int(filled.get("oil_count", 0)) > int(pouring.get("oil_count", 0)) + 1000,
+		"fluid_materials: oil was not poured")
+	_check(int(final.get("water_count", 0)) > 0 and
+		int(final.get("water_count", 0)) == int(filled.get("water_count", -1)) and
+		int(final.get("oil_count", 0)) == int(filled.get("oil_count", -1)),
+		"fluid_materials: phases changed after the pour filled the basin")
+	_check(float(final.get("oil_y", 0.0)) > float(final.get("water_y", 0.0)) + 0.3,
+		"fluid_materials: oil did not settle above water")
+	demo.queue_free()
+	_finish("fluid_materials")
+
+
+func _run_fluid_honey_fall() -> void:
+	await _boot_frames(2)
+	var demo: Node = load("res://scenes/fluid_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid == null or
+			demo.fluid.renderer == null or not demo.fluid.renderer._tex_bound):
+		await process_frame
+	var ready: bool = demo.fluid != null and demo.fluid.renderer != null \
+		and demo.fluid.renderer._tex_bound
+	_check(ready, "fluid_honey_fall: demo did not initialize")
+	if not ready:
+		demo.queue_free()
+		_finish("fluid_honey_fall")
+		return
+	demo.menu.visible = false
+	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.BASIN)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	var pour_speed: float = demo.fluid.sph_solver.emitter_velocity.y
+	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.POOL)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	var solver: SphFluidSolver = demo.fluid.sph_solver
+	solver.emitter_enabled = false
+	solver.active_count = 1
+	demo.fluid.renderer.set_visible_count(1)
+	var seed := PackedFloat32Array([0.0, 10.0, 0.0, 0.0])
+	RenderingServer.call_on_render_thread(solver.respawn_range.bind(0, seed))
+	await _wait_sim(demo, 0.5)
+	var state := await _sample_fluid_particle(solver, 0)
+	var y: float = float(state.get("y", 10.0))
+	var vy: float = float(state.get("vy", 0.0))
+	print("FLUHONEY y=%.3f vy=%.3f pour_vy=%.1f sim=%.2f" % [
+		y, vy, pour_speed, solver._sim_time])
+	_check(is_equal_approx(pour_speed, -6.0),
+		"fluid_honey_fall: Basin honey emitter has a different launch speed")
+	_check(y < 9.0 and vy < -4.0,
+		"fluid_honey_fall: honey free-fall is damped by its material viscosity")
+	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.CASCADE)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
+			not demo.fluid.active_solver.initialized):
+		await process_frame
+	demo.flow_slider.value = demo.flow_slider.max_value
+	await _wait_sim(demo, 8.0)
+	var normal_stream := await _sample_honey_stream(solver)
+	demo.flow_slider.value = demo.flow_slider.min_value
+	await _wait_sim(demo, 2.0)
+	demo.flow_slider.value = demo.flow_slider.max_value
+	await _wait_sim(demo, 8.0)
+	var high_stream := await _sample_honey_stream(solver)
+	_check(is_equal_approx(demo.flow_slider.max_value, FluidSystem.HONEY_CASCADE_FLOW_MAX)
+		and is_equal_approx(demo.fluid.flow_rate, demo.flow_slider.value),
+		"fluid_honey_fall: Flow slider and honey emitter disagree")
+	print("FLUHONEY stream_normal=%d/%d stream_high=%d/%d" % [
+		int(normal_stream.get("escaped", -1)), int(normal_stream.get("airborne", 0)),
+		int(high_stream.get("escaped", -1)), int(high_stream.get("airborne", 0))])
+	_check(int(normal_stream.get("airborne", 0)) > 100 and
+		int(normal_stream.get("escaped", -1)) < int(normal_stream.get("airborne", 0)) * 0.05,
+		"fluid_honey_fall: normal-flow honey stream sprays outside the chute")
+	_check(int(high_stream.get("airborne", 0)) > 100 and
+		int(high_stream.get("escaped", -1)) < int(high_stream.get("airborne", 0)) * 0.05,
+		"fluid_honey_fall: high-flow honey stream sprays outside the chute")
+	demo.queue_free()
+	_finish("fluid_honey_fall")
+
+
+func _sample_honey_stream(solver: SphFluidSolver) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_honey_stream.bind(solver, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return result
+
+
+func _read_honey_stream(solver: SphFluidSolver, result: Dictionary) -> void:
+	var positions := solver._rd.buffer_get_data(
+		solver.parity_positions_rid(solver.current_parity())).to_float32_array()
+	var airborne := 0
+	var escaped := 0
+	for i in solver.live_count():
+		if positions[i * 4 + 1] < 10.5:
+			continue
+		airborne += 1
+		if absf(positions[i * 4] - solver.emitter_origin.x) > 1.0 or \
+				absf(positions[i * 4 + 2] - solver.emitter_origin.z) > 1.0:
+			escaped += 1
+	result["airborne"] = airborne
+	result["escaped"] = escaped
+	result["done"] = true
+
+
+func _sample_fluid_particle(solver: SphFluidSolver, index: int) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_fluid_particle.bind(solver, index, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return result
+
+
+func _read_fluid_particle(solver: SphFluidSolver, index: int, result: Dictionary) -> void:
+	var parity := solver.current_parity()
+	var positions := solver._rd.buffer_get_data(
+		solver.parity_positions_rid(parity)).to_float32_array()
+	var velocities := solver._rd.buffer_get_data(
+		solver.parity_velocities_rid(parity)).to_float32_array()
+	result["y"] = positions[index * 4 + 1]
+	result["vy"] = velocities[index * 4 + 1]
+	result["done"] = true
+
+
+func _sample_fluid_id_integrity(solver: SphFluidSolver, count: int) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_fluid_id_integrity.bind(solver, count, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return result
+
+
+func _read_fluid_id_integrity(solver: SphFluidSolver, count: int,
+		result: Dictionary) -> void:
+	var parity := solver.current_parity()
+	var velocities := solver._rd.buffer_get_data(
+		solver.parity_velocities_rid(parity)).to_float32_array()
+	var seen := PackedByteArray()
+	seen.resize(count)
+	var duplicates := 0
+	for i in solver.live_count():
+		var id := int(round(velocities[i * 4 + 3]))
+		if id < 0 or id >= count:
+			duplicates += 1
+		elif seen[id] != 0:
+			duplicates += 1
+		else:
+			seen[id] = 1
+	var missing := 0
+	for id in count:
+		if seen[id] == 0:
+			missing += 1
+	result["missing"] = missing
+	result["duplicates"] = duplicates
+	result["done"] = true
+
+
+func _sample_fluid_phases(solver: SphFluidSolver) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_fluid_phases.bind(solver, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return result
+
+
+func _read_fluid_phases(solver: SphFluidSolver, result: Dictionary) -> void:
+	var key := "positions_a" if solver.current_parity() == 0 else "positions_b"
+	var positions := solver._rd.buffer_get_data(solver._buffers[key]).to_float32_array()
+	var sums := Vector2.ZERO
+	var counts := Vector2i.ZERO
+	for i in solver.live_count():
+		if positions[i * 4 + 3] > 0.5:
+			sums.y += positions[i * 4 + 1]
+			counts.y += 1
+		else:
+			sums.x += positions[i * 4 + 1]
+			counts.x += 1
+	result["water_count"] = counts.x
+	result["oil_count"] = counts.y
+	result["water_y"] = sums.x / maxf(float(counts.x), 1.0)
+	result["oil_y"] = sums.y / maxf(float(counts.y), 1.0)
+	result["done"] = true
+
+
 ## ── fluid_foam ──────────────────────────────────────────────────────────
 ## Regression gate for the white-particle (foam) aging rule. SebLague ages
 ## spray stranded with no fluid neighbours unconditionally; our port gated that
@@ -514,7 +868,7 @@ func _grab_flu3(shot_name: String) -> void:
 ## inconsistent strands the solver uninitialized and the fluid vanishes (the
 ## 2026-09-23 Ultra->Medium bug). This walks the REAL menu path — the same
 ## set_tier the Quality profile option emits — through every downshift and
-## upshift, a solver A/B switch and a restart, and asserts the solver comes back
+## upshift, scene changes and a restart, and asserts the solver comes back
 ## initialized each time. Boots at Medium first, since a fresh boot never went
 ## through the buggy path.
 ## Sentinel: "TEST PASS fluid_tier" (GPU phase of tests/run_tests.sh).
@@ -535,23 +889,14 @@ func _run_fluid_tier() -> void:
 		return
 	print("FLUTIER boot_medium initialized=%s" % demo.fluid.active_solver.initialized)
 
-	demo.solver_option.select(FluidSystem.Method.PBF)
-	demo.solver_option.item_selected.emit(FluidSystem.Method.PBF)
-	demo.scenario_option.select(FluidSystem.Scenario.CASCADE)
-	demo.scenario_option.item_selected.emit(FluidSystem.Scenario.CASCADE)
-	await process_frame
-	var stored_solver := int(demo.menu.stored_value("Simulation", "Solver", -1))
-	if demo.fluid.method != FluidSystem.Method.SPH \
-			or demo.solver_option.selected != FluidSystem.Method.SPH \
-			or stored_solver != FluidSystem.Method.SPH:
-		_fail_tier(demo, "Cascade/SPH persistence")
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.CASCADE)
+	if not await _soak(demo) or demo.fluid.scenario != FluidSystem.Scenario.CASCADE:
+		_fail_tier(demo, "switch to Cascade")
 		return
-	print("FLUTIER cascade_solver runtime=%d widget=%d stored=%d" % [
-		demo.fluid.method, demo.solver_option.selected, stored_solver])
-	demo.scenario_option.select(FluidSystem.Scenario.DAM)
-	demo.scenario_option.item_selected.emit(FluidSystem.Scenario.DAM)
+	print("FLUTIER cascade_scene initialized=%s" % demo.fluid.active_solver.initialized)
+	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.POOL)
 	if not await _soak(demo):
-		_fail_tier(demo, "return to Dam")
+		_fail_tier(demo, "return to Pool")
 		return
 
 	# Every downshift from Ultra used to strand the solver, plus the upshifts
@@ -579,17 +924,6 @@ func _run_fluid_tier() -> void:
 	print("FLUTIER factory_reset requested=%d stored=%d" % [demo.quality.requested,
 		manager.get_setting("fluid_quality_profile", -1)])
 
-	# Solver A/B re-inits validate the same config pair.
-	demo.fluid.set_method(FluidSystem.Method.PBF)
-	if not await _soak(demo):
-		_fail_tier(demo, "solver PBF")
-		return
-	print("FLUTIER solver_pbf initialized=%s" % demo.fluid.active_solver.initialized)
-	demo.fluid.set_method(FluidSystem.Method.SPH)
-	if not await _soak(demo):
-		_fail_tier(demo, "solver SPH")
-		return
-
 	# The Reset action: free + re-init against the current config.
 	demo.fluid.restart()
 	if not await _soak(demo):
@@ -615,13 +949,7 @@ func _soak(demo: Node) -> bool:
 			break
 	if not demo.fluid.active_solver.initialized:
 		return false
-	var solver: RefCounted = demo.fluid.active_solver
-	if not ("_sim_time" in solver):
-		# The PBF solver has no sim clock; a fixed frame soak still lets the
-		# queued steps run (and any late breakage surface).
-		for i in 90:
-			await process_frame
-		return demo.fluid.active_solver.initialized
+	var solver: SphFluidSolver = demo.fluid.active_solver
 	var target: float = float(solver._sim_time) + TIER_SOAK_SIM
 	var guard := int(TIER_SOAK_SIM * GUARD_FRAMES_PER_SECOND)
 	while float(solver._sim_time) < target and guard > 0:
@@ -1336,6 +1664,7 @@ func _fps_set_target(value: String) -> void:
 	for entry in GameManager.DEMOS:
 		if entry.key == value:
 			_scene_path = entry.scene
+			root.get_node("GameManager").set("current_demo", entry.key)
 			return
 	push_error("FPS PROBE FAIL: unknown demo key %s" % value)
 	quit(1)

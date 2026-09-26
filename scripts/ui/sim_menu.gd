@@ -54,7 +54,7 @@ var _action_shortcuts: Dictionary = {}
 var _action_layout_key := ""
 var _layout_check_frame := 0
 
-const ACTION_BUTTON_SIZE := Vector2(56.0, 52.0)
+const ACTION_BUTTON_SIZE := Vector2(56.0, 56.0)
 const AZERTY_ACTION_KEYS := "&é\"'(-è_ç"
 
 # Cached styleboxes so SimMenu's flat look doesn't inherit the chunky main-menu theme.
@@ -544,22 +544,30 @@ func _make_action_button(icon: String, label_text: String) -> Button:
 	button.tooltip_text = label_text
 	button.clip_contents = true
 
-	var box := VBoxContainer.new()
+	var box := Control.new()
 	box.set_anchors_preset(Control.PRESET_FULL_RECT)
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_theme_constant_override("separation", 0)
 	button.add_child(box)
 
 	var glyph := Label.new()
+	glyph.name = "ActionIcon"
 	glyph.text = icon
+	glyph.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	glyph.offset_top = 2.0
+	glyph.offset_bottom = 34.0
 	glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	glyph.add_theme_font_size_override("font_size", 22)
 	box.add_child(glyph)
 
 	var caption := Label.new()
+	caption.name = "ActionCaption"
 	caption.text = label_text
+	caption.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	caption.offset_top = 33.0
+	caption.offset_bottom = 53.0
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	caption.add_theme_font_size_override("font_size", 10)
 	box.add_child(caption)
 
@@ -585,6 +593,20 @@ func add_action(icon: String, label_text: String, cb: Callable) -> Button:
 	var button := _make_action_button(icon, label_text)
 	button.pressed.connect(cb)
 	return button
+
+
+func set_action_label(button: Button, label_text: String) -> void:
+	var caption := button.find_child("ActionCaption", true, false) as Label
+	if caption == null:
+		return
+	caption.text = label_text
+	button.tooltip_text = label_text
+
+
+func set_action_icon(button: Button, icon: String) -> void:
+	var glyph := button.find_child("ActionIcon", true, false) as Label
+	if glyph != null:
+		glyph.text = icon
 
 
 ## Sticky action (ignite, wind, water jet). Like add_action it lives outside the panel
