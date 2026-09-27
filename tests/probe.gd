@@ -81,6 +81,9 @@ var _tier := -1
 var _seconds := 5.0
 var _size := Vector2i(1920, 1080)
 var _warmup := 90
+var _fps_bodies := 0
+var _fps_medium := -1
+var _fps_settle_seconds := 0.0
 
 # fractal_policy
 var _fails := 0
@@ -2104,10 +2107,13 @@ func _fps_parse_args() -> bool:
 					_tier = clampi(int(value), 0, TIER_NAMES.size() - 1)
 			"seconds": _seconds = clampf(float(value), 1.0, 60.0)
 			"warmup": _warmup = maxi(0, int(value))
+			"settle": _fps_settle_seconds = clampf(float(value), 0.0, 60.0)
 			"size":
 				var dims := value.split("x")
 				if dims.size() == 2:
 					_size = Vector2i(maxi(16, int(dims[0])), maxi(16, int(dims[1])))
+			"bodies": _fps_bodies = clampi(int(value), 1, 40)
+			"medium": _fps_medium = clampi(int(value), 0, 4)
 	if _scene_path == "" or _tier < 0:
 		push_error("FPS PROBE FAIL: need a demo target and tier=" + str(TIER_NAMES))
 		quit(1)
@@ -2142,11 +2148,33 @@ func _run_fps() -> void:
 		return
 	if not await _fps_wait_ready():
 		return
+	if _fps_medium >= 0:
+		if not _demo.has_method("set_capture_medium"):
+			push_error("FPS PROBE FAIL: target does not support medium selection")
+			quit(1)
+			return
+		_demo.set_capture_medium(_fps_medium)
+	if _fps_bodies > 0:
+		if not _demo.has_method("_throw_object"):
+			push_error("FPS PROBE FAIL: target does not support body population")
+			quit(1)
+			return
+		_demo.set("max_objects", _fps_bodies)
+		_demo.set("_object_index", 3)
+		_demo.set("_object_density_kg_m3", 650.0)
+		_demo.set("_throw_speed_m_s", 1.0)
+		var bodies: Array = _demo.get("bodies")
+		while bodies.size() < _fps_bodies:
+			_demo.call("_throw_object")
+			bodies = _demo.get("bodies")
 	# UserSettings restores the persisted window size once the autoloads are in;
 	# force the requested size back so the measurement is deterministic.
 	root.size = _size
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
 	Engine.max_fps = 0
+	var settle_deadline := Time.get_ticks_usec() + int(_fps_settle_seconds * 1_000_000.0)
+	while Time.get_ticks_usec() < settle_deadline:
+		await process_frame
 	for frame in _warmup:
 		await process_frame
 	var frames := 0
@@ -2156,9 +2184,14 @@ func _run_fps() -> void:
 		await process_frame
 		frames += 1
 	var elapsed := float(Time.get_ticks_usec() - t0) / 1_000_000.0
-	print("FPS PROBE target=%s tier=%s fps=%.1f frames=%d seconds=%.2f size=%dx%d" % [
+	var population := ""
+	if _demo.has_method("_throw_object"):
+		var live_bodies: Array = _demo.get("bodies")
+		population = " bodies=%d" % live_bodies.size()
+	print("FPS PROBE target=%s tier=%s fps=%.1f frames=%d seconds=%.2f settle=%.1f size=%dx%d%s" % [
 		_scene_path.get_file().get_basename(), TIER_NAMES[_tier],
-		float(frames) / elapsed, frames, elapsed, _size.x, _size.y])
+		float(frames) / elapsed, frames, elapsed, _fps_settle_seconds,
+		_size.x, _size.y, population])
 	quit(0)
 
 

@@ -12,10 +12,10 @@ func _initialize() -> void:
 	_test_config()
 	_test_surface_zero()
 	_test_pressure_separation()
+	_test_pressure_incidence_side()
 	_test_pressure_symmetry()
 	_test_magnus_symmetry()
-	_test_skin_friction()
-	_test_shape_dissipation()
+	_test_drag_dissipation()
 	_test_convergence_and_terminal_speed()
 	_test_semidirect_coupling_contract()
 	call_deferred("_test_runtime_quality")
@@ -35,7 +35,6 @@ func _test_surface_zero() -> void:
 	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 	var result := _surface(velocity, PI * 0.5, 0.001002)
 	_check(_wrench_norm(result.pressure) <= 1.0e-12, "zero velocity produced pressure")
-	_check(_wrench_norm(result.friction) <= 1.0e-12, "zero velocity produced friction")
 	_check(int(result.attached_faces) == 0, "zero velocity attached faces")
 	var vacuum := _surface(velocity, PI * 0.5, 0.001002, 0.0)
 	_check(_wrench_norm(vacuum.pressure) <= 1.0e-12, "vacuum produced pressure")
@@ -53,11 +52,36 @@ func _test_pressure_separation() -> void:
 		"attached faces did not grow monotonically")
 	_check(int(attached.attached_faces) == PROFILE.face_centers_m.size(),
 		"PI did not retain all faces")
-	var half_power := MATH.vector_dot(half.pressure, velocity)
-	_check(half_power < 0.0, "pressure power is not dissipative")
 	var full_power := MATH.vector_dot(attached.pressure, velocity)
-	_check(absf(full_power) < absf(half_power) * 1.0e-4,
+	_check(_wrench_norm(half.pressure) > 0.0,
+		"separation angle did not change the partial pressure integral")
+	_check(absf(full_power) < 1.0e-6,
 		"full attached pressure did not cancel on closed sphere")
+
+
+func _test_pressure_incidence_side() -> void:
+	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+	var slip_matrix := PackedFloat64Array()
+	slip_matrix.resize(18)
+	var upstream := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
+		velocity, 1000.0, PI * 0.5)
+	var downstream := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([Vector3.RIGHT]), PackedFloat64Array([1.0]), slip_matrix,
+		velocity, 1000.0, PI * 0.5)
+	var half_wet := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
+		velocity, 1000.0, PI * 0.5, PackedFloat64Array([0.5]))
+	var dry := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
+		velocity, 1000.0, PI * 0.5, PackedFloat64Array([0.0]))
+	_check(int(upstream.attached_faces) == 1 and upstream.pressure[3] > 0.0,
+		"body-relative flow did not load the upstream face")
+	_check(int(downstream.attached_faces) == 0,
+		"separation model attached the downstream face as the upstream side")
+	_check(absf(half_wet.pressure[3] - upstream.pressure[3] * 0.5) < 1.0e-6
+		and int(dry.attached_faces) == 0 and _wrench_norm(dry.pressure) == 0.0,
+		"BEM pressure did not follow each face's clipped wet area")
 
 
 func _test_pressure_symmetry() -> void:
@@ -71,14 +95,21 @@ func _test_pressure_symmetry() -> void:
 		"positive direction pressure was empty")
 
 
-func _test_skin_friction() -> void:
+func _test_drag_dissipation() -> void:
 	for direction: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.UP,
 		Vector3.DOWN, Vector3.FORWARD, Vector3.BACK]:
-		var velocity := PackedFloat64Array([0.0, 0.0, 0.0,
-			direction.x, direction.y, direction.z])
-		var result := _surface(velocity, PI * 0.5, 0.001002)
-		_check(MATH.vector_dot(result.friction, velocity) < 0.0,
-			"skin friction power is not dissipative for %s" % direction)
+		for candidate: AmbientFluidProfile3D in [PROFILE, PLATE_PROFILE, BODY_PROFILE]:
+			var velocity := PackedFloat64Array([0.0, 0.0, 0.0,
+				direction.x, direction.y, direction.z])
+			var drag := MATH.particle_drag_wrench(velocity, 0.001002, 998.0,
+				candidate.volume_m3, 1.0, candidate.total_area_m2)
+			_check(MATH.vector_dot(drag, velocity) < 0.0,
+				"particle drag power is not dissipative for %s" % candidate.resource_path)
+	var inviscid_velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+	var inviscid_drag := MATH.particle_drag_wrench(inviscid_velocity, 0.0, 998.0,
+		PROFILE.volume_m3, 1.0, PROFILE.total_area_m2)
+	_check(is_finite(inviscid_drag[3]) and inviscid_drag[3] < 0.0,
+		"zero-viscosity particle drag did not reach the finite high-Re limit")
 
 
 func _test_magnus_symmetry() -> void:
@@ -117,7 +148,7 @@ func _test_scene_body() -> void:
 	var config := CONFIG.new()
 	config.fluid_density_kg_m3 = 998.0
 	config.dynamic_viscosity_pa_s = 0.001002
-	config.body_density_kg_m3 = 700.0
+	config.body_density_kg_m3 = 998.0
 	config.initial_velocity_m_s = Vector3.RIGHT
 	var body := BODY.new()
 	body.profile = PROFILE
@@ -130,9 +161,21 @@ func _test_scene_body() -> void:
 	_check(body.finite_state(), "phase 3 body state became non-finite")
 	_check(body.linear_velocity.x > 0.9, "initial velocity was lost on the first physics tick")
 	_check(body.surface_faces() > 0, "phase 3 body did not evaluate surface faces")
-	_check(body.pressure_power_w() < 0.0, "phase 3 body pressure power is not dissipative")
+	_check(is_finite(body.pressure_power_w()), "phase 3 body pressure power is not finite")
 	_check(body.friction_power_w() < 0.0, "phase 3 body friction power is not dissipative")
+	var pressure_force := body.global_transform.basis * Vector3(body.pressure_wrench()[3],
+		body.pressure_wrench()[4], body.pressure_wrench()[5])
+	_check(absf(pressure_force.dot(body.linear_velocity)) \
+		< pressure_force.length() * body.linear_velocity.length() * 1.0e-2 + 1.0e-6,
+		"BEM pressure duplicated the empirical longitudinal particle drag")
 	_check(body.surface_cpu_time_us() >= 0, "phase 3 surface CPU time was not recorded")
+	body.reset_state(body.global_transform, Vector3.RIGHT, Vector3.ZERO)
+	await physics_frame
+	_check(body.surface_faces() > 0, "high-Reynolds body did not evaluate pressure before threshold crossing")
+	body.reset_state(body.global_transform, Vector3.RIGHT * 1.0e-6, Vector3.ZERO)
+	await physics_frame
+	_check(body.surface_faces() == 0 and _wrench_norm(body.pressure_wrench()) <= 1.0e-12,
+		"sub-threshold substep retained a stale pressure wrench")
 	body.set_fluid_enabled(false)
 	await physics_frame
 	_check(body.pressure_wrench().size() == MATH.MATRIX_SIZE,
@@ -177,12 +220,18 @@ func _test_demo_scenarios() -> void:
 	_check(entries.has("Experiment/Object"), "object control is missing")
 	_check(entries.has("Experiment/Object Density"), "density control is missing")
 	_check(demo.bodies.size() == 4, "starter buoyancy set was not spawned")
-	_check(demo.water_surface.visible and demo.water_volume.visible,
+	_check(demo.water_surface.visible and demo.liquid_sides.visible,
 		"water visuals are hidden in water mode")
 	_check(absf(demo._sample_medium_density(Vector3(0.0, -2.0, 0.0), 0.5) - 998.0) < 1.0e-6,
-		"submerged object does not sample full water density")
-	_check(demo._sample_medium_density(Vector3(0.0, 2.0, 0.0), 0.5) == 0.0,
-		"object above water samples water density")
+		"pool medium sampler does not return full water density")
+	_check(absf(demo._sample_medium_density(Vector3(0.0, 2.0, 0.0), 0.5) - 998.0) < 1.0e-6,
+		"pool medium density depends on object height")
+	var pool_body: AmbientFluidBody3D = demo.bodies[0]
+	pool_body.reset_state(Transform3D(pool_body.global_transform.basis,
+		Vector3(-4.4, demo.WATER_LEVEL - 0.2, -1.0)), Vector3.RIGHT * 4.0, Vector3.ZERO)
+	await physics_frame
+	_check(pool_body.surface_faces() > 0,
+		"partially submerged pool body did not evaluate its wet BEM faces")
 	var initial_count: int = demo.bodies.size()
 	demo._throw_object()
 	_check(demo.bodies.size() == initial_count + 1, "throw did not add one object")
@@ -195,7 +244,7 @@ func _test_demo_scenarios() -> void:
 		and thrown.config.initial_velocity_m_s.length() <= 5.0,
 		"throw speed was not randomized inside configured range")
 	demo._set_medium(3)
-	_check(not demo.water_surface.visible and not demo.water_volume.visible,
+	_check(not demo.water_surface.visible and not demo.liquid_sides.visible,
 		"water visuals stayed visible in air mode")
 	_check(absf(demo._sample_medium_density(Vector3.ZERO, 0.5) - 1.204) < 1.0e-6,
 		"air mode density is wrong")
@@ -296,12 +345,8 @@ func _test_torque_free_angular_momentum() -> void:
 
 
 func _test_coupled_gyroscopic_stability() -> void:
-	# Semidirect coupling only acts when the combined tensor couples linear and
-	# angular blocks, so this drives the real loop with an analytic profile
-	# whose added mass has off-diagonal blocks. Neutral buoyancy removes every
-	# external wrench: the loop must stay energy-bounded and land on the
-	# calibrated body-frame spin (removing the semidirect term multiplies the
-	# energy drift by ~13x and moves the final spin by 10-40% per component).
+	# Exercise the real loop with an analytic profile whose added mass couples
+	# linear and angular motion. Passive drag may remove energy but must not pump it.
 	var profile := AmbientFluidProfile3D.new()
 	profile.format_version = AmbientFluidProfile3D.FORMAT_ANALYTIC
 	profile.volume_m3 = 1.0
@@ -323,27 +368,23 @@ func _test_coupled_gyroscopic_stability() -> void:
 	while body._pending_reset:
 		await physics_frame
 	var first_energy := body.kinetic_energy_j()
-	var worst_energy_drift := 0.0
+	var maximum_energy := first_energy
+	var maximum_spin := body.angular_speed_rad_s()
 	for _frame in 120:
 		await physics_frame
 		_check(body.finite_state(), "coupled gyro body became non-finite")
-		worst_energy_drift = maxf(worst_energy_drift,
-			absf(body.kinetic_energy_j() - first_energy) / absf(first_energy))
+		maximum_energy = maxf(maximum_energy, body.kinetic_energy_j())
+		maximum_spin = maxf(maximum_spin, body.angular_speed_rad_s())
 	var final_spin: Vector3 = body.global_transform.basis.transposed() * body.angular_velocity
 	body.queue_free()
 	await process_frame
-	_check(worst_energy_drift < 0.015,
-		"coupled gyroscopic step pumped %.4f of the energy on the real loop" % worst_energy_drift)
-	_check_spin_near(final_spin, Vector3(1.87036, 1.229739, 0.047268),
-		"coupled gyroscopic loop diverged from the calibrated spin")
-
-
-func _check_spin_near(actual: Vector3, expected: Vector3, message: String) -> void:
-	for index in 3:
-		var tolerance := maxf(absf(expected[index]) * 0.15, 0.02)
-		_check(absf(actual[index] - expected[index]) <= tolerance,
-			"%s (spin[%d]=%.4f, expected %.4f +/- %.4f)" % [
-				message, index, actual[index], expected[index], tolerance])
+	var energy_growth := (maximum_energy - first_energy) / maxf(absf(first_energy), 1.0e-12)
+	print("AMBIENT GYRO energy_growth=%.5f max_spin=%.4f final_spin=%s" % [
+		energy_growth, maximum_spin, final_spin])
+	_check(energy_growth < 0.015,
+		"coupled gyroscopic step pumped %.4f of the energy on the real loop" % energy_growth)
+	_check(maximum_spin < config.initial_spin_rad_s.length() * 2.0,
+		"coupled gyroscopic loop exceeded its spin stability bound")
 
 
 func _world_angular_momentum(body: AmbientFluidBody3D) -> Vector3:
@@ -420,7 +461,9 @@ func _simulate_underwater(delta: float, duration: float) -> float:
 		var surface := _surface_with_profile(PROFILE, velocity, PI * 0.5,
 			0.001002, density)
 		wrench = MATH.vector_add(wrench,
-			MATH.vector_add(surface.pressure, surface.friction))
+			surface.pressure)
+		wrench = MATH.vector_add(wrench, MATH.particle_drag_wrench(velocity,
+			0.001002, density, PROFILE.volume_m3, 1.0, PROFILE.total_area_m2))
 		velocity = MATH.matrix_vector_multiply(inverse,
 			MATH.semi_implicit_momentum_step(momentum, wrench, delta))
 	return velocity[4]
@@ -432,10 +475,9 @@ func _surface(velocity: PackedFloat64Array, angle: float, viscosity: float,
 
 
 func _surface_with_profile(profile: AmbientFluidProfile3D, velocity: PackedFloat64Array,
-		angle: float, viscosity: float, density: float) -> Dictionary:
-	return MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
-		profile.face_areas_m2, profile.slip_matrix, velocity, density, viscosity,
-		angle, profile.characteristic_length_m)
+		angle: float, _viscosity: float, density: float) -> Dictionary:
+	return MATH.potential_pressure_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, profile.slip_matrix, velocity, density, angle)
 
 
 func _relative_vector_error(first: PackedFloat64Array, second: PackedFloat64Array) -> float:

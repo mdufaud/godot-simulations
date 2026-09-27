@@ -4,6 +4,7 @@ const SCENE := preload("res://scenes/ambient_fluid_demo.tscn")
 const PREPROCESSOR := preload("res://scripts/ambient_fluid/ambient_fluid_preprocessor.gd")
 const BODY := preload("res://scripts/ambient_fluid/ambient_fluid_body_3d.gd")
 const CONFIG := preload("res://scripts/ambient_fluid/ambient_fluid_config.gd")
+const CONTROLLER := preload("res://scripts/demos/ambient_fluid_controller.gd")
 const PROFILE := preload("res://resources/ambient_fluid/sphere_bem.tres")
 
 
@@ -33,9 +34,9 @@ func _test_pool_is_labeled_approximation() -> void:
 	_check(entries.has("Experiment/Fluid Density"), "fluid density control is missing")
 	_check(entries.has("Experiment/Dynamic Viscosity"), "viscosity control is missing")
 	_check(entries.has("Experiment/Separation Angle"), "separation control is missing")
-	var partial: float = demo._sample_medium_density(Vector3(0.0, 0.4, 0.0), 0.5)
-	_check(partial > 0.0 and partial < demo.MEDIUM_DENSITIES[0],
-		"pool approximation no longer exposes partial immersion")
+	var pool_density: float = demo._sample_medium_density(Vector3(0.0, 0.4, 0.0), 0.5)
+	_check(is_equal_approx(pool_density, demo.MEDIUM_DENSITIES[0]),
+		"pool density was scaled by a body-wide immersion estimate")
 	demo.queue_free()
 	await process_frame
 
@@ -44,6 +45,17 @@ func _test_geometry_correspondence() -> void:
 	var demo: Node = SCENE.instantiate()
 	root.add_child(demo)
 	await process_frame
+	for type_index in 3:
+		var faces: PackedVector3Array = demo._pool_faces_for(type_index)
+		var profile: AmbientFluidProfile3D = demo._profile_for(type_index)
+		_check(faces.size() == profile.face_centers_m.size() * 3,
+			"pool immersion triangles do not match BEM profile %d" % type_index)
+		if faces.size() == profile.face_centers_m.size() * 3:
+			for face_index in profile.face_centers_m.size():
+				var base := face_index * 3
+				var center := (faces[base] + faces[base + 1] + faces[base + 2]) / 3.0
+				_check(center.distance_to(profile.face_centers_m[face_index]) < 1.0e-4,
+					"pool face order differs from BEM profile %d face %d" % [type_index, face_index])
 	var mesh: ArrayMesh = demo._mesh_for(0)
 	var rebuilt: AmbientFluidProfile3D = PREPROCESSOR.build_profile(mesh, 998.0)
 	_check(rebuilt != null, "canonical sphere mesh failed BEM preprocessing")
@@ -159,38 +171,47 @@ func _test_csv_export() -> void:
 
 
 func _test_scaling_benchmark() -> void:
+	var fixture: Node = CONTROLLER.new()
+	var pool_faces: PackedVector3Array = fixture._pool_faces_for(0)
 	for body_count in [1, 25, 50, 100, 200]:
 		var group := Node3D.new()
 		root.add_child(group)
 		for index in body_count:
 			var config := CONFIG.new()
-			config.fluid_density_kg_m3 = 1.204
-			config.dynamic_viscosity_pa_s = 1.81e-5
+			config.fluid_density_kg_m3 = 998.0
+			config.dynamic_viscosity_pa_s = 0.001002
 			config.body_density_kg_m3 = 500.0
-			config.initial_velocity_m_s = Vector3(5.0, 0.0, 0.0)
+			config.initial_velocity_m_s = Vector3(0.5, 0.0, 0.0)
 			var body: AmbientFluidBody3D = BODY.new()
 			body.profile = PROFILE
 			body.config = config
 			body.profiling = true
-			body.contacts_enabled = true
-			body.position = Vector3((index % 20) * 3.0, 30.0 + (index / 20) * 3.0, 0.0)
-			var collision := CollisionShape3D.new()
-			var shape := SphereShape3D.new()
-			shape.radius = 1.0
-			collision.shape = shape
-			body.add_child(collision)
+			body.contacts_enabled = false
+			body.set_pool_buoyancy_mesh(pool_faces, 0.4)
+			body.set_pool_buoyancy_enabled(true)
+			body.medium_density_sampler = Callable(fixture, "_sample_medium_density").bind(1.0)
+			var column: int = index % 20
+			var row: int = int(index / 20)
+			body.position = Vector3(lerpf(-6.0, 6.0, float(column) / 19.0),
+				0.2 + float(index % 5) * 0.1, lerpf(-4.0, 4.0, float(row) / 9.0))
 			group.add_child(body)
 		await process_frame
 		for _frame in 3:
 			await physics_frame
 		var integration_us := 0
 		var surface_us := 0
+		var partially_submerged := 0
 		for body: AmbientFluidBody3D in group.get_children():
 			integration_us += body.integration_cpu_time_us()
 			surface_us += body.surface_cpu_time_us()
 			_check(body.finite_state(), "benchmark body became non-finite")
-		print("BENCHMARK ambient_fluid bodies=%d integration_us=%d surface_us=%d" % [
-			body_count, integration_us, surface_us])
+			if body.submerged_fraction > 0.01 and body.submerged_fraction < 0.99:
+				partially_submerged += 1
+		print("BENCHMARK ambient_fluid_pool bodies=%d partial=%d integration_us=%d surface_us=%d" % [
+			body_count, partially_submerged, integration_us, surface_us])
+		_check(partially_submerged > 0,
+			"pool immersion benchmark did not exercise partial submersion")
 		_check(integration_us < 1000000, "ambient fluid benchmark exceeded one CPU second")
 		group.queue_free()
 		await process_frame
+	fixture.free()

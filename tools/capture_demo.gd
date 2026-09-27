@@ -43,6 +43,8 @@ var _sun_azimuth := -1.0
 var _debug_view := -1
 var _cascade := -1
 var _scene := -1
+var _scenario := -1
+var _medium := -1
 var _flow := -1.0
 var _foam_feedback := true
 var _micro_normals := true
@@ -112,6 +114,8 @@ func _initialize() -> void:
 			"debug": _debug_view = int(value)
 			"cascade": _cascade = int(value)
 			"scene": _scene = int(value)
+			"scenario": _scenario = clampi(int(value), 0, 4)
+			"medium": _medium = clampi(int(value), 0, 4)
 			"flow": _flow = float(value)
 			"foam": _foam_feedback = value != "0" and value.to_lower() != "false"
 			"micro": _micro_normals = value != "0" and value.to_lower() != "false"
@@ -164,6 +168,18 @@ func _run() -> void:
 		_demo.apply_look(_look)
 	if _quality >= 0 and _demo.has_method("set_quality_profile"):
 		_demo.set_quality_profile(_quality)
+	if _scenario >= 0:
+		if not _demo.has_method("set_capture_scenario"):
+			push_error("CAPTURE FAIL: target does not support scenario selection")
+			quit(1)
+			return
+		_demo.set_capture_scenario(_scenario)
+	if _medium >= 0:
+		if not _demo.has_method("set_capture_medium"):
+			push_error("CAPTURE FAIL: target does not support medium selection")
+			quit(1)
+			return
+		_demo.set_capture_medium(_medium)
 	if _preset >= 0 and _demo.has_method("apply_preset"):
 		_demo.apply_preset(_preset)
 	ready_deadline = Time.get_ticks_msec() + 20000

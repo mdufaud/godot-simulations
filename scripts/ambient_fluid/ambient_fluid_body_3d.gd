@@ -41,6 +41,16 @@ var _pending_central_impulse_world := Vector3.ZERO
 var _pending_torque_impulse_world := Vector3.ZERO
 var medium_velocity_sampler: Callable
 var medium_density_sampler: Callable
+var pool_buoyancy_faces_local := PackedVector3Array()
+var pool_surface_height_world := NAN
+var pool_buoyancy_enabled := false
+var submerged_volume_m3 := 0.0
+var submerged_fraction := 0.0
+var wetted_area_fraction := 0.0
+var center_of_buoyancy_local := Vector3.ZERO
+var waterline_points_local := PackedVector3Array()
+var wet_area_fractions := PackedFloat64Array()
+var wet_area_centers_m := PackedVector3Array()
 
 
 func _ready() -> void:
@@ -115,7 +125,9 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 			_invalid_medium_reported = true
 			push_error("AmbientFluidBody3D: medium density sampler returned an invalid value")
 		fluid_density = 0.0
-	_ensure_tensor_cache(fluid_density)
+	var immersion := _sample_pool_immersion(basis, state.transform.origin)
+	var effective_added_mass_density := fluid_density * float(immersion.fraction)
+	_ensure_tensor_cache(effective_added_mass_density)
 	if not _cache_valid:
 		return
 	var fluid_velocity_world := _sample_fluid_velocity(state.transform.origin)
@@ -125,7 +137,6 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 		local_spin.x, local_spin.y, local_spin.z,
 		local_velocity.x, local_velocity.y, local_velocity.z,
 	])
-	_last_wrench_generalized_velocity = generalized_velocity
 	var momentum := MATH.matrix_vector_multiply(_combined_tensor, generalized_velocity)
 	if _pending_torque_impulse_world != Vector3.ZERO \
 		or _pending_central_impulse_world != Vector3.ZERO:
@@ -149,32 +160,83 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 	var output_basis := basis
 	var next_velocity := generalized_velocity
 	for _index in substeps:
+		_last_pressure_wrench.fill(0.0)
+		_last_surface_faces = 0
 		next_velocity = MATH.matrix_vector_multiply(_combined_inverse, next_momentum)
+		if not _finite_array(next_velocity):
+			_report_invalid_state("substep velocity is not finite")
+			return
+		_last_wrench_generalized_velocity = next_velocity
 		var step_spin := Vector3(next_velocity[0], next_velocity[1], next_velocity[2])
+		if not is_finite(step_spin.length() * substep):
+			_report_invalid_state("substep rotation is not finite")
+			return
 		var gravity_local := output_basis.transposed() * state.total_gravity
-		var displaced_mass := fluid_density * profile.volume_m3
-		var wrench := MATH.gravity_buoyancy_wrench(
-			mass, displaced_mass, gravity_local, profile.center_of_volume_m)
-		wrench = MATH.vector_add(wrench,
-			MATH.semidirect_coupling_wrench(next_momentum, next_velocity))
+		immersion = _sample_pool_immersion(output_basis, state.transform.origin)
+		var displaced_mass := fluid_density * float(immersion.volume_m3) \
+			if pool_buoyancy_enabled else fluid_density * profile.volume_m3
+		var gravity_wrench := MATH.gravity_buoyancy_wrench(
+			mass, displaced_mass, gravity_local, immersion.centroid_m)
+		var passive_wrench := MATH.semidirect_coupling_wrench(
+			next_momentum, next_velocity)
 		if fluid_density > 0.0:
+			var wetted_fraction := float(immersion.wetted_area_fraction) \
+				if pool_buoyancy_enabled else 1.0
+			_last_friction_wrench = MATH.particle_drag_wrench(next_velocity,
+				config.dynamic_viscosity_pa_s, fluid_density, profile.volume_m3,
+				wetted_fraction, profile.total_area_m2)
+			var relative_speed := Vector3(next_velocity[3], next_velocity[4],
+				next_velocity[5]).length()
+			var reynolds := fluid_density * relative_speed \
+				* profile.characteristic_length_m / config.dynamic_viscosity_pa_s \
+				if config.dynamic_viscosity_pa_s > 0.0 else INF
 			if profile.format_version == AmbientFluidProfile3D.FORMAT_BEM \
-				and not profile.slip_matrix.is_empty():
+					and reynolds >= 100.0 \
+					and not profile.slip_matrix.is_empty():
 				var surface_start_us := Time.get_ticks_usec()
-				var surface := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+				var surface := MATH.potential_pressure_wrench(profile.face_centers_m,
+					profile.face_normals,
 					profile.face_areas_m2, profile.slip_matrix, next_velocity,
-					fluid_density, config.dynamic_viscosity_pa_s, config.separation_angle_rad,
-					profile.characteristic_length_m)
-				_last_pressure_wrench = surface.pressure
-				_last_friction_wrench = surface.friction
+					fluid_density, config.separation_angle_rad,
+					immersion.wet_area_fractions if pool_buoyancy_enabled else PackedFloat64Array(),
+					immersion.wet_area_centers_m if pool_buoyancy_enabled else PackedVector3Array())
+				_last_pressure_wrench = surface.pressure.duplicate()
+				var relative_velocity := Vector3(next_velocity[3], next_velocity[4],
+					next_velocity[5])
+				if relative_velocity.length_squared() > 1.0e-16:
+					var pressure_force := Vector3(_last_pressure_wrench[3],
+						_last_pressure_wrench[4], _last_pressure_wrench[5])
+					pressure_force -= relative_velocity * (pressure_force.dot(relative_velocity)
+						/ relative_velocity.length_squared())
+					_last_pressure_wrench[3] = pressure_force.x
+					_last_pressure_wrench[4] = pressure_force.y
+					_last_pressure_wrench[5] = pressure_force.z
+				if pool_buoyancy_enabled and step_spin.length_squared() > 1.0e-16:
+					var pressure_torque := Vector3(_last_pressure_wrench[0],
+						_last_pressure_wrench[1], _last_pressure_wrench[2])
+					var spin_power := pressure_torque.dot(step_spin)
+					if spin_power > 0.0:
+						pressure_torque -= step_spin * (spin_power / step_spin.length_squared())
+						_last_pressure_wrench[0] = pressure_torque.x
+						_last_pressure_wrench[1] = pressure_torque.y
+						_last_pressure_wrench[2] = pressure_torque.z
 				_last_surface_faces = int(surface.attached_faces)
 				_last_surface_cpu_us += Time.get_ticks_usec() - surface_start_us
-				wrench = MATH.vector_add(wrench, MATH.vector_add(_last_pressure_wrench,
-					_last_friction_wrench))
-			elif not _analytic_surface_reported:
+			elif profile.format_version != AmbientFluidProfile3D.FORMAT_BEM \
+					and not _analytic_surface_reported:
 				_analytic_surface_reported = true
-				push_warning("AmbientFluidBody3D: analytic profile disables pressure and skin friction")
-		next_momentum = MATH.semi_implicit_momentum_step(next_momentum, wrench, substep)
+				push_warning("AmbientFluidBody3D: analytic profile disables surface pressure")
+			passive_wrench = MATH.vector_add(passive_wrench, _last_pressure_wrench)
+		if not pool_buoyancy_faces_local.is_empty():
+			next_momentum = _pool_momentum_step(next_momentum, gravity_wrench,
+				passive_wrench, _last_friction_wrench, substep)
+		else:
+			var wrench := MATH.vector_add(gravity_wrench,
+				MATH.vector_add(passive_wrench, _last_friction_wrench))
+			next_momentum = MATH.semi_implicit_momentum_step(next_momentum, wrench, substep)
+		if not _finite_array(next_momentum):
+			_report_invalid_state("substep momentum is not finite")
+			return
 		var rotation_increment := _rotation_increment(step_spin, substep)
 		next_momentum = _rotate_generalized_momentum(next_momentum,
 			rotation_increment.transposed())
@@ -188,6 +250,31 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 	state.linear_velocity = output_basis * Vector3(next_velocity[3], next_velocity[4], next_velocity[5]) \
 		+ fluid_velocity_world
 	_last_generalized_velocity = next_velocity
+
+
+func _pool_momentum_step(momentum: PackedFloat64Array,
+		gravity_wrench: PackedFloat64Array, passive_wrench: PackedFloat64Array,
+		drag_wrench: PackedFloat64Array, delta: float) -> PackedFloat64Array:
+	var forced := MATH.semi_implicit_momentum_step(momentum, gravity_wrench, delta)
+	var forced_velocity := MATH.matrix_vector_multiply(_combined_inverse, forced)
+	var energy_before := 0.5 * MATH.vector_dot(forced, forced_velocity)
+	var passive := MATH.semi_implicit_momentum_step(forced, passive_wrench, delta)
+	var passive_velocity := MATH.matrix_vector_multiply(_combined_inverse, passive)
+	var energy_after := 0.5 * MATH.vector_dot(passive, passive_velocity)
+	if energy_after > energy_before and energy_after > 0.0:
+		passive = MATH.vector_scale(passive,
+			sqrt(maxf(energy_before, 0.0) / energy_after))
+		passive_velocity = MATH.matrix_vector_multiply(_combined_inverse, passive)
+	var drag_impulse := MATH.vector_scale(drag_wrench, delta)
+	var drag_power := MATH.vector_dot(drag_impulse, passive_velocity)
+	if drag_power >= 0.0:
+		return passive
+	var drag_velocity := MATH.matrix_vector_multiply(_combined_inverse, drag_impulse)
+	var drag_curvature := MATH.vector_dot(drag_impulse, drag_velocity)
+	if drag_curvature <= 0.0:
+		return passive
+	var drag_scale := minf(1.0, -drag_power / drag_curvature)
+	return MATH.vector_add(passive, MATH.vector_scale(drag_impulse, drag_scale))
 
 
 func set_fluid_enabled(enabled: bool) -> void:
@@ -295,6 +382,27 @@ func set_medium_velocity_sampler(value: Callable) -> void:
 
 func set_medium_density_sampler(value: Callable) -> void:
 	medium_density_sampler = value
+	_cache_valid = false
+	sleeping = false
+
+
+func set_pool_buoyancy_mesh(faces_local: PackedVector3Array,
+			surface_height_world: float) -> void:
+	if faces_local.is_empty() or faces_local.size() % 3 != 0 \
+		or not is_finite(surface_height_world):
+		push_error("AmbientFluidBody3D: pool buoyancy mesh and surface height must be valid")
+		return
+	pool_buoyancy_faces_local = faces_local.duplicate()
+	pool_surface_height_world = surface_height_world
+	pool_buoyancy_enabled = true
+	_cache_valid = false
+	sleeping = false
+
+
+func set_pool_buoyancy_enabled(enabled: bool) -> void:
+	if pool_buoyancy_faces_local.is_empty():
+		return
+	pool_buoyancy_enabled = enabled
 	_cache_valid = false
 	sleeping = false
 
@@ -498,6 +606,52 @@ func _sample_fluid_density(world_center: Vector3) -> float:
 			return float(sampled)
 		return NAN
 	return config.fluid_density_kg_m3
+
+
+func _sample_pool_immersion(body_basis: Basis, body_origin: Vector3) -> Dictionary:
+	if not pool_buoyancy_enabled:
+		submerged_volume_m3 = profile.volume_m3
+		submerged_fraction = 1.0
+		center_of_buoyancy_local = profile.center_of_volume_m
+		waterline_points_local = PackedVector3Array()
+		wet_area_fractions = PackedFloat64Array()
+		wet_area_centers_m = PackedVector3Array()
+		return {
+			volume_m3 = profile.volume_m3,
+			fraction = 1.0,
+			centroid_m = profile.center_of_volume_m,
+			wet_area_fractions = PackedFloat64Array(),
+			wet_area_centers_m = PackedVector3Array(),
+			wetted_area_fraction = 1.0,
+		}
+	var local_up := body_basis.transposed() * Vector3.UP
+	var clipped: Dictionary = MATH.clip_convex_mesh_below_plane(
+		pool_buoyancy_faces_local, profile.center_of_volume_m,
+		local_up, pool_surface_height_world - body_origin.y)
+	if clipped.is_empty():
+		return {
+			volume_m3 = 0.0,
+			fraction = 0.0,
+			centroid_m = profile.center_of_volume_m,
+			wet_area_fractions = PackedFloat64Array(),
+			wet_area_centers_m = PackedVector3Array(),
+			wetted_area_fraction = 0.0,
+		}
+	submerged_volume_m3 = clampf(float(clipped.volume_m3), 0.0, profile.volume_m3)
+	submerged_fraction = submerged_volume_m3 / profile.volume_m3
+	center_of_buoyancy_local = clipped.centroid_m
+	waterline_points_local = clipped.waterline_points
+	wet_area_fractions = clipped.wet_area_fractions
+	wet_area_centers_m = clipped.wet_area_centers_m
+	wetted_area_fraction = clipped.wetted_area_fraction
+	return {
+		volume_m3 = submerged_volume_m3,
+		fraction = submerged_fraction,
+		centroid_m = center_of_buoyancy_local,
+		wet_area_fractions = wet_area_fractions,
+		wet_area_centers_m = wet_area_centers_m,
+		wetted_area_fraction = wetted_area_fraction,
+	}
 
 
 func _basis_is_valid(basis: Basis) -> bool:

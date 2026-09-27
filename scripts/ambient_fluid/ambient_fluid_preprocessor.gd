@@ -97,7 +97,8 @@ static func build_profile(mesh: ArrayMesh,
 			bem_psd_clamped = true
 			break
 	added_mass = projected_added_mass
-	var slip_matrix := _build_slip_matrix(vertices, triangles, face_normals)
+	var slip_matrix := _build_slip_matrix(vertices, triangles, face_normals,
+		potential_matrix)
 	if slip_matrix.size() != face_centers.size() * 18:
 		return _fail("BEM slip matrix construction failed")
 	var total_area := 0.0
@@ -416,23 +417,40 @@ static func _build_added_mass(vertices: PackedVector3Array, triangles: Array,
 
 
 static func _build_slip_matrix(vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array) -> PackedFloat64Array:
+		face_normals: PackedVector3Array,
+		potential_matrix: PackedFloat64Array) -> PackedFloat64Array:
 	var result := PackedFloat64Array()
 	result.resize(triangles.size() * 18)
 	for triangle_index in triangles.size():
 		var ids: PackedInt32Array = triangles[triangle_index]
 		var normal: Vector3 = face_normals[triangle_index]
-		var positions := [vertices[ids[0]], vertices[ids[1]], vertices[ids[2]]]
-		var center: Vector3 = (positions[0] + positions[1] + positions[2]) / 3.0
-		for row in 3:
-			for col in 6:
-				var geometric := 0.0
-				for projection_axis in 3:
-					var projected := (1.0 if row == projection_axis else 0.0) \
-						- normal[row] * normal[projection_axis]
-					geometric += projected * _rigid_motion_matrix_value(center,
-						projection_axis, col)
-				result[triangle_index * 18 + row * 6 + col] = -geometric
+		var a: Vector3 = vertices[ids[0]]
+		var edge_a: Vector3 = vertices[ids[1]] - a
+		var edge_b: Vector3 = vertices[ids[2]] - a
+		var edge_a_squared := edge_a.length_squared()
+		var edge_b_squared := edge_b.length_squared()
+		var edge_dot := edge_a.dot(edge_b)
+		var determinant := edge_a_squared * edge_b_squared - edge_dot * edge_dot
+		if determinant <= maxf(1.0e-24, edge_a_squared * edge_b_squared * 1.0e-12):
+			return _fail_array("BEM slip gradient encountered a degenerate face")
+		var center: Vector3 = (a + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+		for col in 6:
+			var potential_a := potential_matrix[ids[0] * 6 + col]
+			var potential_delta_a := potential_matrix[ids[1] * 6 + col] - potential_a
+			var potential_delta_b := potential_matrix[ids[2] * 6 + col] - potential_a
+			var gradient := edge_a * ((potential_delta_a * edge_b_squared \
+				- potential_delta_b * edge_dot) / determinant) \
+				+ edge_b * ((potential_delta_b * edge_a_squared \
+				- potential_delta_a * edge_dot) / determinant)
+			var tangent_flow := gradient - normal * normal.dot(gradient)
+			var rigid_velocity := Vector3(
+				_rigid_motion_matrix_value(center, 0, col),
+				_rigid_motion_matrix_value(center, 1, col),
+				_rigid_motion_matrix_value(center, 2, col))
+			var tangent_body := rigid_velocity - normal * normal.dot(rigid_velocity)
+			var relative_tangent := tangent_flow - tangent_body
+			for row in 3:
+				result[triangle_index * 18 + row * 6 + col] = relative_tangent[row]
 	return result
 
 

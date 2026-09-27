@@ -55,6 +55,7 @@ usage() {
 	printf '       tests/probe.sh <name> [args...]\n'
 	printf '       tests/probe.sh fps <demo> <low|medium|high|ultra> [WxH] [seconds]\n'
 	printf '       tests/probe.sh fps target=... tier=... [size=...] [seconds=...]\n'
+	printf '       tests/probe.sh fps target=ambient_fluid_demo tier=high size=1280x720 bodies=24\n'
 	printf '       tests/probe.sh kill\n'
 	printf 'names: %s\n' "$(probe_names | tr '\n' ' ')"
 }

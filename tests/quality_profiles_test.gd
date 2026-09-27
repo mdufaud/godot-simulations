@@ -40,7 +40,7 @@ func _profile_table() -> void:
 		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale", "render_scale"],
 		SsrQualityProfile: ["render_scale", "msaa", "ssr_steps", "max_objects",
 			"ssao", "ssil", "glow"],
-		AmbientFluidQualityProfile: ["max_objects", "render_scale", "msaa"],
+		AmbientFluidQualityProfile: ["render_scale", "msaa"],
 		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow",
 			"render_scale"],
 	}

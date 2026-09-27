@@ -2,7 +2,7 @@ class_name AmbientFluidProfile3D
 extends Resource
 
 const FORMAT_ANALYTIC := 1
-const FORMAT_BEM := 3
+const FORMAT_BEM := 4
 
 const MATH := preload("res://scripts/ambient_fluid/ambient_fluid_math.gd")
 
