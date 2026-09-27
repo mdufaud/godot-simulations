@@ -5,7 +5,7 @@ extends RefCounted
 ## Solvers bracket their dispatches with capture_timestamp(prefix + "start") and
 ## capture_timestamp(prefix + "end"), and mark stage boundaries in between. Each
 ## marker closes the segment opened by the previous one; a name repeated across
-## substeps sums. Timestamps are captured in nanoseconds and lag one to two frames.
+## substeps sums. Vulkan timestamps are captured in nanoseconds and lag one to two frames.
 ##
 ## Call from the render thread, after the frame whose timestamps you want to read.
 

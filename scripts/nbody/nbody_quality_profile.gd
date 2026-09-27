@@ -1,14 +1,11 @@
 class_name NBodyQualityProfile
 extends SimQualityProfile
-## Quality tiers for the GPU N-body galaxy. The count and the physics mode are
-## one decision: self-gravity is the O(N²) tiled pass and its particle ceiling
-## (32k costs ~24 ms on the 760M iGPU), so Low to High spend the budget on
-## density — bigger attractor-driven galaxies — and Ultra is the only tier
-## that gives up nothing: full direct gravity at its largest supported count.
+## Quality tiers for the GPU N-body gallery. Low to High use massless test
+## particles; Ultra uses direct particle self-gravity on the black-hole disk,
+## capped at 32k particles because the pairwise force pass is O(N²).
 
-## Counts the menu proposes, smallest first; 32k exists so the gravity tiers
-## and manual gravity toggles have a label to land on.
-const PARTICLE_COUNTS := [32768, 65536, 262144, 1048576]
+## Counts the menu proposes, smallest first; 32k is the direct-gravity tier.
+const PARTICLE_COUNTS := [16384, 32768, 65536, 262144, 1048576]
 
 const PARTICLE_COUNT := {
 	Tier.LOW: 65536,
@@ -24,8 +21,7 @@ const SELF_GRAVITY := {
 	Tier.ULTRA: true,
 }
 
-## Ceiling the O(N²) pass supports; config.validate refuses counts above it
-## while self-gravity is on.
+## Ceiling the O(N²) pass supports; config.validate refuses larger counts.
 const SELF_GRAVITY_MAX := {
 	Tier.LOW: 16384,
 	Tier.MEDIUM: 16384,

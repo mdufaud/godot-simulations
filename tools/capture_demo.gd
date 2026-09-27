@@ -15,6 +15,7 @@ const DEFAULT_FRAMES := 120
 
 var _frames := DEFAULT_FRAMES
 var _every := 0
+var _shots := PackedInt32Array()
 var _out := ""
 var _size := Vector2i(1280, 720)
 var _scene_path := ""
@@ -29,7 +30,10 @@ var _features := true
 var _clouds := true
 var _view := ""
 var _hide_ui := true
+var _show_panel := false
 var _freeze := false
+var _nbody_seed := -1
+var _nbody_time_scale := -1.0
 var _capture_time := -1.0
 var _fixed_delta := -1.0
 var _warmup := 90
@@ -53,6 +57,8 @@ var _foam_warmup := 0.0
 var _foam_distance := -1.0
 var _detail_distance := -1.0
 var _camera_speed := 0.0
+var _param_overrides: Dictionary = {}
+var _nbody_render_overrides: Dictionary = {}
 
 
 func _initialize() -> void:
@@ -66,6 +72,24 @@ func _initialize() -> void:
 			"target": _set_target(value)
 			"frames": _frames = maxi(1, int(value))
 			"every": _every = maxi(0, int(value))
+			"shots":
+				for frame_text in value.split(","):
+					var frame := int(frame_text.strip_edges())
+					if frame > 0 and not _shots.has(frame):
+						_shots.append(frame)
+			"param":
+				var assignment := value.split(":", true, 1)
+				if assignment.size() == 2:
+					_param_overrides[String(assignment[0])] = float(assignment[1])
+				else:
+					push_error("CAPTURE FAIL: param must be key:value")
+					quit(1)
+					return
+			"nbody_star_size": _nbody_render_overrides.star_size = float(value)
+			"nbody_brightness": _nbody_render_overrides.brightness = float(value)
+			"nbody_min_pixel_size": _nbody_render_overrides.min_pixel_size = float(value)
+			"nbody_seed": _nbody_seed = int(value)
+			"nbody_time_scale": _nbody_time_scale = float(value)
 			"out": _out = value
 			"preset": _preset = int(value)
 			"height": _height_gain = float(value)
@@ -77,6 +101,7 @@ func _initialize() -> void:
 			"clouds": _clouds = value != "0" and value.to_lower() != "false"
 			"view": _view = value
 			"ui": _hide_ui = value == "0" or value.to_lower() == "false"
+			"panel": _show_panel = value == "1" or value.to_lower() == "true"
 			"freeze": _freeze = value == "1" or value.to_lower() == "true"
 			"time": _capture_time = float(value)
 			"dt": _fixed_delta = maxf(float(value), 0.0)
@@ -106,6 +131,9 @@ func _initialize() -> void:
 				if dims.size() == 2:
 					_size = Vector2i(maxi(16, int(dims[0])), maxi(16, int(dims[1])))
 	# Unique default so concurrent captures never overwrite each other.
+	if not _shots.is_empty():
+		for frame in _shots:
+			_frames = maxi(_frames, frame)
 	if _out.is_empty():
 		_out = "res://tmp/capture-%d.png" % OS.get_process_id()
 	if _scene_path == "":
@@ -145,6 +173,40 @@ func _run() -> void:
 		push_error("CAPTURE FAIL: quality resources did not become ready")
 		quit(1)
 		return
+	if not _param_overrides.is_empty():
+		if not _demo.has_method("set_capture_params"):
+			push_error("CAPTURE FAIL: target does not support parameter overrides")
+			quit(1)
+			return
+		_demo.set_capture_params(_param_overrides)
+		ready_deadline = Time.get_ticks_msec() + 20000
+		while _demo.has_method("capture_ready") and not _demo.capture_ready() \
+				and Time.get_ticks_msec() < ready_deadline:
+			await process_frame
+		if _demo.has_method("capture_ready") and not _demo.capture_ready():
+			push_error("CAPTURE FAIL: parameter overrides did not become ready")
+			quit(1)
+			return
+	if not _nbody_render_overrides.is_empty():
+		if not _demo.has_method("set_capture_render"):
+			push_error("CAPTURE FAIL: target does not support N-body render overrides")
+			quit(1)
+			return
+		_demo.set_capture_render(_nbody_render_overrides)
+	if _nbody_seed >= 0:
+		if not _demo.has_method("set_capture_seed"):
+			push_error("CAPTURE FAIL: target does not support N-body seed overrides")
+			quit(1)
+			return
+		_demo.set_capture_seed(_nbody_seed)
+		ready_deadline = Time.get_ticks_msec() + 20000
+		while _demo.has_method("capture_ready") and not _demo.capture_ready() \
+				and Time.get_ticks_msec() < ready_deadline:
+			await process_frame
+		if _demo.has_method("capture_ready") and not _demo.capture_ready():
+			push_error("CAPTURE FAIL: N-body seed override did not become ready")
+			quit(1)
+			return
 	if _height_gain >= 0.0 and _demo.has_method("set_capture_height_gain"):
 		_demo.set_capture_height_gain(_height_gain)
 	if _wind_direction >= 0.0 and _demo.has_method("set_capture_wind_direction"):
@@ -230,8 +292,22 @@ func _run() -> void:
 			_demo.set_capture_time(_capture_time)
 	if _profile and _demo.has_method("set_capture_profiling"):
 		_demo.set_capture_profiling(true)
+	if _nbody_time_scale >= 0.0:
+		if not _demo.has_method("set_capture_time_scale"):
+			push_error("CAPTURE FAIL: target does not support N-body time-scale overrides")
+			quit(1)
+			return
+		_demo.set_capture_time_scale(_nbody_time_scale)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(_freeze)
+	if _show_panel:
+		var capture_menu := _demo.get_node_or_null("UI/SimMenu")
+		if capture_menu == null or not capture_menu.has_method("toggle_panel"):
+			push_error("CAPTURE FAIL: target has no SimMenu panel")
+			quit(1)
+			return
+		if not capture_menu.is_panel_open():
+			capture_menu.toggle_panel()
 	print("CAPTURE CONFIG preset=%d look=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f foam_distance=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d scene=%d cascade=%d" % [
 		_preset, _look, _view,
 		OceanQualityProfile.tier_name(_quality) if _quality >= 0 else "default",
@@ -246,11 +322,15 @@ func _run() -> void:
 			_demo.move_capture_camera(Vector3(_camera_speed * maxf(_fixed_delta, 1.0 / 60.0), 0.0, 0.0))
 		if _interaction and _demo.has_method("throw_crate") and waited == toss_frame:
 			_demo.throw_crate()
-		if _every > 0 and waited > 0 and waited % _every == 0:
+		var capture_frame := waited + 1
+		if _shots.is_empty() and _every > 0 and waited > 0 and waited % _every == 0:
 			await _grab(_numbered(waited))
+		elif not _shots.is_empty() and capture_frame < _frames \
+				and _shots.has(capture_frame):
+			await _grab(_numbered(capture_frame))
 		await process_frame
 		waited += 1
-	var final_numbered := _out if _every <= 0 else _numbered(waited)
+	var final_numbered := _out if _every <= 0 and _shots.is_empty() else _numbered(waited)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
 	if _demo.has_method("capture_metadata_async"):

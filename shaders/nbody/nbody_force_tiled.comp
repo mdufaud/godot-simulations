@@ -12,8 +12,9 @@ void main() {
 	// past particle_count keep participating and are masked at the store instead.
 	vec3 p = positions.data[min(i, n - 1u)].xyz;
 	vec3 a = vec3(0.0);
-	float soft2 = params.sim.z;
+	float soft2 = max(params.sim.z, 1e-12);
 	uint tiles = (n + 255u) / 256u;
+	int substep = (params.misc.w & 0x3f) >> 1;
 
 	for (uint t = 0u; t < tiles; t++) {
 		uint src = t * 256u + lid;
@@ -31,6 +32,6 @@ void main() {
 	}
 
 	if (i < n) {
-		accels.data[i] = vec4(params.sim.y * (a + attractor_pull(p)), 0.0);
+		accels.data[i] = vec4(params.sim.y * (a + attractor_pull(p, 2 * substep + 1)), 0.0);
 	}
 }

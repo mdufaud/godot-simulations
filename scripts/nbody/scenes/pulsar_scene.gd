@@ -6,23 +6,20 @@ extends NBodySceneDef
 ## real pulsar wind traces. Slow ejecta falls back onto the star and is re-fired.
 
 var star_mass := 1.5
-var spin_rate := 1.2
-var obliquity := 0.7
-var cone := 0.12
-var jet_speed := 3.0
-var nebula_radius := 90.0
+var spin_rate := 0.5
+var obliquity := 0.45
+var cone := 0.1
+var jet_speed := 4.0
+var nebula_radius := 70.0
+var absorb_radius := 0.3
 
 
 func title() -> String:
 	return "Pulsar jets"
 
 
-func star_size() -> float:
-	return 0.06
-
-
-func view_distance() -> float:
-	return nebula_radius * 1.5
+func view_distance(_solver: NBodySolver) -> float:
+	return nebula_radius * 2.4
 
 
 func params() -> Array:
@@ -36,8 +33,15 @@ func params() -> Array:
 	]
 
 
+func advanced_params() -> Array:
+	return [{key = "absorb_radius", label = "Absorb radius", min = 0.1, max = 2.0}]
+
+
+func normalize_params() -> void:
+	absorb_radius = clampf(absorb_radius, 0.1, 2.0)
+
+
 func apply_defaults(solver: NBodySolver) -> void:
-	solver.gravity_constant = 1.0
 	solver.softening = 0.1
 	solver.attractor_softening = 0.05
 	solver.disk_mass = 0.0
@@ -59,28 +63,28 @@ func update_frame(t: float, solver: NBodySolver) -> void:
 	solver.axis_dir = _axis(t)
 
 
-func attractors() -> Array:
-	return [{pos = Vector3.ZERO, vel = Vector3.ZERO, mass = star_mass, radius = 0.3}]
+func attractors(_solver: NBodySolver) -> Array:
+	return [{pos = Vector3.ZERO, vel = Vector3.ZERO, mass = star_mass, radius = absorb_radius}]
 
 
 # Pre-fill the sprinkler spiral: a particle emitted at time -age along the beam
 # axis of that moment has since flown speed * age outward. Without this the demo
 # starts empty and takes nebula_radius / jet_speed time units to fill.
-func seed(count: int, _solver: NBodySolver) -> Dictionary:
+func seed(count: int, _solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0x9017A12
+	rng.seed = 0x9017A12 ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
 	vel.resize(count * 4)
-	var max_age := nebula_radius / jet_speed * 0.95
+	var max_age := nebula_radius / (jet_speed * 1.2) * 0.95
 
 	for i in count:
-		var age := rng.randf() * max_age
 		var pole := 1.0 if rng.randf() < 0.5 else -1.0
 		var jitter := Vector3(rng.randf() - 0.5, rng.randf() - 0.5, rng.randf() - 0.5) * 2.0
-		var dir := (_axis(-age) * pole + jitter * cone).normalized()
 		var speed := jet_speed * (0.8 + 0.4 * rng.randf())
+		var age := rng.randf() * max_age
+		var dir := (_axis(-age) * pole + jitter * cone).normalized()
 		var p := dir * (0.5 + speed * age)
 		var v := dir * speed
 

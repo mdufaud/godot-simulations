@@ -3,8 +3,6 @@ extends NBodySceneDef
 ## Supermassive black hole with an accretion disk. G = 1, so with M_bh = 1 the
 ## circular period at r = 10 is 2*pi*10^1.5 ~ 200 time units.
 
-const BULGE_FRACTION := 0.03
-
 var bh_mass := 1.0
 var bh_radius := 2.0
 var r_min := 6.0
@@ -12,16 +10,21 @@ var r_max := 40.0
 var thickness := 0.8
 var dispersion := 0.04
 var disk_mass := 0.35
+var bulge_fraction := 0.03
 
 
 func title() -> String:
 	return "Black hole disk"
 
 
+func view_distance(_solver: NBodySolver) -> float:
+	return maxf(70.0, maxf(r_max, r_min * 1.5) * 1.75)
+
+
 func params() -> Array:
 	return [
 		{key = "bh_mass", label = "BH mass", min = 0.2, max = 8.0},
-		{key = "bh_radius", label = "BH radius", min = 0.3, max = 10.0},
+		{key = "bh_radius", label = "Absorb radius", min = 0.3, max = 10.0},
 		{key = "r_min", label = "Disk inner", min = 3.0, max = 40.0},
 		{key = "r_max", label = "Disk outer", min = 10.0, max = 160.0},
 		{key = "thickness", label = "Thickness", min = 0.0, max = 8.0},
@@ -30,8 +33,24 @@ func params() -> Array:
 	]
 
 
+func advanced_params() -> Array:
+	return [{key = "bulge_fraction", label = "Bulge fraction", min = 0.0, max = 0.15}]
+
+
+func normalize_params() -> void:
+	bh_radius = clampf(bh_radius, 0.3, 10.0)
+	r_min = clampf(r_min, 3.0, 40.0)
+	r_max = clampf(r_max, 10.0, 160.0)
+	r_min = maxf(r_min, bh_radius * 2.0)
+	r_max = maxf(r_max, r_min * 1.5)
+	bulge_fraction = clampf(bulge_fraction, 0.0, 0.15)
+
+
+func supports_self_gravity() -> bool:
+	return true
+
+
 func apply_defaults(solver: NBodySolver) -> void:
-	solver.gravity_constant = 1.0
 	solver.softening = 0.15
 	solver.attractor_softening = 0.05
 	solver.disk_r_min = _inner()
@@ -45,19 +64,19 @@ func apply_defaults(solver: NBodySolver) -> void:
 	solver.v_ref = sqrt(solver.gravity_constant * bh_mass / solver.disk_r_min)
 
 
-func attractors() -> Array:
+func attractors(_solver: NBodySolver) -> Array:
 	return [{pos = Vector3.ZERO, vel = Vector3.ZERO, mass = bh_mass, radius = _horizon()}]
 
 
-func seed(count: int, solver: NBodySolver) -> Dictionary:
+func seed(count: int, solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0x5EEDBEEF
+	rng.seed = 0x5EEDBEEF ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
 	vel.resize(count * 4)
 	var m_particle := solver.disk_mass / float(count)
-	var bulge := int(count * BULGE_FRACTION)
+	var bulge := int(count * bulge_fraction)
 	# A 0.85 * v_circ orbit dips to r_p = 0.565 * r, so keep the bulge floor above
 	# twice the horizon or the black hole eats the bulge on the first pass.
 	var bulge_min := maxf(solver.disk_r_min * 0.65, _horizon() * 2.0)

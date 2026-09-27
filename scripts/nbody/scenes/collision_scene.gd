@@ -1,20 +1,21 @@
 class_name GalaxyCollisionScene
 extends NBodySceneDef
-## Two galaxies (a central mass + test-particle disk each) on a bound collision
-## course. The two cores are integrated on the CPU in update_attractors() —
-## leapfrog on the 2-body problem — while their disks tidally shred on the GPU.
+## Two galaxies (a central mass + test-particle disk each) on an encounter
+## course. Depending on approach speed, the two cores are bound or unbound.
 
-const CORE_SOFT2 := 1.0
 const DISK_R_MIN := 3.0
 
 var mass_a := 1.0
 var mass_b := 0.6
 var start_distance := 90.0
 var impact_offset := 16.0
-var approach_speed := 0.14
 var disk_a := 26.0
 var disk_b := 18.0
 var tilt_b := 0.7
+var core_softening := 1.0
+var disk_thickness := 0.5
+var dispersion := 0.04
+var approach_speed_ratio := 0.75
 
 var _pos_a := Vector3.ZERO
 var _vel_a := Vector3.ZERO
@@ -27,8 +28,13 @@ func title() -> String:
 	return "Galaxy collision"
 
 
-func view_distance() -> float:
-	return start_distance * 1.6
+func view_distance(_solver: NBodySolver) -> float:
+	var total_mass := mass_a + mass_b
+	var relative_position := Vector3(start_distance, 0.0, impact_offset)
+	var center_a := relative_position * (mass_b / total_mass)
+	var center_b := relative_position * (mass_a / total_mass)
+	var outer_radius := maxf(center_a.length() + disk_a, center_b.length() + disk_b)
+	return maxf(70.0, outer_radius * 1.8)
 
 
 func params() -> Array:
@@ -37,33 +43,49 @@ func params() -> Array:
 		{key = "mass_b", label = "Mass B", min = 0.3, max = 4.0},
 		{key = "start_distance", label = "Start distance", min = 40.0, max = 200.0},
 		{key = "impact_offset", label = "Impact offset", min = 0.0, max = 60.0},
-		{key = "approach_speed", label = "Approach speed", min = 0.0, max = 0.5},
 		{key = "disk_a", label = "Disk A radius", min = 8.0, max = 60.0},
 		{key = "disk_b", label = "Disk B radius", min = 8.0, max = 60.0},
 		{key = "tilt_b", label = "Tilt B", min = 0.0, max = 1.5},
 	]
 
 
+func advanced_params() -> Array:
+	return [
+		{key = "approach_speed_ratio", label = "Speed / escape speed", min = 0.0, max = 2.0},
+		{key = "core_softening", label = "Core softening", min = 0.05, max = 4.0},
+		{key = "disk_thickness", label = "Disk thickness", min = 0.0, max = 3.0},
+		{key = "dispersion", label = "Disk dispersion", min = 0.0, max = 0.2},
+	]
+
+
+func normalize_params() -> void:
+	approach_speed_ratio = clampf(approach_speed_ratio, 0.0, 2.0)
+	core_softening = clampf(core_softening, 0.05, 4.0)
+	disk_thickness = clampf(disk_thickness, 0.0, 3.0)
+	dispersion = clampf(dispersion, 0.0, 0.2)
+
+
 func apply_defaults(solver: NBodySolver) -> void:
-	solver.gravity_constant = 1.0
 	solver.softening = 0.15
 	solver.attractor_softening = 0.05
 	# Respawn ring lives on galaxy A's disk (the shader respawns around attractor 0).
 	solver.disk_r_min = DISK_R_MIN
 	solver.disk_r_max = disk_a
-	solver.disk_thickness = 0.5
-	solver.dispersion = 0.04
+	solver.disk_thickness = disk_thickness
+	solver.dispersion = dispersion
 	solver.disk_mass = 0.0
 	solver.escape_radius = start_distance * 3.0
-	solver.v_ref = sqrt(mass_a / DISK_R_MIN)
+	solver.v_ref = sqrt(solver.gravity_constant * mass_a / DISK_R_MIN)
 
 
-func attractors() -> Array:
+func attractors(solver: NBodySolver) -> Array:
 	# Barycentric frame: rel = pos_b - pos_a starts at (d, 0, offset), closing
-	# along -x. Bound when approach_speed < escape speed, so the cores dance.
+	# along -x. The configured speed is relative to the softened escape speed.
 	var m := mass_a + mass_b
 	var rel_pos := Vector3(start_distance, 0.0, impact_offset)
-	var rel_vel := Vector3(-approach_speed, 0.0, 0.0)
+	var separation := sqrt(rel_pos.length_squared() + core_softening * core_softening)
+	var escape_speed := sqrt(2.0 * solver.gravity_constant * m / separation)
+	var rel_vel := Vector3(-approach_speed_ratio * escape_speed, 0.0, 0.0)
 	_pos_a = -rel_pos * (mass_b / m)
 	_pos_b = rel_pos * (mass_a / m)
 	_vel_a = -rel_vel * (mass_b / m)
@@ -75,22 +97,24 @@ func attractors() -> Array:
 	]
 
 
-func update_attractors(t: float, list: Array) -> bool:
+func update_attractors(t: float, list: Array, solver: NBodySolver) -> bool:
 	var dt := t - _last_t
 	_last_t = t
 	if dt <= 0.0:
 		return false
-	# Substep the CPU leapfrog so a close core passage stays stable.
+	# Substep CPU DKD so a close core passage stays stable.
 	var steps := maxi(1, ceili(dt / 0.02))
 	var h := dt / steps
 	for _s in steps:
+		_pos_a += _vel_a * (0.5 * h)
+		_pos_b += _vel_b * (0.5 * h)
 		var r := _pos_b - _pos_a
-		var d2 := r.length_squared() + CORE_SOFT2
-		var acc := r / (d2 * sqrt(d2))
+		var d2 := r.length_squared() + core_softening * core_softening
+		var acc := r * (solver.gravity_constant / (d2 * sqrt(d2)))
 		_vel_a += acc * (mass_b * h)
 		_vel_b -= acc * (mass_a * h)
-		_pos_a += _vel_a * h
-		_pos_b += _vel_b * h
+		_pos_a += _vel_a * (0.5 * h)
+		_pos_b += _vel_b * (0.5 * h)
 	list[0].pos = _pos_a
 	list[0].vel = _vel_a
 	list[1].pos = _pos_b
@@ -98,9 +122,9 @@ func update_attractors(t: float, list: Array) -> bool:
 	return true
 
 
-func seed(count: int, _solver: NBodySolver) -> Dictionary:
+func seed(count: int, solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0xC0111DE
+	rng.seed = 0xC0111DE ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
@@ -117,14 +141,14 @@ func seed(count: int, _solver: NBodySolver) -> Dictionary:
 		var r := lerpf(DISK_R_MIN, r_out, rng.randf())
 		var ang := rng.randf() * TAU
 		var tz := rng.randf() * 2.0 - 1.0
-		var h := 0.5 * (0.3 + 0.7 * r / r_out)
+		var h := disk_thickness * (0.3 + 0.7 * r / r_out)
 		var p := Vector3(r * cos(ang), tz * tz * tz * h, r * sin(ang))
-		var v := Vector3(-sin(ang), 0.0, cos(ang)) * sqrt(m_core / r)
+		var v := Vector3(-sin(ang), 0.0, cos(ang)) * sqrt(solver.gravity_constant * m_core / r)
 		if not in_a:
 			p = basis_b * p
 			v = basis_b * v
 		var speed := v.length()
-		v += Vector3(rng.randfn(), rng.randfn() * 0.3, rng.randfn()) * (0.04 * speed)
+		v += Vector3(rng.randfn(), rng.randfn() * 0.3, rng.randfn()) * (dispersion * speed)
 		p += center
 		v += center_v
 

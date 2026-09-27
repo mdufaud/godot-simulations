@@ -60,4 +60,4 @@ mouse_filter = 2
 theme = ExtResource("2_theme")
 
 [node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]
-title = "🌌 N-Body Galaxy"
+title = "🌌 N-Body Gallery"

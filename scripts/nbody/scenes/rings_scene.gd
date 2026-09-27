@@ -10,22 +10,15 @@ var ring_outer := 16.0
 var moon_mass := 0.006
 var moon_orbit := 10.5
 var thickness := 0.05
+var outer_moon_ratio := 1.18
 
 
 func title() -> String:
 	return "Planet rings + moons"
 
 
-func star_size() -> float:
-	return 0.035
-
-
-func brightness() -> float:
-	return 0.3
-
-
-func view_distance() -> float:
-	return ring_outer * 3.0
+func view_distance(_solver: NBodySolver) -> float:
+	return maxf(24.0, ring_outer * outer_moon_ratio * 1.35)
 
 
 func params() -> Array:
@@ -39,40 +32,52 @@ func params() -> Array:
 	]
 
 
+func advanced_params() -> Array:
+	return [{key = "outer_moon_ratio", label = "Outer moon / ring", min = 1.05, max = 1.5}]
+
+
+func normalize_params() -> void:
+	ring_inner = clampf(ring_inner, 3.0, 20.0)
+	ring_outer = clampf(ring_outer, 8.0, 40.0)
+	ring_inner = minf(ring_inner, ring_outer - 1.0)
+	moon_orbit = clampf(moon_orbit, 5.0, 30.0)
+	moon_orbit = maxf(moon_orbit, ring_inner * 0.45 + 0.31)
+	outer_moon_ratio = clampf(outer_moon_ratio, 1.05, 1.5)
+
+
 func apply_defaults(solver: NBodySolver) -> void:
-	solver.gravity_constant = 1.0
 	# Rings are cold: tiny softening keeps moon wakes sharp.
 	solver.softening = 0.05
 	solver.attractor_softening = 0.03
 	solver.disk_r_min = ring_inner
-	solver.disk_r_max = maxf(ring_outer, ring_inner + 1.0)
+	solver.disk_r_max = ring_outer
 	solver.disk_thickness = thickness
 	solver.dispersion = 0.004
 	solver.disk_mass = 0.0
 	solver.escape_radius = solver.disk_r_max * 6.0
-	solver.v_ref = sqrt(planet_mass / ring_inner)
+	solver.v_ref = sqrt(solver.gravity_constant * planet_mass / ring_inner)
 
 
-func attractors() -> Array:
+func attractors(solver: NBodySolver) -> Array:
 	var list := [
 		{pos = Vector3.ZERO, vel = Vector3.ZERO, mass = planet_mass, radius = ring_inner * 0.45},
 	]
-	for m in _moons():
+	for m in _moons(0.0, solver):
 		list.append({pos = m.pos, vel = m.vel, mass = moon_mass, radius = 0.3})
 	return list
 
 
-func update_attractors(t: float, list: Array) -> bool:
-	var moons := _moons(t)
+func update_attractors(t: float, list: Array, solver: NBodySolver) -> bool:
+	var moons := _moons(t, solver)
 	for k in moons.size():
 		list[k + 1].pos = moons[k].pos
 		list[k + 1].vel = moons[k].vel
 	return true
 
 
-func seed(count: int, solver: NBodySolver) -> Dictionary:
+func seed(count: int, solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0x51A7031
+	rng.seed = 0x51A7031 ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
@@ -82,7 +87,8 @@ func seed(count: int, solver: NBodySolver) -> Dictionary:
 		var r := lerpf(solver.disk_r_min, solver.disk_r_max, rng.randf())
 		var ang := rng.randf() * TAU
 		var p := Vector3(r * cos(ang), (rng.randf() * 2.0 - 1.0) * thickness, r * sin(ang))
-		var v := Vector3(-sin(ang), 0.0, cos(ang)) * sqrt(planet_mass / r)
+		var v := Vector3(-sin(ang), 0.0, cos(ang)) \
+			* sqrt(solver.gravity_constant * planet_mass / r)
 		var speed := v.length()
 		v += Vector3(rng.randfn(), rng.randfn() * 0.2, rng.randfn()) * (solver.dispersion * speed)
 
@@ -99,12 +105,12 @@ func seed(count: int, solver: NBodySolver) -> Dictionary:
 
 
 # One moon at moon_orbit, a second shepherd just past the ring edge, opposite phase.
-func _moons(t: float = 0.0) -> Array:
+func _moons(t: float, solver: NBodySolver) -> Array:
 	var out := []
-	var radii := [moon_orbit, ring_outer * 1.18]
+	var radii := [moon_orbit, ring_outer * outer_moon_ratio]
 	for k in radii.size():
 		var r: float = radii[k]
-		var omega := sqrt(planet_mass / pow(r, 3.0))
+		var omega := sqrt(solver.gravity_constant * planet_mass / pow(r, 3.0))
 		var ang := omega * t + PI * k
 		out.append({
 			pos = Vector3(r * cos(ang), 0.0, r * sin(ang)),

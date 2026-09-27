@@ -13,6 +13,9 @@ resources/*
 !resources/generated/**
 !resources/ambient_fluid/
 !resources/ambient_fluid/**
+!resources/nbody/
+!resources/nbody/presets/
+!resources/nbody/presets/*.tres
 !resources/ocean/
 resources/ocean/*
 !resources/ocean/foam_detail.png

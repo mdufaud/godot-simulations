@@ -32,7 +32,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | SSR Physics Demo | Screen-space reflections + Jolt rigid bodies |
 | FFT Ocean | Tessendorf FFT — JONSWAP/TMA spectrum, Stockham IFFT, 3 cascades, Jacobian foam, clipmap mesh |
 | Fire Simulation | Sparse GPU Arrhenius combustion grid + volume raymarch |
-| N-Body Galaxy | GPU Verlet integration + additive point sprites |
+| N-Body Gallery | GPU DKD leapfrog gravity, test particles and analytic effects + additive point sprites |
 | Grass Simulation | Multimesh LOD + wind |
 | Parallax Mapping | Cone-relaxed parallax occlusion + per-light self-shadowing |
 | Fluid Simulation | 65K-particle GPU PBF/SPH fluid + screen-space surfacing |

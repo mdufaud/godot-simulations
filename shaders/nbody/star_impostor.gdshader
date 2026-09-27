@@ -9,9 +9,12 @@ uniform int tex_width = 512;
 uniform float sprite_size = 0.09;
 uniform float min_pixel_size = 1.2;
 uniform float brightness = 1.0;
+uniform vec3 seed_tint : source_color = vec3(1.0);
 uniform vec3 cold_color : source_color = vec3(1.0, 0.32, 0.06);
 uniform vec3 warm_color : source_color = vec3(1.0, 0.88, 0.68);
 uniform vec3 hot_color : source_color = vec3(0.52, 0.72, 1.0);
+uniform bool firework_mode = false;
+uniform int firework_groups = 5;
 
 varying vec2 quad_uv;
 varying vec3 star_color;
@@ -45,7 +48,22 @@ void vertex() {
 
 	vec3 c = mix(cold_color, warm_color, smoothstep(0.10, 0.55, speed));
 	c = mix(c, hot_color, smoothstep(0.55, 1.10, speed));
-	star_color = c * brightness * (0.7 + 0.6 * jitter);
+	if (firework_mode) {
+		int group = INSTANCE_ID % max(firework_groups, 1);
+		if (group % 5 == 0) { c = vec3(1.0, 0.55, 0.13); }
+		if (group % 5 == 1) { c = vec3(0.25, 0.65, 1.0); }
+		if (group % 5 == 2) { c = vec3(1.0, 0.22, 0.48); }
+		if (group % 5 == 3) { c = vec3(0.35, 1.0, 0.45); }
+		if (group % 5 == 4) { c = vec3(0.95, 0.8, 1.0); }
+		c = mix(vec3(1.0, 0.94, 0.72), c, 0.75);
+	}
+	star_color = c * seed_tint * brightness * (0.7 + 0.6 * jitter);
+	if (firework_mode) {
+		star_color *= speed * 3.5;
+		if (speed <= 0.001) {
+			POSITION = vec4(2.0, 2.0, 2.0, 1.0);
+		}
+	}
 }
 
 void fragment() {
@@ -54,7 +72,8 @@ void fragment() {
 		discard;
 	}
 	// Gaussian core, forced to zero at the quad edge so sprites don't show seams.
-	float falloff = exp(-5.0 * r2) - exp(-5.0);
+	float sharpness = firework_mode ? 2.5 : 5.0;
+	float falloff = exp(-sharpness * r2) - exp(-sharpness);
 	ALBEDO = star_color * falloff;
 	ALPHA = 1.0;
 }

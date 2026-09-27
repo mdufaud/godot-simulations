@@ -4,60 +4,83 @@
 // round-trip, one dispatch per frame instead of 2 * substeps, and the position
 // texture is written once.
 
-// Analytic firework: no integration at all. Every star's position is a pure
-// function of (index, sim time), so a whole shell bursts in perfect sync,
-// decelerates under linear air drag, droops, fades and relaunches — the same
-// state machine per particle can never smear into a steady-state fountain.
-// Linear-drag ballistics: v(t) = v0*e^-kt + (g/k)(1-e^-kt),
-// p(t) = p0 + v0*(1-e^-kt)/k + (g/k)(t - (1-e^-kt)/k).
 void firework(uint i, float mass, float color_seed) {
 	float t = params.aux1.w;
 	float period = max(params.aux1.y, 0.5);
 	float spread = params.aux1.z;
-	float speed_min = params.aux2.x;
 	float grav = params.aux2.y;
 	float speed_max = params.aux2.z;
 	uint groups = uint(max(params.aux2.w, 1.0));
-
-	// Desynchronize the rockets: each group gets its own period AND phase, so
-	// the show never settles into a metronome beat.
 	uint gi = i % groups;
-	uint hs = pcg(gi + 1u);
-	float g_period = period * (0.55 + 0.9 * rnd(hs));
+	uint local = i / groups;
+	uint seed_mix = uint(params.misc.w);
+	seed_mix = seed_mix == 0u ? 0u : pcg(seed_mix);
+	uint hs = pcg((gi + 1u) ^ seed_mix);
+	float g_period = period * (0.75 + 0.5 * rnd(hs));
 	float local_t = t + rnd(hs) * g_period;
 	uint cycle = uint(local_t / g_period);
 	float phase = local_t - float(cycle) * g_period;
 
-	// Per-burst group values, re-rolled each cycle. Shell size is heavily skewed:
-	// pow(u, 2.4) makes most bursts small crackles and the occasional one huge.
-	uint sg = pcg(gi ^ pcg(cycle * 2654435761u));
+	uint sg = pcg(gi ^ pcg(cycle * 2654435761u) ^ seed_mix);
 	vec3 launch = vec3(
 		(rnd(sg) - 0.5) * 2.0 * spread,
-		mix(spread * 0.3, spread * 1.1, rnd(sg)),
-		(rnd(sg) - 0.5) * 2.0 * spread);
-	float size_roll = pow(rnd(sg), 2.4);
-	float shell_speed = mix(speed_min, speed_max, size_roll);
-	// Small shells also light fewer of their stars — a firecracker is sparse,
-	// a king shell is dense, even though the group sizes are fixed.
-	float visible_frac = mix(0.15, 1.0, size_roll);
+		0.0,
+		(rnd(sg) - 0.5) * 1.2 * spread);
+	float size_roll = rnd(sg);
+	vec3 apex = launch + vec3((rnd(sg) - 0.5) * spread * 0.35,
+		spread * (2.2 + 0.4 * size_roll),
+		(rnd(sg) - 0.5) * spread * 0.35);
+	float rise = g_period * 0.38;
+	float glow = 0.0;
+	vec3 p = apex;
+	vec3 v = vec3(0.0);
 
-	// Per-star direction on the shell, re-rolled each cycle.
-	uint sp = pcg(i ^ pcg(cycle * 747796405u) ^ 0xA5A5u);
-	vec3 dir = sphere_dir(sp);
-	float speed = shell_speed * (0.92 + 0.16 * rnd(sp));
-	float vis = rnd(sp) < visible_frac ? 1.0 : 0.0;
-
-	const float DRAG = 1.1;
-	float e = 1.0 - exp(-DRAG * phase);
-	vec3 g = vec3(0.0, -grav, 0.0);
-	vec3 p = launch + dir * (speed * e / DRAG) + g * ((phase - e / DRAG) / DRAG);
-	vec3 v = dir * (speed * (1.0 - e)) + g * (e / DRAG);
-
-	// Quadratic die-off plus per-frame flicker: burst opens blue-white (ramp top),
-	// cools through orange, sparkles, and goes fully dark before the next shot.
-	float life = clamp(1.0 - phase / g_period, 0.0, 1.0);
-	uint sf = pcg(i ^ (uint(params.counts.w) * 1013904223u));
-	float glow = life * life * (0.6 + 0.8 * rnd(sf)) * 1.4 * vis;
+	if (phase < rise) {
+		p = launch;
+		if (local < 96u) {
+			uint sp = pcg(i ^ pcg(cycle * 747796405u) ^ seed_mix);
+			float lag = local < 8u ? 0.12 * rnd(sp)
+				: 0.12 + float(local - 8u) * (3.2 / 88.0);
+			float age = max(phase - lag, 0.0);
+			float u = clamp(age / rise, 0.0, 1.0);
+			p = mix(launch, apex, u * u);
+			p.y = apex.y * (2.0 * u - u * u);
+			p.xz += (vec2(rnd(sp), rnd(sp)) - 0.5) * (local < 8u ? 0.35 : 0.9);
+			glow = phase > lag ? (local < 8u ? 2.4 : 1.0 * (1.0 - lag / 4.0)) : 0.0;
+			v = (apex - launch) * (2.0 * (1.0 - u) / rise);
+		}
+	} else {
+		uint capacity = (uint(params.counts.x) + groups - 1u - gi) / groups;
+		uint star_count = min(uint(mix(220.0, 340.0, size_roll)),
+			max(capacity / 6u, 1u));
+		uint star = local / 6u;
+		uint segment = local % 6u;
+		float age = phase - rise;
+		if (star < star_count && age < min(g_period * 0.54, 23.0)) {
+			uint sp = pcg(star ^ pcg(cycle * 747796405u) ^
+				pcg(gi * 2891336453u) ^ seed_mix);
+			vec3 dir = sphere_dir(sp);
+			if (rnd(sp) < 0.72) {
+				dir.z *= 0.28;
+				dir = normalize(dir);
+			}
+			float speed = speed_max * mix(0.68, 1.14, size_roll)
+				* mix(0.78, 1.22, rnd(sp));
+			float duration = min(g_period * mix(0.40, 0.53, rnd(sp)), 23.0);
+			float lag = float(segment) * 0.18;
+			float sample_age = max(age - lag, 0.0);
+			float drag = 0.04 + 0.08 * params.beam.w;
+			float distance = log(1.0 + drag * speed * sample_age) / drag
+				* (1.0 - 0.055 * float(segment));
+			p = apex + dir * distance;
+			p.y -= 0.045 * grav * sample_age * sample_age;
+			v = dir * (speed / (1.0 + drag * speed * sample_age));
+			v.y -= 0.09 * grav * sample_age;
+			float life = clamp(1.0 - age / duration, 0.0, 1.0);
+			float trail = segment == 0u ? 1.0 : exp(-float(segment) * 0.48);
+			glow = age >= lag ? 2.2 * pow(life, 0.65) * trail : 0.0;
+		}
+	}
 
 	positions.data[i] = vec4(p, mass);
 	velocities.data[i] = vec4(v, color_seed);
@@ -85,22 +108,34 @@ void main() {
 	bool vortex = params.misc.z == 1;
 
 	for (int s = 0; s < params.misc.x; s++) {
+		int sample_start = 2 * s;
+		int sample_mid = sample_start + 1;
+		int sample_end = sample_start + 2;
+		vec3 p_start = p;
 		vec3 a;
 		if (vortex) {
-			a = vortex_force(p, v);
+			a = vortex_force(p, v, params.aux1.w + float(s) * params.sim.x);
+			v += a * params.sim.x;
+			p += v * params.sim.x;
 		} else {
-			a = params.sim.y * (attractor_pull(p) + smooth_disk_pull(p));
+			vec3 p_half = p + v * (0.5 * params.sim.x);
+			a = params.sim.y * (attractor_pull(p_half, sample_mid)
+				+ smooth_disk_pull(p_half, sample_mid));
+			v += a * params.sim.x;
+			p = p_half + v * (0.5 * params.sim.x);
 		}
-		v += a * params.sim.x;
-		p += v * params.sim.x;
 
 		// Vortex loses particles out the top and the sides; everything else to
 		// the attractors or past the escape radius.
 		bool out_of_field = vortex
 			? (abs(p.y) > params.disk.z * 1.5 || dot(p.xz, p.xz) > esc2)
-			: (swallowed(p) || dot(p, p) > esc2);
+			: (swallowed_segment(p_start, p, sample_start, sample_end)
+				|| dot(p, p) > esc2);
 		if (out_of_field) {
-			respawn(i, frame * 4u + uint(s), p, v);
+			uint quantum_substeps = uint(max(params.aux1.x, 1.0));
+			uint quantum = uint(s) / quantum_substeps;
+			uint local_substep = uint(s) % quantum_substeps;
+			respawn(i, (frame + quantum) * 33u + local_substep, sample_end, p, v);
 		}
 	}
 	positions.data[i] = vec4(p, pw.w);

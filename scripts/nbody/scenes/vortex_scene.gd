@@ -11,22 +11,15 @@ var updraft := 2.5
 var turbulence := 2.5
 var funnel_radius := 14.0
 var height := 70.0
+var downdraft_ratio := 0.6
 
 
 func title() -> String:
 	return "Tornado vortex"
 
 
-func star_size() -> float:
-	return 0.05
-
-
-func brightness() -> float:
-	return 0.45
-
-
-func view_distance() -> float:
-	return height * 2.4
+func view_distance(_solver: NBodySolver) -> float:
+	return height * 1.8
 
 
 func params() -> Array:
@@ -39,12 +32,21 @@ func params() -> Array:
 	]
 
 
+func advanced_params() -> Array:
+	return [{key = "downdraft_ratio", label = "Downdraft ratio", min = 0.0, max = 1.5}]
+
+
+func normalize_params() -> void:
+	downdraft_ratio = clampf(downdraft_ratio, 0.0, 1.5)
+
+
 func apply_defaults(solver: NBodySolver) -> void:
 	solver.force_mode = 1
 	solver.respawn_mode = 2
 	solver.vortex_updraft_mps = updraft
 	solver.vortex_swirl_mps = swirl_speed
 	solver.vortex_turbulence_mps2 = turbulence
+	solver.vortex_downdraft_ratio = downdraft_ratio
 	# Funnel geometry rides the disk slots (see nbody_common.comp Params).
 	solver.disk_r_min = funnel_radius * 0.15
 	solver.disk_r_max = funnel_radius
@@ -55,9 +57,9 @@ func apply_defaults(solver: NBodySolver) -> void:
 
 # Seed the funnel wall directly: without this the first seconds are a formless
 # cloud snapping onto the cone.
-func seed(count: int, solver: NBodySolver) -> Dictionary:
+func seed(count: int, solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0x707BADE
+	rng.seed = 0x707BADE ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
@@ -84,3 +86,10 @@ func seed(count: int, solver: NBodySolver) -> Dictionary:
 		vel[i * 4 + 3] = rng.randf()
 
 	return {positions = pos, velocities = vel}
+
+
+func render_bounds(solver: NBodySolver, _sources: Array) -> AABB:
+	var extent := Vector3(solver.escape_radius, solver.disk_thickness * 1.5,
+		solver.escape_radius)
+	extent += Vector3.ONE * maxf(2.0, solver.dt * maxf(2.0 * solver.v_ref, 1.0))
+	return AABB(-extent, extent * 2.0)

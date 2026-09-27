@@ -5,16 +5,31 @@ void main() {
 	}
 	vec4 pw = positions.data[i];
 	vec4 vw = velocities.data[i];
+	int meta = params.misc.w;
+	int substep = (meta & 0x3f) >> 1;
+	bool finish_step = (meta & 1) != 0;
+	float half_dt = 0.5 * params.sim.x;
+	if (!finish_step) {
+		positions.data[i] = vec4(pw.xyz + vw.xyz * half_dt, pw.w);
+		return;
+	}
 
-	// Leapfrog: the half kick closing a substep and the one opening the next use
-	// the same acceleration, so they merge into a single full kick. Same
-	// trajectory as velocity Verlet, one less pass over velocities and accels.
+	// DKD leapfrog: force_tiled sampled the acceleration at the half-drifted
+	// positions. Finish with a full kick and the second half drift.
 	vec3 v = vw.xyz + accels.data[i].xyz * params.sim.x;
-	vec3 p = pw.xyz + v * params.sim.x;
+	vec3 p = pw.xyz + v * half_dt;
+	vec3 p_start = pw.xyz - vw.xyz * half_dt;
 
 	float esc = params.field.x;
-	if (swallowed(p) || dot(p, p) > esc * esc) {
-		respawn(i, uint(params.counts.w), p, v);
+	int sample_start = 2 * substep;
+	int sample_end = sample_start + 2;
+	if (swallowed_segment(p_start, p, sample_start, sample_end)
+			|| dot(p, p) > esc * esc) {
+		int quantum_substeps = max(int(params.aux1.x), 1);
+		uint quantum = uint(substep / quantum_substeps);
+		uint local_substep = uint(substep % quantum_substeps);
+		respawn(i, (uint(params.counts.w) + quantum) * 33u + local_substep,
+			sample_end, p, v);
 	}
 	positions.data[i] = vec4(p, pw.w);
 	velocities.data[i] = vec4(v, vw.w);

@@ -668,10 +668,13 @@ func add_progress_bar(label_text: String, max_val: float) -> ProgressBar:
 ## Begin a hideable group. Widgets added after this land inside the returned
 ## VBoxContainer until end_group(). Toggle the container's .visible to show/hide a
 ## whole param group (used for per-fractal / per-solver parameter scoping).
-func add_group() -> VBoxContainer:
+func add_group(parent_override: Control = null) -> VBoxContainer:
 	var group := VBoxContainer.new()
 	group.add_theme_constant_override("separation", 6)
-	_host().add_child(group)
+	if parent_override == null:
+		_host().add_child(group)
+	else:
+		parent_override.add_child(group)
 	_current = group
 	return group
 

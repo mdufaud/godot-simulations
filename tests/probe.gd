@@ -138,6 +138,464 @@ func _boot_frames(count: int) -> void:
 		await process_frame
 
 
+func _run_nbody_numeric() -> void:
+	await _boot_frames(2)
+	var solver := NBodySolver.new()
+	solver.particle_count = 1
+	solver.tex_width = 1
+	solver.substeps = 1
+	solver.dt = 0.1
+	solver.gravity_constant = 1.0
+	solver.softening = 0.1
+	solver.attractor_softening = 0.04
+	solver.disk_mass = 0.0
+	solver.escape_radius = 100.0
+	solver.config.self_gravity_max_particles = 2
+	solver.set_seed(PackedFloat32Array([2.0, 0.0, 0.0, 0.0]),
+		PackedFloat32Array([0.0, 1.0, 0.0, 0.0]))
+	solver.set_attractors([{
+		pos = Vector3.ZERO, vel = Vector3.ZERO, mass = 0.5, radius = 0.2,
+	}])
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: solver failed to initialize")
+		await _nbody_free_render(solver)
+		_finish("nbody_numeric")
+		return
+	var state := await _nbody_sample(solver)
+	_check(state.has("texture") and state.texture.size() == 4
+		and is_equal_approx(state.texture[0], 2.0),
+		"nbody_numeric: init did not publish the seed position texture")
+	if state.has("positions"):
+		_check(is_equal_approx(state.positions[0], 2.0),
+			"nbody_numeric: init changed the seeded x position")
+
+	var static_source: Array = [{
+		pos = Vector3.ZERO, vel = Vector3.ZERO, mass = 0.5, radius = 0.2,
+	}]
+	var expected_half := Vector3(2.0, 0.05, 0.0)
+	var pull := -expected_half * (0.5 / pow(expected_half.length_squared()
+		+ solver.attractor_softening * solver.attractor_softening, 1.5))
+	var expected_velocity := Vector3(0.0, 1.0, 0.0) + pull * 0.1
+	var expected_position := expected_half + expected_velocity * 0.05
+	await _nbody_step(solver, 0.1, [static_source, static_source, static_source])
+	state = await _nbody_sample(solver)
+	if state.has("positions") and state.has("velocities"):
+		var actual_position := Vector3(state.positions[0], state.positions[1],
+			state.positions[2])
+		var actual_velocity := Vector3(state.velocities[0], state.velocities[1],
+			state.velocities[2])
+		_check(actual_position.distance_to(expected_position) < 1e-5,
+			"nbody_numeric: test-particle DKD position differs from midpoint-force result")
+		_check(actual_velocity.distance_to(expected_velocity) < 1e-5,
+			"nbody_numeric: test-particle DKD velocity differs from midpoint-force result")
+
+	await _nbody_free_render(solver)
+	solver.set_seed(PackedFloat32Array([0.0, 0.0, 0.0, 0.0]),
+		PackedFloat32Array([0.0, 0.0, 0.0, 0.0]))
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: moving-source solver failed to initialize")
+		await _nbody_free_render(solver)
+		_finish("nbody_numeric")
+		return
+	var moving_source: Array = [
+		{pos = Vector3(-2.0, 0.0, 0.0), vel = Vector3(4.0, 0.0, 0.0), mass = 0.0, radius = 0.5},
+		{pos = Vector3.ZERO, vel = Vector3(4.0, 0.0, 0.0), mass = 0.0, radius = 0.5},
+		{pos = Vector3(2.0, 0.0, 0.0), vel = Vector3(4.0, 0.0, 0.0), mass = 0.0, radius = 0.5},
+	]
+	solver.attractor_softening = 0.04
+	var moving_timeline: Array = [[moving_source[0]], [moving_source[1]], [moving_source[2]]]
+	await _nbody_step(solver, 1.0, moving_timeline)
+	state = await _nbody_sample(solver)
+	if state.has("positions"):
+		var absorbed_position := Vector3(state.positions[0], state.positions[1],
+			state.positions[2])
+		_check(absorbed_position.length() > 1.0,
+			"nbody_numeric: particle crossed a moving absorb sphere without respawning")
+
+	await _nbody_free_render(solver)
+	solver.particle_count = 2
+	solver.tex_width = 2
+	solver.dt = 0.01
+	solver.self_gravity = true
+	solver.set_attractors([])
+	solver.set_seed(PackedFloat32Array([-1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
+		PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+	var pair_pull: float = 2.0 / pow(4.0 + solver.softening * solver.softening, 1.5)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: self-gravity solver failed to initialize")
+	else:
+		var empty_source: Array = []
+		await _nbody_step(solver, 0.01, [empty_source, empty_source, empty_source])
+		state = await _nbody_sample(solver)
+		if state.has("positions") and state.has("velocities"):
+			var expected_vx := pair_pull * 0.01
+			var expected_x := -1.0 + expected_vx * 0.005
+			_check(absf(state.velocities[0] - expected_vx) < 1e-6
+				and absf(state.positions[0] - expected_x) < 1e-6,
+				"nbody_numeric: pair-force barrier/DKD result differs from two-body reference")
+	await _nbody_free_render(solver)
+	solver.gravity_constant = 2.0
+	solver.set_seed(
+		PackedFloat32Array([-1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
+		PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: scaled-G pair solver failed to initialize")
+	else:
+		await _nbody_step(solver, 0.01, [[], [], []])
+		state = await _nbody_sample(solver)
+		if state.has("positions") and state.has("velocities"):
+			var expected_scaled_vx := pair_pull * 2.0 * 0.01
+			var expected_scaled_x := -1.0 + expected_scaled_vx * 0.005
+			_check(absf(state.velocities[0] - expected_scaled_vx) < 1e-6
+				and absf(state.positions[0] - expected_scaled_x) < 1e-6,
+				"nbody_numeric: pair-force integration did not scale with G")
+	await _nbody_free_render(solver)
+
+	# With Plummer softening the self term has r = 0, so it contributes no force.
+	solver.particle_count = 1
+	solver.tex_width = 1
+	solver.substeps = 1
+	solver.dt = 0.1
+	solver.softening = 0.1
+	solver.gravity_constant = 2.0
+	solver.escape_radius = 100.0
+	solver.disk_mass = 0.0
+	solver.self_gravity = true
+	solver.set_attractors([])
+	solver.set_seed(PackedFloat32Array([5.0, 0.0, 0.0, 1.0]),
+		PackedFloat32Array([1.0, 2.0, 0.0, 0.0]))
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: self-force solver failed to initialize")
+	else:
+		await _nbody_step(solver, 0.1, [[], [], []])
+		state = await _nbody_sample(solver)
+		if state.has("positions") and state.has("velocities"):
+			_check(absf(state.positions[0] - 5.1) < 1e-6
+				and absf(state.velocities[0] - 1.0) < 1e-6
+				and absf(state.velocities[1] - 2.0) < 1e-6,
+				"nbody_numeric: softened one-particle self-force must be zero")
+	await _nbody_free_render(solver)
+
+	# Pairwise re-emissions use the initial frame seed and the substep salt. Replays
+	# from the same seed match, while the second swallowed substep gets a new sample.
+	solver.substeps = 2
+	solver.dt = 0.001
+	solver.gravity_constant = 1.0
+	solver.random_seed = 7
+	solver.respawn_mode = 0
+	solver.disk_r_min = 2.0
+	solver.disk_r_max = 4.0
+	solver.disk_thickness = 0.3
+	solver.dispersion = 0.0
+	solver.escape_radius = 1000.0
+	var absorber: Dictionary = {
+		pos = Vector3.ZERO, vel = Vector3.ZERO, mass = 0.0, radius = 100.0,
+	}
+	solver.set_attractors([absorber])
+	var respawn_seed_pos := PackedFloat32Array([0.0, 0.0, 0.0, 1.0])
+	var respawn_seed_vel := PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
+	solver.set_seed(respawn_seed_pos, respawn_seed_vel)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	var pair_respawn_two := PackedFloat32Array()
+	var pair_respawn_replay := PackedFloat32Array()
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: pairwise respawn solver failed to initialize")
+	else:
+		await _nbody_step(solver, 0.001, [[absorber], [absorber], [absorber],
+			[absorber], [absorber]])
+		state = await _nbody_sample(solver)
+		pair_respawn_two = state.get("positions", PackedFloat32Array())
+	await _nbody_free_render(solver)
+	solver.set_seed(respawn_seed_pos, respawn_seed_vel)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: pairwise replay solver failed to initialize")
+	else:
+		await _nbody_step(solver, 0.001, [[absorber], [absorber], [absorber],
+			[absorber], [absorber]])
+		state = await _nbody_sample(solver)
+		pair_respawn_replay = state.get("positions", PackedFloat32Array())
+		_check(pair_respawn_two == pair_respawn_replay,
+			"nbody_numeric: same frame seed must reproduce pairwise respawns")
+	await _nbody_free_render(solver)
+	solver.substeps = 1
+	solver.set_seed(respawn_seed_pos, respawn_seed_vel)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: single-substep respawn solver failed to initialize")
+	else:
+		await _nbody_step(solver, 0.001, [[absorber], [absorber], [absorber]])
+		state = await _nbody_sample(solver)
+		var pair_respawn_one: PackedFloat32Array = state.get(
+			"positions", PackedFloat32Array())
+		_check(pair_respawn_two.size() == 4 and pair_respawn_one.size() == 4
+			and Vector3(pair_respawn_two[0], pair_respawn_two[1], pair_respawn_two[2])
+				.distance_to(Vector3(pair_respawn_one[0], pair_respawn_one[1],
+					pair_respawn_one[2])) > 1e-4,
+			"nbody_numeric: pairwise respawns in successive substeps must use distinct salts")
+	await _nbody_free_render(solver)
+
+	solver.substeps = NBodySolver.MAX_SUBSTEPS
+	solver.particle_count = 2
+	solver.tex_width = 2
+	solver.gravity_constant = 1.0
+	solver.random_seed = 0
+	solver.self_gravity = true
+	var circular_speed := sqrt(2.0 / pow(4.0 + solver.softening * solver.softening, 1.5))
+	var orbit_step_count := NBodySolver.MAX_SUBSTEPS * 4
+	var orbit_step_dt := TAU / (circular_speed * float(orbit_step_count))
+	solver.dt = orbit_step_dt
+	solver.set_seed(
+		PackedFloat32Array([-1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0]),
+		PackedFloat32Array([0.0, circular_speed, 0.0, 0.0,
+			0.0, -circular_speed, 0.0, 0.0]))
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: circular-orbit solver failed to initialize")
+	else:
+		var orbit_samples: Array = []
+		for _sample in NBodySolver.MAX_SUBSTEPS * 2 + 1:
+			orbit_samples.append([])
+		for _orbit_chunk in 4:
+			await _nbody_step(solver, orbit_step_dt, orbit_samples)
+		state = await _nbody_sample(solver)
+		if state.has("positions") and state.has("velocities"):
+			var relative_position := Vector3(state.positions[0] - state.positions[4],
+				state.positions[1] - state.positions[5],
+				state.positions[2] - state.positions[6])
+			var first_velocity := Vector3(state.velocities[0], state.velocities[1],
+				state.velocities[2])
+			var second_velocity := Vector3(state.velocities[4], state.velocities[5],
+				state.velocities[6])
+			var total_energy := 0.5 * (first_velocity.length_squared()
+				+ second_velocity.length_squared()) - 1.0 / sqrt(
+				relative_position.length_squared() + solver.softening * solver.softening)
+			var initial_energy := circular_speed * circular_speed - 1.0 / sqrt(
+				4.0 + solver.softening * solver.softening)
+			var angular_momentum := relative_position.cross(
+				first_velocity - second_velocity).z
+			print("NBODY ORBIT energy=%.8f initial=%.8f angular=%.8f initial_angular=%.8f" % [
+				total_energy, initial_energy, angular_momentum, 4.0 * circular_speed])
+			_check(absf((total_energy - initial_energy) / initial_energy) < 1e-3,
+				"nbody_numeric: DKD energy drift exceeded 0.1% over one circular orbit")
+			_check(absf(absf(angular_momentum) - 4.0 * circular_speed) < 1e-5,
+				"nbody_numeric: central pair force failed to conserve angular momentum")
+	await _nbody_free_render(solver)
+	await _test_nbody_firework_output()
+	_finish("nbody_numeric")
+
+
+func _test_nbody_firework_output() -> void:
+	var solver := NBodySolver.new()
+	solver.particle_count = 2048
+	solver.tex_width = 64
+	solver.substeps = 2
+	solver.dt = 0.075
+	solver.random_seed = 0
+	var scene := FireworkScene.new()
+	scene.period = 40.0
+	scene.rockets = 16.0
+	scene.burst_speed = 20.0
+	scene.gravity_strength = 3.0
+	scene.spread = 50.0
+	scene.air_drag = 0.1
+	scene.normalize_params()
+	scene.apply_defaults(solver)
+	var seed := scene.seed(solver.particle_count, solver, solver.random_seed)
+	solver.set_seed(seed.positions, seed.velocities)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	if not await _nbody_wait_initialized(solver):
+		_check(false, "nbody_numeric: maximum-firework solver failed to initialize")
+		await _nbody_free_render(solver)
+		return
+	var empty_samples: Array = []
+	var axes: Array[Vector3] = []
+	for _sample in solver.substeps * 2 + 1:
+		empty_samples.append([])
+		axes.append(Vector3.UP)
+	var constants := solver.make_step_constants(solver.dt, 0.0)
+	var packed_samples := solver.pack_attractor_samples(empty_samples, axes)
+	RenderingServer.call_on_render_thread(
+		solver.step_render.bind(constants, packed_samples)
+	)
+	await process_frame
+	var state := await _nbody_sample(solver)
+	var positions: PackedFloat32Array = state.get("positions", PackedFloat32Array())
+	var valid_positions := positions.size() == solver.particle_count * 4
+	var moved_count := 0
+	var bounds := scene.render_bounds(solver, [])
+	if valid_positions:
+		for i in solver.particle_count:
+			var offset := i * 4
+			if not is_finite(positions[offset]) or not is_finite(positions[offset + 1]) \
+					or not is_finite(positions[offset + 2]):
+				valid_positions = false
+			var p := Vector3(positions[offset], positions[offset + 1], positions[offset + 2])
+			if p.length_squared() > 0.01:
+				moved_count += 1
+			if p.x < bounds.position.x or p.y < bounds.position.y or p.z < bounds.position.z \
+					or p.x > bounds.end.x or p.y > bounds.end.y or p.z > bounds.end.z:
+				valid_positions = false
+	_check(moved_count > solver.particle_count * 0.9,
+		"nbody_numeric: maximum-firework compute must publish analytic positions")
+	_check(valid_positions,
+		"nbody_numeric: maximum firework positions must stay finite")
+	await _nbody_free_render(solver)
+
+
+func _run_nbody_perf() -> void:
+	await _boot_frames(3)
+	var adapter := RenderingServer.get_video_adapter_name()
+	var has_samples := true
+	var p95_by_count: Dictionary = {}
+	for count in [4096, 8192, 16384, 32768]:
+		var solver := NBodySolver.new()
+		solver.particle_count = count
+		solver.tex_width = ceili(sqrt(float(count)))
+		solver.self_gravity = true
+		solver.config.self_gravity_max_particles = count
+		solver.substeps = 2
+		solver.dt = 0.075
+		solver.softening = 0.12
+		solver.escape_radius = 1000000.0
+		solver.profiling = true
+		var positions := PackedFloat32Array()
+		var velocities := PackedFloat32Array()
+		positions.resize(count * 4)
+		velocities.resize(count * 4)
+		velocities.fill(0.0)
+		for i in count:
+			var angle := float(i) * 2.399963229728653
+			var radius := 10.0 + 0.1 * sqrt(float(i))
+			positions[i * 4] = cos(angle) * radius
+			positions[i * 4 + 1] = sin(angle) * radius
+			positions[i * 4 + 2] = 0.05 * sin(angle * 0.37)
+			positions[i * 4 + 3] = 1.0
+		solver.set_seed(positions, velocities)
+		solver.set_attractors([])
+		RenderingServer.call_on_render_thread(solver.init_render)
+		if not await _nbody_wait_initialized(solver):
+			_check(false, "nbody_perf: %d-particle solver failed to initialize" % count)
+			await _nbody_free_render(solver)
+			has_samples = false
+			break
+
+		var source_samples: Array = []
+		for _sample in solver.substeps * 2 + 1:
+			source_samples.append([])
+		var timings: Array[float] = []
+		var frame_times: Array[float] = []
+		var last_timestamp_frame := -1
+		var deadline := Time.get_ticks_msec() + 180000
+		var sent_steps := 0
+		while timings.size() < 20 and Time.get_ticks_msec() < deadline:
+			var step_start_usec := Time.get_ticks_usec()
+			await _nbody_step(solver, solver.dt, source_samples)
+			var frame_ms := float(Time.get_ticks_usec() - step_start_usec) / 1000.0
+			sent_steps += 1
+			var timing_state := await _nbody_read_perf_timing(solver)
+			var timestamp_frame := int(timing_state.get("frame", -1))
+			var total_ms := float(timing_state.get("timings", {}).get("total", 0.0))
+			if timestamp_frame > last_timestamp_frame and total_ms > 0.0:
+				last_timestamp_frame = timestamp_frame
+				if sent_steps > 3:
+					timings.append(total_ms)
+					frame_times.append(frame_ms)
+		if timings.size() < 20:
+			_check(false, "nbody_perf: only collected %d of 20 samples at %d particles" % [
+				timings.size(), count,
+			])
+			has_samples = false
+		else:
+			timings.sort()
+			var p95_ms := timings[ceili(float(timings.size()) * 0.95) - 1]
+			p95_by_count[count] = p95_ms
+			frame_times.sort()
+			var p95_cpu_wait_ms := frame_times[ceili(float(frame_times.size()) * 0.95) - 1]
+			print("NBODY PERF adapter=%s count=%d p95_ms=%.3f p95_cpu_wait_ms=%.3f limit_ms=33 pass=%s samples=%d" % [
+				adapter, count, p95_ms, p95_cpu_wait_ms, str(p95_ms <= 33.0), timings.size(),
+			])
+		await _nbody_free_render(solver)
+		if not has_samples:
+			break
+	if has_samples:
+		var ultra_count: int = NBodyQualityProfile.PARTICLE_COUNT[SimQualityProfile.Tier.ULTRA]
+		var ultra_p95_ms := float(p95_by_count.get(ultra_count, -1.0))
+		_check(ultra_p95_ms > 0.0 and ultra_p95_ms <= 33.0,
+			"nbody_perf: selected Ultra count %d p95 is %.3f ms; limit is 33 ms" % [
+				ultra_count, ultra_p95_ms,
+			])
+	_check(has_samples, "nbody_perf: failed to collect all required GPU timing samples")
+	_finish("nbody_perf")
+
+
+func _nbody_read_perf_timing(solver: NBodySolver) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_nbody_perf_timing.bind(solver, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(result.get("done", false), "nbody_perf: GPU timestamp read timed out")
+	return result
+
+
+func _read_nbody_perf_timing(solver: NBodySolver, result: Dictionary) -> void:
+	result["frame"] = solver._rd.get_captured_timestamps_frame()
+	result["timings"] = GpuTimings.read(solver._rd, "nbody/")
+	result["done"] = true
+
+
+func _nbody_wait_initialized(solver: NBodySolver) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while not solver.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return solver.initialized
+
+
+func _nbody_free_render(solver: NBodySolver) -> void:
+	var result := {}
+	RenderingServer.call_on_render_thread(func():
+		solver.free_render()
+		result["done"] = true
+	)
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(result.get("done", false), "nbody_numeric: solver teardown timed out")
+
+
+func _nbody_step(solver: NBodySolver, step_dt: float, samples: Array) -> void:
+	var axes: Array[Vector3] = []
+	for _sample in samples:
+		axes.append(Vector3.UP)
+	var packed_samples := solver.pack_attractor_samples(samples, axes)
+	var constants := solver.make_step_constants(step_dt, 0.0)
+	RenderingServer.call_on_render_thread(solver.step_render.bind(constants, packed_samples))
+	await process_frame
+
+
+func _nbody_sample(solver: NBodySolver) -> Dictionary:
+	var result := {}
+	RenderingServer.call_on_render_thread(_read_nbody_state.bind(solver, result))
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(result.get("done", false), "nbody_numeric: GPU readback timed out")
+	return result
+
+
+func _read_nbody_state(solver: NBodySolver, result: Dictionary) -> void:
+	result["positions"] = solver._rd.buffer_get_data(solver._buffers["positions"]).to_float32_array()
+	result["velocities"] = solver._rd.buffer_get_data(solver._buffers["velocities"]).to_float32_array()
+	result["texture"] = solver._rd.texture_get_data(solver._tex_rid, 0).to_float32_array()
+	result["done"] = true
+
+
 func _run_ocean_freeze() -> void:
 	await _boot_frames(2)
 	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()

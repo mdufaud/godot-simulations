@@ -67,6 +67,8 @@ func _run() -> void:
 		await _check_mixwell_periodic()
 	if _demo == "tornado_demo":
 		await _check_tornado_actions()
+	if _demo == "nbody_demo":
+		await _check_nbody_actions(menu)
 
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
@@ -406,6 +408,274 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 	freeze_button.toggled.emit(false)
 	if _demo_root._frozen:
 		_fail("ocean freeze action did not resume simulation")
+
+
+func _check_nbody_actions(menu: SimMenu) -> void:
+	var controller := _demo_root
+	var deadline := Time.get_ticks_msec() + 30000
+	while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.capture_ready():
+		_fail("N-body solver did not initialize")
+		return
+
+	var actions: Dictionary = {}
+	var action_bar := menu.get_node_or_null("BottomRight/ActionBar") as GridContainer
+	if action_bar == null:
+		_fail("N-body action bar missing")
+		return
+	for child in action_bar.get_children():
+		if child is Button and child.visible:
+			actions[child.tooltip_text] = child
+	for expected in ["Pause", "Reset"]:
+		if not actions.has(expected):
+			_fail("N-body action missing: %s" % expected)
+	if not action_bar.get_children().has(controller.scene_action) \
+			or not action_bar.get_children().has(controller.speed_action) \
+			or not action_bar.get_children().has(controller.step_action) \
+			or (controller.scene_action.find_child("ActionCaption", true, false) as Label).text != "Scene" \
+			or (controller.speed_action.find_child("ActionCaption", true, false) as Label).text != "1.00x":
+		_fail("N-body Scene or Speed action missing from the visible action strip")
+	if not controller.step_action.disabled or controller.step_action.modulate.a >= 0.5 \
+			or controller.seed_action.get_parent() != menu.get_node("Panel/VBox/Scroll/Margin/Content"):
+		_fail("N-body Step must be visible but inactive, and New seed must be a top-level control")
+	if _failures.size() > 0:
+		return
+
+	var scene_action: Button = controller.scene_action
+	var speed: Button = controller.speed_action
+	var pause: Button = actions.Pause
+	var step: Button = controller.step_action
+	var reset: Button = actions.Reset
+	var seed: Button = controller.seed_action
+	var defaults: Button = controller.defaults_button
+	var frame: Button = controller.frame_button
+	scene_action.pressed.emit()
+	await _wait_nbody_scene(controller, 1)
+	if controller.active_preset.scene_type != 1 or controller.scene_option.selected != 1:
+		_fail("N-body Scene action did not advance the visible scene selector")
+	controller._on_scene_selected(0)
+	await _wait_nbody_scene(controller, 0)
+	controller.time_scale_slider.value = 1.0
+	speed.pressed.emit()
+	if not is_equal_approx(controller.time_scale, 2.0) \
+			or not is_equal_approx(controller.time_scale_slider.value, 2.0):
+		_fail("N-body Speed action did not update the live time-scale slider")
+	controller.time_scale_slider.value = 1.0
+	if not step.disabled:
+		_fail("N-body Step should be inactive while the simulation is running")
+	controller._paused = true
+	pause.set_pressed_no_signal(true)
+	pause.toggled.emit(true)
+	if not controller._paused or step.disabled or step.modulate.a < 0.99 \
+			or pause.tooltip_text != "Resume":
+		_fail("N-body pause did not expose Step and Resume")
+	var before_step: float = controller._sim_time
+	step.pressed.emit()
+	if not is_equal_approx(controller._sim_time, before_step + controller.integration_dt):
+		_fail("N-body Step did not advance exactly one fixed integration quantum")
+	var step_dt: float = controller.solver.dt
+	if not is_equal_approx(step_dt,
+			controller.integration_dt / float(controller.solver.substeps)):
+		_fail("N-body substeps changed the fixed integration quantum")
+	pause.set_pressed_no_signal(false)
+	pause.toggled.emit(false)
+	var before_running_step: float = controller._sim_time
+	step.pressed.emit()
+	if not controller._paused and (not step.disabled or step.modulate.a >= 0.5 \
+			or not is_equal_approx(controller._sim_time, before_running_step)):
+		_fail("N-body Step ran while the simulation was not paused")
+	controller._paused = true
+	pause.set_pressed_no_signal(true)
+	pause.toggled.emit(true)
+	var paused_time: float = controller._sim_time
+	for _frame_index in 2:
+		await get_tree().process_frame
+	if not is_equal_approx(controller._sim_time, paused_time):
+		_fail("N-body Pause still advanced simulation time")
+
+	# Drive every scene slider to its maximum and commit once per scene. The solver
+	# is reduced to a tiny particle count so these UI checks exercise the real
+	# reset/init path without benchmarking the selected GPU.
+	controller._on_self_gravity(false)
+	controller._set_particle_count(65536)
+	await _wait_nbody_scene(controller, 0)
+	controller.gravity_toggle.set_pressed_no_signal(true)
+	controller.gravity_toggle.toggled.emit(true)
+	await _wait_nbody_scene(controller, 0)
+	if not controller.solver.self_gravity \
+			or controller.solver.particle_count != controller.config.self_gravity_max_particles:
+		_fail("N-body self-gravity toggle did not apply the pairwise particle cap")
+	controller.gravity_toggle.set_pressed_no_signal(false)
+	controller.gravity_toggle.toggled.emit(false)
+	await _wait_nbody_scene(controller, 0)
+	if controller.solver.self_gravity or controller.solver.particle_count != 65536:
+		_fail("N-body self-gravity toggle did not restore the previous particle count")
+	scene_action.pressed.emit()
+	await _wait_nbody_scene(controller, 1)
+	controller._on_scene_selected(0)
+	await _wait_nbody_scene(controller, 0)
+	if controller.solver.self_gravity or controller.solver.particle_count != 65536:
+		_fail("N-body self-gravity toggled twice broke the scene on return")
+	controller._set_particle_count(64)
+	deadline = Time.get_ticks_msec() + 30000
+	while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.capture_ready():
+		_fail("N-body reduced-count solver did not reinitialize")
+		return
+	controller.time_scale_slider.value = 1.5
+	controller.gravity_constant_slider.value = 1.25
+	controller.integration_dt_slider.value = 0.09
+	controller.substeps_slider.value = 3.0
+	controller.pair_softening_slider.value = 0.2
+	controller.attractor_softening_slider.value = 0.13
+	controller._on_physics_drag_ended(true)
+	if not is_equal_approx(controller.time_scale, 1.5) \
+			or not is_equal_approx(controller.gravity_constant, 1.25) \
+			or not is_equal_approx(controller.integration_dt, 0.09) \
+			or controller.solver.substeps != 3 \
+			or not is_equal_approx(controller.solver.dt, 0.03) \
+			or not is_equal_approx(controller.solver.softening, 0.2) \
+			or not is_equal_approx(controller.solver.attractor_softening, 0.13):
+		_fail("N-body physics and numerics sliders did not reach the running solver")
+	deadline = Time.get_ticks_msec() + 30000
+	while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.capture_ready():
+		_fail("N-body physics-control change did not reinitialize")
+		return
+
+	for scene_index in controller.PRESETS.size():
+		controller._on_scene_selected(scene_index)
+		deadline = Time.get_ticks_msec() + 30000
+		while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+			await get_tree().process_frame
+		if not controller.capture_ready():
+			_fail("N-body scene %d did not reinitialize" % scene_index)
+			return
+		var all_params: Array = controller.scene_def.params() \
+			+ controller.scene_def.advanced_params()
+		var slider_map: Dictionary = controller.scene_param_sliders.duplicate()
+		slider_map.merge(controller.advanced_param_sliders)
+		for param: Dictionary in all_params:
+			var key: String = param.key
+			if not slider_map.has(key):
+				_fail("N-body scene %d parameter has no slider: %s" % [scene_index, key])
+				continue
+			var slider: HSlider = slider_map[key]
+			slider.value = float(param.max)
+			if not is_equal_approx(float(controller.scene_def.get(key)), slider.value):
+				_fail("N-body slider %s is not wired to its scene parameter" % key)
+		controller._on_param_drag_ended(true)
+		deadline = Time.get_ticks_msec() + 30000
+		while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+			await get_tree().process_frame
+		if not controller.capture_ready():
+			_fail("N-body scene %d failed after slider commit" % scene_index)
+			return
+		match scene_index:
+			0:
+				if not is_equal_approx(controller.solver.escape_radius,
+						controller.solver.disk_r_max * 4.0):
+					_fail("N-body black-hole sliders did not reach the solver bounds")
+				controller._on_scene_selected(1)
+				await _wait_nbody_scene(controller, 1)
+				controller._on_scene_selected(0)
+				await _wait_nbody_scene(controller, 0)
+				if not is_equal_approx(controller.scene_def.bh_mass, 8.0):
+					_fail("N-body black-hole controls did not persist across scenes")
+				controller.random_seed = 9
+				defaults.pressed.emit()
+				if not is_equal_approx(controller.scene_def.bh_mass, 1.0) \
+						or not is_equal_approx(controller.scene_def.bulge_fraction, 0.03) \
+						or controller.random_seed != 9:
+					_fail("N-body Scene defaults did not restore scene values and keep the seed")
+				await _wait_nbody_scene(controller, 0)
+			1:
+				if not is_equal_approx(controller.scene_def.absorb_radius, 2.0) \
+						or not is_equal_approx(controller.attractor_list[0].radius, 2.0):
+					_fail("N-body pulsar absorb-radius slider did not reach the attractor")
+			2:
+				if not is_equal_approx(controller.solver.disk_thickness, 3.0):
+					_fail("N-body collision thickness slider did not reach the solver")
+			3:
+				if not is_equal_approx(controller.scene_def.outer_moon_ratio, 1.5):
+					_fail("N-body ring moon-orbit slider did not reach the scene")
+			4:
+				if not is_equal_approx(controller.solver.vortex_downdraft_ratio, 1.5):
+					_fail("N-body vortex downdraft slider did not reach the shader")
+			5:
+				if not is_equal_approx(controller.solver.firework_drag, 3.0):
+					_fail("N-body firework drag slider did not reach the shader")
+			6:
+				if not is_equal_approx(controller.solver.disk_r_max, 90.0):
+					_fail("N-body planetary belt slider did not reach the solver bounds")
+			7:
+				if not is_equal_approx(controller.solver.v_ref * controller.solver.v_ref,
+						controller.gravity_constant * 60.0 / 24.0):
+					_fail("N-body cluster mass and radius sliders did not reach the solver")
+			8:
+				if not is_equal_approx(controller.solver.escape_radius, 140.0):
+					_fail("N-body Trojan orbit slider did not reach the solver bounds")
+			9:
+				if controller.solver.respawn_mode != 3 \
+						or not is_equal_approx(controller.solver.escape_radius, 360.0):
+					_fail("N-body tidal stream sliders did not reach respawn and solver bounds")
+
+	controller._on_scene_selected(5)
+	await _wait_nbody_scene(controller, 5)
+	if not controller.star_mat.get_shader_parameter("firework_mode") \
+			or controller.mm.visible_instance_count != mini(controller.solver.particle_count,
+				int(controller.scene_def.rockets) * 2048):
+		_fail("N-body Fireworks must render its active analytic stars")
+	controller.star_size_slider.value = 0.11
+	controller.brightness_slider.value = 2.0
+	controller.min_pixel_size_slider.value = 2.3
+	if not is_equal_approx(controller.star_mat.get_shader_parameter("sprite_size"), 0.11) \
+			or not is_equal_approx(controller.star_mat.get_shader_parameter("brightness"), 2.0) \
+			or not is_equal_approx(controller.star_mat.get_shader_parameter("min_pixel_size"), 2.3) \
+			or not is_equal_approx(controller._scene_render_values[5].min_pixel_size, 2.3):
+		_fail("N-body render sliders did not reach the star material")
+	controller._on_scene_selected(4)
+	await _wait_nbody_scene(controller, 4)
+	if controller.star_mat.get_shader_parameter("firework_mode") \
+			or controller.mm.visible_instance_count != -1:
+		_fail("N-body Fireworks rendering must clear on scene switch")
+	controller._on_scene_selected(5)
+	await _wait_nbody_scene(controller, 5)
+	if not is_equal_approx(controller.min_pixel_size_slider.value, 2.3) \
+			or not is_equal_approx(controller.star_mat.get_shader_parameter("min_pixel_size"), 2.3):
+		_fail("N-body render sliders did not persist across scenes")
+	frame.pressed.emit()
+	if not is_equal_approx(controller.orbit_cam.distance,
+			controller.scene_def.view_distance(controller.solver)):
+		_fail("N-body Frame did not restore the full scene framing")
+
+	var original_positions: PackedFloat32Array = controller.solver._seed_pos.duplicate()
+	var original_velocities: PackedFloat32Array = controller.solver._seed_vel.duplicate()
+	var original_tint: Color = controller.star_mat.get_shader_parameter("seed_tint")
+	seed.pressed.emit()
+	if controller.random_seed != 10 \
+			or (controller.solver._seed_pos == original_positions \
+				and controller.solver._seed_vel == original_velocities) \
+			or controller.star_mat.get_shader_parameter("seed_tint") == original_tint:
+		_fail("N-body New seed did not increment the seed and change the initial state")
+	var current_positions: PackedFloat32Array = controller.solver._seed_pos.duplicate()
+	var current_velocities: PackedFloat32Array = controller.solver._seed_vel.duplicate()
+	reset.pressed.emit()
+	if controller.random_seed != 10 \
+			or controller.solver._seed_pos != current_positions \
+			or controller.solver._seed_vel != current_velocities:
+		_fail("N-body Reset did not reproduce the current seed")
+
+
+func _wait_nbody_scene(controller: Node, scene_index: int) -> void:
+	var deadline := Time.get_ticks_msec() + 30000
+	while not controller.capture_ready() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.capture_ready():
+		_fail("N-body scene %d did not become ready" % scene_index)
 
 
 func _fail(message: String) -> void:
