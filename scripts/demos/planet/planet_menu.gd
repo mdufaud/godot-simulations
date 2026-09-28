@@ -206,9 +206,8 @@ func build(menu: SimMenu, presets: Array) -> void:
 			host.start_generation(),
 		func(res: int) -> int: return PlanetQualityProfile.RESOLUTIONS.find(res))
 	host.quality.attach_menu_option(menu)
-	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0, host.render_scale,
+	menu.add_slider("Render scale", 0.4, 1.0, host.render_scale,
 		host.set_render_scale)
-	host.quality.bind("render_scale", scale_slider, host.set_render_scale)
 	var detail_slider := menu.add_slider("Surface detail", 0.0, 8.0,
 		float(surface.get_shader_parameter("detail_octaves")),
 		func(v: float) -> void:

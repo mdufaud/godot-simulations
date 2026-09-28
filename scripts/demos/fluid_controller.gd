@@ -97,9 +97,8 @@ func _setup_ui() -> void:
 	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
 		func(v): fluid.set_render_scale(v))
 	quality.bind("water_scale", water_scale, fluid.set_render_scale)
-	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var count_labels: Array = []
 	for count in FluidQualityProfile.PARTICLE_COUNTS:
 		count_labels.append("%dk" % int(count / 1000))
@@ -118,8 +117,8 @@ func _set_render_scale(v: float) -> void:
 ## Sets the fields a quality tier bundles. Before fluid.start() only the config
 ## changes (start() seeds the count and the solver reads texture_width); after,
 ## the same setters the menu uses apply the tier, rebuilding on a count change.
-## particle_count, water_scale and render_scale are widget-bound: absent from
-## values on a tier push (the widget callbacks already applied them). The count
+## particle_count and water_scale are widget-bound: absent from values on a
+## tier push (the widget callbacks already applied them). The count
 ## fallback must be the tier table's own count for `effective`, never the live
 ## one: the live count still belongs to the previous tier, and pairing it with
 ## this tier's texture_width fails config validation, which strands the solver
@@ -133,7 +132,6 @@ func _apply_quality(values: Dictionary) -> void:
 		return
 	fluid.set_particle_count(count)
 	fluid.set_render_scale(values.get("water_scale", fluid.render_scale))
-	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 	_resync_parameter_widgets()
 
 

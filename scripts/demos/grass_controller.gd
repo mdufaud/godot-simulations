@@ -1,6 +1,39 @@
 extends Node3D
 
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
+const BASE_COLOR := Color(0.14, 0.23, 0.1)
+const TIP_COLOR := Color(0.58, 0.54, 0.28)
+const SSS_COLOR := Color(0.8, 0.69, 0.45)
+const COLOR_PALETTES := [
+	{"name": "Pampas", "base": BASE_COLOR, "tip": TIP_COLOR,
+		"backlight": SSS_COLOR, "plume": Color(0.68, 0.61, 0.51),
+		"moss": Color(0.11, 0.19, 0.08), "straw": Color(0.32, 0.28, 0.13),
+		"chromatic": 0.0},
+	{"name": "Meadow", "base": Color(0.06, 0.25, 0.07),
+		"tip": Color(0.3, 0.62, 0.16), "backlight": Color(0.55, 0.85, 0.28),
+		"plume": Color(0.72, 0.68, 0.43), "moss": Color(0.08, 0.2, 0.08),
+		"straw": Color(0.18, 0.32, 0.1), "chromatic": 0.0},
+	{"name": "Ember", "base": Color(0.18, 0.12, 0.055),
+		"tip": Color(0.68, 0.37, 0.14), "backlight": Color(0.95, 0.65, 0.26),
+		"plume": Color(0.85, 0.68, 0.42), "moss": Color(0.15, 0.1, 0.05),
+		"straw": Color(0.34, 0.25, 0.1), "chromatic": 0.0},
+	{"name": "Prism", "base": Color(0.1, 0.07, 0.32),
+		"tip": Color(0.1, 0.75, 0.78), "backlight": Color(0.9, 0.3, 0.85),
+		"plume": Color(0.84, 0.36, 0.92), "moss": Color(0.06, 0.05, 0.18),
+		"straw": Color(0.14, 0.12, 0.3), "chromatic": 0.7},
+]
+const WIND_PRESETS := [
+	{"name": "Calm", "speed": 0.0, "direction": 35.0, "gustiness": 0.0},
+	{"name": "Breeze", "speed": 1.0, "direction": 35.0, "gustiness": 0.65},
+	{"name": "Gusty", "speed": 2.5, "direction": 70.0, "gustiness": 0.85},
+	{"name": "Storm", "speed": 4.0, "direction": 115.0, "gustiness": 1.0},
+]
+const STAGE_DESCRIPTIONS := [
+	"Start with one uniform blade shape and an even field distribution.",
+	"Curved tufts replace single blades; shared noise shapes their height and facing.",
+	"Cream pampas plumes, straw colors, and warm light complete the field.",
+	"Tune the wind and watch broad gusts travel through leaves and plumes.",
+]
 
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var menu: SimMenu = $UI/SimMenu
@@ -11,8 +44,26 @@ const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 var config: GrassConfig = GrassConfig.new()
 var density_modifier := 1.0
 var wind_speed := 1.0
+var wind_direction_degrees := 35.0
+var gustiness := 0.65
+var demo_stage := 3
 var quality := SimQualityState.new()
 var _grass_ready := false
+var _stage_description: Label
+var _stage_option: OptionButton
+var _wind_preset_index := -1
+var _applying_wind_preset := false
+var _wind_preset_action: Button
+var _wind_speed_slider: HSlider
+var _wind_direction_slider: HSlider
+var _gustiness_slider: HSlider
+var _palette_index := 0
+var _palette_colors: Dictionary = {}
+var _palette_option: OptionButton
+var _palette_action: Button
+var _palette_pickers: Dictionary = {}
+var _chromatic_strength := 0.0
+var _chromatic_slider: HSlider
 
 
 func _ready() -> void:
@@ -20,38 +71,73 @@ func _ready() -> void:
 	if config_error != "":
 		push_error("Grass config: %s" % config_error)
 		return
+	_viewport.set_taa(true)
 	density_modifier = config.density
 	wind_speed = config.wind_speed_mps
 	quality.setup(GrassQualityProfile, "grass_quality_profile", _apply_quality)
 	quality.restore()
-	# The Density slider persists its last value and SimMenu's deferred restore
-	# would re-emit it after _ready, running the blade fill a second time; seed
-	# the build from the same stored value so that restore lands on no change.
 	density_modifier = clampf(
 		menu.stored_value("🌿 Grass Properties", "Density",
 			GrassQualityProfile.values(quality.effective).density), 0.0, 2.0)
+	# The Density slider persists its last value and SimMenu's deferred restore
+	# would re-emit it after _ready, running the blade fill a second time; seed
+	# the build from the same stored value so that restore lands on no change.
+	wind_speed = clampf(float(menu.stored_value("🌿 Grass Properties", "Wind Speed",
+		wind_speed)), 0.0, 5.0)
+	wind_direction_degrees = fposmod(float(menu.stored_value("🌬 Wind Field",
+		"Direction", wind_direction_degrees)), 360.0)
+	gustiness = clampf(float(menu.stored_value("🌬 Wind Field", "Gustiness", gustiness)),
+		0.0, 1.0)
+	for index in WIND_PRESETS.size():
+		var preset: Dictionary = WIND_PRESETS[index]
+		if is_equal_approx(wind_speed, preset.speed) \
+				and is_equal_approx(wind_direction_degrees, preset.direction) \
+				and is_equal_approx(gustiness, preset.gustiness):
+			_wind_preset_index = index
+			break
+	demo_stage = clampi(int(menu.stored_value("🧭 Learning Steps", "Step", 3)), 0, 3)
+	_palette_index = clampi(int(menu.stored_value("🎨 Grass Palette", "Palette", 0)),
+		0, COLOR_PALETTES.size() - 1)
+	var palette: Dictionary = COLOR_PALETTES[_palette_index]
+	_palette_colors = {
+		"base": menu.stored_value("🎨 Grass Palette", "Base Color", palette.base),
+		"tip": menu.stored_value("🎨 Grass Palette", "Tip Color", palette.tip),
+		"backlight": menu.stored_value("🎨 Grass Palette", "Backlight", palette.backlight),
+		"plume": menu.stored_value("🎨 Grass Palette", "Plumes", palette.plume),
+		"moss": menu.stored_value("🎨 Grass Palette", "Ground Shade", palette.moss),
+		"straw": menu.stored_value("🎨 Grass Palette", "Ground Light", palette.straw),
+	}
+	_chromatic_strength = clampf(float(menu.stored_value("🎨 Grass Palette",
+		"Color Gradient", palette.chromatic)), 0.0, 1.0)
 	grass.density = density_modifier
 	grass.config = config
+	grass.wind_speed = wind_speed
+	grass.wind_direction_degrees = wind_direction_degrees
+	grass.gustiness = gustiness
+	grass.demo_stage = demo_stage
 	add_child(grass)
 	grass.build()
 	ground_mesh.material_override = grass.ground_material()
+	for color_key in _palette_colors:
+		_set_palette_color(color_key, _palette_colors[color_key])
+	_set_chromatic_strength(_chromatic_strength)
 	_apply_quality(GrassQualityProfile.values(quality.effective))
 	_grass_ready = true
 	orbit_cam.target = Vector3.ZERO
 	orbit_cam.distance = 20.0
-	orbit_cam.pitch = -25.0
-	orbit_cam.yaw = 45.0
+	orbit_cam.pitch = -28.0
+	orbit_cam.yaw = 35.0
 	orbit_cam.min_distance = 5.0
-	orbit_cam.max_distance = 100.0
+	orbit_cam.max_distance = 60.0
 	orbit_cam.rotation_speed = 0.4
 	orbit_cam.zoom_speed = 2.0
+	orbit_cam.enable_movement = false
 	_setup_heightmap_collision()
 	_setup_ui()
 
 
 func _physics_process(delta: float) -> void:
-	grass.set_crush_center(orbit_cam.target)
-	grass.tick(delta, orbit_cam.target)
+	grass.tick(delta, orbit_cam.target, orbit_cam.get_camera().global_position)
 
 
 func _setup_heightmap_collision() -> void:
@@ -72,7 +158,14 @@ func _setup_heightmap_collision() -> void:
 
 
 func _setup_ui() -> void:
-	menu.add_label("Drag: rotate | Scroll: zoom")
+	menu.title = "🌾 Windblown Grass Study"
+	menu.add_label("Drag: orbit | Scroll: zoom")
+	menu.add_separator()
+	menu.add_section("🧭 Learning Steps")
+	_stage_option = menu.add_option_button("Step", [
+		"1 · Blades", "2 · Tufts", "3 · Pampas and light", "4 · Wind",
+	], demo_stage, _on_stage_selected)
+	_stage_description = menu.add_label(STAGE_DESCRIPTIONS[demo_stage])
 	menu.add_separator()
 	menu.add_section("🌿 Grass Properties")
 	var density_slider: HSlider = menu.add_slider("Density", 0.0, 2.0, density_modifier,
@@ -83,26 +176,47 @@ func _setup_ui() -> void:
 		func(value: float) -> void:
 			density_modifier = value
 			grass.set_density(value))
-	menu.add_slider("Clumping", 0.0, 1.0, 0.5, grass.set_clumping)
-	menu.add_slider("Wind Speed", 0.0, 5.0, wind_speed,
+	quality.bind("near_detail", null, grass.set_near_detail)
+	menu.add_slider("Clumping", 0.0, 1.0, 0.55, grass.set_clumping)
+	_wind_speed_slider = menu.add_slider("Wind Speed", 0.0, 5.0, wind_speed,
 		func(value: float) -> void:
 			wind_speed = value
-			grass.set_wind_speed(value))
+			grass.set_wind_speed(value)
+			_mark_custom_wind())
 	menu.add_separator()
-	menu.add_section("🎨 Colors")
-	menu.add_color_picker("Base Color", Color(0.05, 0.2, 0.01),
-		func(color: Color) -> void: grass.set_colors(color,
-			Color(0.5, 0.5, 0.1), Color(1.0, 0.75, 0.1)))
-	menu.add_color_picker("Tip Color", Color(0.5, 0.5, 0.1),
-		func(color: Color) -> void: grass.material.set_shader_parameter("tip_color", color))
-	menu.add_color_picker("SSS Color", Color(1.0, 0.75, 0.1),
-		func(color: Color) -> void:
-			grass.material.set_shader_parameter("subsurface_scattering_color", color))
+	menu.add_section("🌬 Wind Field")
+	_wind_direction_slider = menu.add_slider("Direction", 0.0, 360.0, wind_direction_degrees,
+		func(value: float) -> void:
+			wind_direction_degrees = value
+			grass.set_wind_direction(value)
+			_mark_custom_wind(), true, 1.0)
+	_gustiness_slider = menu.add_slider("Gustiness", 0.0, 1.0, gustiness,
+		func(value: float) -> void:
+			gustiness = value
+			grass.set_gustiness(value)
+			_mark_custom_wind())
+	menu.add_separator()
+	menu.add_section("🎨 Grass Palette")
+	_palette_option = menu.add_option_button("Palette", ["Pampas", "Meadow", "Ember", "Prism"],
+		_palette_index, _on_palette_selected)
+	_palette_pickers["base"] = menu.add_color_picker("Base Color", _palette_colors.base,
+		func(color: Color) -> void: _set_palette_color("base", color))
+	_palette_pickers["tip"] = menu.add_color_picker("Tip Color", _palette_colors.tip,
+		func(color: Color) -> void: _set_palette_color("tip", color))
+	_palette_pickers["backlight"] = menu.add_color_picker("Backlight", _palette_colors.backlight,
+		func(color: Color) -> void: _set_palette_color("backlight", color))
+	_palette_pickers["plume"] = menu.add_color_picker("Plumes", _palette_colors.plume,
+		func(color: Color) -> void: _set_palette_color("plume", color))
+	_palette_pickers["moss"] = menu.add_color_picker("Ground Shade", _palette_colors.moss,
+		func(color: Color) -> void: _set_palette_color("moss", color))
+	_palette_pickers["straw"] = menu.add_color_picker("Ground Light", _palette_colors.straw,
+		func(color: Color) -> void: _set_palette_color("straw", color))
+	_chromatic_slider = menu.add_slider("Color Gradient", 0.0, 1.0,
+		_chromatic_strength, _set_chromatic_strength, true, 0.01)
 	menu.add_separator()
 	menu.add_section("⚙️ Rendering")
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var shadow_slider: HSlider = menu.add_slider("Shadow distance", 0.0, 100.0,
 		config.shadow_distance_m, grass.set_shadow_distance)
 	quality.bind("shadow_distance_m", shadow_slider, grass.set_shadow_distance)
@@ -110,8 +224,139 @@ func _setup_ui() -> void:
 		grass.shadows_enabled, grass.set_shadows)
 	quality.bind("shadows", shadows_toggle, grass.set_shadows)
 	quality.attach_menu_option(menu)
-	menu.add_action("🌬", "Gust", func() -> void: grass.add_gust(4.0))
-	menu.add_action("🎲", "Regen", grass.generate)
+	menu.add_action("🌬", "Gust", func() -> void: grass.add_gust(4.0, orbit_cam.target))
+	_wind_preset_action = menu.add_action("🍃", "Wind", cycle_wind_preset)
+	_refresh_wind_action()
+	_palette_action = menu.add_action("🎨", "Palette", cycle_palette)
+	_refresh_palette_action()
+	menu.add_action("🎲", "Regen", grass.regenerate)
+
+
+func _on_stage_selected(index: int) -> void:
+	demo_stage = clampi(index, 0, STAGE_DESCRIPTIONS.size() - 1)
+	grass.set_demo_stage(demo_stage)
+	if _stage_description != null:
+		_stage_description.text = STAGE_DESCRIPTIONS[demo_stage]
+
+
+func cycle_wind_preset() -> void:
+	apply_preset((_wind_preset_index + 1) % WIND_PRESETS.size())
+
+
+func apply_preset(index: int) -> void:
+	_wind_preset_index = clampi(index, 0, WIND_PRESETS.size() - 1)
+	var preset: Dictionary = WIND_PRESETS[_wind_preset_index]
+	_applying_wind_preset = true
+	_wind_speed_slider.value = preset.speed
+	_wind_direction_slider.value = preset.direction
+	_gustiness_slider.value = preset.gustiness
+	_applying_wind_preset = false
+	wind_speed = preset.speed
+	wind_direction_degrees = preset.direction
+	gustiness = preset.gustiness
+	grass.set_wind_speed(wind_speed)
+	grass.set_wind_direction(wind_direction_degrees)
+	grass.set_gustiness(gustiness)
+	_refresh_wind_action()
+
+
+func _mark_custom_wind() -> void:
+	if _applying_wind_preset:
+		return
+	_wind_preset_index = -1
+	_refresh_wind_action()
+
+
+func _refresh_wind_action() -> void:
+	if _wind_preset_action == null:
+		return
+	var preset_name: String = "Wind" if _wind_preset_index < 0 else WIND_PRESETS[_wind_preset_index].name
+	menu.set_action_label(_wind_preset_action, preset_name)
+
+
+func cycle_palette() -> void:
+	apply_look((_palette_index + 1) % COLOR_PALETTES.size())
+
+
+func apply_look(index: int) -> void:
+	index = clampi(index, 0, COLOR_PALETTES.size() - 1)
+	_palette_option.select(index)
+	_palette_option.item_selected.emit(index)
+
+
+func _on_palette_selected(index: int) -> void:
+	_palette_index = clampi(index, 0, COLOR_PALETTES.size() - 1)
+	var palette: Dictionary = COLOR_PALETTES[_palette_index]
+	for color_key in _palette_colors:
+		var picker: ColorPickerButton = _palette_pickers[color_key]
+		picker.color = palette[color_key]
+		picker.color_changed.emit(palette[color_key])
+	_chromatic_slider.value = palette.chromatic
+	_set_chromatic_strength(float(palette.chromatic))
+	_refresh_palette_action()
+
+
+func _set_palette_color(color_key: String, color: Color) -> void:
+	_palette_colors[color_key] = color
+	match color_key:
+		"base": grass.set_base_color(color)
+		"tip": grass.set_tip_color(color)
+		"backlight": grass.set_sss_color(color)
+		"plume": grass.set_plume_color(color)
+		"moss": (ground_mesh.material_override as ShaderMaterial).set_shader_parameter("moss_color", color)
+		"straw": (ground_mesh.material_override as ShaderMaterial).set_shader_parameter("straw_color", color)
+
+
+func _set_chromatic_strength(value: float) -> void:
+	_chromatic_strength = value
+	grass.set_chromatic_strength(value)
+	(ground_mesh.material_override as ShaderMaterial).set_shader_parameter("chromatic_strength", value)
+
+
+func _refresh_palette_action() -> void:
+	if _palette_action != null:
+		menu.set_action_label(_palette_action, COLOR_PALETTES[_palette_index].name)
+
+
+func set_capture_params(params: Dictionary) -> void:
+	if params.has("stage"):
+		_on_stage_selected(int(round(float(params["stage"]))))
+		if _stage_option != null:
+			_stage_option.select(demo_stage)
+	if params.has("wind_speed"):
+		wind_speed = clampf(float(params["wind_speed"]), 0.0, 5.0)
+		grass.set_wind_speed(wind_speed)
+	if params.has("wind_direction"):
+		wind_direction_degrees = fposmod(float(params["wind_direction"]), 360.0)
+		grass.set_wind_direction(wind_direction_degrees)
+	if params.has("gustiness"):
+		gustiness = clampf(float(params["gustiness"]), 0.0, 1.0)
+		grass.set_gustiness(gustiness)
+	if params.has("gust") and float(params["gust"]) > 0.0:
+		grass.add_gust(float(params["gust"]), orbit_cam.target)
+
+
+func set_quality_profile(tier: int) -> void:
+	quality.set_tier(tier)
+
+
+func set_capture_view(view: String) -> void:
+	match view:
+		"near":
+			orbit_cam.distance = 9.0
+			orbit_cam.pitch = -18.0
+		"far":
+			orbit_cam.distance = 38.0
+			orbit_cam.pitch = -12.0
+		"high":
+			orbit_cam.distance = 26.0
+			orbit_cam.pitch = -42.0
+		"overhead":
+			orbit_cam.distance = 32.0
+			orbit_cam.pitch = -78.0
+		_:
+			orbit_cam.distance = 20.0
+			orbit_cam.pitch = -28.0
 
 
 func _set_render_scale(value: float) -> void:
@@ -123,11 +368,12 @@ func _set_render_scale(value: float) -> void:
 ## the setters regenerate and re-flag. Set_density runs the GDScript blade
 ## fill, so it must not run twice at launch.
 func _apply_quality(values: Dictionary) -> void:
-	_set_render_scale(values.render_scale)
 	if not _grass_ready:
+		grass.near_detail = values.near_detail
 		grass.shadows_enabled = values.shadows
 		grass.config.shadow_distance_m = values.shadow_distance_m
 		return
+	grass.set_near_detail(values.near_detail)
 	grass.set_density(values.density)
 	grass.set_shadows(values.shadows)
 	grass.set_shadow_distance(values.shadow_distance_m)

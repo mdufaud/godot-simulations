@@ -1826,7 +1826,7 @@ func _fractal_reference(ftype: int, x0: float, y0: float, iters: int) -> Diction
 ## ── grass ───────────────────────────────────────────────────────────────
 ## F-GRA-3 probe: does the grass blade fill (GrassRenderer.generate) run more
 ## than once at launch? Each generate() rebuilds all five LOD MultiMeshes, so
-## sampling the identity of _lod_meshes[0] every frame counts the fills without
+## sampling the identity of the first seeded LOD mesh every frame counts fills without
 ## touching the runtime path.
 ##
 ## seed=0  fresh settings (no persisted Density slider value)
@@ -1838,19 +1838,29 @@ func _fractal_reference(ftype: int, x0: float, y0: float, iters: int) -> Diction
 func _run_grass() -> void:
 	await _boot_frames(2)
 	var seed_mode := 0
+	var tier := GrassQualityProfile.Tier.MEDIUM
+	var palette_seed := 0
 	for arg in _extra:
 		if arg.begins_with("seed="):
 			seed_mode = int(arg.get_slice("=", 1))
+		elif arg.begins_with("tier="):
+			tier = clampi(int(arg.get_slice("=", 1)), 0, 3)
+		elif arg.begins_with("palette="):
+			palette_seed = clampi(int(arg.get_slice("=", 1)), 0, 3)
 	var settings: Node = root.get_node("/root/UserSettings")
 	settings.clear_sim("grass_demo")
 	# SimMenu derives its persistence section from GameManager.current_demo;
 	# without the real launch flow it stays empty and restore is disabled.
 	root.get_node("/root/GameManager").current_demo = "grass_demo"
-	root.get_node("/root/GameManager").set_setting("grass_quality_profile", 1)
+	root.get_node("/root/GameManager").set_setting("grass_quality_profile", tier)
 	if seed_mode == 1:
 		settings.set_sim_value("grass_demo", DENSITY_KEY, 0.5)
 	elif seed_mode == 2:
 		settings.set_sim_value("grass_demo", DENSITY_KEY, TIER_DENSITY)
+	if palette_seed == 3:
+		settings.set_sim_value("grass_demo", "🎨 Grass Palette/Palette", 3)
+		settings.set_sim_value("grass_demo", "🎨 Grass Palette/Base Color", Color(0.22, 0.1, 0.29))
+		settings.set_sim_value("grass_demo", "🎨 Grass Palette/Color Gradient", 0.4)
 
 	var demo: Node = load("res://scenes/grass_demo.tscn").instantiate()
 
@@ -1862,29 +1872,108 @@ func _run_grass() -> void:
 	# The first fill runs inside _ready during add_child, before the first
 	# awaitable frame, so sample synchronously here and then every frame.
 	root.add_child(demo)
-	if not demo.grass._lod_meshes.is_empty():
+	var profile: Dictionary = GrassQualityProfile.values(tier)
+	if demo.grass.near_detail != profile.near_detail \
+			or demo.grass.shadows_enabled != profile.shadows \
+			or (seed_mode == 0 and not is_equal_approx(demo.grass.density, profile.density)):
+		push_error("GRA3: quality tier %d did not reach the player boot path" % tier)
+	var expected_base: Color = Color(0.22, 0.1, 0.29) if palette_seed == 3 else demo.BASE_COLOR
+	var expected_gradient := 0.4 if palette_seed == 3 else 0.0
+	if demo.grass.demo_stage != 3 \
+			or demo._palette_index != palette_seed \
+			or demo._palette_option.selected != palette_seed \
+			or demo.grass.material.get_shader_parameter("base_color") != expected_base \
+			or not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), expected_gradient) \
+			or demo.ground_mesh.material_override.get_shader_parameter("clump_noise") == null:
+		push_error("GRA3: grass palette or ground variation missing at player boot")
+	demo.apply_look(0)
+	demo._palette_action.pressed.emit()
+	var palette_caption := demo._palette_action.find_child("ActionCaption", true, false) as Label
+	if demo._palette_index != 1 or palette_caption.text != "Meadow" \
+			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) != 1 \
+			or demo.grass.material.get_shader_parameter("base_color") != demo.COLOR_PALETTES[1].base \
+			or demo.grass.material.get_shader_parameter("plume_color") != demo.COLOR_PALETTES[1].plume \
+			or demo.ground_mesh.material_override.get_shader_parameter("moss_color") != demo.COLOR_PALETTES[1].moss:
+		push_error("GRA3: palette action did not recolor the whole field")
+	var custom_ground := Color(0.2, 0.3, 0.1)
+	var ground_picker: ColorPickerButton = demo._palette_pickers["straw"]
+	ground_picker.color = custom_ground
+	ground_picker.color_changed.emit(custom_ground)
+	demo._chromatic_slider.value = 0.35
+	if demo.ground_mesh.material_override.get_shader_parameter("straw_color") != custom_ground \
+			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Ground Light", null) != custom_ground \
+			or not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.35):
+		push_error("GRA3: custom palette controls did not update and persist")
+	demo.apply_look(3)
+	if not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.7) \
+			or not is_equal_approx(demo.ground_mesh.material_override.get_shader_parameter("chromatic_strength"), 0.7):
+		push_error("GRA3: Prism shader colors did not reach grass and ground")
+	demo._palette_action.pressed.emit()
+	if demo._palette_index != 0 or palette_caption.text != "Pampas" \
+			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) != 0:
+		push_error("GRA3: palette action did not wrap to Pampas")
+	demo._on_stage_selected(2)
+	var wind_slider: HSlider = demo.menu._entries["🌿 Grass Properties/Wind Speed"].node
+	wind_slider.value = 2.5
+	if not is_equal_approx(demo.grass.wind_speed, 2.5) \
+			or not is_equal_approx(demo.grass.material.get_shader_parameter("wind_speed"), 2.5) \
+			or demo.grass.material.get_shader_parameter("demo_stage") != 2:
+		push_error("GRA3: Wind Speed slider did not reach the shader at the Pampas step")
+	wind_slider.value = 1.0
+	demo._on_stage_selected(3)
+	demo.apply_preset(1)
+	demo._wind_preset_action.pressed.emit()
+	var wind_caption := demo._wind_preset_action.find_child("ActionCaption", true, false) as Label
+	if not is_equal_approx(demo.grass.wind_speed, 2.5) \
+			or not is_equal_approx(demo.grass.wind_direction_degrees, 70.0) \
+			or not is_equal_approx(demo.grass.gustiness, 0.85) \
+			or wind_caption.text != "Gusty":
+		push_error("GRA3: wind preset action did not advance and update the field")
+	demo._wind_preset_action.pressed.emit()
+	demo._wind_preset_action.pressed.emit()
+	if wind_caption.text != "Calm" or not is_zero_approx(demo.grass.wind_speed):
+		push_error("GRA3: wind preset action did not wrap to Calm")
+	demo.apply_preset(1)
+	demo.grass.add_gust(4.0, demo.orbit_cam.target)
+	if not is_zero_approx(demo.grass._gust_pulse):
+		push_error("GRA3: gust starts with an instant pulse")
+	demo.grass.tick(0.2, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
+	var early_pulse: float = demo.grass._gust_pulse
+	demo.grass.tick(0.5, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
+	if not (early_pulse > 0.0 and early_pulse < demo.grass._gust_pulse):
+		push_error("GRA3: gust does not build gradually")
+	demo.grass.tick(4.0, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
+	if not is_zero_approx(demo.grass._gust_pulse):
+		push_error("GRA3: gust did not decay")
+	if not demo.grass._lod_variants.is_empty():
 		generates += 1
 		frames.append(-1)
 		densities.append(demo.grass.density)
-		last_lod_id = (demo.grass._lod_meshes[0] as MultiMesh).get_instance_id()
+		last_lod_id = (demo.grass._lod_variants[0][0] as MultiMesh).get_instance_id()
+		demo.grass.set_demo_stage(0)
+		var stage_kept_layout := (demo.grass._lod_variants[0][0] as MultiMesh).get_instance_id() == last_lod_id
+		demo.grass.set_demo_stage(3)
+		if not stage_kept_layout:
+			push_error("GRA3: changing the learning step rebuilt grass instances")
 
 	for frame in GRASS_SAMPLE_FRAMES:
 		await process_frame
 		var grass: Node = demo.grass
 		if grass == null:
 			continue
-		var meshes: Array = grass._lod_meshes
-		if meshes.is_empty():
+		var variants: Array = grass._lod_variants
+		if variants.is_empty():
 			continue
-		var id: int = (meshes[0] as MultiMesh).get_instance_id()
+		var id: int = (variants[0][0] as MultiMesh).get_instance_id()
 		if id != last_lod_id:
 			generates += 1
 			frames.append(frame)
 			densities.append(grass.density)
 			last_lod_id = id
 
-	print("GRA3 PROBE DONE seed=%d generates=%d frames=%s densities=%s final_density=%.3f" % [
-		seed_mode, generates, str(frames), str(densities), demo.grass.density])
+	print("GRA3 PROBE DONE seed=%d tier=%d generates=%d frames=%s densities=%s final_density=%.3f near_detail=%s" % [
+		seed_mode, tier, generates, str(frames), str(densities), demo.grass.density,
+		str(demo.grass.near_detail)])
 	quit(0)
 
 

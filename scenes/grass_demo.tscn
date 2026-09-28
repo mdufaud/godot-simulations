@@ -14,10 +14,10 @@ albedo_color = Color(0.04, 0.11, 0.02, 1)
 roughness = 0.95
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_grass"]
-sky_top_color = Color(0.35, 0.55, 0.85, 1)
-sky_horizon_color = Color(0.6, 0.7, 0.85, 1)
-ground_bottom_color = Color(0.12, 0.08, 0.05, 1)
-ground_horizon_color = Color(0.3, 0.25, 0.2, 1)
+sky_top_color = Color(0.29, 0.41, 0.57, 1)
+sky_horizon_color = Color(0.82, 0.66, 0.48, 1)
+ground_bottom_color = Color(0.2, 0.24, 0.17, 1)
+ground_horizon_color = Color(0.46, 0.48, 0.34, 1)
 
 [sub_resource type="Sky" id="Sky_grass"]
 sky_material = SubResource("ProceduralSkyMaterial_grass")
@@ -26,13 +26,11 @@ sky_material = SubResource("ProceduralSkyMaterial_grass")
 background_mode = 2
 sky = SubResource("Sky_grass")
 ambient_light_source = 2
-ambient_light_color = Color(0.55, 0.6, 0.65, 1)
-ambient_light_energy = 0.5
+ambient_light_color = Color(0.78, 0.8, 0.7, 1)
+ambient_light_energy = 0.8
 reflected_light_source = 2
 tonemap_mode = 2
-glow_enabled = true
-glow_intensity = 0.2
-glow_bloom = 0.03
+glow_enabled = false
 
 [node name="GrassDemo" type="Node3D"]
 script = ExtResource("1_controller")
@@ -42,7 +40,7 @@ environment = SubResource("Environment_grass")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 10, 25, 10)
-light_color = Color(1, 0.98, 0.92, 1)
+light_color = Color(1, 0.95, 0.85, 1)
 light_energy = 1.2
 shadow_enabled = true
 shadow_bias = 0.02
@@ -71,4 +69,4 @@ surface_material_override/0 = SubResource("StandardMaterial3D_ground")
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="SimMenu" parent="UI" instance=ExtResource("4_sim_menu")]
-title = "🌿 Grass Shader (GodotGrass)"
+title = "🌾 Windblown Grass Study"

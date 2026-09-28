@@ -23,26 +23,22 @@ func _profile_table() -> void:
 		OceanQualityProfile: ["fft_size", "foam_near_size", "foam_near_distance",
 			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate",
 			"surface_detail"],
-		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations", "render_scale"],
-		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max",
-			"render_scale"],
-		FluidQualityProfile: ["particle_count", "texture_width", "water_scale",
-			"render_scale"],
-		PlanetQualityProfile: ["resolution", "detail_octaves", "render_scale"],
-		TornadoQualityProfile: ["render_scale", "raymarch_steps", "dust_amount",
-			"debris_cap"],
-		ClothQualityProfile: ["iterations", "substeps", "render_scale"],
-		DestructionQualityProfile: ["chunk_count", "render_scale"],
-		GrassQualityProfile: ["density", "shadows", "shadow_distance_m", "render_scale"],
+		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations"],
+		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max"],
+		FluidQualityProfile: ["particle_count", "texture_width", "water_scale"],
+		PlanetQualityProfile: ["resolution", "detail_octaves"],
+		TornadoQualityProfile: ["raymarch_steps", "dust_amount", "debris_cap"],
+		ClothQualityProfile: ["iterations", "substeps"],
+		DestructionQualityProfile: ["chunk_count"],
+		GrassQualityProfile: ["near_detail", "density", "shadows", "shadow_distance_m"],
 		MixwellQualityProfile: ["target_spp", "preview_scale", "final_scale",
 			"gpu_budget_ms"],
 		FractalQualityProfile: ["aa_quality", "refine_band_rows"],
-		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale", "render_scale"],
-		SsrQualityProfile: ["render_scale", "msaa", "ssr_steps", "max_objects",
+		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale"],
+		SsrQualityProfile: ["msaa", "ssr_steps", "max_objects",
 			"ssao", "ssil", "glow"],
-		AmbientFluidQualityProfile: ["render_scale", "msaa"],
-		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow",
-			"render_scale"],
+		AmbientFluidQualityProfile: ["msaa"],
+		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow"],
 	}
 
 
@@ -50,6 +46,7 @@ func _initialize() -> void:
 	_profile_table()
 	_test_base_class()
 	_test_profile_tables()
+	_test_fire_render_scale_ownership()
 	_test_game_manager_seeds()
 	_test_state_machine()
 	_test_widget_pushes()
@@ -83,21 +80,20 @@ func _test_profile_tables() -> void:
 			for key in keys:
 				_check(values.has(key), "%s tier %d misses key '%s'" % [
 					profile_script.get_class(), tier, key])
-		# Render scale is a shared lever: within [0.4, 1] and never decreases
-		# with the tier (more quality = no smaller framebuffer).
-		if profile_script.values(0).has("render_scale"):
-			var previous := -1.0
-			for tier in 4:
-				var scale: float = profile_script.values(tier).render_scale
-				_check(scale >= 0.4 and scale <= 1.0,
-					"%s tier %d render scale %s out of [0.4, 1]" % [
-						profile_script.get_class(), tier, scale])
-				_check(scale >= previous,
-					"%s render scale shrinks at tier %d" % [
-						profile_script.get_class(), tier])
-				previous = scale
+			_check(not values.has("render_scale"),
+				"%s tier %d must preserve the manual viewport render scale" % [
+					profile_script.get_class(), tier])
 	_test_ocean_tables()
 	_test_lever_caps()
+
+
+func _test_fire_render_scale_ownership() -> void:
+	for preset in range(FireQuality.Preset.AUTO):
+		_check(not FireQuality.preset_values(preset).has("render_scale"),
+			"Fire fixed preset %d must preserve the manual viewport render scale" % preset)
+	for level in FireQuality.AUTO_MAX_LEVEL + 1:
+		_check(FireQuality.auto_values(level).has("render_scale"),
+			"Fire Auto level %d must retain adaptive render scale" % level)
 
 
 func _test_ocean_tables() -> void:
@@ -211,7 +207,7 @@ class TestProfile extends SimQualityProfile:
 			strength = float(tier + 1),
 			count = (tier + 1) * 16,
 			enabled = tier % 2 == 1,
-			render_scale = 1.0,
+			callback_value = 1.0,
 		}
 
 	static func tier_supported(tier: int) -> bool:
@@ -335,7 +331,7 @@ func _test_widget_pushes() -> void:
 
 	# Callback-only binding of the last unbound key: every key is now widget-
 	# routed, so the apply callable must be bypassed entirely.
-	state.bind("render_scale", null,
+	state.bind("callback_value", null,
 		func(value) -> void: pass)
 	var count := _apply_count
 	state.set_tier(SimQualityProfile.Tier.ULTRA)

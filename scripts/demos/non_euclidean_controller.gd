@@ -91,7 +91,6 @@ func _set_render_scale(v: float) -> void:
 ## size and each view's resolution; after the HUD exists the keys are bound to
 ## its sliders and a tier switch re-pushes through them.
 func _apply_quality(values: Dictionary) -> void:
-	_set_render_scale(values.render_scale)
 	render_manager.set_portal_view_scale(values.portal_view_scale)
 	render_manager.set_max_views(int(values.portal_views))
 

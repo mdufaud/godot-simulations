@@ -9,13 +9,6 @@ extends SimQualityProfile
 ## Dust particle amounts the menu proposes, smallest first.
 const DUST_AMOUNTS := [4000, 14000, 28000, 56000]
 
-const RENDER_SCALE := {
-	Tier.LOW: 0.6,
-	Tier.MEDIUM: 0.75,
-	Tier.HIGH: 1.0,
-	Tier.ULTRA: 1.0,
-}
-
 const RAYMARCH_STEPS := {
 	Tier.LOW: 24,
 	Tier.MEDIUM: 48,
@@ -40,7 +33,6 @@ const DEBRIS_CAP := {
 
 static func values(tier: int) -> Dictionary:
 	return {
-		render_scale = RENDER_SCALE[tier],
 		raymarch_steps = RAYMARCH_STEPS[tier],
 		dust_amount = DUST_AMOUNT[tier],
 		debris_cap = DEBRIS_CAP[tier],

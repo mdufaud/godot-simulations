@@ -33,9 +33,8 @@ func build(host, exhibit_names: Array) -> void:
 	)
 	_menu.add_separator()
 	_menu.add_section("Performance")
-	var scale_slider: HSlider = _menu.add_slider("Render scale", 0.4, 1.0,
+	_menu.add_slider("Render scale", 0.4, 1.0,
 		host._viewport.render_scale(), host._set_render_scale)
-	host.quality.bind("render_scale", scale_slider, host._set_render_scale)
 	var views_slider: HSlider = _menu.add_slider("Portal views", 1.0, 4.0,
 		float(host.render_manager.max_views),
 		func(v: float) -> void: host.render_manager.set_max_views(int(v)))

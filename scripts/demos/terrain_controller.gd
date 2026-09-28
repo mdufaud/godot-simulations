@@ -315,7 +315,6 @@ func render_scale() -> float:
 ## change reseeds through the same restart path, and a sheet change rebuilds
 ## the displaced mesh.
 func _apply_quality(values: Dictionary) -> void:
-	set_render_scale(values.render_scale)
 	solver.iterations = int(values.iterations)
 	if solver.initialized and int(values.grid_n) != solver.grid_n:
 		set_grid_n(int(values.grid_n))

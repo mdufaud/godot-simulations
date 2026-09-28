@@ -158,7 +158,6 @@ func _apply_quality(values: Dictionary) -> void:
 	var resolution: int = values.resolution
 	var regen := _planet_ready and resolution != generator.resolution
 	generator.resolution = resolution
-	set_render_scale(values.render_scale)
 	if view.surface != null:
 		view.surface.set_shader_parameter("detail_octaves", int(values.detail_octaves))
 	if regen:

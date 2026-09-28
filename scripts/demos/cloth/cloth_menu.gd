@@ -45,9 +45,8 @@ func build(menu: SimMenu, solvers: Array[ClothSolver], state: Dictionary,
 
 	menu.add_section("Performance")
 	quality.attach_menu_option(menu)
-	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		callbacks.initial_render_scale, callbacks.render_scale)
-	quality.bind("render_scale", scale_slider, callbacks.render_scale)
 
 
 func update_status(solvers: Array[ClothSolver]) -> void:

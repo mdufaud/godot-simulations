@@ -86,9 +86,8 @@ func _ready() -> void:
 			clear = _clear_objects,
 		})
 	menu.add_section("Performance")
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var msaa_option: OptionButton = menu.add_option_button("MSAA", ["Off", "2×", "4×"],
 		_msaa_index(_viewport.msaa()), _set_msaa)
 	quality.bind("msaa", msaa_option, _set_msaa,
@@ -170,7 +169,6 @@ static func _msaa_index(mode: int) -> int:
 
 
 func _apply_quality(values: Dictionary) -> void:
-	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, values.render_scale)
 	_viewport.set_msaa(values.msaa)
 
 

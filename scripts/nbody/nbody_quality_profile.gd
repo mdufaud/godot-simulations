@@ -29,18 +29,9 @@ const SELF_GRAVITY_MAX := {
 	Tier.ULTRA: 32768,
 }
 
-const RENDER_SCALE := {
-	Tier.LOW: 0.75,
-	Tier.MEDIUM: 0.85,
-	Tier.HIGH: 1.0,
-	Tier.ULTRA: 1.0,
-}
-
-
 static func values(tier: int) -> Dictionary:
 	return {
 		particle_count = PARTICLE_COUNT[tier],
 		self_gravity = SELF_GRAVITY[tier],
 		self_gravity_max = SELF_GRAVITY_MAX[tier],
-		render_scale = RENDER_SCALE[tier],
 	}

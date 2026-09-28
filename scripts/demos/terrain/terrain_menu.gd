@@ -133,9 +133,8 @@ func build(menu: SimMenu, presets: Array, preset_idx: int, tool_choice: int,
 	host.quality.bind("mesh_n", mesh_option, host.set_mesh_n,
 		func(n: int) -> int: return TerrainQualityProfile.MESH_SIZES.find(n))
 	host.quality.attach_menu_option(menu)
-	var scale_slider := _slider(menu, "Render scale", 0.4, 1.0,
+	_slider(menu, "Render scale", 0.4, 1.0,
 		host.render_scale(), host.set_render_scale)
-	host.quality.bind("render_scale", scale_slider, host.set_render_scale)
 
 
 ## Registers a non-persisting slider. [param getter] feeds sync_params.

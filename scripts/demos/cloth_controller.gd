@@ -218,8 +218,6 @@ func _apply_solver_quality() -> void:
 	for solver in solvers:
 		solver.iterations = int(_quality_values.iterations)
 		solver.substeps = int(_quality_values.substeps)
-	if not _quality_values.is_empty():
-		_set_render_scale(_quality_values.render_scale)
 
 
 func _on_profiler_enabled(on: bool) -> void:

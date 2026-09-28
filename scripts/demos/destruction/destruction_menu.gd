@@ -39,9 +39,8 @@ func build(menu: SimMenu, projectiles: Array, projectile_idx: int, chunk_count: 
 	menu.add_separator()
 
 	menu.add_section("Performance")
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		host.render_scale(), host.set_render_scale)
-	host.quality.bind("render_scale", scale_slider, host.set_render_scale)
 	host.quality.attach_menu_option(menu)
 
 

@@ -408,9 +408,8 @@ func _setup_ui() -> void:
 	quality.bind("particle_count", particle_count_option,
 		func(count): _set_particle_count(count),
 		func(count): return NBodyQualityProfile.PARTICLE_COUNTS.find(count))
-	var scale_slider := menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	_sync_physics_controls()
 	_sync_render_controls()
 	_sync_navigation_controls()
@@ -761,9 +760,8 @@ func _apply_quality(values: Dictionary) -> void:
 	_scene_self_gravity[active_preset.scene_type] = requested_self_gravity
 	solver.self_gravity = requested_self_gravity and scene_def.supports_self_gravity()
 	config.self_gravity_max_particles = values.self_gravity_max
-	# particle_count and render_scale are widget-bound: absent from values on a
-	# tier push (the widget callback already applied them), so fall back to the
-	# live values.
+	# Particle count is widget-bound: absent from values on a tier push, so fall
+	# back to the live value.
 	var count := int(values.get("particle_count",
 		_preferred_particle_count if _preferred_particle_count > 0 else solver.particle_count))
 	if solver.initialized:
@@ -775,7 +773,6 @@ func _apply_quality(values: Dictionary) -> void:
 			solver.particle_count = target
 			solver.tex_width = _tex_width_for(target)
 	_sync_physics_controls()
-	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 
 
 func _tex_width_for(n: int) -> int:

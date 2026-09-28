@@ -19,17 +19,8 @@ const SUBSTEPS := {
 	Tier.ULTRA: 6,
 }
 
-const RENDER_SCALE := {
-	Tier.LOW: 0.75,
-	Tier.MEDIUM: 0.85,
-	Tier.HIGH: 1.0,
-	Tier.ULTRA: 1.0,
-}
-
-
 static func values(tier: int) -> Dictionary:
 	return {
 		iterations = ITERATIONS[tier],
 		substeps = SUBSTEPS[tier],
-		render_scale = RENDER_SCALE[tier],
 	}

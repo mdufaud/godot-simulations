@@ -140,10 +140,8 @@ func render_scale() -> float:
 
 # Called from quality.restore() before the menu exists, so the chunk count
 # lands on the member ahead of the launch rebuild; once the slider is bound the
-# debounced path refactures the walls. render_scale is widget-bound — absent
-# from values on a tier push, so it falls back to the live value.
+# debounced path refactures the walls.
 func _apply_quality(values: Dictionary) -> void:
-	set_render_scale(values.get("render_scale", render_scale()))
 	chunk_count = int(round(values.chunk_count))
 
 

@@ -52,9 +52,8 @@ func _ready() -> void:
 	_apply_settings()
 
 	menu.add_section("Performance")
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	quality.attach_menu_option(menu)
 
 	orbit_cam.distance = 4.0
@@ -118,12 +117,9 @@ func _set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
 
 
-## The layer counts scale around the active preset's base. render_scale and
-## self_shadow are widget-bound — absent from values on a tier push (the
-## widget callbacks already applied them), so they fall back to the live
-## values.
+## The layer counts scale around the active preset's base. self_shadow is
+## widget-bound and falls back to its live value on a tier push.
 func _apply_quality(values: Dictionary) -> void:
-	_set_render_scale(values.get("render_scale", _viewport.render_scale()))
 	_settings.min_layer_count = clampi(
 		int(round(_base_min_layers * values.min_factor)), 4, 128)
 	_settings.max_layer_count = clampi(

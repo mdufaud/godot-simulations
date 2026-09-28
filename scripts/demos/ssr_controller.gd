@@ -137,9 +137,8 @@ func _build_menu() -> void:
 		func(on: bool) -> void: env.volumetric_fog_enabled = on)
 
 	menu.add_section("Performance")
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var msaa_names := ["Off", "2×", "4×"]
 	var msaa_option: OptionButton = menu.add_option_button("MSAA", msaa_names,
 		_msaa_index(_viewport.msaa()), _set_msaa)
@@ -171,7 +170,6 @@ static func _msaa_index(mode: int) -> int:
 ## built; the bound keys re-push through their widgets on a tier switch.
 func _apply_quality(values: Dictionary) -> void:
 	var env := world_env.environment
-	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, values.render_scale)
 	_viewport.set_msaa(values.msaa)
 	env.ssr_max_steps = int(values.ssr_steps)
 	max_objects = int(values.max_objects)
