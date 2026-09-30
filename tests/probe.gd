@@ -8,6 +8,7 @@ extends "res://tests/test_case.gd"
 ## outside the _run_<name> convention.
 
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
+const GRASS_HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -1853,6 +1854,10 @@ func _run_grass() -> void:
 	# without the real launch flow it stays empty and restore is disabled.
 	root.get_node("/root/GameManager").current_demo = "grass_demo"
 	root.get_node("/root/GameManager").set_setting("grass_quality_profile", tier)
+	var expected_sun_elevation := 24.0
+	var expected_sun_azimuth := 187.0
+	settings.set_sim_value("grass_demo", "☀️ Sunlight/Sun elevation", expected_sun_elevation)
+	settings.set_sim_value("grass_demo", "☀️ Sunlight/Sun azimuth", expected_sun_azimuth)
 	if seed_mode == 1:
 		settings.set_sim_value("grass_demo", DENSITY_KEY, 0.5)
 	elif seed_mode == 2:
@@ -1872,79 +1877,166 @@ func _run_grass() -> void:
 	# The first fill runs inside _ready during add_child, before the first
 	# awaitable frame, so sample synchronously here and then every frame.
 	root.add_child(demo)
+	var boot_sun_color: Color = demo.sun.light_color
+	var boot_horizon: Color = demo.sky_material.get_shader_parameter("horizon_color")
+	var ground_material: ShaderMaterial = demo.ground_mesh.material_override
 	var profile: Dictionary = GrassQualityProfile.values(tier)
-	if demo.grass.near_detail != profile.near_detail \
-			or demo.grass.shadows_enabled != profile.shadows \
-			or (seed_mode == 0 and not is_equal_approx(demo.grass.density, profile.density)):
-		push_error("GRA3: quality tier %d did not reach the player boot path" % tier)
+	_check(demo.grass.material.get_shader_parameter("cloud_shadow_texture") \
+			== demo.cloudscape._shadow_viewport.get_texture() \
+			and ground_material.get_shader_parameter("cloud_shadow_texture") \
+			== demo.cloudscape._shadow_viewport.get_texture() \
+			and (float(demo.cloudscape._shadow_material.get_shader_parameter("cloud_shadow_strength")) > 0.0) \
+				== bool(profile.shadows) \
+			and is_equal_approx(float(demo.cloudscape._shadow_material.get_shader_parameter("coverage")),
+				demo.cloudscape._coverage),
+		"GRA3: cloud shadows did not reach grass and ground at player boot")
+	_check((demo.main_camera.cull_mask & OceanCloudscape.CLOUD_LAYER) == 0 \
+			and demo.cloudscape._cloud_camera.cull_mask == OceanCloudscape.CLOUD_LAYER,
+		"GRA3: cloud raymarch escaped into the player camera")
+	demo._set_shadows(false)
+	_check(is_zero_approx(float(demo.cloudscape._shadow_material.get_shader_parameter("cloud_shadow_strength"))),
+		"GRA3: disabling shadows left cloud shadows active")
+	demo._set_shadows(true)
+	demo.cloudscape.set_enabled(false)
+	_check(is_zero_approx(float(demo.cloudscape._shadow_material.get_shader_parameter("cloud_shadow_strength"))),
+		"GRA3: disabling clouds left cloud shadows active")
+	demo.cloudscape.set_enabled(true)
+	demo._set_shadows(profile.shadows)
+	var sun_direction: Vector3 = demo.sun.global_basis.z.normalized()
+	var sky_direction: Vector3 = demo.sky_material.get_shader_parameter("sun_direction")
+	var cloud_direction: Vector3 = demo.cloudscape._data_material.get_shader_parameter("sun_direction")
+	_check(is_equal_approx(demo.sun_elevation, expected_sun_elevation) \
+			and is_equal_approx(demo.sun_azimuth, expected_sun_azimuth) \
+			and demo.sun.rotation_degrees.is_equal_approx(
+				Vector3(-expected_sun_elevation, expected_sun_azimuth, 0.0)) \
+			and (sun_direction - sky_direction).length() < 0.0001 \
+			and (sun_direction - cloud_direction).length() < 0.0001,
+		"GRA3: persisted sun position did not reach the light, sky and clouds")
+	var sun_elevation_slider: HSlider = demo.menu._entries["☀️ Sunlight/Sun elevation"].node
+	var sun_azimuth_slider: HSlider = demo.menu._entries["☀️ Sunlight/Sun azimuth"].node
+	sun_elevation_slider.value = 42.0
+	sun_azimuth_slider.value = 260.0
+	_check(demo.sun.light_color != boot_sun_color \
+			and demo.sky_material.get_shader_parameter("horizon_color") != boot_horizon,
+		"GRA3: changing sun elevation did not update the daylight palette")
+	sun_direction = demo.sun.global_basis.z.normalized()
+	sky_direction = demo.sky_material.get_shader_parameter("sun_direction")
+	cloud_direction = demo.cloudscape._data_material.get_shader_parameter("sun_direction")
+	_check(is_equal_approx(demo.sun_elevation, 42.0) \
+			and is_equal_approx(demo.sun_azimuth, 260.0) \
+			and is_equal_approx(float(settings.get_sim_value(
+				"grass_demo", "☀️ Sunlight/Sun elevation", -1.0)), 42.0) \
+			and is_equal_approx(float(settings.get_sim_value(
+				"grass_demo", "☀️ Sunlight/Sun azimuth", -1.0)), 260.0) \
+			and (sun_direction - sky_direction).length() < 0.0001 \
+			and (sun_direction - cloud_direction).length() < 0.0001,
+		"GRA3: sun sliders did not update and persist the position across renderers")
+	_check(demo.grass.near_detail == profile.near_detail \
+			and demo.grass.shadows_enabled == profile.shadows \
+			and demo.sun.shadow_enabled == profile.shadows \
+			and (seed_mode != 0 or is_equal_approx(demo.grass.density, profile.density)),
+		"GRA3: quality tier %d did not reach the player boot path" % tier)
 	var expected_base: Color = Color(0.22, 0.1, 0.29) if palette_seed == 3 else demo.BASE_COLOR
 	var expected_gradient := 0.4 if palette_seed == 3 else 0.0
-	if demo.grass.demo_stage != 3 \
-			or demo._palette_index != palette_seed \
-			or demo._palette_option.selected != palette_seed \
-			or demo.grass.material.get_shader_parameter("base_color") != expected_base \
-			or not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), expected_gradient) \
-			or demo.ground_mesh.material_override.get_shader_parameter("clump_noise") == null:
-		push_error("GRA3: grass palette or ground variation missing at player boot")
+	_check(demo.grass.demo_stage == 3 \
+			and demo._palette_index == palette_seed \
+			and demo._palette_option.selected == palette_seed \
+			and demo.grass.material.get_shader_parameter("base_color") == expected_base \
+			and is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), expected_gradient) \
+			and demo.ground_mesh.material_override.get_shader_parameter("clump_noise") != null,
+		"GRA3: grass palette or ground variation missing at player boot")
 	demo.apply_look(0)
 	demo._palette_action.pressed.emit()
 	var palette_caption := demo._palette_action.find_child("ActionCaption", true, false) as Label
-	if demo._palette_index != 1 or palette_caption.text != "Meadow" \
-			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) != 1 \
-			or demo.grass.material.get_shader_parameter("base_color") != demo.COLOR_PALETTES[1].base \
-			or demo.grass.material.get_shader_parameter("plume_color") != demo.COLOR_PALETTES[1].plume \
-			or demo.ground_mesh.material_override.get_shader_parameter("moss_color") != demo.COLOR_PALETTES[1].moss:
-		push_error("GRA3: palette action did not recolor the whole field")
+	_check(demo._palette_index == 1 and palette_caption.text == "Meadow" \
+			and settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) == 1 \
+			and demo.grass.material.get_shader_parameter("base_color") == demo.COLOR_PALETTES[1].base \
+			and demo.grass.material.get_shader_parameter("plume_color") == demo.COLOR_PALETTES[1].plume \
+			and demo.ground_mesh.material_override.get_shader_parameter("moss_color") == demo.COLOR_PALETTES[1].moss,
+		"GRA3: palette action did not recolor the whole field")
 	var custom_ground := Color(0.2, 0.3, 0.1)
 	var ground_picker: ColorPickerButton = demo._palette_pickers["straw"]
 	ground_picker.color = custom_ground
 	ground_picker.color_changed.emit(custom_ground)
 	demo._chromatic_slider.value = 0.35
-	if demo.ground_mesh.material_override.get_shader_parameter("straw_color") != custom_ground \
-			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Ground Light", null) != custom_ground \
-			or not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.35):
-		push_error("GRA3: custom palette controls did not update and persist")
+	_check(demo.ground_mesh.material_override.get_shader_parameter("straw_color") == custom_ground \
+			and settings.get_sim_value("grass_demo", "🎨 Grass Palette/Ground Light", null) == custom_ground \
+			and is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.35),
+		"GRA3: custom palette controls did not update and persist")
 	demo.apply_look(3)
-	if not is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.7) \
-			or not is_equal_approx(demo.ground_mesh.material_override.get_shader_parameter("chromatic_strength"), 0.7):
-		push_error("GRA3: Prism shader colors did not reach grass and ground")
+	_check(is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.7) \
+			and is_equal_approx(demo.ground_mesh.material_override.get_shader_parameter("chromatic_strength"), 0.7),
+		"GRA3: Prism shader colors did not reach grass and ground")
 	demo._palette_action.pressed.emit()
-	if demo._palette_index != 0 or palette_caption.text != "Pampas" \
-			or settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) != 0:
-		push_error("GRA3: palette action did not wrap to Pampas")
+	_check(demo._palette_index == 0 and palette_caption.text == "Pampas" \
+			and settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) == 0,
+		"GRA3: palette action did not wrap to Pampas")
 	demo._on_stage_selected(2)
 	var wind_slider: HSlider = demo.menu._entries["🌿 Grass Properties/Wind Speed"].node
 	wind_slider.value = 2.5
-	if not is_equal_approx(demo.grass.wind_speed, 2.5) \
-			or not is_equal_approx(demo.grass.material.get_shader_parameter("wind_speed"), 2.5) \
-			or demo.grass.material.get_shader_parameter("demo_stage") != 2:
-		push_error("GRA3: Wind Speed slider did not reach the shader at the Pampas step")
+	_check(is_equal_approx(demo.grass.wind_speed, 2.5) \
+			and is_equal_approx(demo.grass.material.get_shader_parameter("wind_speed"), 2.5) \
+			and demo.grass.material.get_shader_parameter("demo_stage") == 2,
+		"GRA3: Wind Speed slider did not reach the shader at the Pampas step")
 	wind_slider.value = 1.0
 	demo._on_stage_selected(3)
 	demo.apply_preset(1)
 	demo._wind_preset_action.pressed.emit()
 	var wind_caption := demo._wind_preset_action.find_child("ActionCaption", true, false) as Label
-	if not is_equal_approx(demo.grass.wind_speed, 2.5) \
-			or not is_equal_approx(demo.grass.wind_direction_degrees, 70.0) \
-			or not is_equal_approx(demo.grass.gustiness, 0.85) \
-			or wind_caption.text != "Gusty":
-		push_error("GRA3: wind preset action did not advance and update the field")
+	_check(is_equal_approx(demo.grass.wind_speed, 2.5) \
+			and is_equal_approx(demo.grass.wind_direction_degrees, 70.0) \
+			and is_equal_approx(demo.grass.gustiness, 0.85) \
+			and wind_caption.text == "Gusty",
+		"GRA3: wind preset action did not advance and update the field")
 	demo._wind_preset_action.pressed.emit()
 	demo._wind_preset_action.pressed.emit()
-	if wind_caption.text != "Calm" or not is_zero_approx(demo.grass.wind_speed):
-		push_error("GRA3: wind preset action did not wrap to Calm")
+	_check(wind_caption.text == "Calm" and is_zero_approx(demo.grass.wind_speed),
+		"GRA3: wind preset action did not wrap to Calm")
 	demo.apply_preset(1)
-	demo.grass.add_gust(4.0, demo.orbit_cam.target)
-	if not is_zero_approx(demo.grass._gust_pulse):
-		push_error("GRA3: gust starts with an instant pulse")
-	demo.grass.tick(0.2, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
+	var gust_button: Button
+	for button in demo.menu._actions:
+		var caption := button.find_child("ActionCaption", true, false) as Label
+		if caption != null and caption.text == "Gust":
+			gust_button = button
+	_check(gust_button != null, "GRA3: Gust action missing")
+	if gust_button != null:
+		gust_button.pressed.emit()
+	_check(is_zero_approx(demo.grass._gust_age) and is_equal_approx(demo.grass._gust_strength, 1.0),
+		"GRA3: Gust action did not trigger the runtime")
+	_check(is_zero_approx(demo.grass._gust_pulse), "GRA3: gust starts with an instant pulse")
+	var gust_origin: Vector2 = demo.grass.material.get_shader_parameter("gust_origin")
+	var gust_direction: Vector2 = demo.grass.material.get_shader_parameter("gust_direction")
+	var gust_distance := (Vector2(demo.orbit_cam.target.x, demo.orbit_cam.target.z) - gust_origin).dot(gust_direction)
+	var arrival: float = gust_distance / demo.grass._gust_speed
+	var peak_age: float = (gust_distance + 60.0) / demo.grass._gust_speed
+	_check(arrival < 2.25 and peak_age < 3.6, "GRA3: Gust action arrives too late in the visible field")
+	print("GRA3 GUST BUTTON arrival=%.3fs peak=%.3fs" % [arrival, peak_age])
+	demo.grass.tick(0.03, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
 	var early_pulse: float = demo.grass._gust_pulse
-	demo.grass.tick(0.5, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
-	if not (early_pulse > 0.0 and early_pulse < demo.grass._gust_pulse):
-		push_error("GRA3: gust does not build gradually")
-	demo.grass.tick(4.0, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
-	if not is_zero_approx(demo.grass._gust_pulse):
-		push_error("GRA3: gust did not decay")
+	demo.grass.tick(0.12, demo.orbit_cam.target, demo.orbit_cam.get_camera().global_position)
+	_check(early_pulse > 0.0 and early_pulse < demo.grass._gust_pulse,
+		"GRA3: gust does not build gradually")
+	_check_grass_gust_coverage(demo.grass)
+	demo.grass.tick(demo.grass._gust_duration, demo.orbit_cam.target,
+		demo.orbit_cam.get_camera().global_position)
+	_check(is_zero_approx(demo.grass._gust_pulse) and demo.grass._gust_age < 0.0 \
+			and float(demo.grass.material.get_shader_parameter("gust_age")) < 0.0 \
+			and is_zero_approx(float(demo.grass.material.get_shader_parameter("gust_pulse"))),
+		"GRA3: expired gust left active shader state")
+	_check_grass_deformation()
+	var post_fx_rect: ColorRect = demo._post_fx_rect
+	_check(post_fx_rect != null and not post_fx_rect.visible \
+			and int(demo._post_fx_material.get_shader_parameter("filter_mode")) == 0,
+		"GRA3: post filter is not off at boot")
+	demo.set_capture_params({"filter": 1})
+	_check(post_fx_rect.visible \
+			and int(demo._post_fx_material.get_shader_parameter("filter_mode")) == 1 \
+			and int(settings.get_sim_value("grass_demo", "🎞 Filters/Filter", -1)) == 1,
+		"GRA3: filter capture param did not enable and persist Obra Dinn")
+	demo.set_capture_params({"filter": 0})
+	_check(not post_fx_rect.visible \
+			and int(settings.get_sim_value("grass_demo", "🎞 Filters/Filter", -1)) == 0,
+		"GRA3: filter capture param did not switch back to Off")
 	if not demo.grass._lod_variants.is_empty():
 		generates += 1
 		frames.append(-1)
@@ -1953,8 +2045,7 @@ func _run_grass() -> void:
 		demo.grass.set_demo_stage(0)
 		var stage_kept_layout := (demo.grass._lod_variants[0][0] as MultiMesh).get_instance_id() == last_lod_id
 		demo.grass.set_demo_stage(3)
-		if not stage_kept_layout:
-			push_error("GRA3: changing the learning step rebuilt grass instances")
+		_check(stage_kept_layout, "GRA3: changing the learning step rebuilt grass instances")
 
 	for frame in GRASS_SAMPLE_FRAMES:
 		await process_frame
@@ -1971,10 +2062,265 @@ func _run_grass() -> void:
 			densities.append(grass.density)
 			last_lod_id = id
 
+	var collision_shape: HeightMapShape3D = demo.get_node("Ground/CollisionShape3D").shape
+	var collision_image := GRASS_HEIGHTMAP.noise.get_seamless_image(
+		collision_shape.map_width, collision_shape.map_depth)
+	collision_image.convert(Image.FORMAT_RF)
+	var collision_source := collision_image.get_data().to_float32_array()
+	var collision_state: PhysicsDirectSpaceState3D = demo.get_world_3d().direct_space_state
+	for sample in [Vector2i(192, 192), Vector2i(256, 256),
+			Vector2i(320, 320), Vector2i(192, 320)]:
+		var world_x := float(sample.x) - float(collision_shape.map_width - 1) * 0.5
+		var world_z := float(sample.y) - float(collision_shape.map_depth - 1) * 0.5
+		var query := PhysicsRayQueryParameters3D.create(
+			Vector3(world_x, 10.0, world_z), Vector3(world_x, -10.0, world_z))
+		var hit: Dictionary = collision_state.intersect_ray(query)
+		var source_x: int = posmod(sample.x - (collision_shape.map_width >> 1),
+			collision_shape.map_width)
+		var source_z: int = posmod(sample.y - (collision_shape.map_depth >> 1),
+			collision_shape.map_depth)
+		var expected_height: float = (collision_source[
+			source_x + source_z * collision_shape.map_width]
+			- 0.5) * demo.config.heightmap_scale_m
+		var collision_matches := not hit.is_empty() \
+				and absf(hit.position.y - expected_height) <= 0.01
+		_check(collision_matches,
+			"GRA3: collision height is misaligned at map sample %s" % sample)
+		if not collision_matches:
+			break
+
+	var first_variant: Array = demo.grass._lod_variants[0]
+	var lod_ordered := true
+	var lod_counts: Array[int] = []
+	for lod_index in first_variant.size():
+		var lod: MultiMesh = first_variant[lod_index]
+		lod_counts.append(lod.instance_count)
+		if lod_index > 0 and lod.instance_count > lod_counts[lod_index - 1]:
+			lod_ordered = false
+	for lod_index in range(1, first_variant.size()):
+		var fine_lod: MultiMesh = first_variant[lod_index - 1]
+		var coarse_lod: MultiMesh = first_variant[lod_index]
+		if coarse_lod.instance_count == 0:
+			continue
+		for sample_index in [0, coarse_lod.instance_count - 1]:
+			if not coarse_lod.get_instance_transform(sample_index).origin \
+					.is_equal_approx(fine_lod.get_instance_transform(sample_index).origin):
+				lod_ordered = false
+	_check(lod_ordered and lod_counts[0] >= lod_counts[1] and lod_counts[1] >= lod_counts[2] \
+			and lod_counts[2] >= lod_counts[3] and lod_counts[3] >= lod_counts[4],
+		"GRA3: LOD levels are not graded subsets of one layout")
+	var first_tile: MultiMeshInstance3D = demo.grass._tiles[0][0]
+	_check(first_tile.custom_aabb.position.x <= -9.0 \
+			and first_tile.custom_aabb.position.z <= -9.0 \
+			and first_tile.custom_aabb.position.y <= -3.5 \
+			and first_tile.custom_aabb.size.y >= 9.0,
+		"GRA3: grass tile bounds do not cover maximum wind displacement")
+	var shadow_source: MultiMesh = demo.grass._lod_variants[
+		demo.grass._variant_for_tile(first_tile)][2]
+	var expected_shadow: Transform3D = shadow_source.get_instance_transform(0)
+	expected_shadow.origin += demo.grass._tiles[0][1]
+	var baked_shadow: Transform3D = demo.grass._shadow_instance.multimesh.get_instance_transform(0)
+	_check(baked_shadow.origin.is_equal_approx(expected_shadow.origin),
+		"GRA3: shadow proxy transforms do not match their tile source")
+
+	for profile_tier in range(4):
+		demo.set_quality_profile(profile_tier)
+		var tier_values: Dictionary = GrassQualityProfile.values(profile_tier)
+		var tier_matches: bool = is_equal_approx(demo.grass.density, tier_values.density) \
+				and demo.grass.near_detail == tier_values.near_detail \
+				and demo.grass.shadows_enabled == tier_values.shadows \
+				and demo.sun.shadow_enabled == tier_values.shadows \
+				and (float(demo.cloudscape._shadow_material.get_shader_parameter("cloud_shadow_strength")) > 0.0) \
+					== bool(tier_values.shadows) \
+				and is_equal_approx(demo.shadow_distance_m,
+					tier_values.shadow_distance_m) \
+				and is_equal_approx(demo.sun.directional_shadow_max_distance,
+					tier_values.shadow_distance_m)
+		var expected_casting := GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY \
+			if tier_values.shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var shadow_instance: MultiMeshInstance3D = demo.grass._shadow_instance
+		tier_matches = tier_matches and shadow_instance.cast_shadow == expected_casting \
+			and shadow_instance.multimesh.instance_count < first_tile.multimesh.instance_count \
+				* demo.grass._tiles.size()
+		for tile_data in demo.grass._tiles:
+			if tile_data[0].cast_shadow != GeometryInstance3D.SHADOW_CASTING_SETTING_OFF:
+				tier_matches = false
+				break
+		_check(tier_matches, "GRA3: live quality switch failed at tier %d" % profile_tier)
+		if not tier_matches:
+			break
+	var shadow_distance_slider: HSlider = demo.menu._entries["⚙️ Rendering/Shadow distance"].node
+	shadow_distance_slider.value = 53.0
+	_check(is_equal_approx(demo.shadow_distance_m, 53.0) \
+			and is_equal_approx(demo.sun.directional_shadow_max_distance, 53.0),
+		"GRA3: shadow distance slider did not update the light")
+
+	if _failures > 0:
+		printerr("GRA3 PROBE FAIL: %d check(s)" % _failures)
+		quit(1)
+		return
 	print("GRA3 PROBE DONE seed=%d tier=%d generates=%d frames=%s densities=%s final_density=%.3f near_detail=%s" % [
 		seed_mode, tier, generates, str(frames), str(densities), demo.grass.density,
 		str(demo.grass.near_detail)])
 	quit(0)
+
+
+func _check_grass_gust_coverage(grass: GrassRenderer) -> void:
+	var original_direction := grass.wind_direction_degrees
+	var checked := 0
+	for degrees in [0.0, 35.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0]:
+		grass.set_wind_direction(degrees)
+		grass.add_gust(4.0, Vector3(127.0, 0.0, -63.0))
+		var direction: Vector2 = grass.material.get_shader_parameter("gust_direction")
+		var origin: Vector2 = grass.material.get_shader_parameter("gust_origin")
+		var half := grass.config.tile_size_m * 0.5
+		for data in grass._tiles:
+			var position: Vector3 = data[0].global_position
+			for corner in [Vector2(-half, -half), Vector2(half, -half),
+					Vector2(-half, half), Vector2(half, half)]:
+				var distance: float = (Vector2(position.x, position.z) + corner - origin).dot(direction)
+				var peak_age: float = (distance + 60.0) / grass._gust_speed
+				_check(distance >= 8.99 and peak_age >= 0.15 \
+						and (distance + 190.0) / grass._gust_speed <= grass._gust_release_start + 0.001 \
+						and (distance + 275.0) / grass._gust_speed <= grass._gust_duration + 0.001,
+					"GRA3: gust missed a tile corner or expired before its recoil")
+				checked += 1
+	grass.set_wind_direction(original_direction)
+	print("GRA3 GUST coverage_corners=%d directions=8" % checked)
+
+
+func _check_grass_deformation() -> void:
+	var rd := RenderingServer.create_local_rendering_device()
+	if rd == null:
+		print("GRA3 DEFORMATION SKIP renderer has no GPU device")
+		return
+	var shader_text := FileAccess.get_file_as_string("res://shaders/grass/grass.gdshader")
+	var functions := shader_text.substr(shader_text.find("mat3 rotate_y"))
+	functions = functions.substr(0, functions.find("void vertex()"))
+	var source := RDShaderSource.new()
+	source.source_compute = """#version 450
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer Inputs { vec4 inputs[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer Results { vec4 results[]; };
+layout(push_constant, std430) uniform Params { uint count; } params;
+""" + functions + """
+void main() {
+	uint id = gl_GlobalInvocationID.x;
+	if (id >= params.count) { return; }
+	vec4 vertex = inputs[id * 4];
+	vec4 root = inputs[id * 4 + 1];
+	vec4 curve = inputs[id * 4 + 2];
+	vec4 part_bend = inputs[id * 4 + 3];
+	float head = float(part_bend.x == 1.0);
+	float pampas = float(part_bend.x > 0.0);
+	mat3 rest = rotate_y(0.61) * mat3(vec3(0.83,0,0), vec3(0,1.37,0), vec3(0,0,1));
+	vec3 position = rest * vertex.xyz;
+	if (head > 0.5) {
+		vec3 pivot = rest * vec3(0.71 * 0.38, 1.1, 0.71 * 0.38);
+		position = pivot + rotate_y(0.3) * (position - pivot) * 1.2;
+	}
+	mat3 normal_rotation;
+	vec3 bent = bend_tuft_vertex(position, root, curve, vertex.w, pampas, head,
+		1.0, rest, part_bend.zw, normal_rotation);
+	float residue = wind_flutter(12.34, 2.5, 1.0, 4.7, 0.0, 1.0)
+		- wind_flutter(12.34, 2.5, 1.0, -1.0, 0.0, 0.0);
+	float distance = 9.0 + float(id) * 0.25;
+	vec2 peak = gust_envelope(distance, (distance + 60.0) / 200.0, 200.0);
+	results[id] = vec4(bent, abs(residue) + abs(peak.x - 1.0) + abs(peak.y));
+}
+"""
+	var spirv := rd.shader_compile_spirv_from_source(source)
+	_check(spirv.compile_error_compute.is_empty(), "GRA3: deformation shader: " + spirv.compile_error_compute)
+	if not spirv.compile_error_compute.is_empty():
+		rd.free()
+		return
+	var cases: Array = []
+	var input := PackedFloat32Array()
+	var builder := preload("res://scripts/grass/grass_multimesh_builder.gd")
+	for detailed in [false, true]:
+		var arrays: Array = builder.make_tuft_mesh(detailed).surface_get_arrays(0)
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var uv: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
+		var roots: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM0]
+		var curves: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM1]
+		for bend in [Vector2.ZERO, Vector2(-0.18, 0.04), Vector2(0.5, -0.05), Vector2(0.86, 0.6), Vector2(1.17, 0.77)]:
+			cases.append([arrays, input.size() / 16, bend])
+			for index in vertices.size():
+				var kind := floorf(uv[index].x * 0.5)
+				input.append_array(PackedFloat32Array([vertices[index].x, vertices[index].y,
+					vertices[index].z, uv[index].y if kind == 0.0 else uv[index].y / 0.75]))
+				for metadata in [roots, curves]:
+					for channel in 4:
+						input.append(metadata[index * 4 + channel])
+				input.append_array(PackedFloat32Array([kind, 1.0, bend.x, bend.y]))
+	var count := input.size() / 16
+	var shader := rd.shader_create_from_spirv(spirv)
+	var pipeline := rd.compute_pipeline_create(shader)
+	var input_buffer := rd.storage_buffer_create(input.size() * 4, input.to_byte_array())
+	var output_buffer := rd.storage_buffer_create(count * 16)
+	var uniforms: Array[RDUniform] = []
+	for binding in 2:
+		var uniform := RDUniform.new()
+		uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+		uniform.binding = binding
+		uniform.add_id(input_buffer if binding == 0 else output_buffer)
+		uniforms.append(uniform)
+	var uniform_set := rd.uniform_set_create(uniforms, shader, 0)
+	var compute := rd.compute_list_begin()
+	rd.compute_list_bind_compute_pipeline(compute, pipeline)
+	rd.compute_list_bind_uniform_set(compute, uniform_set, 0)
+	var push_constants := PackedInt32Array([count, 0, 0, 0]).to_byte_array()
+	rd.compute_list_set_push_constant(compute, push_constants, push_constants.size())
+	rd.compute_list_dispatch(compute, ceili(float(count) / 64.0), 1, 1)
+	rd.compute_list_end()
+	rd.submit()
+	rd.sync()
+	var output := rd.buffer_get_data(output_buffer).to_float32_array()
+	var rest := Basis(Vector3.UP, 0.61) * Basis.from_scale(Vector3(0.83, 1.37, 1.0))
+	var max_error := 0.0
+	var max_joint_gap := 0.0
+	var segments := 0
+	for sample in cases:
+		var arrays: Array = sample[0]
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var uv: PackedVector2Array = arrays[Mesh.ARRAY_TEX_UV]
+		var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
+		var positions := PackedVector3Array()
+		var rest_positions := PackedVector3Array()
+		var stalk_tip := Vector3.ZERO
+		for index in vertices.size():
+			var offset := (int(sample[1]) + index) * 4
+			positions.append(Vector3(output[offset], output[offset + 1], output[offset + 2]))
+			_check(absf(output[offset + 3]) < 0.000001, "GRA3: gust envelope or flutter regression")
+			var position := rest * vertices[index]
+			if uv[index].x >= 2.0 and uv[index].x <= 3.0:
+				var pivot := rest * Vector3(0.71 * 0.38, 1.1, 0.71 * 0.38)
+				position = pivot + Basis(Vector3.UP, 0.3) * (position - pivot) * 1.2
+			rest_positions.append(position)
+			if sample[2] == Vector2.ZERO:
+				_check(position.distance_to(positions[index]) < 0.000002,
+					"GRA3: deformation changes the resting tuft")
+		for triangle in range(0, indices.size(), 6):
+			var a := indices[triangle]
+			var b := indices[triangle + 1]
+			var c := indices[triangle + 2]
+			var d := indices[triangle + 5]
+			var rest_length := ((rest_positions[c] + rest_positions[d]) * 0.5).distance_to(
+				(rest_positions[a] + rest_positions[b]) * 0.5)
+			var bent_length := ((positions[c] + positions[d]) * 0.5).distance_to(
+				(positions[a] + positions[b]) * 0.5)
+			max_error = maxf(max_error, absf(bent_length / rest_length - 1.0))
+			segments += 1
+			if uv[c].x >= 4.0 and is_equal_approx(uv[c].y, 0.75):
+				stalk_tip = (positions[c] + positions[d]) * 0.5
+			if uv[a].x == 2.0 and is_equal_approx(uv[a].y, 0.75):
+				max_joint_gap = maxf(max_joint_gap, stalk_tip.distance_to((positions[a] + positions[b]) * 0.5))
+	_check(max_error < 0.00001, "GRA3: wind stretches grass segments: %.8f" % max_error)
+	_check(max_joint_gap < 0.000002, "GRA3: wind detaches plume from stalk: %.8f" % max_joint_gap)
+	print("GRA3 DEFORMATION segments=%d max_relative_length_error=%.8f max_joint_gap=%.8f flutter_residue=0" % [segments, max_error, max_joint_gap])
+	for resource in [uniform_set, pipeline, shader, input_buffer, output_buffer]:
+		rd.free_rid(resource)
+	rd.free()
 
 
 ## ── mixopt ──────────────────────────────────────────────────────────────

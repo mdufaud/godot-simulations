@@ -5,6 +5,7 @@ const CLOUD_FAR := 8000.0
 const CLOUD_LAYER := 1 << 18
 const CLOUD_BASE := 220.0
 const CLOUD_TOP := 680.0
+const CLOUD_SHADOW_EXTENT := 256.0
 ## Overcast palette the look colors are pushed towards as the storm mood rises.
 const STORM_TOP_COLOR := Color(0.52, 0.55, 0.54)
 const STORM_BASE_COLOR := Color(0.12, 0.15, 0.14)
@@ -12,6 +13,8 @@ const STORM_RIM_COLOR := Color(0.55, 0.60, 0.58)
 
 var camera: Camera3D
 var sun: DirectionalLight3D
+var wind_velocity := Vector2(7.0, 2.5)
+var shadow_receivers: Array[ShaderMaterial] = []
 
 var _cloud_viewport: SubViewport
 var _cloud_camera: Camera3D
@@ -20,16 +23,22 @@ var _noise_texture: NoiseTexture3D
 var _data_material := ShaderMaterial.new()
 var _composite_material := ShaderMaterial.new()
 var _composite: MeshInstance3D
+var _shadow_viewport: SubViewport
+var _shadow_material: ShaderMaterial
 var _wind_offset := Vector2.ZERO
 var _density := 0.75
 var _coverage := 0.78
 var _profiling := false
 var _viewport_scale := 0.5
 var _viewport_size := Vector2i.ZERO
+var _enabled := true
+var _shadows_enabled := true
 
 
 func build() -> void:
 	assert(camera != null and sun != null, "OceanCloudscape requires camera and sun")
+	camera.cull_mask &= ~CLOUD_LAYER
+	_shadows_enabled = sun.shadow_enabled
 	process_priority = 10
 	_data_material.shader = load("res://shaders/ocean/ocean_cloud_data.gdshader")
 	_composite_material.shader = load("res://shaders/ocean/ocean_cloud_composite.gdshader")
@@ -39,6 +48,8 @@ func build() -> void:
 	_build_noise()
 	_build_cloud_viewport()
 	_build_composite()
+	if not shadow_receivers.is_empty():
+		_build_shadow_viewport()
 	if not get_viewport().size_changed.is_connected(_resize_viewports):
 		get_viewport().size_changed.connect(_resize_viewports)
 	_resize_viewports()
@@ -52,9 +63,14 @@ func _process(delta: float) -> void:
 func update(delta: float) -> void:
 	if camera == null or _cloud_camera == null:
 		return
-	_wind_offset += Vector2(7.0, 2.5) * delta
+	_wind_offset += wind_velocity * delta
 	_sync_camera()
 	_data_material.set_shader_parameter("wind_offset", _wind_offset)
+	for receiver in shadow_receivers:
+		receiver.set_shader_parameter("cloud_shadow_center", Vector2(camera.global_position.x, camera.global_position.z))
+	if _shadow_material != null:
+		_shadow_material.set_shader_parameter("wind_offset", _wind_offset)
+		_shadow_material.set_shader_parameter("shadow_center", Vector2(camera.global_position.x, camera.global_position.z))
 
 
 func apply_look(look: OceanLookPreset, mood: float) -> void:
@@ -77,6 +93,15 @@ func apply_look(look: OceanLookPreset, mood: float) -> void:
 	_data_material.set_shader_parameter("density", _density)
 	_composite_material.set_shader_parameter("density", _density)
 	_composite_material.set_shader_parameter("storm_mood", mood)
+	if _shadow_material != null:
+		_shadow_material.set_shader_parameter("noise_tex", _noise_texture)
+		_shadow_material.set_shader_parameter("cloud_base", CLOUD_BASE)
+		_shadow_material.set_shader_parameter("cloud_top", CLOUD_TOP)
+		_shadow_material.set_shader_parameter("coverage", _coverage)
+		_shadow_material.set_shader_parameter("density", _density)
+		_shadow_material.set_shader_parameter("storm_mood", mood)
+		_shadow_material.set_shader_parameter("sun_direction", sun.global_basis.z.normalized())
+		_sync_shadow_state()
 
 
 func set_lightning(position: Vector3, energy: float) -> void:
@@ -86,10 +111,31 @@ func set_lightning(position: Vector3, energy: float) -> void:
 
 func set_sun_direction(direction: Vector3) -> void:
 	_data_material.set_shader_parameter("sun_direction", direction)
+	if _shadow_material != null:
+		_shadow_material.set_shader_parameter("sun_direction", direction)
 
 
 func reflection_texture() -> Texture2D:
 	return _cloud_viewport.get_texture() if _cloud_viewport != null else null
+
+
+func _build_shadow_viewport() -> void:
+	_shadow_viewport = SubViewport.new()
+	_shadow_viewport.size = Vector2i(128, 128)
+	_shadow_viewport.disable_3d = true
+	_shadow_viewport.use_hdr_2d = true
+	_shadow_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	add_child(_shadow_viewport)
+	_shadow_material = ShaderMaterial.new()
+	_shadow_material.shader = load("res://shaders/ocean/cloud_shadow.gdshader")
+	_shadow_material.set_shader_parameter("shadow_extent", CLOUD_SHADOW_EXTENT)
+	var rect := ColorRect.new()
+	rect.size = Vector2(128.0, 128.0)
+	rect.material = _shadow_material
+	_shadow_viewport.add_child(rect)
+	for receiver in shadow_receivers:
+		receiver.set_shader_parameter("cloud_shadow_texture", _shadow_viewport.get_texture())
+		receiver.set_shader_parameter("cloud_shadow_extent", CLOUD_SHADOW_EXTENT)
 
 
 func capture_alpha_coverage() -> float:
@@ -115,11 +161,27 @@ func set_profiling(on: bool) -> void:
 
 
 func set_enabled(on: bool) -> void:
+	_enabled = on
 	if _composite != null:
 		_composite.visible = on
 	if _cloud_viewport != null:
 		_cloud_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS \
 			if on else SubViewport.UPDATE_DISABLED
+	_sync_shadow_state()
+
+
+func set_shadows_enabled(on: bool) -> void:
+	_shadows_enabled = on
+	_sync_shadow_state()
+
+
+func _sync_shadow_state() -> void:
+	if _shadow_material == null:
+		return
+	var active := _enabled and _shadows_enabled
+	_shadow_material.set_shader_parameter("cloud_shadow_strength", 0.65 if active else 0.0)
+	_shadow_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS \
+		if active else SubViewport.UPDATE_ONCE
 
 
 func get_gpu_time() -> float:
@@ -154,7 +216,12 @@ func _build_noise() -> void:
 func _build_cloud_viewport() -> void:
 	_cloud_viewport = SubViewport.new()
 	_cloud_viewport.name = "CloudVolumeViewport"
-	_cloud_viewport.own_world_3d = true
+	# Shares the main world: with own_world_3d the separate scenario breaks
+	# directional shadow rendering for the whole main world (the grass field
+	# drew shadowless). The cloud camera's cull_mask sees only the raymarch
+	# quad and its Environment override keeps the transparent background, so
+	# nothing else leaks in.
+	_cloud_viewport.own_world_3d = false
 	_cloud_viewport.transparent_bg = true
 	_cloud_viewport.use_hdr_2d = true
 	_cloud_viewport.msaa_3d = Viewport.MSAA_DISABLED
@@ -216,7 +283,7 @@ func _resize_viewports() -> void:
 		return
 	_viewport_size = target
 	_cloud_viewport.size = target
-	_data_material.set_shader_parameter("march_steps", 24 if OS.has_feature("mobile") else 40)
+	_data_material.set_shader_parameter("march_steps", 32 if OS.has_feature("mobile") else 64)
 	_data_material.set_shader_parameter("viewport_size", Vector2(target))
 
 

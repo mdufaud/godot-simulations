@@ -1,13 +1,16 @@
 extends Node3D
 
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
-const BASE_COLOR := Color(0.14, 0.23, 0.1)
-const TIP_COLOR := Color(0.58, 0.54, 0.28)
-const SSS_COLOR := Color(0.8, 0.69, 0.45)
+const GOLDEN_HOUR := preload("res://resources/ocean/looks/golden_hour.tres")
+const POST_FX_SHADER := preload("res://shaders/grass/post_fx.gdshader")
+const FILTER_NAMES := ["Off", "Obra Dinn", "Contrast", "Sepia", "Thermal", "Phosphor"]
+const BASE_COLOR := Color(0.09, 0.22, 0.09)
+const TIP_COLOR := Color(0.46, 0.52, 0.24)
+const SSS_COLOR := Color(0.76, 0.8, 0.48)
 const COLOR_PALETTES := [
 	{"name": "Pampas", "base": BASE_COLOR, "tip": TIP_COLOR,
-		"backlight": SSS_COLOR, "plume": Color(0.68, 0.61, 0.51),
-		"moss": Color(0.11, 0.19, 0.08), "straw": Color(0.32, 0.28, 0.13),
+		"backlight": SSS_COLOR, "plume": Color(0.84, 0.78, 0.68),
+		"moss": Color(0.1, 0.18, 0.1), "straw": Color(0.28, 0.29, 0.16),
 		"chromatic": 0.0},
 	{"name": "Meadow", "base": Color(0.06, 0.25, 0.07),
 		"tip": Color(0.3, 0.62, 0.16), "backlight": Color(0.55, 0.85, 0.28),
@@ -38,10 +41,19 @@ const STAGE_DESCRIPTIONS := [
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var ground_mesh: MeshInstance3D = $Ground/MeshInstance3D
+@onready var sun: DirectionalLight3D = $DirectionalLight3D
+@onready var world_env: WorldEnvironment = $WorldEnvironment
+@onready var main_camera: Camera3D = $CameraPivot/Camera3D
 @onready var grass: GrassRenderer = GrassRenderer.new()
 @onready var _viewport := ViewportGuard.attach(self)
 
 var config: GrassConfig = GrassConfig.new()
+var shadow_distance_m := 40.0
+var sun_elevation := 10.0
+var sun_azimuth := 215.0
+var sky_material := ShaderMaterial.new()
+var cloudscape := OceanCloudscape.new()
+var _atmosphere_look: OceanLookPreset
 var density_modifier := 1.0
 var wind_speed := 1.0
 var wind_direction_degrees := 35.0
@@ -64,6 +76,11 @@ var _palette_action: Button
 var _palette_pickers: Dictionary = {}
 var _chromatic_strength := 0.0
 var _chromatic_slider: HSlider
+var _filter_index := 0
+var _filter_option: OptionButton
+var _post_fx_layer: CanvasLayer
+var _post_fx_rect: ColorRect
+var _post_fx_material: ShaderMaterial
 
 
 func _ready() -> void:
@@ -109,6 +126,12 @@ func _ready() -> void:
 	}
 	_chromatic_strength = clampf(float(menu.stored_value("🎨 Grass Palette",
 		"Color Gradient", palette.chromatic)), 0.0, 1.0)
+	sun_elevation = clampf(float(menu.stored_value("☀️ Sunlight", "Sun elevation",
+		sun_elevation)), 2.0, 80.0)
+	sun_azimuth = clampf(float(menu.stored_value("☀️ Sunlight", "Sun azimuth",
+		sun_azimuth)), 0.0, 360.0)
+	_filter_index = clampi(int(menu.stored_value("🎞 Filters", "Filter", 0)),
+		0, FILTER_NAMES.size() - 1)
 	grass.density = density_modifier
 	grass.config = config
 	grass.wind_speed = wind_speed
@@ -125,7 +148,7 @@ func _ready() -> void:
 	_grass_ready = true
 	orbit_cam.target = Vector3.ZERO
 	orbit_cam.distance = 20.0
-	orbit_cam.pitch = -28.0
+	orbit_cam.pitch = -14.0
 	orbit_cam.yaw = 35.0
 	orbit_cam.min_distance = 5.0
 	orbit_cam.max_distance = 60.0
@@ -133,11 +156,15 @@ func _ready() -> void:
 	orbit_cam.zoom_speed = 2.0
 	orbit_cam.enable_movement = false
 	_setup_heightmap_collision()
+	_setup_environment()
+	_setup_post_fx()
 	_setup_ui()
 
 
 func _physics_process(delta: float) -> void:
 	grass.tick(delta, orbit_cam.target, orbit_cam.get_camera().global_position)
+	var angle := deg_to_rad(grass.wind_direction_degrees)
+	cloudscape.wind_velocity = Vector2(cos(angle), sin(angle)) * (2.5 + grass.wind_speed * 2.0)
 
 
 func _setup_heightmap_collision() -> void:
@@ -147,9 +174,17 @@ func _setup_heightmap_collision() -> void:
 	var image := HEIGHTMAP.noise.get_seamless_image(512, 512)
 	var dims := Vector2i(image.get_width(), image.get_height())
 	image.convert(Image.FORMAT_RF)
-	var map_data := image.get_data().to_float32_array()
-	for i in map_data.size():
-		map_data[i] = (map_data[i] - 0.5) * config.heightmap_scale_m
+	var source_data := image.get_data().to_float32_array()
+	var map_data := PackedFloat32Array()
+	map_data.resize(source_data.size())
+	var half_dims := dims / 2
+	for z in dims.y:
+		var source_z := posmod(z - half_dims.y, dims.y)
+		for x in dims.x:
+			var source_x := posmod(x - half_dims.x, dims.x)
+			var index := x + z * dims.x
+			map_data[index] = (source_data[source_x + source_z * dims.x] - 0.5) \
+				* config.heightmap_scale_m
 	var shape := HeightMapShape3D.new()
 	shape.map_width = dims.x
 	shape.map_depth = dims.y
@@ -166,6 +201,12 @@ func _setup_ui() -> void:
 		"1 · Blades", "2 · Tufts", "3 · Pampas and light", "4 · Wind",
 	], demo_stage, _on_stage_selected)
 	_stage_description = menu.add_label(STAGE_DESCRIPTIONS[demo_stage])
+	menu.add_separator()
+	menu.add_section("☀️ Sunlight")
+	menu.add_slider("Sun elevation", 2.0, 80.0, sun_elevation,
+		set_sun_elevation, true, 1.0)
+	menu.add_slider("Sun azimuth", 0.0, 360.0, sun_azimuth,
+		set_sun_azimuth, true, 1.0)
 	menu.add_separator()
 	menu.add_section("🌿 Grass Properties")
 	var density_slider: HSlider = menu.add_slider("Density", 0.0, 2.0, density_modifier,
@@ -214,15 +255,19 @@ func _setup_ui() -> void:
 	_chromatic_slider = menu.add_slider("Color Gradient", 0.0, 1.0,
 		_chromatic_strength, _set_chromatic_strength, true, 0.01)
 	menu.add_separator()
+	menu.add_section("🎞 Filters")
+	_filter_option = menu.add_option_button("Filter", FILTER_NAMES, _filter_index,
+		_on_filter_selected)
+	menu.add_separator()
 	menu.add_section("⚙️ Rendering")
 	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
 	var shadow_slider: HSlider = menu.add_slider("Shadow distance", 0.0, 100.0,
-		config.shadow_distance_m, grass.set_shadow_distance)
-	quality.bind("shadow_distance_m", shadow_slider, grass.set_shadow_distance)
+		shadow_distance_m, _set_shadow_distance)
+	quality.bind("shadow_distance_m", shadow_slider, _set_shadow_distance)
 	var shadows_toggle: Button = menu.add_debug_toggle("🌑", "Cast shadows",
-		grass.shadows_enabled, grass.set_shadows)
-	quality.bind("shadows", shadows_toggle, grass.set_shadows)
+		grass.shadows_enabled, _set_shadows)
+	quality.bind("shadows", shadows_toggle, _set_shadows)
 	quality.attach_menu_option(menu)
 	menu.add_action("🌬", "Gust", func() -> void: grass.add_gust(4.0, orbit_cam.target))
 	_wind_preset_action = menu.add_action("🍃", "Wind", cycle_wind_preset)
@@ -300,7 +345,9 @@ func _set_palette_color(color_key: String, color: Color) -> void:
 	_palette_colors[color_key] = color
 	match color_key:
 		"base": grass.set_base_color(color)
-		"tip": grass.set_tip_color(color)
+		"tip":
+			grass.set_tip_color(color)
+			(ground_mesh.material_override as ShaderMaterial).set_shader_parameter("distant_color", color)
 		"backlight": grass.set_sss_color(color)
 		"plume": grass.set_plume_color(color)
 		"moss": (ground_mesh.material_override as ShaderMaterial).set_shader_parameter("moss_color", color)
@@ -311,6 +358,133 @@ func _set_chromatic_strength(value: float) -> void:
 	_chromatic_strength = value
 	grass.set_chromatic_strength(value)
 	(ground_mesh.material_override as ShaderMaterial).set_shader_parameter("chromatic_strength", value)
+
+
+func _setup_environment() -> void:
+	_atmosphere_look = GOLDEN_HOUR.duplicate() as OceanLookPreset
+	_atmosphere_look.cloud_coverage = 0.22
+	_atmosphere_look.cloud_density = 0.32
+	_atmosphere_look.cloud_base_color = Color(0.29, 0.37, 0.49)
+	_atmosphere_look.cloud_rim_strength = 0.65
+	var look := _atmosphere_look
+	sun.light_angular_distance = 1.0
+	sun.shadow_enabled = grass.shadows_enabled
+	sun.shadow_opacity = 0.8
+	# Softens the shadow-map lookup: at low sun the sparse shadow proxy casts
+	# long streaks whose rasterized edges would read as blocks from above.
+	sun.shadow_blur = 1.1
+	# Light3D shadow_normal_bias defaults to 2 m: the lookups would land 2 m
+	# above the <1.5 m canopy, washing the shadows off the blades.
+	sun.shadow_normal_bias = 0.1
+	# Single cascade (directional_shadow_mode = 0 in grass_demo.tscn): PSSM
+	# splits draw a visible shadow-density boundary that moves with the camera,
+	# which reads far worse than the coarser single-map texels (~7 mm at the
+	# 30 m MEDIUM range). The fade ring is pushed out to keep it off close views.
+	sun.directional_shadow_fade_start = 0.9
+
+	var environment := world_env.environment
+	sun.directional_shadow_max_distance = shadow_distance_m
+	environment.ambient_light_energy = 0.55
+	environment.ambient_light_color = Color(0.52, 0.64, 0.8)
+	environment.tonemap_mode = Environment.TONE_MAPPER_AGX
+	environment.tonemap_exposure = look.exposure
+	environment.tonemap_white = look.white_point
+	environment.glow_enabled = true
+	environment.glow_intensity = look.glow_intensity
+	environment.glow_bloom = look.glow_bloom
+	environment.glow_hdr_threshold = look.glow_hdr_threshold
+	environment.fog_enabled = true
+	environment.fog_light_color = Color(0.61, 0.69, 0.77)
+	environment.fog_density = 0.0025
+	environment.fog_aerial_perspective = look.fog_aerial_perspective
+
+	sky_material.shader = load("res://shaders/ocean/ocean_sky.gdshader")
+	sky_material.set_shader_parameter("zenith_color", look.sky_zenith)
+	sky_material.set_shader_parameter("horizon_color", look.sky_horizon)
+	sky_material.set_shader_parameter("haze_color", look.haze_color)
+	sky_material.set_shader_parameter("sun_color", look.sun_disk_color)
+	sky_material.set_shader_parameter("energy", look.sky_energy)
+	sky_material.set_shader_parameter("gradient_height", 0.22)
+	sky_material.set_shader_parameter("haze_strength", 0.16)
+	sky_material.set_shader_parameter("sun_disk_energy", 4.0)
+	sky_material.set_shader_parameter("sun_halo_energy", 0.8)
+	var sky := Sky.new()
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
+	sky.radiance_size = Sky.RADIANCE_SIZE_256
+	sky.sky_material = sky_material
+	environment.sky = sky
+	environment.background_mode = Environment.BG_SKY
+	environment.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+
+	cloudscape.camera = main_camera
+	cloudscape.sun = sun
+	cloudscape.shadow_receivers = [grass.material, ground_mesh.material_override as ShaderMaterial]
+	add_child(cloudscape)
+	cloudscape.build()
+	_apply_sun()
+
+
+func set_sun_elevation(value: float) -> void:
+	sun_elevation = clampf(value, 2.0, 80.0)
+	_apply_sun()
+
+
+func set_sun_azimuth(value: float) -> void:
+	sun_azimuth = clampf(value, 0.0, 360.0)
+	_apply_sun()
+
+
+func _apply_sun() -> void:
+	sun.rotation_degrees = Vector3(-sun_elevation, sun_azimuth, 0.0)
+	var daylight := smoothstep(8.0, 42.0, sun_elevation)
+	sun.light_color = Color(1.0, 0.86, 0.67).lerp(Color(1.0, 0.98, 0.92), daylight)
+	sun.light_energy = lerpf(4.0, 3.8, daylight)
+	world_env.environment.ambient_light_energy = lerpf(0.55, 0.7, daylight)
+	sky_material.set_shader_parameter("zenith_color",
+		Color(0.1, 0.35, 0.72).lerp(Color(0.12, 0.4, 0.76), daylight))
+	sky_material.set_shader_parameter("horizon_color",
+		Color(0.8, 0.66, 0.48).lerp(Color(0.68, 0.78, 0.87), daylight))
+	sky_material.set_shader_parameter("haze_color",
+		Color(0.69, 0.65, 0.58).lerp(Color(0.72, 0.8, 0.88), daylight))
+	sky_material.set_shader_parameter("sun_color", sun.light_color)
+	var direction := sun.global_transform.basis.z.normalized()
+	sky_material.set_shader_parameter("sun_direction", direction)
+	sky_material.set_shader_parameter("sun_radius",
+		deg_to_rad(sun.light_angular_distance) * 0.5)
+	if cloudscape.is_inside_tree():
+		_atmosphere_look.cloud_top_color = Color(0.92, 0.86, 0.76).lerp(
+			Color(0.95, 0.97, 1.0), daylight)
+		_atmosphere_look.cloud_rim_color = sun.light_color
+		cloudscape.apply_look(_atmosphere_look, 0.0)
+		cloudscape.set_sun_direction(direction)
+
+
+## Full-screen stylization pass: a ColorRect on its own CanvasLayer BELOW the
+## SimMenu layer, so SCREEN_TEXTURE holds the rendered field while the menu
+## above stays unfiltered. Off hides the rect entirely (zero fragment cost).
+func _setup_post_fx() -> void:
+	_post_fx_layer = CanvasLayer.new()
+	_post_fx_layer.layer = 0
+	_post_fx_material = ShaderMaterial.new()
+	_post_fx_material.shader = POST_FX_SHADER
+	_post_fx_material.set_shader_parameter("filter_mode", _filter_index)
+	_post_fx_rect = ColorRect.new()
+	_post_fx_rect.material = _post_fx_material
+	_post_fx_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_post_fx_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_post_fx_rect.visible = _filter_index != 0
+	_post_fx_layer.add_child(_post_fx_rect)
+	add_child(_post_fx_layer)
+
+
+func _apply_filter() -> void:
+	_post_fx_rect.visible = _filter_index != 0
+	_post_fx_material.set_shader_parameter("filter_mode", _filter_index)
+
+
+func _on_filter_selected(index: int) -> void:
+	_filter_index = clampi(index, 0, FILTER_NAMES.size() - 1)
+	_apply_filter()
 
 
 func _refresh_palette_action() -> void:
@@ -334,6 +508,18 @@ func set_capture_params(params: Dictionary) -> void:
 		grass.set_gustiness(gustiness)
 	if params.has("gust") and float(params["gust"]) > 0.0:
 		grass.add_gust(float(params["gust"]), orbit_cam.target)
+	if params.has("filter"):
+		var index := clampi(int(params["filter"]), 0, FILTER_NAMES.size() - 1)
+		if _filter_option != null:
+			_filter_option.select(index)
+			_filter_option.item_selected.emit(index)
+		else:
+			_filter_index = index
+			_apply_filter()
+	if params.has("shadows"):
+		_set_shadows(bool(params["shadows"]))
+	if params.has("light_energy"):
+		sun.light_energy = clampf(float(params["light_energy"]), 0.0, 40.0)
 
 
 func set_quality_profile(tier: int) -> void:
@@ -351,9 +537,15 @@ func set_capture_view(view: String) -> void:
 		"high":
 			orbit_cam.distance = 26.0
 			orbit_cam.pitch = -42.0
+		"horizon":
+			orbit_cam.distance = 20.0
+			orbit_cam.pitch = -5.0
 		"overhead":
 			orbit_cam.distance = 32.0
 			orbit_cam.pitch = -78.0
+		"top":
+			orbit_cam.distance = 14.0
+			orbit_cam.pitch = -87.0
 		_:
 			orbit_cam.distance = 20.0
 			orbit_cam.pitch = -28.0
@@ -361,6 +553,17 @@ func set_capture_view(view: String) -> void:
 
 func _set_render_scale(value: float) -> void:
 	_viewport.set_render_scale(Viewport.SCALING_3D_MODE_FSR, value)
+
+
+func _set_shadow_distance(value: float) -> void:
+	shadow_distance_m = value
+	sun.directional_shadow_max_distance = value
+
+
+func _set_shadows(enabled: bool) -> void:
+	grass.set_shadows(enabled)
+	sun.shadow_enabled = enabled
+	cloudscape.set_shadows_enabled(enabled)
 
 
 ## Before grass.build() the values land on the fields the build reads; density
@@ -371,9 +574,9 @@ func _apply_quality(values: Dictionary) -> void:
 	if not _grass_ready:
 		grass.near_detail = values.near_detail
 		grass.shadows_enabled = values.shadows
-		grass.config.shadow_distance_m = values.shadow_distance_m
+		shadow_distance_m = values.shadow_distance_m
 		return
 	grass.set_near_detail(values.near_detail)
 	grass.set_density(values.density)
-	grass.set_shadows(values.shadows)
-	grass.set_shadow_distance(values.shadow_distance_m)
+	_set_shadows(values.shadows)
+	_set_shadow_distance(values.shadow_distance_m)

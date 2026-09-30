@@ -1,5 +1,9 @@
 shader_type spatial;
 
+uniform sampler2D cloud_shadow_texture : hint_default_white, filter_linear, repeat_disable;
+uniform vec2 cloud_shadow_center = vec2(0.0);
+uniform float cloud_shadow_extent = 256.0;
+
 // Visual soil under the grass. Displaces the plane with the same heightmap
 // sampling the blade shader uses (world xz over the texture size), so the
 // ground, the grass and the HeightMapShape3D collision all follow one field.
@@ -8,9 +12,11 @@ uniform float heightmap_scale = 5.0;
 uniform sampler2D clump_noise : filter_linear, repeat_enable;
 uniform vec3 moss_color : source_color = vec3(0.11, 0.19, 0.08);
 uniform vec3 straw_color : source_color = vec3(0.32, 0.28, 0.13);
+uniform vec3 distant_color : source_color = vec3(0.46, 0.52, 0.24);
 uniform float chromatic_strength : hint_range(0.0, 1.0) = 0.0;
 varying float ground_variation;
 varying vec2 ground_world_xz;
+varying float cloud_transmittance;
 
 float terrain_height(vec2 world_xz, vec2 tex_size) {
 	return (texture(heightmap, world_xz / tex_size).x - 0.5) * heightmap_scale;
@@ -37,8 +43,19 @@ void fragment() {
 	float straw = clamp(0.3 + broad * 0.45 + fine * 0.15, 0.0, 1.0);
 	ALBEDO = mix(moss_color, straw_color, straw)
 		* mix(0.92, 1.08, smoothstep(0.2, 0.8, ground_variation));
+	float distant_cover = smoothstep(55.0, 95.0,
+		distance(CAMERA_POSITION_WORLD.xz, ground_world_xz));
+	ALBEDO = mix(ALBEDO, distant_color, distant_cover);
 	float chromatic_phase = ground_world_xz.x * 0.013 + ground_world_xz.y * 0.009;
 	vec3 chromatic = 0.5 + 0.5 * cos(TAU * (chromatic_phase + vec3(0.0, 0.34, 0.68)));
 	ALBEDO = mix(ALBEDO, chromatic * 0.22, chromatic_strength);
 	ROUGHNESS = 0.95;
+	cloud_transmittance = texture(cloud_shadow_texture,
+		(ground_world_xz - cloud_shadow_center) / cloud_shadow_extent + 0.5).r;
+}
+
+void light() {
+	float diffuse = clamp((dot(NORMAL, LIGHT) + 0.25) / 1.25, 0.0, 1.0);
+	DIFFUSE_LIGHT += diffuse * LIGHT_COLOR
+		* ATTENUATION * cloud_transmittance / PI;
 }

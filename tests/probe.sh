@@ -15,6 +15,11 @@
 # those plus any stray project test godot (never a user's open editor) and
 # orphaned virtual kwins. Nuclear for this project's test processes: do not
 # run it while another agent's run matters.
+# If KWin fails before Godot starts, inspect its log, run `tests/probe.sh kill`
+# once, and retry once. If KWin fails again, stop restarting it. For a
+# headless-capable probe, run `godot --headless --path . -s tests/probe.gd --
+# <name> [args]` directly. That checks logic and scene wiring only; visual
+# claims still need a real capture.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

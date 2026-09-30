@@ -16,8 +16,8 @@ roughness = 0.95
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_grass"]
 sky_top_color = Color(0.29, 0.41, 0.57, 1)
 sky_horizon_color = Color(0.82, 0.66, 0.48, 1)
-ground_bottom_color = Color(0.2, 0.24, 0.17, 1)
-ground_horizon_color = Color(0.46, 0.48, 0.34, 1)
+ground_bottom_color = Color(0.82, 0.66, 0.48, 1)
+ground_horizon_color = Color(0.82, 0.66, 0.48, 1)
 
 [sub_resource type="Sky" id="Sky_grass"]
 sky_material = SubResource("ProceduralSkyMaterial_grass")
@@ -44,7 +44,7 @@ light_color = Color(1, 0.95, 0.85, 1)
 light_energy = 1.2
 shadow_enabled = true
 shadow_bias = 0.02
-directional_shadow_mode = 1
+directional_shadow_mode = 0
 directional_shadow_max_distance = 60.0
 
 [node name="CameraPivot" type="Node3D" parent="."]
