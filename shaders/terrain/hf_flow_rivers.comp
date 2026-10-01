@@ -1,0 +1,69 @@
+layout(set = 0, binding = 2, rgba32f) uniform readonly restrict image2D flux_src;
+layout(set = 0, binding = 3, rg32f) uniform writeonly restrict image2D velocity_dst;
+
+float bed_height(ivec2 id, int n) {
+	vec4 cell = imageLoad(field_src, clamp(id, ivec2(0), ivec2(n - 1)));
+	return cell.r + cell.b;
+}
+
+void main() {
+	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+	int n = params.misc.x;
+	if (any(greaterThanEqual(id, ivec2(n)))) {
+		return;
+	}
+	vec4 cell = imageLoad(field_src, id);
+	vec4 outflow = imageLoad(flux_src, id);
+	vec4 inflow = vec4(0.0);
+	float dt = params.flow.w;
+	float cell_size = params.flow.z;
+	float depth_scale = dt / (cell_size * cell_size);
+	float sediment_delta = 0.0;
+	float concentration = cell.g > RIVER_DRY_M ? cell.a / cell.g : 0.0;
+	for (int k = 0; k < 4; k++) {
+		ivec2 nb = id + RIVER_OFFSETS[k];
+		if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, ivec2(n)))) {
+			continue;
+		}
+		vec4 neighbour = imageLoad(field_src, nb);
+		float incoming = river_component(imageLoad(flux_src, nb), k ^ 1);
+		if (k == 0) { inflow.x = incoming; }
+		else if (k == 1) { inflow.y = incoming; }
+		else if (k == 2) { inflow.z = incoming; }
+		else { inflow.w = incoming; }
+		float donor_concentration = neighbour.g > RIVER_DRY_M ? neighbour.a / neighbour.g : 0.0;
+		sediment_delta += depth_scale * (incoming * donor_concentration
+			- river_component(outflow, k) * concentration);
+	}
+	float water = max(0.0, cell.g + depth_scale * (dot(inflow, vec4(1.0)) - dot(outflow, vec4(1.0))));
+	float sediment = max(0.0, cell.a + sediment_delta);
+	float average_depth = max(0.5 * (cell.g + water), RIVER_DRY_M);
+	vec2 velocity = 0.5 * vec2(outflow.x - outflow.y + inflow.y - inflow.x,
+		outflow.z - outflow.w + inflow.w - inflow.z) / (average_depth * cell_size);
+	float speed = length(velocity);
+	if (water <= RIVER_DRY_M) {
+		cell.r += sediment;
+		sediment = 0.0;
+		velocity = vec2(0.0);
+	} else {
+		vec2 gradient = vec2(bed_height(id + ivec2(1, 0), n) - bed_height(id - ivec2(1, 0), n),
+			bed_height(id + ivec2(0, 1), n) - bed_height(id - ivec2(0, 1), n)) / (2.0 * cell_size);
+		float slope = length(gradient);
+		float tilt = max(0.05, slope / sqrt(1.0 + slope * slope));
+		float capacity = params.waterflow.z * speed * water * tilt;
+		if (sediment < capacity) {
+			float eroded = min((1.0 - exp(-params.waterflow.y * dt)) * (capacity - sediment), cell.r);
+			cell.r -= eroded;
+			sediment += eroded;
+		} else {
+			float settled = (1.0 - exp(-weather.hydro.y * dt)) * (sediment - capacity);
+			cell.r += settled;
+			sediment -= settled;
+		}
+	}
+	if (dt > 0.0 && speed * dt > cell_size) {
+		velocity *= cell_size / (speed * dt);
+	}
+	imageStore(field_dst, id, vec4(cell.r, water, cell.b, sediment));
+	imageStore(velocity_dst, id, vec4(velocity, 0.0, 0.0));
+}

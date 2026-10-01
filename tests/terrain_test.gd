@@ -47,11 +47,18 @@ func _run() -> void:
 	await _check_melt_balance(demo)
 	await _check_freeze_balance(demo)
 	await _check_snowfall_source(demo)
+	await _check_hydrology(demo)
 	await _check_scene_reset(demo)
 	await _check_determinism(demo)
 	await _check_query_sync(demo)
 	await _check_quality_tiers(demo)
 
+	RenderingServer.call_on_render_thread(demo.solver.free_render)
+	await _frames(2)
+	_check(not demo.solver.get_height_tex_rid().is_valid()
+		and not demo.solver.get_flux_tex_rid().is_valid()
+		and not demo.solver.get_velocity_tex_rid().is_valid(),
+		"terrain teardown left field, flux or velocity resources valid")
 	demo.queue_free()
 	await process_frame
 	_finish("terrain")
@@ -60,10 +67,10 @@ func _run() -> void:
 ## Freeze the demo, reseed and step manually. Mirrors the controller's
 ## restart contract: teardown (free_render) before the next init_render.
 func _reseed(demo: Node, sand: PackedFloat32Array, water: PackedFloat32Array,
-		snow: PackedFloat32Array) -> void:
+		snow: PackedFloat32Array, sediment: PackedFloat32Array = PackedFloat32Array()) -> void:
 	demo.solver.brush.clear()
 	demo.solver.contact_brush.clear()
-	demo.solver.set_seed_channels(sand, water, snow)
+	demo.solver.set_seed_channels(sand, water, snow, sediment)
 	RenderingServer.call_on_render_thread(demo.solver.free_render)
 	RenderingServer.call_on_render_thread(demo.solver.init_render)
 	await _frames(2)
@@ -98,10 +105,16 @@ func _field(demo: Node) -> PackedFloat32Array:
 
 
 func _channel_sums(field: PackedFloat32Array) -> Vector4:
-	var sums := Vector4()
+	var r := 0.0
+	var g := 0.0
+	var b := 0.0
+	var a := 0.0
 	for i in field.size() / 4:
-		sums += Vector4(field[i * 4], field[i * 4 + 1], field[i * 4 + 2], field[i * 4 + 3])
-	return sums
+		r += field[i * 4]
+		g += field[i * 4 + 1]
+		b += field[i * 4 + 2]
+		a += field[i * 4 + 3]
+	return Vector4(r, g, b, a)
 
 
 func _step(demo: Node, steps: int, dt: float = DT) -> void:
@@ -175,54 +188,65 @@ func _check_dry_repose(demo: Node) -> void:
 	demo.solver.repose_deg = 30.0  # config default for later sections
 
 
-## The wet-threshold formula, end to end: alternate water and pour stamps on
-## the cone top so material is added while the summit sits at full saturation
-## (5 cm of standing water ≥ the 4 cm saturation point). The steepened top can
-## only be held by the wet cohesion term tan(33°)·(1+0.6); measure right after
-## the last pour, before drainage dries the flank back to the dry angle.
+## Compare dry and saturated repose on the same cone while holding all hydraulic
+## transfers still; only the wet-cohesion gain changes between the two runs.
 func _check_wet_repose(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.repose_deg = 33.0
 	demo.solver.melt_rate_m_s = 0.0
-	demo.solver.evap_rate_m_s = 0.0  # keep the soak
-	demo.solver.wet_gain = 0.6
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.infiltration_rate_m_s = 0.0
+	demo.solver.freeze_rate_m_s = 0.0
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
 	demo.solver.water_sat_m = 0.04
-	demo.solver.water_flow_rate = 0.05  # slow drainage to the minimum
-	var sand := _flat(0.05)
-	demo.solver.set_seed_channels(sand, _flat(0.0), _flat(0.0))
-	RenderingServer.call_on_render_thread(demo.solver.free_render)
-	RenderingServer.call_on_render_thread(demo.solver.init_render)
-	await _frames(2)
-	demo.solver.brush.pos_m = Vector2.ZERO
-	demo.solver.brush.radius_m = 0.25
-	demo.solver.brush.strength = 0.5
-	for round_index in 5:
-		demo.solver.brush.mode = TerrainBrush.WATER
-		await _step(demo, 4)
-		demo.solver.brush.mode = TerrainBrush.POUR
-		await _step(demo, 12)
-	demo.solver.brush.clear()
-	# A short settle relaxes the last pour's transient pile while the summit
-	# is still wet; drainage cannot dry the flank back in this window.
-	await _step(demo, 20)
-	var field := await _field(demo)
 	var n := _n
 	var cell := WORLD / float(n)
-	var max_slope := 0.0
-	for y in range(1, n - 1, 2):
-		for x in range(1, n - 1, 2):
-			var i := (y * n + x) * 4
-			var slope: float = maxf(
-				absf(field[(y * n + x + 1) * 4] - field[i]),
-				absf(field[((y + 1) * n + x) * 4] - field[i])) / cell
-			max_slope = maxf(max_slope, slope)
+	var centre := n / 2
+	var radius_cells := 12.0
+	var sand := _flat(0.05)
+	var slope_height := tan(deg_to_rad(40.0)) * cell
+	for y in n:
+		for x in n:
+			var distance := Vector2(x - centre, y - centre).length()
+			if distance <= radius_cells:
+				sand[y * n + x] += maxf(radius_cells - distance, 0.0) * slope_height
+	var water := _flat(0.05)
+	demo.solver.wet_gain = 0.0
+	await _reseed(demo, sand, water, _flat(0.0), _flat(0.0))
+	await _step(demo, 180, 0.0)
+	var dry_field := await _field(demo)
+	var dry_slope := _max_sand_slope(dry_field, n, cell)
+	demo.solver.wet_gain = 0.6
+	await _reseed(demo, sand, water, _flat(0.0), _flat(0.0))
+	await _step(demo, 180, 0.0)
+	var wet_field := await _field(demo)
+	var wet_slope := _max_sand_slope(wet_field, n, cell)
 	var dry := tan(deg_to_rad(33.0))
 	var wet_target := dry * (1.0 + 0.6)
-	_check(max_slope > dry * 1.2,
-		"soaked cone slope %.3f stayed at the dry repose %.3f (wet term inactive)"
-			% [max_slope, dry])
-	_check(max_slope < wet_target * 1.25 + 1e-3,
-		"soaked cone slope %.3f exceeds the fully-wet repose %.3f" % [max_slope, wet_target])
-	demo.solver.water_flow_rate = 0.55
+	_check(dry_slope <= dry * 1.2 + 0.02,
+		"dry cone slope %.3f exceeds dry repose %.3f" % [dry_slope, dry])
+	_check(wet_slope > dry_slope + 0.08,
+		"saturated cone slope %.3f did not exceed dry control %.3f" % [wet_slope, dry_slope])
+	_check(wet_slope <= wet_target * 1.2 + 0.02,
+		"saturated cone slope %.3f exceeds wet repose %.3f" % [wet_slope, wet_target])
+	demo.solver.wet_gain = 0.6
+
+
+func _max_sand_slope(field: PackedFloat32Array, n: int, cell: float) -> float:
+	var max_slope := 0.0
+	for y in range(1, n - 1):
+		for x in range(1, n - 1):
+			var i := (y * n + x) * 4
+			var slope := maxf(
+				absf(field[i + 4] - field[i]),
+				absf(field[i + n * 4] - field[i])) / cell
+			max_slope = maxf(max_slope, slope)
+	return max_slope
 
 
 ## Snow cohesion: a sharp snow spike (strong curvature) holds above its
@@ -383,6 +407,448 @@ func _check_snowfall_source(demo: Node) -> void:
 	demo.solver.snowfall_rate_m_s = 0.0
 
 
+func _check_hydrology(demo: Node) -> void:
+	var suite_n := _n
+	_n = 64
+	demo.solver.grid_n = _n
+	demo.apply_preset(1)
+	await _wait_init(demo, false)
+	demo.solver.melt_rate_m_s = 0.0
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.freeze_rate_m_s = 0.0
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.snowline_m = -1.0
+	demo.solver.stochasticity = 0.0
+	demo.solver.deposition_gain = 0.6
+	demo.solver.infiltration_rate_m_s = 0.0
+	await _check_hydro_conservation(demo)
+	await _check_hydro_sources(demo)
+	await _check_infiltration(demo)
+	await _check_sediment_transport(demo)
+	await _check_inertial_flow(demo)
+	await _check_closed_basin(demo)
+	await _check_hydro_stability(demo)
+	await _check_summit_source_budget(demo)
+	await _check_sculpt_tools(demo)
+	_n = suite_n
+	demo.solver.grid_n = suite_n
+	demo.apply_preset(1)
+	await _wait_init(demo, false)
+
+
+func _check_hydro_conservation(demo: Node) -> void:
+	var sand := _bump(0.3, 0.12, 18.0)
+	var water := _flat(0.008)
+	var snow := _flat(0.004)
+	var sediment := _flat(0.001)
+	demo.solver.set_seed_channels(sand, water, snow, sediment)
+	RenderingServer.call_on_render_thread(demo.solver.free_render)
+	RenderingServer.call_on_render_thread(demo.solver.init_render)
+	await _frames(2)
+	var before := _channel_sums(await _field(demo))
+	await _step(demo, 60)
+	var after := _channel_sums(await _field(demo))
+	var gb_before := before.y + before.z
+	var gb_after := after.y + after.z
+	var ra_before := before.x + before.w
+	var ra_after := after.x + after.w
+	_check(absf(gb_after - gb_before) <= 1e-4 * maxf(gb_before, 1.0),
+		"hydraulic G+B drifted %.6f -> %.6f" % [gb_before, gb_after])
+	_check(absf(ra_after - ra_before) <= 1e-4 * maxf(ra_before, 1.0),
+		"solid R+A drifted %.6f -> %.6f" % [ra_before, ra_after])
+
+
+func _check_hydro_sources(demo: Node) -> void:
+	var cells := float(_n * _n)
+	var dt := 0.5
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.rain_rate_m_s = 0.002
+	demo.solver.uplift_rate_m_s = 0.0
+	await _reseed(demo, _flat(0.2), _flat(0.0), _flat(0.0), _flat(0.0))
+	var before := _channel_sums(await _field(demo))
+	await _step(demo, 1, dt)
+	var after := _channel_sums(await _field(demo))
+	_check(absf(after.y - before.y - 0.002 * dt * cells) < 0.01,
+		"rain budget differs from rate·dt·cells")
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.DOME
+	demo.solver.uplift_radius_fraction = 0.3
+	demo.solver.uplift_rate_m_s = 0.003
+	await _reseed(demo, _flat(0.2), _flat(0.0), _flat(0.0), _flat(0.0))
+	before = _channel_sums(await _field(demo))
+	await _step(demo, 1, dt)
+	after = _channel_sums(await _field(demo))
+	var uplift_expected := 0.0
+	for y in _n:
+		for x in _n:
+			var p := (Vector2(x, y) + Vector2(0.5, 0.5)) / float(_n) - Vector2(0.5, 0.5)
+			uplift_expected += 0.003 * dt * exp(-3.0 * p.length_squared() / (0.3 * 0.3))
+	_check(absf(after.x - before.x - uplift_expected) < 1e-3,
+		"dome uplift budget differs from its configured rate (%.6f vs %.6f)"
+			% [after.x - before.x, uplift_expected])
+	_check(absf(after.y - before.y) < 0.01, "uplift changed water budget")
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.snowline_m = 0.0
+	demo.solver.snowfall_rate_m_s = 0.002
+	var snowline_sand := _flat(0.1)
+	for y in _n:
+		for x in range(_n / 2, _n):
+			snowline_sand[y * _n + x] = 0.3
+	demo.solver.snowline_m = 0.2
+	await _reseed(demo, snowline_sand, _flat(0.0), _flat(0.0), _flat(0.0))
+	before = _channel_sums(await _field(demo))
+	await _step(demo, 1, dt)
+	after = _channel_sums(await _field(demo))
+	var snow_expected := 0.002 * dt * cells * 0.5
+	_check(absf(after.z - before.z - snow_expected) < 0.01,
+		"snowline snowfall budget differs from eligible cells")
+	_check(absf(after.y - before.y) < 0.01, "snowline snowfall changed water budget")
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.snowline_m = -1.0
+
+
+func _check_infiltration(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.melt_rate_m_s = 0.0
+	demo.solver.freeze_rate_m_s = 0.0
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
+	demo.solver.infiltration_rate_m_s = 0.01
+	var cells := float(_n * _n)
+	var rate: float = demo.solver.infiltration_rate_m_s
+	var dt := 0.25
+	await _reseed(demo, _flat(0.2), _flat(0.05), _flat(0.0), _flat(0.002))
+	var before := _channel_sums(await _field(demo))
+	await _step(demo, 1, dt)
+	var after := _channel_sums(await _field(demo))
+	var removed := before.y - after.y
+	var expected := minf(rate * dt, 0.05) * cells
+	_check(absf(removed - expected) < 1e-4 * maxf(expected, 1.0),
+		"infiltration water budget differs (%.6f vs %.6f)" % [removed, expected])
+	_check(absf(after.x + after.w - before.x - before.w)
+		<= 1e-4 * maxf(before.x + before.w, 1.0),
+		"infiltration changed R+A mass")
+
+	await _reseed(demo, _flat(0.2), _flat(0.0), _flat(0.0), _flat(0.01))
+	before = _channel_sums(await _field(demo))
+	await _step(demo, 1, DT)
+	after = _channel_sums(await _field(demo))
+	_check(after.w < 1e-6 and after.x > before.x,
+		"dry suspended sediment did not settle onto the sand")
+	_check(absf(after.x + after.w - before.x - before.w)
+		<= 1e-4 * maxf(before.x + before.w, 1.0),
+		"dry sediment settling changed R+A mass")
+
+	demo.solver.infiltration_rate_m_s = 10.0
+	await _reseed(demo, _flat(0.2), _flat(0.005), _flat(0.0), _flat(0.0))
+	await _step(demo, 1, 1.0)
+	var field := await _field(demo)
+	var valid := true
+	for i in field.size() / 4:
+		if is_nan(field[i]) or is_inf(field[i]) or field[i] < -1e-7:
+			valid = false
+			break
+	_check(valid, "high infiltration rate produced invalid or negative channels")
+	demo.solver.infiltration_rate_m_s = 0.0
+
+
+func _check_sediment_transport(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
+	demo.solver.sediment_capacity = 0.8
+	var sand := _flat(0.2)
+	var water := _flat(0.012)
+	var sediment := _flat(0.0)
+	var c := _n / 2
+	sediment[c * _n + c] = 0.08
+	await _reseed(demo, sand, water, _flat(0.0), sediment)
+	var flux := PackedFloat32Array()
+	flux.resize(_n * _n * 4)
+	flux[(c * _n + c) * 4] = 0.001
+	RenderingServer.call_on_render_thread(_seed_hydro_flux.bind(
+		demo.solver.get_flux_tex_rid(), flux.to_byte_array()))
+	await _frames(1)
+	var before := await _field(demo)
+	await _step(demo, 40)
+	var after := await _field(demo)
+	var destination := (c * _n + c + 1) * 4 + 3
+	_check(after[destination] > 1e-4,
+		"sediment did not arrive in the downstream cell with erosion/deposition disabled")
+	var before_sums := _channel_sums(before)
+	var after_sums := _channel_sums(after)
+	var before_ra := before_sums.x + before_sums.w
+	var after_ra := after_sums.x + after_sums.w
+	_check(absf(after_ra - before_ra) <= 1e-4 * maxf(before_ra, 1.0),
+		"sediment transport changed R+A mass")
+	_check(absf(after_sums.w - before_sums.w) <= 1e-4 * before_sums.w,
+		"transport lost suspended sediment with erosion/deposition disabled")
+
+
+func _check_inertial_flow(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.stochasticity = 0.0
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
+	await _reseed(demo, _flat(0.2), _flat(0.02), _flat(0.0), _flat(0.0))
+	var flux := PackedFloat32Array()
+	flux.resize(_n * _n * 4)
+	flux[((_n / 2) * _n + _n / 2) * 4] = 0.001
+	var flux_bytes := flux.to_byte_array()
+	RenderingServer.call_on_render_thread(_seed_hydro_flux.bind(demo.solver.get_flux_tex_rid(), flux_bytes))
+	await _frames(1)
+	var seeded_flux := await _hydro_flux(demo)
+	var centre_flux := ((_n / 2) * _n + _n / 2) * 4
+	_check(absf(seeded_flux[centre_flux] - 0.001) < 1e-6,
+		"inertial flux fixture did not upload to the center cell")
+	await _step(demo, 1)
+	var flowed := await _hydro_flux(demo)
+	var velocity := await _hydro_velocity(demo)
+	var centre_velocity := ((_n / 2) * _n + _n / 2) * 2
+	_check(seeded_flux.size() == flowed.size() and flowed[centre_flux] > 0.0
+		and velocity.size() == _n * _n * 2
+		and absf(velocity[centre_velocity]) + absf(velocity[centre_velocity + 1]) > 0.0,
+		"inertial flux did not produce a persistent outflow and velocity")
+
+
+func _check_closed_basin(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
+	demo.solver.repose_deg = 89.0
+	var c := _n / 2
+	var basin := _flat(0.05)
+	var water := _flat(0.0)
+	for y in _n:
+		for x in _n:
+			var dx := absi(x - c)
+			var dy := absi(y - c)
+			if dx < 12 and dy < 12:
+				basin[y * _n + x] = 0.15
+				water[y * _n + x] = 0.05
+				if x == c and y == c:
+					water[y * _n + x] += 0.005
+			elif dx == 12 and dy <= 12 or dy == 12 and dx <= 12:
+				basin[y * _n + x] = 0.4
+				if x == c + 12 and dy <= 3:
+					basin[y * _n + x] = 0.23
+	await _reseed(demo, basin, water, _flat(0.0), _flat(0.0))
+	await _step(demo, 1, 0.0)
+	await _step(demo, 240)
+	var levelled := await _field(demo)
+	var level_min := INF
+	var level_max := -INF
+	for y in range(c - 11, c + 12):
+		for x in range(c - 11, c + 12):
+			var i := (y * _n + x) * 4
+			var level: float = levelled[i] + levelled[i + 1]
+			level_min = minf(level_min, level)
+			level_max = maxf(level_max, level)
+	_check(level_max - level_min < 0.003,
+		"closed basin failed to level before spilling (spread %.5f m)" % (level_max - level_min))
+	demo.solver.rain_rate_m_s = 0.04
+	var rain_steps := 180
+	await _step(demo, rain_steps)
+	var spilled := await _field(demo)
+	var outside_water := 0.0
+	var outside_cells := 0
+	var high_rim_water := 0.0
+	var high_rim_cells := 0
+	for y in _n:
+		for x in _n:
+			var dx := absi(x - c)
+			var dy := absi(y - c)
+			var idx := (y * _n + x) * 4
+			if (dx == 12 and dy <= 12 or dy == 12 and dx <= 12) \
+					and not (x == c + 12 and dy <= 3):
+				high_rim_water += spilled[idx + 1]
+				high_rim_cells += 1
+			elif dx > 12 or dy > 12:
+				outside_water += spilled[idx + 1]
+				outside_cells += 1
+	var expected_rain := 0.04 * float(rain_steps) * DT
+	var total_before_rain := _channel_sums(levelled).y
+	var total_after_rain := _channel_sums(spilled).y
+	var outside_rain := expected_rain * float(outside_cells)
+	var rim_rain := expected_rain * float(high_rim_cells)
+	_check(outside_water > outside_rain + 1.0,
+		"water did not discharge through the notch (outside %.3f, uniform rain %.3f)"
+			% [outside_water, outside_rain])
+	_check(high_rim_water <= rim_rain + 0.01,
+		"water crossed the high rim (rim %.3f, uniform rain %.3f)"
+			% [high_rim_water, rim_rain])
+	_check(absf(total_after_rain - total_before_rain
+		- expected_rain * float(_n * _n)) < 0.01,
+		"closed basin water budget differs (%.3f vs expected gain %.3f)"
+			% [total_after_rain - total_before_rain, expected_rain * float(_n * _n)])
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.repose_deg = 33.0
+
+
+func _check_hydro_stability(demo: Node) -> void:
+	demo.solver.erosion_rate = 0.15
+	demo.solver.deposition_gain = 0.6
+	demo.solver.rain_rate_m_s = 0.001
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NOISE
+	demo.solver.uplift_rate_m_s = 0.001
+	demo.solver.snowline_m = 0.15
+	demo.solver.snowfall_rate_m_s = 0.0005
+	await _reseed(demo, _bump(0.2, 0.08, 12.0), _flat(0.005), _flat(0.0), _flat(0.0))
+	var before := _channel_sums(await _field(demo))
+	await _step(demo, 300)
+	var field := await _field(demo)
+	var after := _channel_sums(field)
+	var valid := true
+	for value in field:
+		if is_nan(value) or is_inf(value) or value < -1e-6:
+			valid = false
+			break
+	_check(valid, "300 hydro steps produced invalid or negative channel values")
+	var expected_hydro_gain := (0.001 + 0.0005) * 300.0 * DT * float(_n * _n)
+	var actual_hydro_gain := after.y + after.z - before.y - before.z
+	_check(absf(actual_hydro_gain - expected_hydro_gain)
+		<= 1e-4 * maxf(expected_hydro_gain, 1.0),
+		"300-step rain/snow budget differs: %.6f vs %.6f"
+			% [actual_hydro_gain, expected_hydro_gain])
+	var expected_uplift_cap := 0.001 * 300.0 * DT * float(_n * _n)
+	var actual_solid_gain := after.x + after.w - before.x - before.w
+	_check(actual_solid_gain >= -1e-4 * maxf(expected_uplift_cap, 1.0)
+		and actual_solid_gain <= expected_uplift_cap * 1.001 + 1e-4,
+		"300-step R+A gain %.6f outside uplift budget [0, %.6f]"
+			% [actual_solid_gain, expected_uplift_cap])
+	var velocity := await _hydro_velocity(demo)
+	var velocity_valid := velocity.size() == _n * _n * 2
+	var max_speed := 0.0
+	for i in velocity.size() / 2:
+		var vx: float = velocity[i * 2]
+		var vy: float = velocity[i * 2 + 1]
+		if is_nan(vx) or is_inf(vx) or is_nan(vy) or is_inf(vy):
+			velocity_valid = false
+			break
+		max_speed = maxf(max_speed, Vector2(vx, vy).length())
+	var max_velocity := (WORLD / float(_n)) / (DT / float(HeightfieldTerrain.RIVER_ITERATIONS))
+	_check(velocity_valid and max_speed <= max_velocity + 1e-4,
+		"300-step velocity invalid or exceeded substep cap (%.6f / %.6f)"
+			% [max_speed, max_velocity])
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.snowline_m = -1.0
+
+
+func _check_summit_source_budget(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.set_summit_sources(PackedVector2Array(), 1.0, 0.0)
+	await _reseed(demo, _flat(0.25), _flat(0.0), _flat(0.0), _flat(0.0))
+	var point := Vector2.ZERO
+	var radius := 0.75
+	var rate := 0.004
+	var dt := 0.25
+	demo.solver.set_summit_sources(PackedVector2Array([point]), radius, rate)
+	var before := _channel_sums(await _field(demo))
+	await _step(demo, 1, dt)
+	var after := _channel_sums(await _field(demo))
+	var cell := WORLD / float(_n)
+	var expected := 0.0
+	for y in _n:
+		for x in _n:
+			var position := Vector2((float(x) + 0.5) * cell - WORLD * 0.5,
+				(float(y) + 0.5) * cell - WORLD * 0.5)
+			var d := (position - point) / maxf(radius, cell)
+			expected += rate * dt * exp(-3.0 * d.length_squared())
+	_check(absf(after.y - before.y - expected) < 1e-4 * maxf(expected, 1.0),
+		"summit source water budget differs (%.7f vs %.7f)"
+			% [after.y - before.y, expected])
+	demo.solver.set_summit_sources(PackedVector2Array(), 1.0, 0.0)
+
+
+func _check_sculpt_tools(demo: Node) -> void:
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.infiltration_rate_m_s = 0.0
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.erosion_rate = 0.0
+	demo.solver.deposition_gain = 0.0
+	demo.solver.repose_deg = 89.0
+	demo.solver.brush.pos_m = Vector2.ZERO
+	demo.solver.brush.radius_m = 0.9
+	demo.solver.brush.strength = 3.0
+	await _reseed(demo, _flat(0.25), _flat(0.0), _flat(0.0), _flat(0.0))
+	demo.solver.brush.mode = TerrainBrush.MOUNTAIN
+	await _step(demo, 1)
+	var raised := await _field(demo)
+	var centre := (_n / 2 * _n + _n / 2) * 4
+	_check(raised[centre] > 0.3,
+		"Raise mountain brush did not lift the centre from its flat starting height")
+	demo.solver.brush.clear()
+
+	var bump := _bump(0.25, 0.8, 18.0)
+	await _reseed(demo, bump, _flat(0.0), _flat(0.0), _flat(0.0))
+	var before := await _field(demo)
+	demo.solver.brush.mode = TerrainBrush.SMOOTH
+	await _step(demo, 12)
+	var flattened := await _field(demo)
+	var before_variance := _disk_variance(before, _n, 0.2)
+	var after_variance := _disk_variance(flattened, _n, 0.2)
+	_check(after_variance < before_variance * 0.1,
+		"Flatten brush did not reduce center variance by 90%% (%.6f -> %.6f)"
+			% [before_variance, after_variance])
+	demo.solver.brush.clear()
+	demo.solver.repose_deg = 33.0
+
+
+func _disk_variance(field: PackedFloat32Array, n: int, radius_m: float) -> float:
+	var values: Array[float] = []
+	var centre := Vector2i(n / 2, n / 2)
+	var radius_cells := int(radius_m / WORLD * float(n))
+	for y in range(centre.y - radius_cells, centre.y + radius_cells + 1):
+		for x in range(centre.x - radius_cells, centre.x + radius_cells + 1):
+			if Vector2(x - centre.x, y - centre.y).length() > float(radius_cells):
+				continue
+			values.append(field[(y * n + x) * 4])
+	var mean := 0.0
+	for value in values:
+		mean += value
+	mean /= float(values.size())
+	var variance := 0.0
+	for value in values:
+		variance += (value - mean) * (value - mean)
+	return variance / float(values.size())
+
+
+func _hydro_flux(demo: Node) -> PackedFloat32Array:
+	var data: PackedByteArray = await TextureReadback.new().read_layer(
+		demo.solver.get_flux_tex_rid(), 0)
+	if data.is_empty():
+		_check(false, "hydraulic flux readback timed out")
+	return data.to_float32_array()
+
+
+func _hydro_velocity(demo: Node) -> PackedFloat32Array:
+	var data: PackedByteArray = await TextureReadback.new().read_layer(
+		demo.solver.get_velocity_tex_rid(), 0)
+	if data.is_empty():
+		_check(false, "hydraulic velocity readback timed out")
+	return data.to_float32_array()
+
+
+func _seed_hydro_flux(rid: RID, bytes: PackedByteArray) -> void:
+	RenderingServer.get_rendering_device().texture_update(rid, 0, bytes)
+
+
 ## The user-reported leak: entering avalanche after thaw must not carry melt
 ## (or any dragged slider) across. The slab then avalanches (cohesion 13° is
 ## below the 24° tilt) but conserves snow up to the accounted snowfall.
@@ -411,6 +877,66 @@ func _check_scene_reset(demo: Node) -> void:
 	var expected := seeded + 0.002 * 4.0 * float(_n * _n)
 	_check(absf(snow_sum - expected) < 0.02 * expected,
 		"avalanche slab mass drifted: %.1f vs expected %.1f (melt leaked?)" % [snow_sum, expected])
+	demo.apply_preset(9)
+	await _wait_init(demo, false)
+	_check(demo.solver.world_size == 64.0
+		and demo.mountain_world_size_m == 64.0
+		and demo.mountain_height_m == 12.0
+		and demo._preset.mountain_height_m == 12.0
+		and demo._preset.landscape_materials
+		and demo.solver.rain_rate_m_s == 0.0
+		and demo.solver.uplift_rate_m_s == 0.0
+		and demo.solver.uplift_mode == TerrainConfig.UpliftMode.NONE
+		and demo.solver.snowfall_rate_m_s == 0.0
+		and demo.solver.freeze_rate_m_s == 0.0
+		and demo.solver.melt_rate_m_s == 0.0
+		and demo.solver.infiltration_rate_m_s == 0.0
+		and not demo.view.sand_mat.get_shader_parameter("snow_enabled")
+		and not demo.drying_enabled,
+		"Mountain preset did not select its dry 64 m alpine defaults")
+	var mountain_boot := await _field(demo)
+	_check(_snow_mass(mountain_boot) == 0.0,
+		"Mountain terrain initialized with snow")
+	demo.solver.rain_rate_m_s = 0.04
+	await _step(demo, 60)
+	var mountain_rained := await _field(demo)
+	_check(_snow_mass(mountain_rained) == 0.0,
+		"Mountain climate or rain created snow")
+	demo.solver.rain_rate_m_s = 0.04
+	demo.solver.uplift_rate_m_s = 0.02
+	demo.solver.snowline_m = 0.5
+	demo.solver.deposition_gain = 0.1
+	demo.set_drying(true)
+	demo.set_drying_rate(0.4)
+	demo.apply_preset(1)
+	await _wait_init(demo, false)
+	_check(demo.preset_idx == 1 and demo.solver.world_size == 4.0,
+		"legacy preset did not restore its 4 m domain after Mountain")
+	_check(demo.solver.rain_rate_m_s == 0.0
+		and demo.solver.uplift_rate_m_s == 0.0
+		and demo.solver.uplift_mode == TerrainConfig.UpliftMode.NONE
+		and demo.solver.snowline_m == -1.0
+		and demo.solver.deposition_gain == 0.6
+		and demo.solver.infiltration_rate_m_s == 0.0
+		and not demo.drying_enabled
+		and not demo._preset.landscape_materials,
+		"legacy preset inherited hydraulic parameters from Mountain")
+	demo.apply_preset(6)
+	await _wait_init(demo, false)
+	var avalanche := await _field(demo)
+	_check(demo.solver.snowfall_rate_m_s == 0.001
+		and demo.view.sand_mat.get_shader_parameter("snow_enabled")
+		and _snow_mass(avalanche) > 0.0,
+		"legacy avalanche did not restore its snow source and material")
+	demo.apply_preset(1)
+	await _wait_init(demo, false)
+
+
+func _snow_mass(field: PackedFloat32Array) -> float:
+	var total := 0.0
+	for i in field.size() / 4:
+		total += field[i * 4 + 2]
+	return total
 
 
 ## Same seed twice → bit-identical fields after the same step count: transfers
@@ -420,21 +946,44 @@ func _check_determinism(demo: Node) -> void:
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.005
 	demo.solver.stochasticity = 0.25
+	demo.solver.rain_rate_m_s = 0.001
+	demo.solver.uplift_rate_m_s = 0.001
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NOISE
 	var sand := _bump(0.3, 0.2, 40.0)
 	var water := _flat(0.006)
-	demo.solver.set_seed_channels(sand, water, _flat(0.02))
+	demo.solver.set_seed_channels(sand, water, _flat(0.02), _flat(0.001))
 	RenderingServer.call_on_render_thread(demo.solver.free_render)
 	RenderingServer.call_on_render_thread(demo.solver.init_render)
 	await _frames(2)
+	var initial_flux := await _hydro_flux(demo)
+	var initial_velocity := await _hydro_velocity(demo)
+	var initial_transport_zero := initial_flux.size() == _n * _n * 4 \
+		and initial_velocity.size() == _n * _n * 2
+	for value in initial_flux:
+		if value != 0.0:
+			initial_transport_zero = false
+			break
+	for value in initial_velocity:
+		if value != 0.0:
+			initial_transport_zero = false
+			break
+	_check(initial_transport_zero,
+		"reseed initialization retained old hydraulic flux or velocity")
 	await _step(demo, 90)
 	var run_a := await _field(demo)
-	demo.solver.set_seed_channels(sand, water, _flat(0.02))
+	var flux_a := await _hydro_flux(demo)
+	demo.solver.set_seed_channels(sand, water, _flat(0.02), _flat(0.001))
 	RenderingServer.call_on_render_thread(demo.solver.free_render)
 	RenderingServer.call_on_render_thread(demo.solver.init_render)
 	await _frames(2)
 	await _step(demo, 90)
 	var run_b := await _field(demo)
+	var flux_b := await _hydro_flux(demo)
 	_check(run_a == run_b, "reseeded run diverged bit-for-bit (stochastic flux not deterministic)")
+	_check(flux_a == flux_b, "reseeded rain/uplift run changed hydraulic flux bits")
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
 
 
 ## Physics sync: GPU point queries vs the same bilinear on the CPU readback.
@@ -507,10 +1056,20 @@ func _check_quality_tiers(demo: Node) -> void:
 		"Low tier did not resize the solver grid (%d)" % demo.solver.grid_n)
 	_check(demo.solver.iterations == TerrainQualityProfile.ITERATIONS[SimQualityProfile.Tier.LOW],
 		"Low tier did not set the settle iterations (%d)" % demo.solver.iterations)
+	var low_flux := await _hydro_flux(demo)
+	var low_velocity := await _hydro_velocity(demo)
+	_check(low_flux.size() == demo.solver.grid_n * demo.solver.grid_n * 4
+		and low_velocity.size() == demo.solver.grid_n * demo.solver.grid_n * 2,
+		"Low tier did not rebuild flux and velocity textures to its grid")
 	demo.quality.set_tier(SimQualityProfile.Tier.MEDIUM)
 	await _wait_init(demo)
 	_check(demo.solver.grid_n == TerrainQualityProfile.GRID_SIZES[SimQualityProfile.Tier.MEDIUM],
 		"Medium tier did not restore the solver grid (%d)" % demo.solver.grid_n)
+	var medium_flux := await _hydro_flux(demo)
+	var medium_velocity := await _hydro_velocity(demo)
+	_check(medium_flux.size() == demo.solver.grid_n * demo.solver.grid_n * 4
+		and medium_velocity.size() == demo.solver.grid_n * demo.solver.grid_n * 2,
+		"Medium tier did not rebuild flux and velocity textures to its grid")
 	await _step(demo, 10)
 
 

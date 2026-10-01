@@ -59,6 +59,10 @@ func _run() -> void:
 		_fail("no SimMenu in scene tree")
 		_report()
 		return
+	if _demo == "terrain_demo" and not GpuPreflight.available():
+		_fail("terrain demo has no GPU compute device")
+		_report()
+		return
 	if _demo == "ocean_demo":
 		await _check_ocean_actions(menu)
 	if _demo == "ambient_fluid_demo":
@@ -69,6 +73,9 @@ func _run() -> void:
 		await _check_tornado_actions()
 	if _demo == "nbody_demo":
 		await _check_nbody_actions(menu)
+	if _demo == "terrain_demo":
+		await _check_terrain_actions(menu)
+		menu = _find_sim_menu(get_tree().root)
 
 	Input.use_accumulated_input = false
 	# Real clicks in a focused test window would race the synthetic touches.
@@ -408,6 +415,314 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 	freeze_button.toggled.emit(false)
 	if _demo_root._frozen:
 		_fail("ocean freeze action did not resume simulation")
+
+
+func _check_terrain_actions(menu: SimMenu) -> void:
+	var controller := _demo_root
+	if not await _wait_terrain_ready(controller):
+		_fail("terrain solver did not initialize before action smoke")
+		return
+	controller.set_frozen(true)
+	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), true,
+		"terrain preset panel opens")
+	var preset_option: OptionButton = controller._menu_builder._preset_option
+	if preset_option == null or not preset_option.is_visible_in_tree():
+		_fail("terrain preset selector is not visible in the open panel")
+		return
+	preset_option.select(9)
+	preset_option.item_selected.emit(9)
+	if not await _wait_terrain_ready(controller):
+		_fail("terrain Mountain preset did not initialize")
+		return
+	var actions := _terrain_action_buttons(menu)
+	if not actions.has("Scene"):
+		_fail("preset cycle action is missing")
+		return
+	var first_action := (menu.get_node("BottomRight/ActionBar") as GridContainer).get_child(0) as Button
+	if first_action.tooltip_text != "Scene":
+		_fail("Scene preset cycle is not the first visible action")
+		return
+	for step in 10:
+		first_action.pressed.emit()
+		var expected_preset := step % 10
+		if not await _wait_terrain_ready(controller):
+			_fail("Scene action did not initialize preset %d" % expected_preset)
+			return
+		if controller.preset_idx != expected_preset or preset_option.selected != expected_preset \
+				or int(controller.menu.stored_value("Scene", "Preset", -1)) != expected_preset:
+			_fail("Scene action did not cycle/persist preset %d from Mountain" % expected_preset)
+		var expected_size: float = controller._preset.world_size_m
+		var expected_snow: bool = controller._preset.snow_enabled
+		if absf(controller.solver.world_size - expected_size) > 1e-5 \
+				or controller.solver.snow_enabled != expected_snow \
+				or controller.view.sand_mat.get_shader_parameter("snow_enabled") != expected_snow \
+				or controller.view.water_mat.get_shader_parameter("snow_enabled") != expected_snow \
+				or not controller.view.water.visible \
+				or controller.view.sand_mat.get_shader_parameter("landscape_materials") \
+				!= controller._preset.landscape_materials \
+				or controller.view.water_mat.get_shader_parameter("landscape_water") \
+				!= controller._preset.landscape_materials:
+			_fail("preset %d left solver, materials, or water visibility out of sync" % expected_preset)
+			return
+		if controller.view.terrain.material_override != controller.view.sand_mat \
+				or not controller.view.sand_mat.shader.resource_path.ends_with("terrain_surface.gdshader"):
+			_fail("preset %d changed the terrain surface material binding" % expected_preset)
+			return
+	if menu._is_pc():
+		var first_key := InputEventKey.new()
+		first_key.pressed = true
+		first_key.physical_keycode = KEY_1
+		menu._unhandled_input(first_key)
+		if not await _wait_terrain_ready(controller) or controller.preset_idx != 0 \
+				or preset_option.selected != 0:
+			_fail("KEY_1 did not trigger the first Scene preset action")
+			return
+		preset_option.select(9)
+		preset_option.item_selected.emit(9)
+		if not await _wait_terrain_ready(controller):
+			_fail("terrain Mountain did not restore after the KEY_1 action check")
+			return
+	actions = _terrain_action_buttons(menu)
+	for expected in ["Scene", "Rain", "Erosion", "Drying", "Raise mountain", "Flatten", "Lower"]:
+		if not actions.has(expected):
+			_fail("Mountain action missing: %s" % expected)
+	if _failures.size() > 0:
+		return
+	var regenerate_button: Button = controller._menu_builder._regenerate_action
+	if regenerate_button.text != "New terrain" \
+			or (menu.get_node("BottomRight/ActionBar") as GridContainer).get_children().has(regenerate_button) \
+			or not menu.get_node("Panel").is_ancestor_of(regenerate_button):
+		_fail("Mountain New terrain action is not available in the panel")
+		return
+	_open_terrain_menu_section(menu, "Terrain")
+	_open_terrain_menu_section(menu, "Erosion")
+	var seed_before: int = controller._mountain_seed
+	var live_size_before: float = controller.solver.world_size
+	var live_height_before: float = controller._preset.mountain_height_m
+	var generation_values := {
+		"Terrain size m": 80.0,
+		"Elevation m": 14.0,
+		"Mountain density": 3.1,
+		"Ruggedness": 0.62,
+		"Valley width": 0.27,
+		"Valley depth": 0.31,
+		"Ridge irregularity": 0.24,
+		"Surface detail": 1.7,
+	}
+	for label in generation_values:
+		var slider := _terrain_slider(menu, label)
+		if slider == null or not slider.is_visible_in_tree():
+			_fail("Mountain generation slider is missing: %s" % label)
+			return
+		slider.value = generation_values[label]
+	if controller.solver.world_size != live_size_before \
+			or controller._preset.mountain_height_m != live_height_before:
+		_fail("Mountain generation controls changed the live terrain before regeneration")
+	regenerate_button.pressed.emit()
+	if not await _wait_terrain_ready(controller):
+		_fail("New terrain action did not initialize")
+		return
+	if controller.preset_idx != 9 or controller._mountain_seed == seed_before \
+			or controller.solver.world_size != 80.0 \
+			or controller._preset.mountain_height_m != 14.0 \
+			or absf(controller._preset.alpine_density - 3.1) > 1e-5 \
+			or absf(controller._preset.alpine_ruggedness - 0.62) > 1e-5 \
+			or absf(controller._preset.alpine_valley_width_fraction - 0.27) > 1e-5 \
+			or absf(controller._preset.alpine_valley_depth_fraction - 0.31) > 1e-5 \
+			or absf(controller._preset.alpine_ridge_irregularity - 0.24) > 1e-5 \
+			or absf(controller._preset.alpine_surface_detail - 1.7) > 1e-5:
+		_fail("New terrain did not apply pending Alpine generation settings")
+	for label in generation_values:
+		if absf(float(menu.stored_value("Terrain", label, -999.0))
+				- generation_values[label]) > 1e-5:
+			_fail("Mountain generation value was not persisted: %s" % label)
+	if absf(controller._menu_builder._summit_rate.value - 0.12) > 1e-6:
+		_fail("Mountain summit-flow control did not start at 0.12 m/s")
+	if controller.rain_enabled or controller.erosion_running \
+			or controller.solver.rain_rate_m_s != 0.0 or controller.solver.erosion_rate != 0.0:
+		_fail("Mountain Rain or Erosion did not start disabled")
+	var rain_slider := _terrain_slider(menu, "Rain m/s")
+	if rain_slider == null or not rain_slider.is_visible_in_tree():
+		_fail("Mountain rain control is missing from the open Erosion section")
+		return
+	rain_slider.value = 0.006
+	if controller.solver.rain_rate_m_s != 0.0 \
+			or absf(controller.mountain_rain_rate_m_s - 0.006) > 1e-6:
+		_fail("Mountain rain control changed live rain while Rain was off")
+	var rain: Button = actions.Rain
+	rain.set_pressed_no_signal(true)
+	rain.toggled.emit(true)
+	if not controller.rain_enabled or absf(controller.solver.rain_rate_m_s - 0.006) > 1e-6 \
+			or controller.erosion_running or controller.solver.erosion_rate != 0.0:
+		_fail("Rain toggle did not start rainfall independently")
+	var erosion_slider := _terrain_slider(menu, "Erosion strength")
+	if erosion_slider == null or not erosion_slider.is_visible_in_tree():
+		_fail("Mountain erosion strength control is missing from the open Erosion section")
+		return
+	erosion_slider.value = 0.8
+	if controller.solver.erosion_rate != 0.0 \
+			or absf(controller.mountain_erosion_rate - 0.8) > 1e-6:
+		_fail("Erosion strength control changed live erosion while Erosion was off")
+	var erosion: Button = actions.Erosion
+	erosion.set_pressed_no_signal(true)
+	erosion.toggled.emit(true)
+	if not controller.erosion_running or absf(controller.solver.rain_rate_m_s - 0.006) > 1e-6 \
+			or absf(controller.solver.erosion_rate - 0.8) > 1e-6:
+		_fail("Erosion toggle changed Rain or did not activate stored strength")
+	rain_slider.value = 0.008
+	if absf(controller.solver.rain_rate_m_s - 0.008) > 1e-6 \
+			or absf(controller.solver.erosion_rate - 0.8) > 1e-6:
+		_fail("Mountain rain control changed erosion or failed to update active rain")
+	erosion_slider.value = 1.1
+	if absf(controller.solver.erosion_rate - 1.1) > 1e-6:
+		_fail("Mountain erosion strength did not update while active")
+	erosion.set_pressed_no_signal(false)
+	erosion.toggled.emit(false)
+	if controller.erosion_running or controller.solver.erosion_rate != 0.0 \
+			or absf(controller.solver.rain_rate_m_s - 0.008) > 1e-6:
+		_fail("Erosion toggle stopped Rain or left erosion active")
+	rain.set_pressed_no_signal(false)
+	rain.toggled.emit(false)
+	if controller.rain_enabled or controller.solver.rain_rate_m_s != 0.0 \
+			or controller.erosion_running:
+		_fail("Rain toggle changed Erosion state or left rain active")
+	var drying: Button = actions.Drying
+	var drying_rate: SpinBox = controller._menu_builder._infiltration_rate
+	drying_rate.value = 0.27
+	if absf(controller.drying_rate_m_s - 0.27) > 1e-6:
+		_fail("Infiltration rate control did not update the drying rate")
+	drying.set_pressed_no_signal(true)
+	drying.toggled.emit(true)
+	if not controller.drying_enabled \
+			or absf(controller.solver.infiltration_rate_m_s - 0.27) > 1e-6:
+		_fail("Drying UI toggle did not enable infiltration")
+	drying.set_pressed_no_signal(false)
+	drying.toggled.emit(false)
+	if controller.drying_enabled or controller.solver.infiltration_rate_m_s != 0.0:
+		_fail("Drying UI toggle did not disable infiltration")
+	var summit: CheckButton = controller._menu_builder._summit_toggle
+	if summit == null or not summit.is_visible_in_tree():
+		_fail("Summit sources panel toggle is missing")
+	summit.set_pressed_no_signal(true)
+	summit.toggled.emit(true)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not controller.summit_water and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.summit_water or controller.solver.summit_sources.is_empty():
+		_fail("Summit water UI toggle did not find Mountain peaks")
+	for source in controller.solver.summit_sources:
+		if absf(source.w - 0.12) > 1e-6:
+			_fail("Summit water source ignored the 0.12 m/s default control")
+			break
+	summit.set_pressed_no_signal(false)
+	summit.toggled.emit(false)
+	if controller.summit_water or not controller.solver.summit_sources.is_empty():
+		_fail("Summit water UI toggle did not clear its sources")
+	for tool in ["Raise mountain", "Flatten", "Lower"]:
+		actions[tool].set_pressed_no_signal(true)
+		actions[tool].toggled.emit(true)
+		var expected_mode := TerrainBrush.MOUNTAIN if tool == "Raise mountain" \
+			else TerrainBrush.SMOOTH if tool == "Flatten" else TerrainBrush.DIG
+		if controller.tool_choice != expected_mode:
+			_fail("%s action did not select its brush mode" % tool)
+
+	preset_option.select(1)
+	preset_option.item_selected.emit(1)
+	if not await _wait_terrain_ready(controller):
+		_fail("legacy terrain preset did not initialize")
+		return
+	if controller.preset_idx != 1 or controller.solver.world_size != 4.0:
+		_fail("terrain preset selector did not return to the legacy 4 m scene")
+	actions = _terrain_action_buttons(menu)
+	for mountain_action in ["Rain", "Erosion", "Raise mountain", "Flatten", "Lower"]:
+		if actions.has(mountain_action):
+			_fail("Mountain-only action remained visible on a legacy preset: %s" % mountain_action)
+	var legacy_reset: Button = controller._menu_builder._regenerate_action
+	if legacy_reset.text != "Reset" \
+			or not menu.get_node("Panel").is_ancestor_of(legacy_reset) \
+			or not controller.view.water.visible:
+		_fail("legacy Reset panel action or physical water surface is missing")
+	if not actions.has("Scene") or not actions.has("Drying"):
+		_fail("legacy Scene or Drying action is missing")
+	legacy_reset.pressed.emit()
+	if not await _wait_terrain_ready(controller):
+		_fail("legacy Reset panel action did not initialize")
+		return
+	if controller.preset_idx != 1 or not controller.view.water.visible:
+		_fail("legacy Reset changed preset or hid the physical water surface")
+	preset_option.select(9)
+	preset_option.item_selected.emit(9)
+	if not await _wait_terrain_ready(controller):
+		_fail("terrain smoke could not restore Mountain before boot persistence check")
+		return
+	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false,
+		"terrain preset panel closes")
+	controller.queue_free()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var packed: PackedScene = load("res://scenes/terrain_demo.tscn")
+	_demo_root = packed.instantiate()
+	get_tree().root.add_child(_demo_root)
+	controller = _demo_root
+	if not await _wait_terrain_ready(controller):
+		_fail("terrain scene did not initialize from persisted Mountain settings")
+		return
+	if controller.preset_idx != 9 \
+			or absf(controller.mountain_world_size_m - 80.0) > 1e-5 \
+			or absf(controller.mountain_height_m - 14.0) > 1e-5 \
+			or absf(controller.mountain_density - 3.1) > 1e-5 \
+			or absf(controller.mountain_ruggedness - 0.62) > 1e-5 \
+			or absf(controller.mountain_valley_width_fraction - 0.27) > 1e-5 \
+			or absf(controller.mountain_valley_depth_fraction - 0.31) > 1e-5 \
+			or absf(controller.mountain_ridge_irregularity - 0.24) > 1e-5 \
+			or absf(controller.mountain_surface_detail - 1.7) > 1e-5 \
+			or controller.solver.world_size != 80.0 \
+			or absf(controller._preset.mountain_height_m - 14.0) > 1e-5:
+		_fail("fresh terrain boot did not restore persisted Mountain generation settings")
+	if int(controller.menu.stored_value("Scene", "Preset", -1)) != 9:
+		_fail("Mountain preset was not persisted for the fresh-scene boot check")
+	controller.set_frozen(true)
+
+
+func _terrain_action_buttons(menu: SimMenu) -> Dictionary:
+	var result := {}
+	var action_bar := menu.get_node_or_null("BottomRight/ActionBar") as GridContainer
+	if action_bar == null:
+		_fail("terrain action bar missing")
+		return result
+	for child in action_bar.get_children():
+		if child is Button and child.visible:
+			result[child.tooltip_text] = child
+	return result
+
+
+func _open_terrain_menu_section(menu: SimMenu, section_name: String) -> void:
+	for node in menu.find_children("*", "Button", true, false):
+		var button := node as Button
+		if button.text.ends_with(section_name):
+			if not button.button_pressed:
+				button.set_pressed_no_signal(true)
+				button.toggled.emit(true)
+			return
+	_fail("terrain menu section missing: %s" % section_name)
+
+
+func _terrain_slider(menu: SimMenu, label_text: String) -> HSlider:
+	for row in menu.find_children("*", "HBoxContainer", true, false):
+		if row.get_child_count() < 2:
+			continue
+		var label := row.get_child(0) as Label
+		if label != null and label.text == label_text:
+			return row.get_child(1) as HSlider
+	return null
+
+
+func _wait_terrain_ready(controller: Node) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline \
+			and (not controller.solver.initialized or not controller.texture_bound):
+		await get_tree().process_frame
+	return controller.solver.initialized and controller.texture_bound
 
 
 func _check_nbody_actions(menu: SimMenu) -> void:

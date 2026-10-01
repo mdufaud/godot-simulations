@@ -1,7 +1,9 @@
 class_name TerrainConfig extends Resource
 
+enum UpliftMode { NONE, DOME, NOISE }
+
 @export_range(16, 2048, 1) var grid_size: int = 512
-@export_range(0.1, 100.0, 0.1) var world_size_m: float = 4.0
+@export_range(0.1, 2000.0, 0.1) var world_size_m: float = 4.0
 @export_range(1.0, 89.0, 0.1) var repose_angle_deg: float = 33.0
 @export_range(0.001, 10.0, 0.001) var flow_rate: float = 0.11
 @export_range(1, 64, 1) var flow_iterations: int = 10
@@ -15,13 +17,21 @@ class_name TerrainConfig extends Resource
 @export_range(0.0, 0.5, 0.01) var stochasticity: float = 0.15
 
 @export_group("Snow")
+@export var snow_enabled := true
 @export_range(1.0, 89.0, 0.1) var snow_repose_angle_deg: float = 50.0
 @export_range(0.001, 1.0, 0.001) var snow_flow_rate: float = 0.05
 @export_range(1, 16, 1) var snow_pass_iterations: int = 2
 
 @export_group("Climate")
+@export_range(0.0, 1.0, 0.0001) var rain_rate_m_s: float = 0.0
+@export_range(0.0, 2.0, 0.01) var deposition_gain: float = 0.6
+@export_range(0.0, 2.0, 0.0001) var uplift_rate_m_s: float = 0.0
+@export var uplift_mode: UpliftMode = UpliftMode.NONE
+@export_range(0.001, 1.0, 0.001) var uplift_radius_fraction: float = 0.3
+@export_range(-1.0, 10.0, 0.01) var snowline_m: float = -1.0
 @export_range(0.0, 1.0, 0.0001) var melt_rate_m_s: float = 0.0
 @export_range(0.0, 1.0, 0.0001) var evap_rate_m_s: float = 0.02
+@export_range(0.0, 2.0, 0.001) var infiltration_rate_m_s: float = 0.0
 ## Uniform snow deposition per second (a weather source; adds mass).
 @export_range(0.0, 1.0, 0.0001) var snowfall_rate_m_s: float = 0.0
 ## Standing water that freezes into snow per second (an in-cell G -> B move).
@@ -47,4 +57,17 @@ func validate() -> String:
 	if melt_rate_m_s < 0.0 or evap_rate_m_s < 0.0 or snowfall_rate_m_s < 0.0 \
 			or freeze_rate_m_s < 0.0 or wet_gain < 0.0 or water_sat_m <= 0.0:
 		return "climate rates cannot be negative and water_sat_m must be positive"
+	if not is_finite(rain_rate_m_s) or rain_rate_m_s < 0.0 \
+			or not is_finite(deposition_gain) or deposition_gain < 0.0 \
+			or not is_finite(uplift_rate_m_s) or uplift_rate_m_s < 0.0:
+		return "rain_rate_m_s, deposition_gain and uplift_rate_m_s must be finite and nonnegative"
+	if not is_finite(uplift_radius_fraction) or uplift_radius_fraction <= 0.0 \
+			or uplift_radius_fraction > 1.0:
+		return "uplift_radius_fraction must be in (0, 1]"
+	if uplift_mode < UpliftMode.NONE or uplift_mode > UpliftMode.NOISE:
+		return "uplift_mode is invalid"
+	if not is_finite(snowline_m):
+		return "snowline_m must be finite"
+	if not is_finite(infiltration_rate_m_s) or infiltration_rate_m_s < 0.0:
+		return "infiltration_rate_m_s must be finite and nonnegative"
 	return ""

@@ -34,6 +34,7 @@ source "$SCRIPT_DIR/virtual_display.sh"
 # -E fragment matching the probe's own diagnostics lines)
 PROBE_TABLE=(
 	"nbody_numeric|180|^TEST PASS nbody_numeric$|"
+	"terrain_hydro|300|^TEST PASS terrain_hydro$|TERRAIN HYDRO "
 	"nbody_perf|600|^TEST PASS nbody_perf$|NBODY PERF "
 	"fluid_foam|180|^TEST PASS fluid_foam$|FLUFOAM "
 	"fluid_honey_fall|180|^TEST PASS fluid_honey_fall$|FLUHONEY "

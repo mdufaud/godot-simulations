@@ -1,14 +1,12 @@
 class_name HeightfieldTerrain extends RefCounted
 ## GPU multi-material heightfield terrain. Each cell of the grid is a column
 ## of four channels — sand height, water depth, snow depth and suspended
-## sediment (rgba32f, heights in metres). Per frame the solver applies the
-## brushes (user + contact), a climate pass (melt / evaporation), then gather
-## exchanges: water levels against the solid surface while carrying sediment
-## (capacity-model erosion/deposition, pair-hashed stochastic jitter), snow
-## creeps past its cohesion threshold, sand relaxes toward its repose angle
-## (steeper while wet). Every exchange is a pure function of the two endpoint
-## cells, so mass is conserved bit-exact and nothing ever leaves the GPU: the
-## surface shader displaces a grid mesh from the same texture the flows write.
+## sediment (rgba32f, equivalent column heights in metres). Brushes and climate
+## precede inertial pipe fluxes and conservative water/sediment gathering, then
+## snow creep and sand relaxation. Rain, snowfall and uplift add material;
+## evaporation and brushes can remove it. Internal transfers conserve mass
+## within floating-point rounding. Terrain and water render directly from
+## the GPU field; velocity drives the water material.
 ##
 ## All stages share one push-constant layout (hf_common.comp); each ping-pong
 ## pass runs an even number of dispatches so the frame's result lands back in
@@ -17,13 +15,14 @@ class_name HeightfieldTerrain extends RefCounted
 const SHADER_DIR := "res://shaders/terrain/"
 const TIMESTAMP_PREFIX := "terrain/"
 
-## Water passes run a fixed, even dispatch count per frame; snow passes are
-## configurable (an avalanche scene raises the count to speed the release
-## wave), and the step forces the count even so the frame lands in tex 0.
-const WATER_ITERATIONS := 4
+## Each hydraulic substep updates flux before gathering the field. Only the
+## gather toggles field parity; the even count returns field and flux to tex 0.
+const RIVER_ITERATIONS := 2
+const STAGES := ["flow_sand", "river_flux", "flow_rivers", "flow_snow", "climate", "tool"]
 
 ## Point queries (props resting on the surface). Results land one frame later.
 const MAX_QUERY_POINTS := 64
+const MAX_SUMMIT_SOURCES := 8
 
 var config: TerrainConfig = TerrainConfig.new()
 var grid_n := 512
@@ -32,24 +31,33 @@ var repose_deg := 33.0
 var flow_rate := 0.11
 var iterations := 10
 
-## Water and transport: flow speed, capacity-model gains, channel jitter.
+## Water and transport: conductance, capacity-model gains, channel jitter.
 var water_flow_rate := 0.55
 var erosion_rate := 0.15
 var sediment_capacity := 0.8
 var stochasticity := 0.15
+var rain_rate_m_s := 0.0
+var deposition_gain := 0.6
+var uplift_rate_m_s := 0.0
+var uplift_mode: int = TerrainConfig.UpliftMode.NONE
+var uplift_radius_fraction := 0.3
+var snowline_m := -1.0
+var summit_sources := PackedVector4Array()
 
 ## Snow: steep cohesion angle, creep rate, and the per-pair shed cap that
 ## bounds the avalanche release wave.
 var snow_repose_deg := 50.0
+var snow_enabled := true
 var snow_flow_rate := 0.05
 var snow_cap := 0.12
 var snow_iterations := 2
 
 ## Climate: melt moves snow into water, evaporation dries it, snowfall
-## deposits new snow everywhere, freeze turns standing water into snow; wet
+## deposits new snow above the snowline, freeze turns standing water into snow; wet
 ## sand holds up to wet_gain times steeper, saturating at water_sat_m of water.
 var melt_rate_m_s := 0.0
 var evap_rate_m_s := 0.02
+var infiltration_rate_m_s := 0.0
 var snowfall_rate_m_s := 0.0
 var freeze_rate_m_s := 0.0
 var wet_gain := 0.6
@@ -77,6 +85,10 @@ var _shaders := {}
 var _pipelines := {}
 var _sets := {}
 var _tex := [RID(), RID()]
+var _flux := [RID(), RID()]
+var _velocity := RID()
+var _hydro_params := RID()
+var _summit_buffer := RID()
 var _seed_data := PackedFloat32Array()
 var _frames := 0
 var _timing_store := GpuTimingStore.new()
@@ -89,6 +101,7 @@ var _query_submitted_count := 0
 var _query_generation := 0
 var _query_latest := PackedVector4Array()
 var _query_results_valid := false
+var _query_revision := 0
 var _query_in := RID()
 var _query_out := RID()
 
@@ -101,6 +114,7 @@ func cell_size() -> float:
 ## Hosts call this when the scene (preset) changes, then apply their preset
 ## overrides, so slider drags never leak from one scene into the next.
 func reset_to_config() -> void:
+	summit_sources = PackedVector4Array()
 	# iterations is owned by the quality tier (never preset- or slider-driven),
 	# so it must survive this reset or a tier switch that rebuilds the grid
 	# would lose its settle count.
@@ -110,12 +124,20 @@ func reset_to_config() -> void:
 	erosion_rate = _defaults.erosion_rate
 	sediment_capacity = _defaults.sediment_capacity
 	stochasticity = _defaults.stochasticity
+	rain_rate_m_s = _defaults.rain_rate_m_s
+	deposition_gain = _defaults.deposition_gain
+	uplift_rate_m_s = _defaults.uplift_rate_m_s
+	uplift_mode = _defaults.uplift_mode
+	uplift_radius_fraction = _defaults.uplift_radius_fraction
+	snowline_m = _defaults.snowline_m
+	snow_enabled = _defaults.snow_enabled
 	snow_repose_deg = _defaults.snow_repose_angle_deg
 	snow_flow_rate = _defaults.snow_flow_rate
 	snow_iterations = _defaults.snow_pass_iterations
 	snow_cap = 0.12
 	melt_rate_m_s = _defaults.melt_rate_m_s
 	evap_rate_m_s = _defaults.evap_rate_m_s
+	infiltration_rate_m_s = _defaults.infiltration_rate_m_s
 	snowfall_rate_m_s = _defaults.snowfall_rate_m_s
 	freeze_rate_m_s = _defaults.freeze_rate_m_s
 	wet_gain = _defaults.wet_gain
@@ -124,6 +146,14 @@ func reset_to_config() -> void:
 
 func get_height_tex_rid() -> RID:
 	return _tex[0]
+
+
+func get_flux_tex_rid() -> RID:
+	return _flux[0]
+
+
+func get_velocity_tex_rid() -> RID:
+	return _velocity
 
 
 ## Queue world-space xz query points for the next step. Results land one frame
@@ -144,6 +174,17 @@ func query_results_valid() -> bool:
 	return _query_results_valid
 
 
+func query_revision() -> int:
+	return _query_revision
+
+
+func set_summit_sources(points: PackedVector2Array, radius_m: float, rate_m_s: float) -> void:
+	var sources := PackedVector4Array()
+	for point in points.slice(0, MAX_SUMMIT_SOURCES):
+		sources.append(Vector4(point.x, point.y, radius_m, rate_m_s))
+	summit_sources = sources
+
+
 ## grid_n * grid_n sand column heights, row-major, x fastest. Water, snow and
 ## sediment start empty; [method set_seed_channels] seeds them explicitly.
 func set_seed(heights: PackedFloat32Array) -> void:
@@ -151,7 +192,8 @@ func set_seed(heights: PackedFloat32Array) -> void:
 
 
 ## grid_n * grid_n floats per channel (missing channels seed to zero).
-func set_seed_channels(sand: PackedFloat32Array, water: PackedFloat32Array, snow: PackedFloat32Array) -> void:
+func set_seed_channels(sand: PackedFloat32Array, water: PackedFloat32Array,
+		snow: PackedFloat32Array, sediment := PackedFloat32Array()) -> void:
 	var cells := grid_n * grid_n
 	var interleaved := PackedFloat32Array()
 	interleaved.resize(cells * 4)
@@ -159,6 +201,7 @@ func set_seed_channels(sand: PackedFloat32Array, water: PackedFloat32Array, snow
 		interleaved[i * 4] = sand[i] if i < sand.size() else 0.0
 		interleaved[i * 4 + 1] = water[i] if i < water.size() else 0.0
 		interleaved[i * 4 + 2] = snow[i] if i < snow.size() else 0.0
+		interleaved[i * 4 + 3] = sediment[i] if i < sediment.size() else 0.0
 	_seed_data = interleaved
 
 
@@ -175,11 +218,19 @@ func init_render() -> void:
 	config.erosion_rate = erosion_rate
 	config.sediment_capacity = sediment_capacity
 	config.stochasticity = stochasticity
+	config.rain_rate_m_s = rain_rate_m_s
+	config.deposition_gain = deposition_gain
+	config.uplift_rate_m_s = uplift_rate_m_s
+	config.uplift_mode = uplift_mode
+	config.uplift_radius_fraction = uplift_radius_fraction
+	config.snowline_m = snowline_m
+	config.snow_enabled = snow_enabled
 	config.snow_repose_angle_deg = snow_repose_deg
 	config.snow_flow_rate = snow_flow_rate
 	config.snow_pass_iterations = snow_iterations
 	config.melt_rate_m_s = melt_rate_m_s
 	config.evap_rate_m_s = evap_rate_m_s
+	config.infiltration_rate_m_s = infiltration_rate_m_s
 	config.snowfall_rate_m_s = snowfall_rate_m_s
 	config.freeze_rate_m_s = freeze_rate_m_s
 	config.wet_gain = wet_gain
@@ -193,7 +244,7 @@ func init_render() -> void:
 		return
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "hf_common.comp")
-	for stage in ["flow_sand", "flow_water", "flow_snow", "climate", "tool"]:
+	for stage in STAGES:
 		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "hf_" + stage + ".comp")
 		var spirv := ShaderCache.compile(_rd, "hf_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
@@ -220,6 +271,16 @@ func init_render() -> void:
 	var seed_bytes := _seed_data.to_byte_array()
 	_tex[0] = _rd.texture_create(fmt, RDTextureView.new(), [seed_bytes])
 	_tex[1] = _rd.texture_create(fmt, RDTextureView.new(), [seed_bytes])
+	var zero_bytes := PackedByteArray()
+	zero_bytes.resize(grid_n * grid_n * 16)
+	zero_bytes.fill(0)
+	_flux[0] = _rd.texture_create(fmt, RDTextureView.new(), [zero_bytes])
+	_flux[1] = _rd.texture_create(fmt, RDTextureView.new(), [zero_bytes])
+	fmt.format = RenderingDevice.DATA_FORMAT_R32G32_SFLOAT
+	zero_bytes.resize(grid_n * grid_n * 8)
+	_velocity = _rd.texture_create(fmt, RDTextureView.new(), [zero_bytes])
+	_hydro_params = _rd.uniform_buffer_create(16, _pack_hydro_params())
+	_summit_buffer = _rd.storage_buffer_create(16 * (MAX_SUMMIT_SOURCES + 1), _pack_summit_sources())
 
 	# Parity 0 reads tex 0 and writes tex 1; parity 1 the reverse. Every
 	# ping-pong stage of a frame runs an even number of dispatches, so the
@@ -227,7 +288,7 @@ func init_render() -> void:
 	# is bound to. The tool and climate stages write tex 0 in place.
 	# Explicit list: "query" also lives in _shaders across re-inits and has
 	# buffer bindings, not the image pair below.
-	for stage in ["flow_sand", "flow_water", "flow_snow", "climate", "tool"]:
+	for stage in STAGES:
 		var sets := []
 		for parity in 2:
 			var u0 := RDUniform.new()
@@ -238,7 +299,29 @@ func init_render() -> void:
 			u1.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
 			u1.binding = 1
 			u1.add_id(_tex[1 - parity])
-			sets.append(_rd.uniform_set_create([u0, u1], _shaders[stage], 0))
+			var hydro := RDUniform.new()
+			hydro.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+			hydro.binding = 4
+			hydro.add_id(_hydro_params)
+			var uniforms: Array[RDUniform] = [u0, u1, hydro]
+			if stage == "climate":
+				var sources := RDUniform.new()
+				sources.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+				sources.binding = 5
+				sources.add_id(_summit_buffer)
+				uniforms.append(sources)
+			if stage == "river_flux" or stage == "flow_rivers":
+				var u2 := RDUniform.new()
+				u2.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+				u2.binding = 2
+				u2.add_id(_flux[parity] if stage == "river_flux" else _flux[1 - parity])
+				var u3 := RDUniform.new()
+				u3.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+				u3.binding = 3
+				u3.add_id(_flux[1 - parity] if stage == "river_flux" else _velocity)
+				uniforms.append(u2)
+				uniforms.append(u3)
+			sets.append(_rd.uniform_set_create(uniforms, _shaders[stage], 0))
 		_sets[stage] = sets
 
 	# Point-query stage: standalone shader (own bindings and push constant),
@@ -279,19 +362,28 @@ func step_render(dt: float) -> void:
 	_read_timings()
 	_frames += 1
 	var pc := _pack_push_constant(dt)
+	var river_pc := _pack_push_constant(dt / float(RIVER_ITERATIONS))
+	var hydro := _pack_hydro_params()
+	_rd.buffer_update(_hydro_params, 0, hydro.size(), hydro)
+	var sources := _pack_summit_sources()
+	_rd.buffer_update(_summit_buffer, 0, sources.size(), sources)
 	var groups := ceili(float(grid_n) / 16.0)
 	var iters := iterations + (iterations & 1)
-	var snow_iters := snow_iterations + (snow_iterations & 1)
+	var snow_iters := snow_iterations + (snow_iterations & 1) if snow_enabled else 0
 
 	if profiling:
 		_rd.capture_timestamp(TIMESTAMP_PREFIX + "start")
 	var cl := _rd.compute_list_begin()
 	var any_tool := not brush.idle() or not contact_brush.idle()
-	if any_tool:
+	if any_tool and dt > 0.0:
 		_dispatch(cl, "tool", 0, pc, groups)
-	_dispatch(cl, "climate", 0, pc, groups)
-	for i in WATER_ITERATIONS:
-		_dispatch(cl, "flow_water", i & 1, pc, groups)
+	if dt > 0.0:
+		_dispatch(cl, "climate", 0, pc, groups)
+		for i in RIVER_ITERATIONS:
+			_dispatch(cl, "river_flux", i & 1, river_pc, groups)
+			_dispatch(cl, "flow_rivers", i & 1, river_pc, groups)
+	if profiling:
+		_rd.capture_timestamp(TIMESTAMP_PREFIX + "hydraulic")
 	for i in snow_iters:
 		_dispatch(cl, "flow_snow", i & 1, pc, groups)
 	for i in iters:
@@ -358,6 +450,7 @@ func _apply_query_results(results: PackedVector4Array, generation: int) -> void:
 		return
 	_query_latest = results
 	_query_results_valid = true
+	_query_revision += 1
 
 
 func _dispatch(cl: int, stage: String, parity: int, pc: PackedByteArray, groups: int) -> void:
@@ -400,7 +493,36 @@ func _pack_push_constant(dt: float) -> PackedByteArray:
 	pc.encode_s32(108, _frames)
 	pc.encode_float(112, snowfall_rate_m_s)
 	pc.encode_float(116, freeze_rate_m_s)
+	pc.encode_float(120, snowline_m)
+	pc.encode_float(124, uplift_radius_fraction)
 	return pc
+
+
+func _pack_hydro_params() -> PackedByteArray:
+	var data := PackedByteArray()
+	data.resize(16)
+	data.encode_float(0, rain_rate_m_s)
+	data.encode_float(4, deposition_gain)
+	data.encode_float(8, uplift_rate_m_s)
+	data.encode_float(12, float(uplift_mode))
+	return data
+
+
+func _pack_summit_sources() -> PackedByteArray:
+	var sources := summit_sources
+	var count := mini(sources.size(), MAX_SUMMIT_SOURCES)
+	var data := PackedByteArray()
+	data.resize(16 * (MAX_SUMMIT_SOURCES + 1))
+	data.encode_float(0, float(count))
+	data.encode_float(4, infiltration_rate_m_s)
+	data.encode_float(8, 1.0 if snow_enabled else 0.0)
+	for i in count:
+		var offset := 16 * (i + 1)
+		data.encode_float(offset, sources[i].x)
+		data.encode_float(offset + 4, sources[i].y)
+		data.encode_float(offset + 8, sources[i].z)
+		data.encode_float(offset + 12, sources[i].w)
+	return data
 
 
 # Render thread; reads last frame's pair of timestamps.
@@ -425,6 +547,9 @@ func readback_cells() -> PackedFloat32Array:
 
 func free_render() -> void:
 	initialized = false
+	_query_generation += 1
+	_query_has_pending = false
+	_query_points_pending = PackedVector2Array()
 	_query_results_valid = false
 	_query_latest = PackedVector4Array()
 	if _rd == null:
@@ -436,10 +561,22 @@ func free_render() -> void:
 			if s.is_valid():
 				_rd.free_rid(s)
 	_sets.clear()
+	if _hydro_params.is_valid():
+		_rd.free_rid(_hydro_params)
+	_hydro_params = RID()
+	if _summit_buffer.is_valid():
+		_rd.free_rid(_summit_buffer)
+	_summit_buffer = RID()
 	for i in 2:
 		if _tex[i].is_valid():
 			_rd.free_rid(_tex[i])
 		_tex[i] = RID()
+		if _flux[i].is_valid():
+			_rd.free_rid(_flux[i])
+		_flux[i] = RID()
+	if _velocity.is_valid():
+		_rd.free_rid(_velocity)
+	_velocity = RID()
 	for stage in _pipelines:
 		if _pipelines[stage].is_valid():
 			_rd.free_rid(_pipelines[stage])

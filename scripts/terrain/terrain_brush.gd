@@ -8,9 +8,8 @@ class_name TerrainBrush extends RefCounted
 ## solver.brush.pos_m = Vector2(0.2, -0.1)
 ## [/codeblock]
 
-enum { NONE, DIG, POUR, SMOOTH, WATER, PACK, SNOW }
-## SNOW deliberately sits last: presets serialize tool indices by number, so
-## appending keeps every existing .tres valid.
+enum { NONE, DIG, POUR, SMOOTH, WATER, PACK, SNOW, MOUNTAIN }
+## New tools append: presets serialize indices, so existing values stay valid.
 
 var mode := NONE
 ## World-space xz, in the domain [HeightfieldTerrain] spans.

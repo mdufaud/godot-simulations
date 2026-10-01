@@ -119,6 +119,7 @@ declare -a CPU_SUITES=(
 	"sim_step_clock|res://tests/sim_step_clock_test.gd"
 	"nbody_values|res://tests/nbody_value_test.gd"
 	"quality_profiles|res://tests/quality_profiles_test.gd"
+	"alpine_terrain|res://tests/alpine_terrain_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do
 	name="${suite%%|*}"

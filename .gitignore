@@ -11,6 +11,11 @@ resources/*
 !resources/
 !resources/generated/
 !resources/generated/**
+!resources/terrain/
+resources/terrain/*
+!resources/terrain/presets/
+resources/terrain/presets/*
+!resources/terrain/presets/montagne.tres
 !resources/ambient_fluid/
 !resources/ambient_fluid/**
 !resources/nbody/

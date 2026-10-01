@@ -553,19 +553,20 @@ func _make_action_button(icon: String, label_text: String) -> Button:
 	glyph.name = "ActionIcon"
 	glyph.text = icon
 	glyph.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	glyph.offset_top = 2.0
-	glyph.offset_bottom = 34.0
+	glyph.offset_top = 0.0
+	glyph.offset_bottom = 25.0
 	glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	glyph.add_theme_font_size_override("font_size", 22)
+	glyph.add_theme_font_size_override("font_size", 18)
 	box.add_child(glyph)
 
 	var caption := Label.new()
 	caption.name = "ActionCaption"
 	caption.text = label_text
 	caption.set_anchors_preset(Control.PRESET_TOP_WIDE)
-	caption.offset_top = 33.0
-	caption.offset_bottom = 53.0
+	caption.offset_top = 26.0
+	caption.offset_bottom = 54.0
+	caption.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	caption.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	caption.add_theme_font_size_override("font_size", 10)

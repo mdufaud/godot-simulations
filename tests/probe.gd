@@ -85,6 +85,8 @@ var _warmup := 90
 var _fps_bodies := 0
 var _fps_medium := -1
 var _fps_settle_seconds := 0.0
+var _fps_params: Dictionary = {}
+var _fps_profile := false
 
 # fractal_policy
 var _fails := 0
@@ -392,6 +394,505 @@ func _run_nbody_numeric() -> void:
 	await _nbody_free_render(solver)
 	await _test_nbody_firework_output()
 	_finish("nbody_numeric")
+
+
+func _run_terrain_hydro() -> void:
+	var demo = (load("res://scenes/terrain_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: boot scene did not initialize and bind its surface")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var boot_preset := clampi(int(demo.menu.stored_value("Scene", "Preset", 9)),
+		0, demo.PRESETS.size() - 1)
+	_check(demo.preset_idx == boot_preset and demo.solver.get_height_tex_rid().is_valid(),
+		"terrain_hydro: boot preset differs from the saved scene or has no height texture")
+	var boot_grid: float = demo.view.sand_mat.get_shader_parameter("grid_n")
+	_check(absf(boot_grid - float(demo.solver.grid_n)) < 0.01,
+		"terrain_hydro: boot material grid does not match the solver")
+	var boot_snow_enabled: bool = demo._preset.snow_enabled
+	_check(demo.solver.snow_enabled == boot_snow_enabled
+		and demo.view.sand_mat.get_shader_parameter("snow_enabled") == boot_snow_enabled
+		and demo.view.water_mat.get_shader_parameter("snow_enabled") == boot_snow_enabled,
+		"terrain_hydro: boot snow state differs across preset, solver and materials")
+	_terrain_hydro_check_surface(demo, "boot")
+	_check(absf(demo.solver.world_size - demo._preset.world_size_m) < 1e-5
+		and absf(float(demo.view.sand_mat.get_shader_parameter("world_size"))
+			- demo.solver.world_size) < 1e-5
+		and absf(float(demo.view.water_mat.get_shader_parameter("world_size"))
+			- demo.solver.world_size) < 1e-5
+		and demo.view.sand_mat.get_shader_parameter("height_tex") == demo.height_texture
+		and demo.view.water_mat.get_shader_parameter("height_tex") == demo.height_texture
+		and demo.view.water_mat.get_shader_parameter("velocity_tex") == demo.velocity_texture
+		and demo.solver.get_velocity_tex_rid().is_valid()
+		and demo.view.sand_mat.get_shader_parameter("landscape_materials")
+		== demo._preset.landscape_materials,
+		"terrain_hydro: boot surface/velocity binding or preset material flag is stale")
+	demo.set_frozen(true)
+	demo.solver.grid_n = 64
+	demo.apply_preset(9)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: Mountain preset failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	demo.set_mountain_size(80.0)
+	demo.set_mountain_height(14.0)
+	demo.regenerate()
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: pending Mountain dimensions failed to regenerate")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(demo.solver.world_size == 80.0 and demo._preset.mountain_height_m == 14.0,
+		"terrain_hydro: New terrain did not apply pending size and elevation")
+	demo.set_mountain_size(64.0)
+	demo.set_mountain_height(12.0)
+	demo.set_mountain_density(2.4)
+	demo.set_mountain_ruggedness(0.46)
+	demo.set_mountain_valley_width(0.16)
+	demo.set_mountain_valley_depth(0.72)
+	demo.set_mountain_ridge_irregularity(0.12)
+	demo.set_mountain_surface_detail(1.0)
+	var alpine_seed := 8675309
+	demo.generate_alpine(alpine_seed)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: default-size Alpine failed to initialize and bind")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(demo.preset_idx == 9 and demo.solver.world_size == 64.0
+		and demo._preset.mountain_height_m == 12.0,
+		"terrain_hydro: Mountain did not restore its 64 m by 12 m defaults")
+	_check(demo.solver.rain_rate_m_s == 0.0 and demo.solver.uplift_rate_m_s == 0.0
+		and demo.solver.uplift_mode == TerrainConfig.UpliftMode.NONE,
+		"terrain_hydro: Mountain rain or uplift was enabled by default")
+	_check(not demo.drying_enabled and demo.solver.infiltration_rate_m_s == 0.0
+		and not demo.rain_enabled and demo.solver.rain_rate_m_s == 0.0
+		and not demo.erosion_running and demo.solver.erosion_rate == 0.0,
+		"terrain_hydro: Mountain drying, rain or erosion was enabled by default")
+	_check(demo._preset.landscape_materials
+		and demo.view.sand_mat.get_shader_parameter("landscape_materials")
+		and demo.view.water.visible
+		and demo.view.water_mat.get_shader_parameter("landscape_water")
+		and not demo.view.sand_mat.get_shader_parameter("snow_enabled")
+		and not demo.view.water_mat.get_shader_parameter("snow_enabled")
+		and not demo.solver.snow_enabled
+		and demo.solver.snowfall_rate_m_s == 0.0
+		and demo.solver.freeze_rate_m_s == 0.0
+		and demo.solver.melt_rate_m_s == 0.0,
+		"terrain_hydro: Mountain snow material or climate source was enabled")
+	var locked_tool: int = demo.tool_choice
+	demo.set_snowfall(0.01)
+	demo.set_freeze(0.01)
+	demo.set_melt(0.01)
+	_check(demo.solver.snowfall_rate_m_s == 0.0
+		and demo.solver.freeze_rate_m_s == 0.0
+		and demo.solver.melt_rate_m_s == 0.0,
+		"terrain_hydro: public snow setters enabled snow in Mountain")
+	demo.select_tool(TerrainBrush.SNOW)
+	demo.select_tool(TerrainBrush.PACK)
+	_check(demo.tool_choice == locked_tool,
+		"terrain_hydro: disabled Mountain snow accepted Snow or Pack tool selection")
+	var generated_a := await _terrain_hydro_field(demo)
+	_check(_terrain_hydro_sums(generated_a).z == 0.0,
+		"terrain_hydro: Mountain generation initialized snow")
+	_check(not demo.summit_water and demo.solver.summit_sources.is_empty(),
+		"terrain_hydro: Mountain regeneration retained summit sources")
+	demo.generate_alpine(alpine_seed)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: repeated Alpine generation failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var generated_b := await _terrain_hydro_field(demo)
+	_check(generated_a == generated_b,
+		"terrain_hydro: public seeded Mountain generation changed for a repeated seed")
+	demo.regenerate()
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: random Mountain regeneration failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var random_seed_a: int = demo._mountain_seed
+	var random_a := await _terrain_hydro_field(demo)
+	demo.regenerate()
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: second random Mountain regeneration failed")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var random_seed_b: int = demo._mountain_seed
+	var random_b := await _terrain_hydro_field(demo)
+	_check(random_seed_a != random_seed_b and random_a != random_b,
+		"terrain_hydro: consecutive New terrain actions did not produce unique random terrain")
+	demo.generate_alpine(alpine_seed)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: fixed-seed Mountain restore failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	demo.set_drying(false)
+	demo.set_erosion_running(false)
+	demo.set_rain_enabled(false)
+	demo.set_rain(0.006)
+	demo.set_erosion(0.8)
+	_check(demo.solver.rain_rate_m_s == 0.0 and demo.solver.erosion_rate == 0.0
+		and absf(demo.mountain_rain_rate_m_s - 0.006) < 1e-7
+		and absf(demo.mountain_erosion_rate - 0.8) < 1e-7,
+		"terrain_hydro: changing disabled Rain/Erosion controls changed live rates")
+	demo.set_rain_enabled(true)
+	_check(absf(demo.solver.rain_rate_m_s - 0.006) < 1e-7
+		and demo.solver.erosion_rate == 0.0,
+		"terrain_hydro: Rain toggle did not activate rain independently")
+	demo.set_erosion_running(true)
+	_check(absf(demo.solver.rain_rate_m_s - 0.006) < 1e-7
+		and absf(demo.solver.erosion_rate - 0.8) < 1e-7,
+		"terrain_hydro: Erosion toggle changed Rain or failed to restore erosion strength")
+	demo.set_erosion(1.2)
+	demo.set_rain(0.004)
+	_check(absf(demo.solver.rain_rate_m_s - 0.004) < 1e-7
+		and absf(demo.solver.erosion_rate - 1.2) < 1e-7,
+		"terrain_hydro: Rain/Erosion controls did not update their independent live rates")
+	demo.set_erosion_running(false)
+	_check(demo.solver.rain_rate_m_s == 0.004 and demo.solver.erosion_rate == 0.0,
+		"terrain_hydro: disabling Erosion also changed Rain")
+	demo.set_rain_enabled(false)
+	_check(demo.solver.rain_rate_m_s == 0.0 and demo.solver.erosion_rate == 0.0,
+		"terrain_hydro: disabling Rain changed Erosion")
+	var fixed_dt := 1.0 / 60.0
+	var fixed_steps := 600
+	demo.solver.flow_rate = 0.0
+	demo.solver.snow_flow_rate = 0.0
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.infiltration_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.stochasticity = 0.0
+	demo.solver.snowfall_rate_m_s = 0.01
+	demo.solver.freeze_rate_m_s = 0.01
+	demo.solver.melt_rate_m_s = 0.01
+	demo.set_rain(0.0025)
+	demo.set_erosion(1.2)
+	demo.set_erosion_running(false)
+	demo.set_rain_enabled(true)
+	var rain_start := await _terrain_hydro_field(demo)
+	var rain_start_sums := _terrain_hydro_sums(rain_start)
+	await _terrain_hydro_steps(demo, fixed_steps, fixed_dt)
+	var rain_only := await _terrain_hydro_field(demo)
+	var rain_only_sums := _terrain_hydro_sums(rain_only)
+	var rain_flux := await _terrain_hydro_flux_stats(demo)
+	var expected_rain: float = demo.mountain_rain_rate_m_s * fixed_dt \
+		* float(fixed_steps * 64 * 64)
+	var rain_gain := rain_only_sums.y - rain_start_sums.y
+	_check(absf(rain_gain - expected_rain) < 1e-3 * maxf(expected_rain, 1.0),
+		"terrain_hydro: Rain-only water budget differs (%.6f vs %.6f)"
+			% [rain_gain, expected_rain])
+	_check(absf((rain_only_sums.x + rain_only_sums.w)
+		- (rain_start_sums.x + rain_start_sums.w)) < 1e-4
+		* maxf(rain_start_sums.x + rain_start_sums.w, 1.0),
+		"terrain_hydro: Rain-only run changed total R+A")
+	var unchanged_solids := true
+	for i in rain_only.size() / 4:
+		if rain_only[i * 4] != rain_start[i * 4] or rain_only[i * 4 + 3] != rain_start[i * 4 + 3]:
+			unchanged_solids = false
+			break
+	_check(unchanged_solids, "terrain_hydro: disabled Erosion altered the bed or sediment")
+	_check(rain_flux.x > 1e-6 and rain_flux.y > 1e-5,
+		"terrain_hydro: Rain-only run did not produce hydraulic flux and water redistribution")
+	_check(_terrain_hydro_channel_spread(rain_only, 1) > 1e-5,
+		"terrain_hydro: Rain-only water remained a uniform source layer")
+	_check(rain_only_sums.z == 0.0,
+		"terrain_hydro: disabled Mountain snow source changed the snow channel")
+	var before_erosion := await _terrain_hydro_field(demo)
+	var before_erosion_flux := await _terrain_hydro_flux_stats(demo)
+	demo.set_erosion_running(true)
+	var immediate_erosion := await _terrain_hydro_field(demo)
+	var immediate_erosion_flux := await _terrain_hydro_flux_stats(demo)
+	_check(demo.rain_enabled and demo.solver.rain_rate_m_s == 0.0025
+		and demo.erosion_running and demo.solver.erosion_rate == 1.2
+		and before_erosion == immediate_erosion and before_erosion_flux == immediate_erosion_flux,
+		"terrain_hydro: enabling Erosion changed Rain or the current water/flux fields")
+	var water_start_sums := _terrain_hydro_sums(immediate_erosion)
+	await _terrain_hydro_steps(demo, fixed_steps, fixed_dt)
+	var watered := await _terrain_hydro_field(demo)
+	var watered_sums := _terrain_hydro_sums(watered)
+	var finite := true
+	for value in watered:
+		if is_nan(value) or is_inf(value) or value < -1e-6:
+			finite = false
+			break
+	var water_gain := watered_sums.y - water_start_sums.y
+	var solid_before := water_start_sums.x + water_start_sums.w
+	var solid_after := watered_sums.x + watered_sums.w
+	_check(absf(water_gain - expected_rain) < 1e-3 * maxf(expected_rain, 1.0),
+		"terrain_hydro: Rain budget changed when Erosion enabled (%.6f vs %.6f)"
+			% [water_gain, expected_rain])
+	_check(absf(solid_after - solid_before) < 1e-4 * maxf(solid_before, 1.0),
+		"terrain_hydro: rain-driven R+A mass drifted (%.6f -> %.6f)"
+			% [solid_before, solid_after])
+	_check(watered_sums.x < rain_only_sums.x - 1e-5
+		and watered_sums.w > rain_only_sums.w + 1e-6,
+		"terrain_hydro: enabling Erosion did not transfer Alpine sand into sediment")
+	_check(watered_sums.z == 0.0,
+		"terrain_hydro: rain or climate created Mountain snow")
+	_check(finite, "terrain_hydro: rain-driven erosion produced invalid or negative channels")
+	print("TERRAIN HYDRO seed=%d size=%.1f height=%.1f steps=%d rain_gain=%.6f expected=%.6f sand_loss=%.6f sediment_gain=%.6f"
+		% [alpine_seed, demo.solver.world_size, demo._preset.mountain_height_m, fixed_steps,
+			water_gain, expected_rain, rain_only_sums.x - watered_sums.x,
+			watered_sums.w - rain_only_sums.w])
+	demo.set_erosion_running(false)
+	_check(demo.rain_enabled and demo.solver.rain_rate_m_s == 0.0025
+		and demo.solver.erosion_rate == 0.0,
+		"terrain_hydro: disabling Erosion also disabled Rain")
+	var after_disable := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	await _terrain_hydro_steps(demo, 10, fixed_dt)
+	var after_disable_steps := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	var short_rain_expected := 0.0025 * fixed_dt * 10.0 * 64.0 * 64.0
+	_check(absf((after_disable_steps.y - after_disable.y) - short_rain_expected) < 1e-4,
+		"terrain_hydro: Rain stopped when Erosion was disabled")
+	demo.set_rain_enabled(false)
+	_check(not demo.erosion_running and demo.solver.erosion_rate == 0.0
+		and demo.solver.rain_rate_m_s == 0.0,
+		"terrain_hydro: disabling Rain changed Erosion state")
+	var after_rain_off := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	await _terrain_hydro_steps(demo, 10, fixed_dt)
+	var after_rain_off_steps := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	_check(absf(after_rain_off_steps.y - after_rain_off.y) < 1e-4,
+		"terrain_hydro: disabled Rain toggle continued adding water")
+	demo.apply_preset(1)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: legacy scene failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(demo.preset_idx == 1 and demo.solver.world_size == 4.0,
+		"terrain_hydro: switching back to a legacy preset did not restore its 4 m domain")
+	_terrain_hydro_check_surface(demo, "legacy preset")
+	demo.regenerate()
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: legacy Reset failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(demo.preset_idx == 1 and demo.solver.world_size == 4.0,
+		"terrain_hydro: legacy Reset did not retain the selected legacy scene")
+	_terrain_hydro_check_surface(demo, "legacy Reset")
+	demo.apply_preset(7)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: Thaw preset failed to initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var thaw_start := await _terrain_hydro_field(demo)
+	var thaw_start_sums := _terrain_hydro_sums(thaw_start)
+	_check(demo.solver.snow_enabled and absf(demo.solver.melt_rate_m_s - 0.06) < 1e-6
+		and demo.solver.snowfall_rate_m_s == 0.0 and demo.solver.freeze_rate_m_s == 0.0
+		and thaw_start_sums.z > 0.0 and demo.view.water.visible,
+		"terrain_hydro: Thaw did not restore snow, melt, or legacy water-surface state")
+	_terrain_hydro_check_surface(demo, "Thaw")
+	demo.solver.rain_rate_m_s = 0.0
+	demo.solver.erosion_rate = 0.0
+	demo.solver.flow_rate = 0.0
+	demo.solver.water_flow_rate = 0.0
+	demo.solver.snow_flow_rate = 0.0
+	demo.solver.evap_rate_m_s = 0.0
+	demo.solver.infiltration_rate_m_s = 0.0
+	demo.solver.uplift_rate_m_s = 0.0
+	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
+	demo.solver.snowfall_rate_m_s = 0.0
+	demo.solver.freeze_rate_m_s = 0.0
+	demo.solver.melt_rate_m_s = 0.06
+	demo.solver.stochasticity = 0.0
+	var thaw_before := await _terrain_hydro_field(demo)
+	var thaw_before_sums := _terrain_hydro_sums(thaw_before)
+	await _terrain_hydro_steps(demo, 180, 1.0 / 60.0)
+	var thaw_after := await _terrain_hydro_field(demo)
+	var thaw_after_sums := _terrain_hydro_sums(thaw_after)
+	var expected_melt := 0.06 * 3.0 * float(demo.solver.grid_n * demo.solver.grid_n)
+	var thaw_water_gain := thaw_after_sums.y - thaw_before_sums.y
+	var snow_loss := thaw_before_sums.z - thaw_after_sums.z
+	var thaw_finite := true
+	for value in thaw_after:
+		if is_nan(value) or is_inf(value) or value < -1e-6:
+			thaw_finite = false
+			break
+	_check(absf(thaw_water_gain - expected_melt) < expected_melt * 1e-3
+		and absf(snow_loss - expected_melt) < expected_melt * 1e-3
+		and absf((thaw_after_sums.y + thaw_after_sums.z)
+			- (thaw_before_sums.y + thaw_before_sums.z)) < expected_melt * 1e-4,
+		"terrain_hydro: Thaw melt did not conserve its expected G+B budget")
+	_check(thaw_finite, "terrain_hydro: Thaw produced invalid or negative channels")
+	demo.apply_preset(7)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: normal Thaw preset failed to reinitialize")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(absf(demo.solver.melt_rate_m_s - 0.06) < 1e-6
+		and absf(demo.solver.evap_rate_m_s - 0.005) < 1e-6
+		and demo.solver.water_flow_rate > 0.0
+		and demo.view.water.visible
+		and demo.view.water_mat.shader.resource_path.ends_with("terrain_water.gdshader")
+		and demo.view.water_mat.get_shader_parameter("height_tex") == demo.height_texture
+		and demo.view.water_mat.get_shader_parameter("velocity_tex") == demo.velocity_texture
+		and demo.solver.get_velocity_tex_rid().is_valid(),
+		"terrain_hydro: Thaw physical water surface lost its live field/velocity or default flow")
+	await _terrain_hydro_steps(demo, 900, 1.0 / 60.0)
+	var thaw_water := await _terrain_hydro_field(demo)
+	var thaw_water_sums := _terrain_hydro_sums(thaw_water)
+	var wet_level := _terrain_hydro_wet_level_spread(thaw_water, demo.solver.grid_n, 0.005)
+	print("TERRAIN HYDRO thaw water_mean=%.6f snow_mean=%.6f wet_cells=%.0f level_spread=%.6f"
+		% [thaw_water_sums.y / float(demo.solver.grid_n * demo.solver.grid_n),
+			thaw_water_sums.z / float(demo.solver.grid_n * demo.solver.grid_n), wet_level.x, wet_level.y])
+	_check(thaw_water_sums.y > float(demo.solver.grid_n * demo.solver.grid_n) * 0.01
+		and thaw_water_sums.z < float(demo.solver.grid_n * demo.solver.grid_n) * 0.001
+		and wet_level.x > float(demo.solver.grid_n * demo.solver.grid_n) * 0.5
+		and wet_level.y < 0.01,
+		"terrain_hydro: normal Thaw did not produce a broad, mostly level physical water surface")
+	demo.apply_preset(6)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: Avalanche preset failed after Thaw")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	var avalanche_sums := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	_check(demo.solver.snow_enabled and absf(demo.solver.snowfall_rate_m_s - 0.001) < 1e-6
+		and demo.solver.melt_rate_m_s == 0.0 and avalanche_sums.z > 0.0,
+		"terrain_hydro: Avalanche failed to restore its snowfall and melt settings")
+	_terrain_hydro_check_surface(demo, "Avalanche")
+	demo.apply_preset(8)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: Squall preset failed after Avalanche")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	await _terrain_hydro_steps(demo, 1, 1.0 / 60.0)
+	var squall_sums := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	_check(demo.solver.snow_enabled
+		and absf(demo.solver.snowfall_rate_m_s - 0.004) < 1e-6
+		and absf(demo.solver.freeze_rate_m_s - 0.0025) < 1e-6
+		and demo.solver.melt_rate_m_s == 0.0 and squall_sums.z > 0.0,
+		"terrain_hydro: Squall failed to restore its snow and climate settings")
+	_terrain_hydro_check_surface(demo, "Squall")
+	demo.set_mountain_size(64.0)
+	demo.set_mountain_height(12.0)
+	demo.set_mountain_density(2.4)
+	demo.set_mountain_ruggedness(0.46)
+	demo.set_mountain_valley_width(0.16)
+	demo.set_mountain_valley_depth(0.72)
+	demo.set_mountain_ridge_irregularity(0.12)
+	demo.set_mountain_surface_detail(1.0)
+	demo.generate_alpine(alpine_seed)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: restoring Mountain defaults failed")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_check(demo.solver.world_size == 64.0 and demo._preset.mountain_height_m == 12.0,
+		"terrain_hydro: returning to Mountain did not restore 64 m by 12 m")
+	_terrain_hydro_check_surface(demo, "restored Mountain")
+	demo.queue_free()
+	await process_frame
+	_finish("terrain_hydro")
+
+
+func _terrain_hydro_ready(demo: Node) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and (not demo.solver.initialized or not demo.texture_bound):
+		await process_frame
+	return demo.solver.initialized and demo.texture_bound
+
+
+func _terrain_hydro_check_surface(demo: Node, context: String) -> void:
+	var landscape: bool = demo._preset.landscape_materials
+	_check(demo.view.water.visible
+		and demo.view.sand_mat.get_shader_parameter("landscape_materials") == landscape
+		and demo.view.water_mat.get_shader_parameter("landscape_water") == landscape
+		and demo.view.terrain.material_override == demo.view.sand_mat
+		and demo.view.water.material_override == demo.view.water_mat,
+		"terrain_hydro: %s water surface/material state differs from its preset" % context)
+
+
+func _terrain_hydro_wet_level_spread(field: PackedFloat32Array, n: int, min_depth: float) -> Vector2:
+	var low := INF
+	var high := -INF
+	var wet_count := 0.0
+	for i in n * n:
+		var offset := i * 4
+		if field[offset + 1] <= min_depth:
+			continue
+		var head := field[offset] + field[offset + 1] + field[offset + 2]
+		low = minf(low, head)
+		high = maxf(high, head)
+		wet_count += 1.0
+	return Vector2(wet_count, high - low)
+
+
+func _terrain_hydro_steps(demo: Node, count: int, dt: float) -> void:
+	for i in count:
+		RenderingServer.call_on_render_thread(demo.solver.step_render.bind(dt))
+		await process_frame
+
+
+func _terrain_hydro_field(demo: Node) -> PackedFloat32Array:
+	var data: PackedByteArray = await TextureReadback.new().read_layer(
+		demo.solver.get_height_tex_rid(), 0)
+	_check(not data.is_empty(), "terrain_hydro: height readback timed out")
+	return data.to_float32_array()
+
+
+func _terrain_hydro_flux_stats(demo: Node) -> Vector2:
+	var data: PackedByteArray = await TextureReadback.new().read_layer(
+		demo.solver.get_flux_tex_rid(), 0)
+	_check(not data.is_empty(), "terrain_hydro: flux readback timed out")
+	var flux := data.to_float32_array()
+	var total := 0.0
+	var peak := 0.0
+	for i in flux.size():
+		var value := absf(flux[i])
+		total += value
+		peak = maxf(peak, value)
+	return Vector2(total, peak)
+
+
+func _terrain_hydro_channel_spread(field: PackedFloat32Array, channel: int) -> float:
+	var low := INF
+	var high := -INF
+	for i in field.size() / 4:
+		var value: float = field[i * 4 + channel]
+		low = minf(low, value)
+		high = maxf(high, value)
+	return high - low
+
+
+func _terrain_hydro_sums(field: PackedFloat32Array) -> Vector4:
+	var r := 0.0
+	var g := 0.0
+	var b := 0.0
+	var a := 0.0
+	for i in field.size() / 4:
+		r += field[i * 4]
+		g += field[i * 4 + 1]
+		b += field[i * 4 + 2]
+		a += field[i * 4 + 3]
+	return Vector4(r, g, b, a)
 
 
 func _test_nbody_firework_output() -> void:
@@ -2549,6 +3050,11 @@ func _fps_parse_args() -> bool:
 					_size = Vector2i(maxi(16, int(dims[0])), maxi(16, int(dims[1])))
 			"bodies": _fps_bodies = clampi(int(value), 1, 40)
 			"medium": _fps_medium = clampi(int(value), 0, 4)
+			"param":
+				var assignment := value.split(":", true, 1)
+				if assignment.size() == 2:
+					_fps_params[String(assignment[0])] = float(assignment[1])
+			"profile": _fps_profile = value == "1" or value.to_lower() == "true"
 	if _scene_path == "" or _tier < 0:
 		push_error("FPS PROBE FAIL: need a demo target and tier=" + str(TIER_NAMES))
 		quit(1)
@@ -2583,6 +3089,14 @@ func _run_fps() -> void:
 		return
 	if not await _fps_wait_ready():
 		return
+	if not _fps_params.is_empty():
+		if not _demo.has_method("set_capture_params"):
+			push_error("FPS PROBE FAIL: target does not support parameter overrides")
+			quit(1)
+			return
+		await _demo.set_capture_params(_fps_params)
+		if not await _fps_wait_ready():
+			return
 	if _fps_medium >= 0:
 		if not _demo.has_method("set_capture_medium"):
 			push_error("FPS PROBE FAIL: target does not support medium selection")
@@ -2612,6 +3126,8 @@ func _run_fps() -> void:
 		await process_frame
 	for frame in _warmup:
 		await process_frame
+	if _fps_profile and _demo.has_method("set_capture_profiling"):
+		_demo.set_capture_profiling(true)
 	var frames := 0
 	var t0 := Time.get_ticks_usec()
 	var deadline := t0 + int(_seconds * 1_000_000.0)
@@ -2627,6 +3143,8 @@ func _run_fps() -> void:
 		_scene_path.get_file().get_basename(), TIER_NAMES[_tier],
 		float(frames) / elapsed, frames, elapsed, _fps_settle_seconds,
 		_size.x, _size.y, population])
+	if _fps_profile and _demo.has_method("capture_metadata"):
+		print(_demo.capture_metadata("fps"))
 	quit(0)
 
 

@@ -53,4 +53,4 @@ far = 200.0
 [node name="UI" type="CanvasLayer" parent="."]
 
 [node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
-title = "🏔️ Sand & Snow"
+title = "🏔️ Water & Stone"

@@ -70,7 +70,7 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/fractal_3d_demo.tscn"},
 	{key = "tornado_demo",  title = "Tornado Simulation",  icon = "🌪️", category = "particles",
 		scene = "res://scenes/tornado_demo.tscn"},
-	{key = "terrain_demo",  title = "Sand & Snow",  icon = "🏔️", category = "particles",
+	{key = "terrain_demo",  title = "Water & Stone",  icon = "🏔️", category = "particles",
 		scene = "res://scenes/terrain_demo.tscn"},
 	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid",
 		scene = "res://scenes/cloth_demo.tscn"},

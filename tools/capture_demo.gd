@@ -194,7 +194,7 @@ func _run() -> void:
 			push_error("CAPTURE FAIL: target does not support parameter overrides")
 			quit(1)
 			return
-		_demo.set_capture_params(_param_overrides)
+		await _demo.set_capture_params(_param_overrides)
 		ready_deadline = Time.get_ticks_msec() + 20000
 		while _demo.has_method("capture_ready") and not _demo.capture_ready() \
 				and Time.get_ticks_msec() < ready_deadline:
