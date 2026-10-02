@@ -763,9 +763,47 @@ func _run_terrain_hydro() -> void:
 		and wet_level.x > float(demo.solver.grid_n * demo.solver.grid_n) * 0.5
 		and wet_level.y < 0.01,
 		"terrain_hydro: normal Thaw did not produce a broad, mostly level physical water surface")
+	demo.apply_preset(4)
+	if not await _terrain_hydro_ready(demo):
+		_check(false, "terrain_hydro: River & delta preset failed after Thaw")
+		demo.queue_free()
+		await process_frame
+		_finish("terrain_hydro")
+		return
+	_terrain_hydro_check_surface(demo, "River & delta")
+	var river_start := _terrain_hydro_sums(await _terrain_hydro_field(demo))
+	_check(river_start.y == 0.0 and demo.auto_water and demo._preset.waters_by_itself(),
+		"terrain_hydro: River & delta did not start dry with its automatic water source")
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	demo.set_frozen(false)
+	for i in 900:
+		await process_frame
+	demo.set_frozen(true)
+	demo.set_capture_fixed_delta(-1.0)
+	var river_field := await _terrain_hydro_field(demo)
+	var river_sums := _terrain_hydro_sums(river_field)
+	var river_count: int = demo.solver.grid_n * demo.solver.grid_n
+	var river_peak := 0.0
+	var river_downhill := 0.0
+	var river_dry := 0
+	for i in river_count:
+		var water: float = river_field[i * 4 + 1]
+		river_peak = maxf(river_peak, water)
+		river_downhill += water * ((float(i % demo.solver.grid_n) + 0.5)
+			* demo.solver.cell_size() - demo.solver.world_size * 0.5)
+		if water < 0.001:
+			river_dry += 1
+	var river_mean := river_sums.y / float(river_count)
+	river_downhill /= maxf(river_sums.y, 1e-6)
+	print("TERRAIN HYDRO river water_mean=%.6f water_peak=%.6f downhill=%.6f dry_fraction=%.6f"
+		% [river_mean, river_peak, river_downhill, float(river_dry) / float(river_count)])
+	_check(river_mean > 0.001 and river_mean < 0.03 and river_peak < 0.25
+		and river_downhill > 0.1 and river_dry > river_count / 2,
+		"terrain_hydro: normal River & delta flooded the bed or failed to carry water downhill")
+
 	demo.apply_preset(6)
 	if not await _terrain_hydro_ready(demo):
-		_check(false, "terrain_hydro: Avalanche preset failed after Thaw")
+		_check(false, "terrain_hydro: Avalanche preset failed after River & delta")
 		demo.queue_free()
 		await process_frame
 		_finish("terrain_hydro")

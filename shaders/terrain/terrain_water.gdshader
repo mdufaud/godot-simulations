@@ -32,6 +32,8 @@ void fragment() {
 	if (field.g < water_film_m * (landscape_water ? 0.5 : 1.0) || COLOR.r < 0.999) {
 		discard;
 	}
+	float coverage = smoothstep(water_film_m * (landscape_water ? 0.5 : 1.0),
+		water_film_m * (landscape_water ? 2.0 : 12.0), field.g);
 	float texel = 1.0 / grid_n;
 	float cell = world_size / grid_n;
 	float left = surface_height(UV - vec2(texel, 0.0));
@@ -51,7 +53,8 @@ void fragment() {
 	vec2 ripple = mix(ripple1, ripple2, abs(phase * 2.0 - 1.0));
 	float fw = fwidth(g.x + g.y) * (landscape_water ? 80.0 : 700.0);
 	float detail = 1.0 / (1.0 + fw * fw * 0.15);
-	n_world = normalize(n_world + vec3(ripple.x, 0.0, ripple.y) * micro_normal_strength * detail);
+	n_world = normalize(n_world + vec3(ripple.x, 0.0, ripple.y) * micro_normal_strength * detail
+		* (landscape_water ? 1.0 : coverage));
 	NORMAL = normalize((VIEW_MATRIX * vec4(n_world, 0.0)).xyz);
 	float depth = 1.0 - exp(-field.g / (landscape_water ? 0.16 : water_pool_m));
 	float sediment = clamp(field.a / max(field.g, 1e-5) * 2.0, 0.0, 0.7);
@@ -66,5 +69,5 @@ void fragment() {
 	if (!landscape_water) {
 		alpha = mix(alpha, 1.0, smoothstep(0.015, 0.06, field.g));
 	}
-	ALPHA = alpha * smoothstep(water_film_m * (landscape_water ? 0.5 : 1.0), water_film_m * 2.0, field.g);
+	ALPHA = alpha * coverage;
 }
