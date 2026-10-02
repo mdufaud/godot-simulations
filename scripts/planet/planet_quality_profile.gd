@@ -27,4 +27,5 @@ static func values(tier: int) -> Dictionary:
 	return {
 		resolution = RESOLUTION[tier],
 		detail_octaves = DETAIL_OCTAVES[tier],
+		orbit_detail = clampi(tier, 0, 2),
 	}

@@ -1,0 +1,33 @@
+[gd_resource type="Resource" script_class="PlanetPreset" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Volcanic World"
+radius_m = 23.0
+layer_count = 5
+lacunarity = 1.8
+persistence = 0.55
+noise_scale = 3.2
+noise_strength = 0.55
+noise_offset = -0.15
+continent_strength = 0.12
+mountain_strength = 0.4
+warp_strength = 0.12
+volcano_count = 4
+volcano_size_ratio = 0.34
+volcano_height_ratio = 0.24
+volcano_activity = 1.0
+lava_glow = 4.5
+eruption_rate_hz = 6.0
+col_flat = Color(0.38, 0.32, 0.27, 1)
+col_flat_deep = Color(0.24, 0.19, 0.15, 1)
+col_steep = Color(0.35, 0.27, 0.22, 1)
+col_steep_deep = Color(0.19, 0.14, 0.11, 1)
+col_ambient = Color(0.4, 0.36, 0.31, 1)
+height_bands = 7.0
+height_min_m = 21.0
+height_max_m = 27.0
+wavelengths_nm = Vector3(700, 590, 510)
+scattering_strength = 1.5

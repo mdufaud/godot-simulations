@@ -1,0 +1,37 @@
+[gd_resource type="Resource" script_class="PlanetPreset" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Ringed World"
+radius_m = 23.0
+layer_count = 6
+lacunarity = 1.8
+persistence = 0.55
+noise_scale = 3.2
+noise_strength = 1.1
+noise_offset = -0.15
+continent_strength = 0.45
+mountain_strength = 0.65
+warp_strength = 0.3
+ring_enabled = true
+ring_inner_ratio = 1.7
+ring_outer_ratio = 2.9
+ring_tilt_deg = 8.0
+ring_density = 0.8
+ring_rocks = 0.7
+moon_count = 3
+moon_distance_ratio = 4.6
+moon_size_ratio = 0.18
+moon_eccentricity = 0.12
+col_flat = Color(0.65, 0.49, 0.32, 1)
+col_flat_deep = Color(0.38, 0.25, 0.19, 1)
+col_steep = Color(0.48, 0.4, 0.3, 1)
+col_steep_deep = Color(0.24, 0.18, 0.16, 1)
+col_ambient = Color(0.32, 0.26, 0.23, 1)
+height_bands = 6.0
+height_min_m = 18.0
+height_max_m = 26.0
+wavelengths_nm = Vector3(680, 560, 470)
+scattering_strength = 3.0

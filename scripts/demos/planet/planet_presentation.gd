@@ -6,12 +6,14 @@ var surface: ShaderMaterial
 var atmosphere: ShaderMaterial
 var sky: ShaderMaterial
 var crosshair: Control
+var environment: Environment
 
 
 func build(planet_mesh: MeshInstance3D, atmosphere_quad: MeshInstance3D,
 		world_env: WorldEnvironment, ui_layer: Node, mobile: bool) -> void:
 	surface = ShaderMaterial.new()
 	surface.shader = load("res://shaders/planet/planet_surface.gdshader")
+	surface.set_shader_parameter("volcano_count", 0)
 	surface.set_shader_parameter("detail_octaves", 3 if mobile else 8)
 	planet_mesh.material_override = surface
 
@@ -42,6 +44,9 @@ func _build_environment(world_env: WorldEnvironment) -> void:
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_DISABLED
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
 	env.glow_enabled = false
+	env.glow_intensity = 0.35
+	env.glow_strength = 0.5
+	environment = env
 	world_env.environment = env
 
 
@@ -62,6 +67,37 @@ func set_height_range(preset: PlanetPreset, radius_m: float) -> void:
 	var scale := radius_m / preset.radius_m
 	surface.set_shader_parameter("height_min", preset.height_min_m * scale)
 	surface.set_shader_parameter("height_max", preset.height_max_m * scale)
+	surface.set_shader_parameter("planet_radius", radius_m)
+	surface.set_shader_parameter("reference_radius", preset.radius_m)
+
+
+func set_interior(config: PlanetConfig, emission: float) -> void:
+	var enabled := config.opening_strength > 0.0
+	surface.set_shader_parameter("interior_enabled", enabled)
+	surface.set_shader_parameter("core_fraction", config.core_fraction)
+	surface.set_shader_parameter("crust_fraction", config.crust_fraction)
+	surface.set_shader_parameter("core_emission", emission)
+	environment.glow_enabled = (enabled and emission > 0.0) or (
+		int(surface.get_shader_parameter("volcano_count")) > 0
+		and config.volcano_activity > 0.0 and config.lava_glow > 0.0)
+
+
+func set_volcanoes(generator: PlanetGenerator, config: PlanetConfig) -> void:
+	var centres := generator.generated_volcanoes.duplicate()
+	var count := centres.size()
+	centres.resize(8)
+	surface.set_shader_parameter("volcano_count", count)
+	surface.set_shader_parameter("volcano_centres", centres)
+	surface.set_shader_parameter("volcano_size_ratio", generator.generated_volcano_size_ratio)
+	surface.set_shader_parameter("volcano_height_ratio", generator.generated_volcano_height_ratio)
+	surface.set_shader_parameter("volcano_floor_fraction", PlanetConfig.VOLCANO_FLOOR_FRACTION)
+	surface.set_shader_parameter("volcano_crater_bottom_ratio", PlanetConfig.VOLCANO_CRATER_BOTTOM_RATIO)
+	surface.set_shader_parameter("volcano_crater_top_ratio", PlanetConfig.VOLCANO_CRATER_TOP_RATIO)
+	surface.set_shader_parameter("volcano_activity", config.volcano_activity)
+	surface.set_shader_parameter("lava_glow", config.lava_glow)
+	environment.glow_enabled = (bool(surface.get_shader_parameter("interior_enabled"))
+		and float(surface.get_shader_parameter("core_emission")) > 0.0) or (
+		count > 0 and config.volcano_activity > 0.0 and config.lava_glow > 0.0)
 
 
 func set_sun_direction(dir_to_sun: Vector3) -> void:

@@ -9,6 +9,7 @@ enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL }
 
 const RADIUS := 0.16
 const POUR_COOLDOWN_MS := 400
+const PLANET_MAX_POUR_FRACTION := 0.5
 const POOL_START_MULTIPLIER := 1
 const POOL_CAPACITY_MULTIPLIER := 3
 const POOL_ADD_BATCH_DIVISOR := 4
@@ -72,6 +73,15 @@ var _base_texture_width := 0
 
 func active() -> Object:
 	return active_solver
+
+
+func is_ready() -> bool:
+	return active_solver != null and active_solver.initialized and not _pending_init
+
+
+func can_pour() -> bool:
+	return planet_mode() and is_ready() \
+		and Time.get_ticks_msec() - _last_pour_ms >= POUR_COOLDOWN_MS
 
 
 func _foam_active() -> bool:
@@ -378,8 +388,18 @@ func set_composite_priority(p: int) -> void:
 ## a 1/h in its gradient.
 func _configure_planet_solver() -> void:
 	var cell: float = planet_field_world_size / float(planet_grid_dim)
-	sph_solver.grid_dims = Vector3i(planet_grid_dim, planet_grid_dim, planet_grid_dim)
-	sph_solver.grid_origin = planet_centre - Vector3.ONE * planet_field_world_size * 0.5
+	var inner := planet_field_world_size * 0.5
+	var solid_angle := TAU * (1.0 - cos(deg_to_rad(pour_cap_degrees)))
+	var volume := float(particle_count) * PLANET_MAX_POUR_FRACTION * pow(cell * 0.48, 3.0)
+	var outer := pow(pow(inner, 3.0) + 3.0 * volume / solid_angle, 1.0 / 3.0)
+	var dim := ceili(outer * 2.0 / cell) + 4
+	config.grid_dims = Vector3i.ONE * dim
+	config.cell_size_m = cell
+	config.domain_size_m = Vector3.ONE * float(dim) * cell
+	config.domain_origin = planet_centre - config.domain_size_m * 0.5
+	config.grid_origin = config.domain_origin
+	sph_solver.grid_dims = config.grid_dims
+	sph_solver.grid_origin = config.domain_origin
 	# cell_size must stay equal to h: the neighbour macro scans a 3x3x3 cell block.
 	sph_solver.cell_size = cell
 	sph_solver.h = cell
@@ -420,7 +440,7 @@ func _configure_planet_solver() -> void:
 	_radius = RADIUS * (sph_solver.spacing / 0.12)
 	# Keeps the MultiMesh from being frustum-culled as a whole while fluid orbits.
 	domain_origin = sph_solver.grid_origin
-	domain_size = Vector3.ONE * planet_field_world_size
+	domain_size = config.domain_size_m
 
 
 func _configure_solver() -> void:
@@ -518,10 +538,7 @@ func _initialize_runtime() -> void:
 	renderer.set_texture_width(config.texture_width)
 	renderer.set_foam_visible(_foam_active())
 	active_solver.set_seed_positions(_build_seed())
-	if first_start:
-		RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
-	else:
-		_queue_init()
+	_queue_init()
 
 
 # --- Render-thread lifecycle ----------------------------------------------
@@ -533,9 +550,9 @@ func _queue_init() -> void:
 	# run the whole init (bumping the generation) before the next main-thread
 	# line executes, which would make the expected value unreachable.
 	var expected: int = active_solver.init_generation + 1
-	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 	_expected_init_generation = expected
 	_pending_init = true
+	RenderingServer.call_on_render_thread(_render_init.bind(active_solver))
 
 
 func _render_init(solver) -> void:
@@ -650,7 +667,7 @@ func _build_cascade_seed() -> PackedFloat32Array:
 ## pour by pour; once the whole buffer is live it wraps and recycles the oldest
 ## fluid, which is what keeps this to one buffer write and no emitter kernel.
 func pour_at(point: Vector3) -> void:
-	if not planet_mode() or not active_solver.initialized:
+	if not can_pour() or not point.is_finite():
 		return
 	# Two blobs spawned into the same volume overlap at several times the rest
 	# density, and the pressure solver answers that by firing both across the
@@ -665,8 +682,6 @@ func pour_at(point: Vector3) -> void:
 		_pour_cursor = 0
 	var from := _pour_cursor
 	_pour_cursor += count
-	sph_solver.active_count = maxi(sph_solver.active_count, _pour_cursor)
-	renderer.set_visible_count(sph_solver.live_count())
 	var blob := PackedFloat32Array()
 	blob.resize(count * 4)
 	# Pour at the height it was aimed at, so fluid lands on the peak the crosshair
@@ -678,10 +693,16 @@ func pour_at(point: Vector3) -> void:
 	# firing the whole blob off the planet.
 	var cap_solid_angle := TAU * (1.0 - cos(deg_to_rad(pour_cap_degrees)))
 	var volume := float(count) * pow(active_solver.spacing, 3.0)
-	var thickness := volume / maxf(cap_solid_angle * inner * inner, 1e-4)
+	var outer := pow(pow(inner, 3.0) + 3.0 * volume / cap_solid_angle, 1.0 / 3.0)
 	_write_cap(blob, 0, count, (point - planet_centre).normalized(), pour_cap_degrees,
-		inner, inner + thickness)
-	RenderingServer.call_on_render_thread(sph_solver.respawn_range.bind(from, blob))
+		inner, outer)
+	RenderingServer.call_on_render_thread(_render_pour.bind(sph_solver, from, blob, _pour_cursor))
+
+
+func _render_pour(solver: SphFluidSolver, from: int, blob: PackedFloat32Array,
+		live_end: int) -> void:
+	solver.respawn_range(from, blob)
+	solver.active_count = maxi(solver.active_count, live_end)
 
 
 ## Fills seed[from, to) with points on a spherical cap of half-angle `half_deg`
@@ -697,12 +718,8 @@ func _write_cap(seed: PackedFloat32Array, from: int, to: int, axis: Vector3,
 	var dir := axis.normalized()
 	var tangent := dir.cross(Vector3.RIGHT if absf(dir.x) < 0.9 else Vector3.UP).normalized()
 	var bitangent := dir.cross(tangent)
-	# Nothing may spawn outside the grid: cell_of() clamps stray positions into the
-	# edge cells, and a whole spawn landing in a handful of cells turns the neighbour
-	# loop quadratic and hangs the GPU.
-	var box_limit := planet_field_world_size * 0.485
-	var inner := minf(inner_r, box_limit)
-	var outer := minf(maxf(outer_r, inner), box_limit)
+	var inner_cubed := pow(inner_r, 3.0)
+	var outer_cubed := pow(outer_r, 3.0)
 	var cos_min := cos(deg_to_rad(minf(half_deg, 180.0)))
 	var rng := RandomNumberGenerator.new()
 	rng.seed = 42
@@ -714,7 +731,7 @@ func _write_cap(seed: PackedFloat32Array, from: int, to: int, axis: Vector3,
 		var sz := sqrt(maxf(1.0 - cz * cz, 0.0))
 		var phi := golden * float(k)
 		var d := dir * cz + (tangent * cos(phi) + bitangent * sin(phi)) * sz
-		var r := lerpf(inner, outer, pow(rng.randf(), 1.0 / 3.0))
+		var r := pow(lerpf(inner_cubed, outer_cubed, rng.randf()), 1.0 / 3.0)
 		var p := planet_centre + d * r
 		var i := from + k
 		seed[i * 4] = p.x

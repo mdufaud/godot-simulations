@@ -470,16 +470,15 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	slider.add_theme_stylebox_override("grabber_area_highlight", _sb_fill)
 	hbox.add_child(slider)
 
-	var whole_steps := slider.step >= 1.0
 	var value_label := Label.new()
-	value_label.text = _slider_value_text(default_val, whole_steps)
+	value_label.text = _slider_value_text(slider.value, slider.step)
 	value_label.custom_minimum_size.x = 52
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hbox.add_child(value_label)
 
 	slider.value_changed.connect(func(value: float) -> void:
 		cb.call(value)
-		value_label.text = _slider_value_text(value, whole_steps)
+		value_label.text = _slider_value_text(value, slider.step)
 	)
 	var key := _register(label_text, slider, cb, "slider", default_val, persist)
 	if persist:
@@ -489,8 +488,10 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	return slider
 
 
-func _slider_value_text(value: float, whole_steps: bool) -> String:
-	return "%d" % int(round(value)) if whole_steps else "%.2f" % value
+func _slider_value_text(value: float, step_val: float) -> String:
+	if step_val >= 1.0:
+		return "%d" % int(round(value))
+	return "%.3f" % value if step_val < 0.01 else "%.2f" % value
 
 
 func add_toggle(label_text: String, default_val: bool, cb: Callable, persist: bool = true) -> CheckButton:
@@ -629,7 +630,8 @@ func add_button(label_text: String, cb: Callable) -> Button:
 	return button
 
 
-func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> ColorPickerButton:
+func add_color_picker(label_text: String, default_val: Color, cb: Callable,
+		persist: bool = true) -> ColorPickerButton:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	hbox.custom_minimum_size.y = 40
@@ -647,10 +649,11 @@ func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> C
 	hbox.add_child(picker)
 
 	picker.color_changed.connect(cb)
-	var key := _register(label_text, picker, cb, "color", default_val)
-	picker.color_changed.connect(func(color: Color) -> void:
-		_persist(key, color)
-	)
+	var key := _register(label_text, picker, cb, "color", default_val, persist)
+	if persist:
+		picker.color_changed.connect(func(color: Color) -> void:
+			_persist(key, color)
+		)
 	return picker
 
 

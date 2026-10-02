@@ -271,6 +271,8 @@ vec3 planet_gravity(vec3 p) {
 
 float sample_sdf(vec3 p) {
 	vec3 uvw = (p - planet.centre.xyz) / planet.sdf.x + 0.5;
+	vec3 size = vec3(textureSize(density_field, 0));
+	uvw = (uvw * (size - 1.0) + 0.5) / size;
 	return texture(density_field, uvw).r;
 }
 

@@ -26,7 +26,7 @@ func _profile_table() -> void:
 		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations"],
 		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max"],
 		FluidQualityProfile: ["particle_count", "texture_width", "water_scale"],
-		PlanetQualityProfile: ["resolution", "detail_octaves"],
+		PlanetQualityProfile: ["resolution", "detail_octaves", "orbit_detail"],
 		TornadoQualityProfile: ["raymarch_steps", "dust_amount", "debris_cap"],
 		ClothQualityProfile: ["iterations", "substeps"],
 		DestructionQualityProfile: ["chunk_count"],

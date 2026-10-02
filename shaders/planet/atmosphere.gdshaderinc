@@ -18,6 +18,7 @@ uniform float intensity = 1.0;
 uniform float density_falloff = 4.6;
 uniform float dither_strength = 1.0;
 uniform float dither_scale = 3.9;
+uniform bool interior_enabled = false;
 
 const float MAX_DIST = 3.402823466e+38;
 
@@ -67,7 +68,7 @@ float optical_depth_baked2(vec3 ray_origin, vec3 ray_dir, float ray_length) {
 	return mix(d2, d1, w);
 }
 
-vec3 calculate_light(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 original_col,
+vec3 scatter_segment(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 original_col,
 		vec2 screen_uv, vec2 viewport_size) {
 	float dither = texture(dither_tex, screen_uv * viewport_size / 1000.0 * dither_scale).r;
 	dither = (dither - 0.5) * dither_strength;
@@ -75,20 +76,40 @@ vec3 calculate_light(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 origi
 	vec3 in_scatter_point = ray_origin;
 	float step_size = ray_length / float(num_in_scattering_points - 1);
 	vec3 in_scattered_light = vec3(0.0);
-	vec3 transmittance = vec3(1.0);
 
 	for (int i = 0; i < num_in_scattering_points; i++) {
 		float sun_ray_optical_depth = optical_depth_baked(
 				in_scatter_point + dir_to_sun * dither_strength, dir_to_sun);
 		float local_density = density_at_point(in_scatter_point);
 		float view_ray_optical_depth = optical_depth_baked2(ray_origin, ray_dir, step_size * float(i));
-		transmittance = exp(-(sun_ray_optical_depth + view_ray_optical_depth) * scattering_coefficients);
+		vec3 transmittance = exp(-(sun_ray_optical_depth + view_ray_optical_depth) * scattering_coefficients);
 
 		in_scattered_light += local_density * transmittance;
 		in_scatter_point += ray_dir * step_size;
 	}
 	in_scattered_light *= scattering_coefficients * intensity * step_size / planet_radius;
-	in_scattered_light += dither * 0.01;
+	in_scattered_light += dither * 0.01 * min(length(scattering_coefficients), 1.0);
 
-	return original_col * transmittance + in_scattered_light;
+	float view_depth = max(optical_depth_baked2(ray_origin, ray_dir, ray_length), 0.0);
+	return original_col * exp(-view_depth * scattering_coefficients) + in_scattered_light;
+}
+
+vec3 calculate_light(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 original_col,
+		vec2 screen_uv, vec2 viewport_size) {
+	if (interior_enabled) {
+		vec2 inner_hit = ray_sphere(planet_centre, planet_radius, ray_origin, ray_dir);
+		if (inner_hit.x < ray_length) {
+			float far_start = inner_hit.x + inner_hit.y;
+			vec3 color = original_col;
+			if (far_start < ray_length) {
+				color = scatter_segment(ray_origin + ray_dir * far_start, ray_dir,
+					ray_length - far_start, color, screen_uv, viewport_size);
+			}
+			if (inner_hit.x > 0.0001) {
+				color = scatter_segment(ray_origin, ray_dir, inner_hit.x, color, screen_uv, viewport_size);
+			}
+			return color;
+		}
+	}
+	return scatter_segment(ray_origin, ray_dir, ray_length, original_col, screen_uv, viewport_size);
 }

@@ -5,6 +5,7 @@
 [resource]
 script = ExtResource("1_preset")
 display_name = "Asteroid"
+terrain_style = 1
 radius_m = 18.0
 layer_count = 8
 lacunarity = 1.35

@@ -21,4 +21,4 @@ height_bands = 5.2
 height_min_m = 16.2
 height_max_m = 28.3
 wavelengths_nm = Vector3(700, 530, 460)
-scattering_strength = 20.3
+scattering_strength = 3.5

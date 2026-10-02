@@ -21,6 +21,10 @@ resources/terrain/presets/*
 !resources/nbody/
 !resources/nbody/presets/
 !resources/nbody/presets/*.tres
+!resources/planet/
+resources/planet/*
+!resources/planet/presets/
+!resources/planet/presets/*.tres
 !resources/ocean/
 resources/ocean/*
 !resources/ocean/foam_detail.png

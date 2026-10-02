@@ -1355,6 +1355,190 @@ func _run_fluid_scene_retention() -> void:
 	_finish("fluid_scene_retention")
 
 
+func _run_planet_water() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var demo: Node = load("res://scenes/planet_demo.tscn").instantiate()
+	root.add_child(demo)
+	if not await _planet_water_wait(demo, false):
+		demo.queue_free()
+		_finish("planet_water")
+		return
+	var fluid: PlanetFluid = demo._fluid
+	fluid.set_gravity(3.4)
+	fluid.set_viscosity(0.24)
+	fluid.set_slip(0.96)
+	fluid.set_pour_fraction(FluidSystem.PLANET_MAX_POUR_FRACTION)
+	for button: Button in demo.menu._actions:
+		if button.tooltip_text == "Fluid":
+			button.button_pressed = true
+	if not await _planet_water_wait(demo, true):
+		demo.queue_free()
+		_finish("planet_water")
+		return
+	var system: FluidSystem = fluid._system
+	var solver := system.sph_solver
+	var cell: float = demo.generator.generated_world_size / system.planet_grid_dim
+	_check(solver.grid_dims == system.config.grid_dims and
+		solver.grid_origin.is_equal_approx(system.config.domain_origin) and
+		is_equal_approx(solver.cell_size, cell) and is_equal_approx(solver.h, cell) and
+		is_equal_approx(solver.spacing, cell * 0.48), "planet_water: init overwrote planet grid")
+	_check(solver.particle_count == 65536 and solver.active_count == 0,
+		"planet_water: capacity changed or dry boot activated particles")
+	var renderer_id := system.renderer.get_instance_id()
+	demo._menu_builder._pour_action.pressed.emit()
+	_check(not fluid.can_pour(), "planet_water: pour cooldown was ignored")
+	await _boot_frames(120)
+	var stats := await _planet_water_stats(system)
+	_check(int(stats.get("particles", 0)) == 32768 and int(stats.get("invalid", -1)) == 0
+		and int(stats.get("outside", -1)) == 0, "planet_water: maximum pour invalid or outside domain")
+	print("PLANET WATER maximum=%s" % stats)
+	demo.sun_yaw = 145.0
+	await _boot_frames(2)
+	var light_direction: Vector3 = system.renderer.composite_material().get_shader_parameter("sun_direction")
+	_check(light_direction.distance_to(-demo.sun_light.global_basis.z) < 0.001,
+		"planet_water: water highlight did not follow Sun")
+	for button: Button in demo.menu._debug_strip.get_children():
+		if button.tooltip_text == "Atmosphere":
+			button.button_pressed = false
+	_check(not demo.atmosphere_quad.visible and
+		not bool(system.renderer.composite_material().get_shader_parameter("atmosphere_enabled")),
+		"planet_water: atmosphere toggle did not reach water composite")
+	demo._menu_builder._reset_action.pressed.emit()
+	_check(not fluid.is_ready(), "planet_water: Reset did not gate reinitialization")
+	await _planet_water_wait(demo, true)
+	_check(system.renderer.get_instance_id() == renderer_id and solver.active_count == 0 and
+		is_equal_approx(system.pour_fraction, 0.5) and is_equal_approx(solver.planet_gravity, 3.4) and
+		is_equal_approx(solver.viscosity_strength, 0.24) and is_equal_approx(solver.collision_damping, 0.96),
+		"planet_water: Reset replaced renderer or lost tuning")
+	demo._menu_builder._pour_action.pressed.emit()
+	var pour_deadline := Time.get_ticks_msec() + 1000
+	while not fluid.can_pour() and Time.get_ticks_msec() < pour_deadline:
+		await process_frame
+	demo._menu_builder._pour_action.pressed.emit()
+	await _boot_frames(120)
+	stats = await _planet_water_stats(system)
+	_check(solver.active_count == 65536 and int(stats.get("invalid", -1)) == 0 and
+		int(stats.get("outside", -1)) == 0, "planet_water: closely spaced pours failed at full capacity")
+	print("PLANET WATER full_capacity=%s" % stats)
+	demo.orbit_cam.target = Vector3(0, 1000, 0)
+	await _boot_frames(2)
+	_check(not demo.aim_point().is_finite() and demo._menu_builder._pour_action.disabled,
+		"planet_water: missed aim still permits pouring")
+	demo.orbit_cam.target = Vector3.ZERO
+	await _boot_frames(2)
+	demo.set_fluid_enabled(false)
+	_check(fluid._system == null, "planet_water: disabling water kept solver alive")
+	demo.generator.radius = 18.0
+	demo.start_generation()
+	demo.generator.radius = 30.0
+	await _planet_water_wait(demo, false)
+	_check(is_equal_approx(demo.generator.generated_radius, 18.0),
+		"planet_water: queued generation read live shape parameters")
+	demo._menu_builder._sliders["radius"].value = 25.0
+	demo.generator.resolution = 96
+	demo.queue_regen()
+	demo.set_fluid_enabled(true)
+	_check(fluid._system == null, "planet_water: enabled water before field publication")
+	await _planet_water_wait(demo, true)
+	_check(is_equal_approx(demo.generator.generated_radius, 25.0) and
+		demo.generator.generated_resolution == 96 and
+		is_equal_approx(fluid._system.planet_radius, 25.0),
+		"planet_water: debounced latest shape/resolution or published metadata wrong")
+	demo.generator.iso_level = 100.0
+	demo.queue_regen()
+	await _planet_water_wait(demo, false)
+	_check(demo.planet_mesh.mesh == null and fluid._system == null and
+		demo._menu_builder._pour_action.disabled, "planet_water: empty field retained old surface or pouring")
+	demo.generator.iso_level = 0.0
+	demo.apply_preset(0)
+	await _planet_water_wait(demo, true)
+	system = fluid._system
+	fluid.set_gravity(2.6)
+	fluid.set_viscosity(0.14)
+	fluid.set_slip(0.999)
+	fluid.set_pour_fraction(0.15)
+	Engine.max_fps = 0
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	for hashed in [false, true]:
+		system.set_process(true)
+		system.sph_solver.hash_grid_enabled = hashed
+		fluid.reset()
+		await _planet_water_wait(demo, true)
+		system.set_process(false)
+		system.set_profiling(true)
+		fluid.pour_at(demo.aim_point())
+		var frame_times := PackedFloat64Array()
+		var gpu_times := PackedFloat64Array()
+		for frame in 240:
+			var started := Time.get_ticks_usec()
+			system._process(1.0 / 60.0)
+			await process_frame
+			if frame >= 120:
+				frame_times.append(float(Time.get_ticks_usec() - started) / 1000.0)
+				var timings := system.get_timings()
+				if timings.has("total"):
+					gpu_times.append(timings.total)
+		frame_times.sort()
+		gpu_times.sort()
+		stats = await _planet_water_stats(system)
+		_check(int(stats.get("invalid", -1)) == 0 and int(stats.get("outside", -1)) == 0
+			and int(stats.get("particles", 0)) == 9830 and not gpu_times.is_empty(),
+			"planet_water: benchmark lost particles, validation, or GPU timings")
+		print("PLANET WATER benchmark hash=%s capacity=%d cells=%d frame_median_ms=%.3f gpu_median_ms=%.3f stats=%s" % [
+			hashed, system.sph_solver.particle_count, system.sph_solver._grid_cell_count(),
+			frame_times[frame_times.size() / 2],
+			gpu_times[gpu_times.size() / 2] if not gpu_times.is_empty() else -1.0, stats])
+	Engine.max_fps = 60
+	demo.apply_preset(4)
+	await _planet_water_wait(demo, true)
+	system = fluid._system
+	for button: Button in demo.menu._debug_strip.get_children():
+		if button.tooltip_text == "Atmosphere":
+			button.button_pressed = true
+	_check(system.planet_field == demo.generator.density_texture()
+		and bool(system.renderer.composite_material().get_shader_parameter("interior_enabled")),
+		"planet_water: exposed core did not share its field and atmosphere with water")
+	var water_air: Vector3 = system.renderer.composite_material().get_shader_parameter("scattering_coefficients")
+	var scene_air: Vector3 = demo.view.atmosphere.get_shader_parameter("scattering_coefficients")
+	_check(water_air.is_equal_approx(scene_air)
+			and water_air.is_equal_approx(demo._atmosphere.params()["scattering_coefficients"])
+			and demo._atmosphere.fragmentation_strength > 0.9,
+		"planet_water: water retained a different atmosphere around the fragmented shell")
+	demo.orbit_cam.yaw = 11.3
+	demo.orbit_cam.pitch = -8.4
+	await _boot_frames(2)
+	demo._menu_builder._pour_action.pressed.emit()
+	await _boot_frames(300)
+	stats = await _planet_water_stats(system)
+	_check(int(stats.get("particles", 0)) == 9830 and int(stats.get("invalid", -1)) == 0
+		and int(stats.get("outside", -1)) == 0,
+		"planet_water: exposed-core pour invalid or outside its domain")
+	print("PLANET WATER exposed_core=%s" % stats)
+	demo.queue_free()
+	await _boot_frames(2)
+	_finish("planet_water")
+
+
+func _planet_water_wait(demo: Node, water: bool) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline:
+		if demo.capture_ready() and (not water or demo._fluid.is_ready()):
+			return true
+		await process_frame
+	_check(false, "planet_water: runtime did not become ready (water=%s)" % water)
+	return false
+
+
+func _planet_water_stats(system: FluidSystem) -> Dictionary:
+	var result := {}
+	system.request_validation_stats(result)
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return result
+
+
 func _run_fluid_pool() -> void:
 	await _boot_frames(2)
 	var demo: Node = load("res://scenes/fluid_demo.tscn").instantiate()
@@ -2860,6 +3044,1111 @@ void main() {
 	for resource in [uniform_set, pipeline, shader, input_buffer, output_buffer]:
 		rd.free_rid(resource)
 	rd.free()
+
+
+func _run_planet_shape() -> void:
+	await _boot_frames(2)
+	var settings := root.get_node("/root/UserSettings")
+	var manager := root.get_node("/root/GameManager")
+	var section := "sim.planet_demo"
+	var saved: Dictionary = {}
+	if settings._config.has_section(section):
+		for key in settings._config.get_section_keys(section):
+			saved[key] = settings._config.get_value(section, key)
+	var quality_saved: Variant = manager.get_setting("planet_quality_profile", 0)
+	manager.current_demo = "planet_demo"
+	manager.set_setting("planet_quality_profile", PlanetQualityProfile.Tier.LOW)
+	settings.clear_sim("planet_demo")
+	settings.set_sim_value("planet_demo", "Shape/Preset", 4)
+	settings.set_sim_value("planet_demo", "Shape/Seed", 0)
+	var demo := (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	var config: PlanetConfig = demo.generator.config
+	_check(demo.capture_ready() and demo.menu._entries["Shape/Preset"].node.selected == 4
+			and demo.generator.generated_error == "",
+		"planet_shape: Exposed Core did not boot and generate through the scene path")
+	_check(config.reference_radius_m >= 4.0 and config.reference_radius_m <= 120.0
+			and config.opening_count >= 1 and config.opening_count <= 8
+			and config.opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL
+			and config.opening_count == 7 and is_equal_approx(config.fragment_separation_ratio, 0.18)
+			and demo.generator.generated_terrain_style == PlanetConfig.TerrainStyle.CONTINENTAL
+			and demo.generator.generated_opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL
+			and is_equal_approx(float(demo.view.surface.get_shader_parameter("core_fraction")),
+				config.core_fraction)
+			and float(demo.view.surface.get_shader_parameter("core_emission")) > 0.0,
+		"planet_shape: preset config or core material values were not initialized")
+	_check(bool(demo.view.surface.get_shader_parameter("interior_enabled"))
+			and bool(demo.view.atmosphere.get_shader_parameter("interior_enabled"))
+			and demo.view.environment.glow_enabled,
+		"planet_shape: interior and atmosphere effects were not enabled by runtime boot")
+	var intact_air: Vector3 = Vector3(
+		pow(400.0 / demo._atmosphere.wavelengths_nm.x, 4.0),
+		pow(400.0 / demo._atmosphere.wavelengths_nm.y, 4.0),
+		pow(400.0 / demo._atmosphere.wavelengths_nm.z, 4.0)
+	) * demo._atmosphere.scattering_strength
+	var broken_air: Vector3 = demo.view.atmosphere.get_shader_parameter("scattering_coefficients")
+	_check(broken_air.length() < intact_air.length() * 0.06
+			and is_equal_approx(demo._atmosphere.fragmentation_strength, config.opening_strength),
+		"planet_shape: shattered shell boot retained a dense spherical atmosphere")
+	var shell_field := await _planet_shape_read(demo.generator)
+	var shape_data: PackedFloat32Array = demo.generator._request.shape_data.to_float32_array()
+	var sites: Array[Vector3] = []
+	for site_index in config.opening_count:
+		var offset := (2 + site_index * 2) * 4
+		sites.append(Vector3(shape_data[offset], shape_data[offset + 1],
+			shape_data[offset + 2]).normalized())
+	var shell_radius: float = demo.generator.generated_radius
+	_check(_planet_field_at(shell_field, demo.generator, Vector3.ZERO) < 0.0
+			and _planet_field_at(shell_field, demo.generator, sites[0] * shell_radius * 0.65) > 0.0,
+		"planet_shape: shattered shell did not preserve the core and open its forward cavity")
+	var seam_air_count := 0
+	for first in sites.size():
+		for second in range(first + 1, sites.size()):
+			var seam_dir := (sites[first] + sites[second]).normalized()
+			if seam_dir.dot(sites[0]) > 0.55:
+				continue
+			var first_dot := seam_dir.dot(sites[first])
+			var second_dot := seam_dir.dot(sites[second])
+			var top_dot := -INF
+			var next_dot := -INF
+			var top_index := -1
+			var next_index := -1
+			for site_index in sites.size():
+				var score := seam_dir.dot(sites[site_index])
+				if score > top_dot:
+					next_dot = top_dot
+					next_index = top_index
+					top_dot = score
+					top_index = site_index
+				elif score > next_dot:
+					next_dot = score
+					next_index = site_index
+			if [top_index, next_index].has(first) and [top_index, next_index].has(second) \
+					and is_equal_approx(first_dot, second_dot):
+				if _planet_field_at(shell_field, demo.generator, seam_dir * shell_radius * 0.85) > 0.0:
+					seam_air_count += 1
+					if seam_air_count >= 2:
+						break
+		if seam_air_count >= 2:
+			break
+	_check(seam_air_count >= 2,
+		"planet_shape: shell regions had no separated side/back seams from their site axes")
+	var belt_axis := Vector3(shape_data[113], shape_data[114], shape_data[115]).normalized()
+	var belt_tangent := belt_axis.cross(Vector3.FORWARD).normalized()
+	var belt_bitangent := belt_axis.cross(belt_tangent).normalized()
+	for index in 16:
+		var angle := TAU * float(index) / 16.0
+		var direction := belt_tangent * cos(angle) + belt_bitangent * sin(angle)
+		_check(_planet_field_at(shell_field, demo.generator, direction * shell_radius * 0.85) > 0.0,
+			"planet_shape: shattered shell belt did not remain open around the entire planet")
+	var sliders: Dictionary = demo._menu_builder._sliders
+	var structure: OptionButton = demo._menu_builder._options["opening_style"]
+	structure.select(PlanetConfig.OpeningStyle.CAVITIES)
+	structure.emit_signal("item_selected", PlanetConfig.OpeningStyle.CAVITIES)
+	demo._menu_builder._sliders["opening_count"].value = 3.0
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(demo.generator.generated_opening_style == PlanetConfig.OpeningStyle.CAVITIES,
+		"planet_shape: legacy capsule checks did not switch to CAVITIES mode")
+	var cavity_air: Vector3 = demo.view.atmosphere.get_shader_parameter("scattering_coefficients")
+	_check(cavity_air.is_equal_approx(intact_air)
+			and is_zero_approx(demo._atmosphere.fragmentation_strength),
+		"planet_shape: cavity mode did not restore its atmosphere")
+	sliders["radius"].value = 23.0
+	_check(is_equal_approx(demo.generator.radius, 23.0),
+		"planet_shape: radius slider did not reach generator")
+	for entry in [["seed", "seed", 24680], ["opening_strength", "opening_strength", 0.9],
+			["core_fraction", "core_fraction", 0.3], ["continent_strength", "continent_strength", 0.35],
+			["mountain_strength", "mountain_strength", 1.2], ["warp_strength", "warp_strength", 0.4],
+			["opening_count", "opening_count", 5]]:
+		var slider: HSlider = sliders[entry[0]]
+		slider.value = float(entry[2])
+		_check(is_equal_approx(float(config.get(entry[1])), slider.value),
+			"planet_shape: %s slider did not reach generator config" % entry[0])
+	sliders["core_emission"].value = 4.0
+	_check(is_equal_approx(float(demo.get("core_emission")), 4.0)
+			and is_equal_approx(float(demo.view.surface.get_shader_parameter("core_emission")), 4.0),
+		"planet_shape: core emission slider did not reach the surface material")
+	sliders["seed"].value = 0.0
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(is_equal_approx(float(demo.view.surface.get_shader_parameter("core_fraction")),
+		config.core_fraction), "planet_shape: core fraction slider did not reach surface material")
+	for entry in [["seed", 0.0], ["opening_strength", 0.8], ["opening_count", 3.0],
+			["continent_strength", 0.3], ["mountain_strength", 1.1], ["warp_strength", 0.25],
+			["core_fraction", 0.32]]:
+		sliders[entry[0]].value = entry[1]
+	demo.queue_regen()
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	var fields: Array[PackedFloat32Array] = []
+	var generation_ms: Array[float] = []
+	var triangles_64 := 0
+	for radius in [4.0, 23.0, 120.0]:
+		sliders["radius"].value = radius
+		demo.generator.resolution = 64
+		demo.queue_regen()
+		await _planet_shape_scene_wait(demo, 30000)
+		_check(demo.generator.generated_error == "" and demo.generator.generated_radius == radius,
+			"planet_shape: generation error or wrong radius at %.1f" % radius)
+		generation_ms.append(demo.generator.last_generate_ms)
+		fields.append(await _planet_shape_read(demo.generator))
+		if radius == 23.0:
+			triangles_64 = demo.generator.triangle_count
+			var mesh: ArrayMesh = demo.planet_mesh.mesh
+			var vertices: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+			var normals: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_NORMAL]
+			var bounds := AABB()
+			for i in vertices.size():
+				_check(vertices[i].is_finite() and normals[i].is_finite(),
+					"planet_shape: non-finite mesh vertex or normal")
+				if i == 0:
+					bounds = AABB(vertices[i], Vector3.ZERO)
+				else:
+					bounds = bounds.expand(vertices[i])
+			_check(vertices.size() > 0 and bounds.position.x >= -demo.generator.generated_world_size * 0.5
+					and bounds.position.y >= -demo.generator.generated_world_size * 0.5
+					and bounds.position.z >= -demo.generator.generated_world_size * 0.5
+					and bounds.end.x <= demo.generator.generated_world_size * 0.5
+					and bounds.end.y <= demo.generator.generated_world_size * 0.5
+					and bounds.end.z <= demo.generator.generated_world_size * 0.5,
+				"planet_shape: mesh bounds exceeded generated world size")
+	var max_scale_error := 0.0
+	for i in fields[0].size():
+		var base := fields[0][i] / 4.0
+		max_scale_error = maxf(max_scale_error, absf(base - fields[1][i] / 23.0))
+		max_scale_error = maxf(max_scale_error, absf(base - fields[2][i] / 120.0))
+	_check(max_scale_error <= 0.0001,
+		"planet_shape: normalized density changed with radius (max error %.7f)" % max_scale_error)
+	var same_seed := await _planet_shape_read_after_regen(demo, 23.0, 64, 0, 0.8)
+	var repeat_delta := 0.0
+	for i in fields[1].size():
+		repeat_delta = maxf(repeat_delta, absf(fields[1][i] - same_seed[i]))
+	_check(repeat_delta == 0.0, "planet_shape: same seed changed the density field")
+	var different_seed := await _planet_shape_read_after_regen(demo, 23.0, 64, 1, 0.8)
+	var seed_delta := 0.0
+	for i in fields[1].size():
+		seed_delta = maxf(seed_delta, absf(fields[1][i] - different_seed[i]))
+	_check(seed_delta > 0.0001, "planet_shape: changing seed did not change the density field")
+	var closed := await _planet_shape_read_after_regen(demo, 23.0, 64, 0, 0.0)
+	var center := int(64 / 2) * 64 * 64 + int(64 / 2) * 64 + int(64 / 2)
+	var opening_pos := Vector3(0.18, 0.34, 0.93).normalized() * 0.65 * 23.0
+	var box: float = demo.generator.generated_world_size
+	var coord := Vector3i(roundi((opening_pos.x / box + 0.5) * 63.0),
+		roundi((opening_pos.y / box + 0.5) * 63.0),
+		roundi((opening_pos.z / box + 0.5) * 63.0))
+	var opening_index := coord.z * 64 * 64 + coord.y * 64 + coord.x
+	_check(closed[center] < 0.0 and closed[opening_index] < 0.0,
+		"planet_shape: protected core or closed opening was not solid")
+	var opened := await _planet_shape_read_after_regen(demo, 23.0, 64, 0, 0.8)
+	_check(opened[center] < 0.0 and opened[opening_index] > 0.0,
+		"planet_shape: opening did not expose air through the shell while preserving the core")
+	demo.generator.resolution = 96
+	var triangles_96 := 0
+	var ms96 := 0.0
+	await _planet_shape_read_after_regen(demo, 23.0, 96, 0, 0.8)
+	triangles_96 = demo.generator.triangle_count
+	ms96 = demo.generator.last_generate_ms
+	_check(demo.generator.generated_resolution == 96 and demo.generator.last_generate_ms > 0.0,
+		"planet_shape: 96³ generation did not complete")
+	config.triangle_budget_per_cell = 0.1
+	demo.generator.resolution = 64
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(not demo.generator.generated_error.is_empty() and demo.generator.triangle_count == 0
+			and demo.planet_mesh.mesh == null,
+		"planet_shape: triangle overflow returned a clipped or stale surface")
+	config.triangle_budget_per_cell = 20.0
+	demo.generator.resolution = 64
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(demo.generator.generated_error.is_empty() and demo.generator.triangle_count > 0
+			and demo.planet_mesh.mesh != null,
+		"planet_shape: valid generation did not recover after overflow")
+	settings.set_sim_value("planet_demo", "Shape/Seed", 123)
+	settings.set_sim_value("planet_demo", "Interior/Structure", PlanetConfig.OpeningStyle.SHATTERED_SHELL)
+	settings.set_sim_value("planet_demo", "Terrain detail/Terrain", PlanetConfig.TerrainStyle.CONTINENTAL)
+	sliders["seed"].value = 123.0
+	await _boot_frames(2)
+	demo.queue_free()
+	await _boot_frames(3)
+	demo = (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready() and demo.menu._entries["Shape/Preset"].node.selected == 4
+			and demo.generator.config.seed == 123
+			and demo.generator.config.opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL
+			and demo.generator.generated_opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL,
+		"planet_shape: Exposed Core seed/preset did not persist through runtime boot")
+	demo.queue_free()
+	await _boot_frames(3)
+	settings.clear_sim("planet_demo")
+	for key in saved:
+		settings.set_sim_value("planet_demo", key, saved[key])
+	settings._flush()
+	manager.set_setting("planet_quality_profile", quality_saved)
+	print("PLANET SHAPE scaled=4,23,120 resolution=64,96 max_error=%.8f ms64=%d,%d,%d ms96=%.0f triangles64=%d triangles96=%d" % [
+		max_scale_error, generation_ms[0], generation_ms[1], generation_ms[2], ms96,
+		triangles_64, triangles_96])
+	_finish("planet_shape")
+
+
+func _planet_shape_scene_wait(demo: Node, timeout_ms: int) -> void:
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.capture_ready(), "planet_shape: generation timed out")
+
+
+func _planet_shape_read(generator: PlanetGenerator) -> PackedFloat32Array:
+	var result := {}
+	RenderingServer.call_on_render_thread(func():
+		result["field"] = generator._rd.buffer_get_data(generator._density_buf).to_float32_array()
+		result["done"] = true
+	)
+	var deadline := Time.get_ticks_msec() + 10000
+	while not result.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(result.get("done", false), "planet_shape: density readback timed out")
+	return result.get("field", PackedFloat32Array())
+
+
+func _planet_shape_read_after_regen(demo: Node, radius: float, resolution: int,
+		seed: int, opening_strength: float) -> PackedFloat32Array:
+	var sliders: Dictionary = demo._menu_builder._sliders
+	sliders["radius"].value = radius
+	sliders["seed"].value = seed
+	sliders["opening_strength"].value = opening_strength
+	demo.generator.resolution = resolution
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(demo.generator.generated_error == "",
+		"planet_shape: generated_error=%s" % demo.generator.generated_error)
+	return await _planet_shape_read(demo.generator)
+
+
+func _run_planet_controls() -> void:
+	await _boot_frames(2)
+	var invalid_preset := PlanetPreset.new()
+	for entry in [["moon_count", 4], ["ring_outer_ratio", 2.0], ["volcano_size_ratio", 0.0],
+			["warp_strength", 2.0], ["lava_glow", 9.0], ["radius_m", 121.0],
+			["layer_count", 9], ["noise_strength", -1.0], ["scattering_strength", -1.0]]:
+		var original: Variant = invalid_preset.get(entry[0])
+		invalid_preset.set(entry[0], entry[1])
+		_check(not invalid_preset.validate().is_empty(),
+			"planet_controls: preset accepted invalid %s before generation" % entry[0])
+		invalid_preset.set(entry[0], original)
+	_check(invalid_preset.validate().is_empty(), "planet_controls: default preset failed validation")
+	var settings := root.get_node("/root/UserSettings")
+	var manager := root.get_node("/root/GameManager")
+	var section := "sim.planet_demo"
+	var saved: Dictionary = {}
+	if settings._config.has_section(section):
+		for key in settings._config.get_section_keys(section):
+			saved[key] = settings._config.get_value(section, key)
+	manager.current_demo = "planet_demo"
+	settings.clear_sim("planet_demo")
+	var presets: Array[PlanetPreset] = [
+		load("res://resources/planet/presets/terra.tres"),
+		load("res://resources/planet/presets/verdant.tres"),
+		load("res://resources/planet/presets/glacier.tres"),
+		load("res://resources/planet/presets/asteroid.tres"),
+		load("res://resources/planet/presets/exposed_core.tres"),
+		load("res://resources/planet/presets/ringed_world.tres"),
+		load("res://resources/planet/presets/volcanic_world.tres"),
+	]
+	var demo := (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	_check(demo._planet_ready and not demo._fluid.enabled and demo._fluid._system == null,
+		"planet_controls: boot did not leave fluid disabled and unallocated")
+	var preset_option: OptionButton = demo.menu._entries["Shape/Preset"].node
+	_check(preset_option.item_count == presets.size() and preset_option.selected == 0,
+		"planet_controls: preset selector did not boot at Terra")
+	var layers: HSlider = demo._menu_builder._sliders["layer_count"]
+	var detail: HSlider = demo.menu._entries["Performance/Surface detail"].node
+	_check(is_equal_approx(layers.step, 1.0) and is_equal_approx(detail.step, 1.0),
+		"planet_controls: Layers or Surface detail lost unit steps")
+	var sun_button: Button = demo._menu_builder._sun_action
+	_check(not sun_button.button_pressed and demo.sun_auto_rotate == false,
+		"planet_controls: Sun did not start off")
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready(), "planet_controls: initial planet generation did not settle")
+	var radius_slider: HSlider = demo._menu_builder._sliders["radius"]
+	var layers_slider: HSlider = demo._menu_builder._sliders["layer_count"]
+	var lacunarity_slider: HSlider = demo._menu_builder._sliders["lacunarity"]
+	radius_slider.value = 25.0
+	layers_slider.value = 6.0
+	lacunarity_slider.value = 2.5
+	for entry in [["persistence", "persistence", 0.57], ["noise_scale", "noise_scale", 3.25],
+			["noise_strength", "noise_strength", 2.2], ["noise_offset", "noise_offset", -0.45]]:
+		var slider: HSlider = demo._menu_builder._sliders[entry[0]]
+		slider.value = entry[2]
+		_check(is_equal_approx(float(demo.generator.get(entry[1])), float(slider.value)) and
+			slider.get_parent().get_child(2).text == "%.2f" % float(slider.value),
+			"planet_controls: %s did not reach generation or label" % entry[0])
+	_check(is_equal_approx(demo.generator.radius, 25.0)
+			and demo.generator.num_layers == 6
+			and is_equal_approx(demo.generator.lacunarity, 2.5)
+			and radius_slider.get_parent().get_child(2).text == "25.00"
+			and layers_slider.get_parent().get_child(2).text == "6"
+			and lacunarity_slider.get_parent().get_child(2).text == "2.50",
+		"planet_controls: Shape sliders did not update generator values and labels")
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready(), "planet_controls: batched Shape changes did not settle")
+	preset_option.emit_signal("item_selected", 0)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	var steepness: HSlider = demo.menu._entries["Surface/Steepness"].node
+	var intensity: HSlider = demo.menu._entries["Atmosphere/Intensity"].node
+	var fluid_gravity: HSlider = demo.menu._entries["Fluid/Gravity"].node
+	var render_scale: HSlider = demo.menu._entries["Performance/Render scale"].node
+	var detail_slider: HSlider = demo.menu._entries["Performance/Surface detail"].node
+	steepness.value = 0.61
+	intensity.value = 1.1
+	fluid_gravity.value = 3.5
+	render_scale.value = 0.90
+	detail_slider.value = 5.0
+	for entry in [["Steep blend", "flat_blend", 0.0], ["Shade power", "shade_pow", 1.65]]:
+		var slider: HSlider = demo.menu._entries["Surface/" + entry[0]].node
+		slider.value = entry[2]
+		_check(is_equal_approx(float(demo.view.surface.get_shader_parameter(entry[1])), slider.value),
+			"planet_controls: %s did not reach surface shader" % entry[0])
+	demo._menu_builder._sliders["height_bands"].value = 7.4
+	_check(is_equal_approx(float(demo.view.surface.get_shader_parameter("height_bands")), 7.4),
+		"planet_controls: Height bands did not reach surface shader")
+	for param in demo._menu_builder._pickers:
+		var picker: ColorPickerButton = demo._menu_builder._pickers[param]
+		picker.color = Color(0.2, 0.4, 0.7)
+		picker.color_changed.emit(picker.color)
+		_check(demo.view.surface.get_shader_parameter(param).is_equal_approx(picker.color),
+			"planet_controls: %s did not reach palette shader" % param)
+	for entry in [["Falloff", "density_falloff", 4.7], ["Thickness", "shell_fraction", 0.42]]:
+		var slider: HSlider = demo.menu._entries["Atmosphere/" + entry[0]].node
+		slider.value = entry[2]
+		_check(is_equal_approx(float(demo._atmosphere.get(entry[1])), slider.value),
+			"planet_controls: %s did not reach atmosphere" % entry[0])
+	demo._menu_builder._sliders["scattering"].value = 29.5
+	demo._menu_builder._sliders["red_nm"].value = 680
+	demo._menu_builder._sliders["green_nm"].value = 555
+	demo._menu_builder._sliders["blue_nm"].value = 490
+	_check(is_equal_approx(demo._atmosphere.scattering_strength, 29.5) and
+		demo._atmosphere.wavelengths_nm.is_equal_approx(Vector3(680, 555, 490)),
+		"planet_controls: scattering/wavelength sliders did not reach atmosphere")
+	for entry in [["Pour amount", "pour_fraction", 0.24], ["Viscosity", "viscosity", 0.32],
+			["Slip", "slip", 0.997]]:
+		var slider: HSlider = demo.menu._entries["Fluid/" + entry[0]].node
+		slider.value = entry[2]
+		_check(is_equal_approx(float(demo._fluid.get(entry[1])), slider.value),
+			"planet_controls: %s was lost while water disabled" % entry[0])
+	_check(demo.menu._entries["Fluid/Slip"].node.get_parent().get_child(2).text == "0.997",
+		"planet_controls: Slip label rounded away its precision")
+	_check(is_equal_approx(float(demo.view.surface.get_shader_parameter("flat_threshold")), 0.61)
+			and steepness.get_parent().get_child(2).text == "0.61"
+			and is_equal_approx(demo._atmosphere.intensity, 1.1)
+			and is_equal_approx(float(demo.view.atmosphere.get_shader_parameter("intensity")), 1.1)
+			and intensity.get_parent().get_child(2).text == "1.10"
+			and is_equal_approx(demo._fluid.gravity, 3.5)
+			and fluid_gravity.get_parent().get_child(2).text == "3.50"
+			and is_equal_approx(demo.render_scale, 0.90)
+			and render_scale.get_parent().get_child(2).text == "0.90"
+			and is_equal_approx(float(demo.view.surface.get_shader_parameter("detail_octaves")), 5.0)
+			and detail_slider.get_parent().get_child(2).text == "5",
+		"planet_controls: Surface, Atmosphere, Fluid, or Performance sliders did not update values/labels")
+
+	var sun_rect := sun_button.get_global_rect()
+	var click := InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.position = sun_rect.position + sun_rect.size * 0.5
+	click.global_position = click.position
+	click.pressed = true
+	Input.parse_input_event(click)
+	await _boot_frames(1)
+	click = InputEventMouseButton.new()
+	click.button_index = MOUSE_BUTTON_LEFT
+	click.position = sun_rect.position + sun_rect.size * 0.5
+	click.global_position = click.position
+	Input.parse_input_event(click)
+	await _boot_frames(2)
+	_check(sun_button.button_pressed and demo.sun_auto_rotate,
+		"planet_controls: mouse click did not enable Sun rotation")
+	var yaw_before: float = demo.sun_yaw
+	var sun_dir_before: Vector3 = demo._atmosphere.sun_direction
+	await _boot_frames(8)
+	_check(demo.sun_yaw > yaw_before and is_equal_approx(
+		demo.sun_light.rotation_degrees.y, demo.sun_yaw)
+			and not demo._atmosphere.sun_direction.is_equal_approx(sun_dir_before)
+			and demo.view.surface.get_shader_parameter("sun_direction").is_equal_approx(
+				demo._atmosphere.sun_direction),
+		"planet_controls: Sun rotation did not reach the light and surface material")
+
+	var visible_action_index := 0
+	for action in demo.menu._actions:
+		if action == sun_button:
+			break
+		if action.visible:
+			visible_action_index += 1
+	var shortcut_key := KEY_1 + visible_action_index
+	var shortcut := InputEventKey.new()
+	shortcut.keycode = shortcut_key
+	shortcut.physical_keycode = shortcut_key
+	shortcut.pressed = true
+	Input.parse_input_event(shortcut)
+	await _boot_frames(2)
+	shortcut.pressed = false
+	Input.parse_input_event(shortcut)
+	await _boot_frames(1)
+	_check(not sun_button.button_pressed and not demo.sun_auto_rotate,
+		"planet_controls: numeric shortcut did not stop Sun rotation")
+	yaw_before = demo.sun_yaw
+	await _boot_frames(6)
+	_check(is_equal_approx(demo.sun_yaw, yaw_before),
+		"planet_controls: Sun kept rotating after the shortcut disabled it")
+
+	var touch := InputEventScreenTouch.new()
+	touch.index = 0
+	touch.position = sun_rect.position + sun_rect.size * 0.5
+	touch.pressed = true
+	Input.parse_input_event(touch)
+	await _boot_frames(2)
+	touch.pressed = false
+	Input.parse_input_event(touch)
+	await _boot_frames(2)
+	_check(sun_button.button_pressed and demo.sun_auto_rotate,
+		"planet_controls: touch input did not enable Sun rotation")
+	var yaw_slider: HSlider = demo._menu_builder._sliders["sun_yaw"]
+	yaw_slider.value = fmod(demo.sun_yaw + 35.0, 360.0)
+	await _boot_frames(2)
+	_check(not sun_button.button_pressed and not demo.sun_auto_rotate
+			and is_equal_approx(demo.sun_light.rotation_degrees.y, demo.sun_yaw),
+		"planet_controls: manual Yaw did not stop auto-rotation and update the light")
+
+	for index in presets.size():
+		preset_option.select(index)
+		preset_option.emit_signal("item_selected", index)
+		var ready_deadline := Time.get_ticks_msec() + 25000
+		while Time.get_ticks_msec() < ready_deadline and not demo.capture_ready():
+			await process_frame
+		var preset: PlanetPreset = presets[index]
+		_check(preset_option.selected == index
+				and is_equal_approx(demo.generator.num_layers, preset.layer_count)
+				and is_equal_approx(layers.value, preset.layer_count)
+				and is_equal_approx(float(demo._menu_builder._sliders["scattering"].value),
+					preset.scattering_strength)
+				and demo._atmosphere.wavelengths_nm.is_equal_approx(preset.wavelengths_nm)
+				and is_equal_approx(float(demo._menu_builder._sliders["red_nm"].value),
+					preset.wavelengths_nm.x)
+				and is_equal_approx(float(demo._menu_builder._sliders["green_nm"].value),
+					preset.wavelengths_nm.y)
+				and is_equal_approx(float(demo._menu_builder._sliders["blue_nm"].value),
+					preset.wavelengths_nm.z),
+			"planet_controls: preset %d did not sync shape, scattering, and wavelength controls" % index)
+		if index == 5:
+			_check(demo.config.ring_enabled and demo.config.moon_count == 3
+					and demo._menu_builder._toggles["ring_enabled"].button_pressed
+					and int(demo._menu_builder._sliders["moon_count"].value) == 3,
+				"planet_controls: Ringed World did not sync rings and moons")
+		if index == 6:
+			_check(demo.config.volcano_count == 4
+					and int(demo._menu_builder._sliders["volcano_count"].value) == 4
+					and is_equal_approx(demo._menu_builder._sliders["lava_glow"].value, preset.lava_glow),
+				"planet_controls: Volcanic World did not sync volcanoes and lava")
+		_check(demo.capture_ready(), "planet_controls: preset %d generation did not settle" % index)
+		if index == 3:
+			_check(demo.generator.generated_terrain_style == PlanetConfig.TerrainStyle.ASTEROID,
+				"planet_controls: Asteroid preset did not publish its terrain style")
+		if index == 4:
+			_check(demo.generator.generated_opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL,
+				"planet_controls: Exposed Core preset did not publish its opening style")
+
+	preset_option.select(2)
+	preset_option.emit_signal("item_selected", 2)
+	demo.queue_free()
+	await _boot_frames(2)
+	demo = (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready() and demo.menu._entries["Shape/Preset"].node.selected == 2
+			and is_equal_approx(demo.generator.num_layers, presets[2].layer_count),
+		"planet_controls: Glacier selection did not persist through the real boot path")
+	demo.queue_free()
+	await _boot_frames(2)
+	settings.clear_sim("planet_demo")
+	for key in saved:
+		settings.set_sim_value("planet_demo", key, saved[key])
+	settings._flush()
+	print("PLANET CONTROLS presets=%d input=mouse,key,touch" % presets.size())
+	_finish("planet_controls")
+
+
+func _run_planet_orbits() -> void:
+	await _boot_frames(2)
+	var settings := root.get_node("/root/UserSettings")
+	var manager := root.get_node("/root/GameManager")
+	var section := "sim.planet_demo"
+	var saved: Dictionary = {}
+	if settings._config.has_section(section):
+		for key in settings._config.get_section_keys(section):
+			saved[key] = settings._config.get_value(section, key)
+	var quality_saved: Variant = manager.get_setting("planet_quality_profile", 0)
+	manager.current_demo = "planet_demo"
+	manager.set_setting("planet_quality_profile", PlanetQualityProfile.Tier.LOW)
+	settings.clear_sim("planet_demo")
+	settings.set_sim_value("planet_demo", "Shape/Preset", 5)
+	var demo := (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	var config: PlanetConfig = demo.generator.config
+	_check(demo.capture_ready() and demo.menu._entries["Shape/Preset"].node.selected == 5
+			and config.ring_enabled and config.moon_count == 3
+			and demo.orbits.ring_root != null and demo.orbits.moon_nodes.size() == 3,
+		"planet_orbits: Ringed World did not boot from stored settings into runtime orbit objects")
+	var sliders: Dictionary = demo._menu_builder._sliders
+	var toggles: Dictionary = demo._menu_builder._toggles
+	for key in ["ring_inner_ratio", "ring_outer_ratio", "ring_tilt_deg", "ring_density",
+			"ring_rocks", "moon_count", "moon_distance_ratio", "moon_size_ratio",
+			"moon_eccentricity", "orbit_speed"]:
+		_check(sliders.has(key), "planet_orbits: missing orbit slider %s" % key)
+	_check(toggles.has("ring_enabled") and toggles["ring_enabled"].button_pressed,
+		"planet_orbits: ring toggle did not reflect boot config")
+	var generated_mesh_id: int = demo.planet_mesh.mesh.get_instance_id()
+	var triangle_count: int = demo.generator.triangle_count
+	for entry in [["ring_inner_ratio", 2.0], ["ring_outer_ratio", 3.4],
+			["ring_tilt_deg", 42.0], ["moon_size_ratio", 0.2], ["moon_eccentricity", 0.16]]:
+		sliders[entry[0]].value = entry[1]
+		_check(is_equal_approx(float(config.get(entry[0])), float(entry[1])),
+			"planet_orbits: %s slider did not reach the orbit config" % entry[0])
+	sliders["moon_count"].value = 1.0
+	_check(demo.orbits.moon_nodes.size() == 1, "planet_orbits: moon count did not remove satellites")
+	sliders["moon_count"].value = 3.0
+	sliders["ring_density"].value = 0.81
+	sliders["moon_distance_ratio"].value = 4.8
+	_check(is_equal_approx(config.ring_density, 0.81)
+			and is_equal_approx(config.moon_distance_ratio, 4.8)
+			and demo.generator.triangle_count == triangle_count
+			and demo.planet_mesh.mesh.get_instance_id() == generated_mesh_id,
+		"planet_orbits: ring/moon visual controls regenerated the main planet mesh")
+	_check(demo.camera.far >= demo.orbit_cam.max_distance + demo.orbits.extent_radius() - 0.01,
+		"planet_orbits: camera far plane clips the configured orbit extent")
+	var dust_material: ShaderMaterial = demo.orbits.ring_root.get_node("DustBands").material_override
+	_check(dust_material.render_priority == 2 and demo.view.atmosphere.render_priority == 0,
+		"planet_orbits: ring material does not draw above the atmosphere")
+	_check(demo.orbits.ring_rock_count >= 100
+			and demo.orbits._rock_instance.multimesh.visible_instance_count == demo.orbits.ring_rock_count,
+		"planet_orbits: ring rock count fell below the low-detail budget")
+
+	var first_moon: MeshInstance3D = demo.orbits.moon_nodes[0]
+	var moon_mesh: ArrayMesh = first_moon.mesh
+	var moon_arrays: Array = moon_mesh.surface_get_arrays(0)
+	var moon_vertices: PackedVector3Array = moon_arrays[Mesh.ARRAY_VERTEX]
+	var moon_normals: PackedVector3Array = moon_arrays[Mesh.ARRAY_NORMAL]
+	var outward_normals := 0
+	for index in moon_vertices.size():
+		var vertex: Vector3 = moon_vertices[index]
+		var normal: Vector3 = moon_normals[index]
+		_check(vertex.is_finite() and normal.is_finite(),
+			"planet_orbits: moon mesh contains non-finite vertex or normal")
+		if vertex.length_squared() > 0.000001 and normal.length_squared() > 0.000001:
+			if vertex.normalized().dot(normal.normalized()) > 0.0:
+				outward_normals += 1
+	_check(moon_vertices.size() > 0 and moon_normals.size() == moon_vertices.size()
+			and outward_normals > moon_vertices.size() * 0.95,
+		"planet_orbits: moon mesh normals do not face outward")
+	var dust_mesh: ArrayMesh = demo.orbits.ring_root.get_node("DustBands").mesh
+	var dust_vertices: PackedVector3Array = dust_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	var inner_ratio: float = config.ring_inner_ratio
+	var outer_ratio: float = config.ring_outer_ratio
+	var dust_min_radius := INF
+	var dust_max_radius := 0.0
+	var ring_inner_m: float = maxf(demo.generator.generated_radius * inner_ratio,
+		demo.generator.generated_surface_radius * 1.05)
+	var ring_outer_m: float = maxf(demo.generator.generated_radius * outer_ratio,
+		ring_inner_m + demo.generator.generated_radius * 0.2)
+	for vertex in dust_vertices:
+		_check(vertex.is_finite(), "planet_orbits: ring dust mesh contains a non-finite vertex")
+		dust_min_radius = minf(dust_min_radius, Vector2(vertex.x, vertex.z).length())
+		dust_max_radius = maxf(dust_max_radius, Vector2(vertex.x, vertex.z).length())
+	_check(not dust_vertices.is_empty()
+			and is_equal_approx(dust_min_radius, ring_inner_m)
+			and is_equal_approx(dust_max_radius, ring_outer_m),
+		"planet_orbits: ring mesh bounds do not match configured radii")
+	var rocks: MultiMesh = demo.orbits._rock_instance.multimesh
+	var rock_outermost := 0.0
+	for index in rocks.instance_count:
+		var transform: Transform3D = rocks.get_instance_transform(index)
+		_check(transform.origin.is_finite() and transform.basis.is_finite(),
+			"planet_orbits: ring rock has a non-finite transform")
+		rock_outermost = maxf(rock_outermost, Vector2(transform.origin.x, transform.origin.z).length())
+	_check(rock_outermost > ring_inner_m
+			and rock_outermost < ring_outer_m * 1.05,
+		"planet_orbits: ring rocks are not distributed through the configured annulus")
+	var full_rock_count := PlanetOrbitSystem.LOW_ROCK_COUNT
+	sliders["ring_rocks"].value = 1.0
+	_check(rocks.instance_count == full_rock_count
+			and demo.orbits.ring_rock_count == full_rock_count
+			and rocks.visible_instance_count == full_rock_count,
+		"planet_orbits: increasing rock density exposed uninitialized instances")
+	for index in rocks.instance_count:
+		var transform: Transform3D = rocks.get_instance_transform(index)
+		var radius := Vector2(transform.origin.x, transform.origin.z).length()
+		_check(transform.origin.is_finite() and transform.basis.is_finite()
+				and radius > ring_inner_m * 0.9
+				and radius < ring_outer_m * 1.05,
+			"planet_orbits: expanded rock budget revealed an invalid transform")
+
+	var ring_normal: Vector3 = demo.orbits.ring_root.global_transform.basis.y.normalized()
+	for index in demo.orbits.moon_nodes.size():
+		var position: Vector3 = demo.orbits.moon_position(index, 2.4)
+		_check(position.is_finite() and absf(position.dot(ring_normal)) < 0.001,
+			"planet_orbits: moon orbit does not share the ring plane")
+	var moon_axis: float = demo.orbits.moon_orbit_radius(0)
+	var eccentricity: float = config.moon_eccentricity
+	var angular_rate := 0.55 * pow(demo.generator.generated_radius / moon_axis, 1.5)
+	var period := TAU / angular_rate
+	_check(demo.orbits.moon_position(0, 3.1).is_equal_approx(
+		demo.orbits.moon_position(0, 3.1 + period)),
+		"planet_orbits: analytic moon position did not repeat after one period")
+	var periapsis := INF
+	var apoapsis := 0.0
+	for sample in 360:
+		var distance: float = demo.orbits.moon_position(0, period * float(sample) / 360.0).length()
+		periapsis = minf(periapsis, distance)
+		apoapsis = maxf(apoapsis, distance)
+	_check(absf(periapsis - moon_axis * (1.0 - eccentricity)) < moon_axis * 0.002
+			and absf(apoapsis - moon_axis * (1.0 + eccentricity)) < moon_axis * 0.002,
+		"planet_orbits: analytic orbit periapsis/apoapsis bounds are wrong")
+	_check(periapsis > ring_outer_m,
+		"planet_orbits: first moon intersects the ring bounds")
+	var previous_axis := 0.0
+	for index in demo.orbits.moon_nodes.size():
+		var axis: float = demo.orbits.moon_orbit_radius(index)
+		var peri: float = axis * (1.0 - eccentricity)
+		var moon_radius: float = config.moon_size_ratio * demo.generator.generated_radius
+		_check(peri - moon_radius > ring_outer_m and axis > previous_axis,
+			"planet_orbits: moon intersects the ring or shares another moon's orbit")
+		previous_axis = axis
+	var fast_axis: float = demo.orbits.moon_orbit_radius(1)
+	_check(fast_axis > moon_axis
+			and pow(demo.generator.generated_radius / moon_axis, 1.5)
+				> pow(demo.generator.generated_radius / fast_axis, 1.5),
+		"planet_orbits: inner moon does not have the faster period")
+	var paused_elapsed: float = demo.orbits.elapsed
+	var paused_position: Vector3 = demo.orbits.moon_nodes[0].position
+	sliders["orbit_speed"].value = 0.0
+	_check(is_equal_approx(demo.orbits.elapsed, paused_elapsed)
+			and demo.orbits.moon_nodes[0].position.is_equal_approx(paused_position),
+		"planet_orbits: changing orbit speed caused a phase jump")
+	demo.orbits.advance(1.0)
+	_check(is_equal_approx(demo.orbits.elapsed, paused_elapsed)
+			and demo.orbits.moon_nodes[0].position.is_equal_approx(paused_position),
+		"planet_orbits: speed zero did not pause orbital motion")
+	sliders["orbit_speed"].value = 2.0
+	var accelerated_elapsed: float = demo.orbits.elapsed
+	demo.orbits.advance(0.5)
+	_check(is_equal_approx(demo.orbits.elapsed, accelerated_elapsed + 1.0),
+		"planet_orbits: orbit speed did not scale elapsed orbital time")
+	sliders["orbit_speed"].value = 1.0
+
+	var duplicate := PlanetOrbitSystem.new()
+	root.add_child(duplicate)
+	duplicate.configure(config, demo.generator.generated_radius,
+		demo.generator.generated_surface_radius, 0)
+	var duplicate_vertices: PackedVector3Array = duplicate.moon_nodes[0].mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	_check(duplicate_vertices == moon_vertices,
+		"planet_orbits: moon mesh changed for the same seed")
+	var duplicate_rocks: MultiMesh = duplicate._rock_instance.multimesh
+	_check(duplicate_rocks.instance_count == rocks.instance_count,
+		"planet_orbits: seeded ring rock budget changed")
+	for index in rocks.instance_count:
+		_check(rocks.get_instance_transform(index).is_equal_approx(
+			duplicate_rocks.get_instance_transform(index)),
+			"planet_orbits: ring rock transforms changed for the same seed")
+	var changed_seed: PlanetConfig = config.duplicate()
+	changed_seed.seed = 17
+	duplicate.configure(changed_seed, demo.generator.generated_radius,
+		demo.generator.generated_surface_radius, 0)
+	_check(duplicate.moon_nodes[0].mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX] != moon_vertices
+			and not duplicate._rock_instance.multimesh.get_instance_transform(0).is_equal_approx(
+				rocks.get_instance_transform(0)),
+		"planet_orbits: changing the seed did not change moon or ring geometry")
+	duplicate.stop()
+	duplicate.stop()
+	duplicate.queue_free()
+
+	var normalized_axis: float = moon_axis / demo.generator.generated_radius
+	var normalized_position: Vector3 = demo.orbits.moon_position(0, 2.4) / demo.generator.generated_radius
+	var normalized_ring_outer: float = dust_max_radius / demo.generator.generated_radius
+	var scale_errors := 0.0
+	for radius in [4.0, 23.0, 120.0]:
+		sliders["radius"].value = radius
+		deadline = Time.get_ticks_msec() + 30000
+		while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+			await process_frame
+		_check(demo.capture_ready() and demo.generator.generated_error == ""
+				and is_equal_approx(demo.generator.generated_radius, radius),
+			"planet_orbits: radius %.1f did not generate" % radius)
+		var scaled_axis: float = demo.orbits.moon_orbit_radius(0) / demo.generator.generated_radius
+		var scaled_position: Vector3 = demo.orbits.moon_position(0, 2.4) / demo.generator.generated_radius
+		var scaled_ring_inner: float = maxf(demo.generator.generated_radius * config.ring_inner_ratio,
+			demo.generator.generated_surface_radius * 1.05)
+		var scaled_ring_outer: float = maxf(demo.generator.generated_radius * config.ring_outer_ratio,
+			scaled_ring_inner + demo.generator.generated_radius * 0.2) / demo.generator.generated_radius
+		scale_errors = maxf(scale_errors, absf(scaled_axis - normalized_axis))
+		scale_errors = maxf(scale_errors, scaled_position.distance_to(normalized_position))
+		scale_errors = maxf(scale_errors, absf(scaled_ring_outer - normalized_ring_outer))
+		var scale_periapsis: float = scaled_axis * (1.0 - eccentricity) * demo.generator.generated_radius
+		_check(scale_periapsis > scaled_ring_outer * demo.generator.generated_radius
+				and scale_periapsis < demo.generator.generated_surface_radius * 14.0,
+			"planet_orbits: ring/moon bounds intersect or escape the orbit view at radius %.1f" % radius)
+		_check(demo.camera.far >= demo.orbit_cam.max_distance + demo.orbits.extent_radius() - 0.01,
+			"planet_orbits: camera far plane clips scaled orbit bounds")
+	_check(scale_errors < 0.002,
+		"planet_orbits: normalized orbit/ring bounds changed with scale (%.6f)" % scale_errors)
+	var low_detail_vertices: int = demo.orbits.moon_nodes[0].mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size()
+	demo.quality.set_tier(PlanetQualityProfile.Tier.MEDIUM)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	_check(demo.capture_ready()
+			and demo.generator.generated_resolution == PlanetQualityProfile.RESOLUTION[PlanetQualityProfile.Tier.MEDIUM]
+			and demo.orbits.ring_rock_count == 420
+			and demo.orbits.moon_nodes[0].mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size()
+			> low_detail_vertices,
+		"planet_orbits: medium quality did not update orbit geometry budgets")
+
+	toggles["ring_enabled"].button_pressed = false
+	_check(demo.orbits.ring_root == null and demo.orbits.ring_rock_count == 0,
+		"planet_orbits: disabling rings did not clean up ring objects")
+	toggles["ring_enabled"].button_pressed = true
+	_check(demo.orbits.ring_root != null and demo.orbits.ring_rock_count > 0,
+		"planet_orbits: enabling rings did not restore ring objects")
+	var preset_option: OptionButton = demo.menu._entries["Shape/Preset"].node
+	preset_option.select(4)
+	preset_option.emit_signal("item_selected", 4)
+	deadline = Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline and not demo.capture_ready():
+		await process_frame
+	toggles["ring_enabled"].button_pressed = true
+	sliders["moon_count"].value = 3.0
+	var exposed_ring_outer: float = maxf(demo.generator.generated_radius * config.ring_outer_ratio,
+		maxf(demo.generator.generated_radius * config.ring_inner_ratio,
+			demo.generator.generated_surface_radius * 1.05) + demo.generator.generated_radius * 0.2)
+	var exposed_moon_periapsis: float = demo.orbits.moon_orbit_radius(0) * (1.0 - config.moon_eccentricity)
+	_check(demo.capture_ready() and demo.orbits.ring_root != null
+			and demo.orbits.moon_nodes.size() == 3
+			and exposed_ring_outer > demo.generator.generated_surface_radius
+			and exposed_moon_periapsis > exposed_ring_outer
+				+ config.moon_size_ratio * demo.generator.generated_radius
+			and demo.camera.far >= demo.orbit_cam.max_distance + demo.orbits.extent_radius() - 0.01,
+		"planet_orbits: manually ringed Exposed Core has intersecting or clipped orbit bounds")
+	demo.orbits.stop()
+	demo.orbits.stop()
+	_check(demo.orbits.ring_root == null and demo.orbits.moon_nodes.is_empty()
+			and demo.orbits.ring_rock_count == 0 and demo.orbits.get_child_count() == 0,
+		"planet_orbits: stop was not idempotent or left orbit objects behind")
+	demo.queue_free()
+	await _boot_frames(3)
+	settings.clear_sim("planet_demo")
+	for key in saved:
+		settings.set_sim_value("planet_demo", key, saved[key])
+	settings._flush()
+	manager.set_setting("planet_quality_profile", quality_saved)
+	print("PLANET ORBITS rocks=%d moon_vertices=%d scale_error=%.6f period=%.3f" % [
+		full_rock_count, moon_vertices.size(), scale_errors, period])
+	_finish("planet_orbits")
+
+
+func _run_planet_volcanoes() -> void:
+	await _boot_frames(2)
+	var settings := root.get_node("/root/UserSettings")
+	var manager := root.get_node("/root/GameManager")
+	var section := "sim.planet_demo"
+	var saved: Dictionary = {}
+	if settings._config.has_section(section):
+		for key in settings._config.get_section_keys(section):
+			saved[key] = settings._config.get_value(section, key)
+	var quality_saved: Variant = manager.get_setting("planet_quality_profile", 0)
+	manager.current_demo = "planet_demo"
+	manager.set_setting("planet_quality_profile", PlanetQualityProfile.Tier.LOW)
+	settings.clear_sim("planet_demo")
+	settings.set_sim_value("planet_demo", "Shape/Preset", 6)
+	var demo := (load("res://scenes/planet_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	await _planet_shape_scene_wait(demo, 30000)
+	var config: PlanetConfig = demo.generator.config
+	var generator: PlanetGenerator = demo.generator
+	var original_volcano_count: int = config.volcano_count
+	_check(demo.menu._entries["Shape/Preset"].node.selected == 6
+			and config.volcano_count == 4 and generator.generated_volcanoes.size() == 4
+			and demo.eruptions != null and demo.eruptions.active_count >= 0,
+		"planet_volcanoes: stored Volcanic World did not boot geometry and eruption runtime")
+	_check(demo.view.environment.glow_enabled
+			and is_equal_approx(float(demo.view.surface.get_shader_parameter("lava_glow")), config.lava_glow)
+			and int(demo.view.surface.get_shader_parameter("volcano_count")) == 4,
+		"planet_volcanoes: boot glow or surface volcano uniforms were not initialized")
+	var sliders: Dictionary = demo._menu_builder._sliders
+	for key in ["volcano_count", "volcano_size_ratio", "volcano_height_ratio",
+			"volcano_activity", "lava_glow", "eruption_rate_hz"]:
+		_check(sliders.has(key), "planet_volcanoes: missing slider %s" % key)
+	for volcano in generator.generated_volcanoes:
+		var axis := Vector3(volcano.x, volcano.y, volcano.z)
+		_check(axis.is_finite() and absf(axis.length() - 1.0) < 0.002
+				and is_finite(volcano.w) and volcano.w > 0.0 and volcano.w < 1.5,
+			"planet_volcanoes: descriptor axis or measured base radius is invalid")
+	var original_mesh_id: int = demo.planet_mesh.mesh.get_instance_id()
+	var original_triangles: int = generator.triangle_count
+	sliders["volcano_activity"].value = 0.0
+	sliders["lava_glow"].value = 2.0
+	sliders["eruption_rate_hz"].value = 0.0
+	_check(generator.triangle_count == original_triangles
+			and demo.planet_mesh.mesh.get_instance_id() == original_mesh_id
+			and is_equal_approx(config.volcano_activity, 0.0)
+			and is_equal_approx(config.lava_glow, 2.0)
+			and is_equal_approx(config.eruption_rate_hz, 0.0)
+			and is_equal_approx(float(demo.view.surface.get_shader_parameter("lava_glow")), 2.0),
+		"planet_volcanoes: live eruption controls regenerated terrain or missed material/config")
+	var residue_deadline := Time.get_ticks_msec() + 3000
+	while demo.eruptions.active_count > 0 and Time.get_ticks_msec() < residue_deadline:
+		await process_frame
+	_check(demo.eruptions.active_count == 0,
+		"planet_volcanoes: inactive eruption fragments did not expire within three seconds")
+	var inactive_emitted: int = demo.eruptions.emitted_count
+	await _boot_frames(30)
+	_check(demo.eruptions.emitted_count == inactive_emitted,
+		"planet_volcanoes: activity zero continued to emit particles")
+	sliders["volcano_activity"].value = 1.0
+	sliders["eruption_rate_hz"].value = 6.0
+	var emission_deadline := Time.get_ticks_msec() + 2000
+	while demo.eruptions.active_count == 0 and Time.get_ticks_msec() < emission_deadline:
+		await process_frame
+	_check(demo.eruptions.active_count > 0 or demo.eruptions.emitted_count > 0,
+		"planet_volcanoes: positive activity and rate did not restart eruptions")
+	sliders["eruption_rate_hz"].value = 0.0
+	var emitted_at_zero_rate: int = demo.eruptions.emitted_count
+	_check(demo.eruptions.active_count > 0,
+		"planet_volcanoes: zero rate removed already emitted fragments")
+	await _boot_frames(30)
+	_check(demo.eruptions.emitted_count == emitted_at_zero_rate,
+		"planet_volcanoes: zero rate still emitted new particles")
+	sliders["eruption_rate_hz"].value = 6.0
+	var shape_mesh_id: int = demo.planet_mesh.mesh.get_instance_id()
+	sliders["volcano_size_ratio"].value = 0.31
+	sliders["volcano_height_ratio"].value = 0.20
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(is_equal_approx(generator.generated_volcano_size_ratio, 0.31)
+			and is_equal_approx(generator.generated_volcano_height_ratio, 0.20)
+			and demo.planet_mesh.mesh.get_instance_id() != shape_mesh_id,
+		"planet_volcanoes: shape sliders did not regenerate and publish their settings")
+	var field := await _planet_shape_read(generator)
+	var volcano := generator.generated_volcanoes[0]
+	var volcano_shape_data: PackedFloat32Array = generator._request.shape_data.to_float32_array()
+	_check(is_equal_approx(volcano_shape_data[75], PlanetConfig.VOLCANO_FLOOR_FRACTION)
+			and is_equal_approx(volcano_shape_data[111], PlanetConfig.VOLCANO_CRATER_BOTTOM_RATIO)
+			and is_equal_approx(volcano_shape_data[112], PlanetConfig.VOLCANO_CRATER_TOP_RATIO),
+		"planet_volcanoes: density shape data lost crater floor or width constants")
+	var axis := Vector3(volcano.x, volcano.y, volcano.z)
+	var radius: float = generator.generated_radius
+	var floor_ratio: float = volcano.w + generator.generated_volcano_height_ratio * PlanetConfig.VOLCANO_FLOOR_FRACTION
+	var floor_air := _planet_field_at(field, generator, axis * radius * (floor_ratio + 0.045))
+	var floor_below := _planet_field_at(field, generator, axis * radius * (floor_ratio - 0.035))
+	var rim_solid := _planet_field_at(field, generator,
+		axis.rotated(Vector3.UP.cross(axis).normalized(), generator.generated_volcano_size_ratio * 0.45)
+			* radius * (volcano.w + generator.generated_volcano_height_ratio * 0.25))
+	_check(floor_air > 0.0 and floor_below < 0.0 and rim_solid < 0.0,
+		"planet_volcanoes: density readback did not contain an open crater floor and solid rim")
+	var mesh: ArrayMesh = demo.planet_mesh.mesh
+	var vertices: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	var normals: PackedVector3Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_NORMAL]
+	var mesh_bounds := AABB()
+	for index in vertices.size():
+		_check(vertices[index].is_finite() and normals[index].is_finite(),
+			"planet_volcanoes: generated mesh contains non-finite vertex or normal")
+		mesh_bounds = AABB(vertices[index], Vector3.ZERO) if index == 0 else mesh_bounds.expand(vertices[index])
+	var half_world := generator.generated_world_size * 0.5
+	_check(not vertices.is_empty() and mesh_bounds.position.x >= -half_world
+			and mesh_bounds.position.y >= -half_world and mesh_bounds.position.z >= -half_world
+			and mesh_bounds.end.x <= half_world and mesh_bounds.end.y <= half_world
+			and mesh_bounds.end.z <= half_world,
+		"planet_volcanoes: generated mesh exceeded its allocated volume")
+	var baseline := field
+	var flank_rays: Array[Vector3] = []
+	var flank_surfaces: Array[float] = []
+	var flank_tangent := axis.cross(Vector3.UP).normalized()
+	var flank_bitangent := axis.cross(flank_tangent).normalized()
+	for azimuth in 16:
+		var angle := TAU * float(azimuth) / 16.0
+		var around := flank_tangent * cos(angle) + flank_bitangent * sin(angle)
+		var ray := (axis * cos(0.45 * 0.31) + around * sin(0.45 * 0.31)).normalized()
+		var top := volcano.w
+		for radial_step in 100:
+			var radial := volcano.w - 0.1 + float(radial_step) * 0.004
+			if _planet_field_at(baseline, generator, ray * radius * radial) < 0.0:
+				top = radial
+		flank_rays.append(ray)
+		flank_surfaces.append(top)
+	var no_volcanoes: PackedFloat32Array
+	sliders.volcano_count.value = 0
+	await _planet_shape_scene_wait(demo, 30000)
+	no_volcanoes = await _planet_shape_read(generator)
+	var field_delta := 0.0
+	for index in baseline.size():
+		field_delta = maxf(field_delta, absf(baseline[index] - no_volcanoes[index]))
+	_check(field_delta > 0.001 and generator.generated_volcanoes.is_empty(),
+		"planet_volcanoes: count zero did not remove volcanoes from the live density field")
+	var flank_min := INF
+	var flank_max := -INF
+	for azimuth in flank_rays.size():
+		var top := volcano.w
+		for radial_step in 100:
+			var radial := volcano.w - 0.1 + float(radial_step) * 0.004
+			if _planet_field_at(no_volcanoes, generator, flank_rays[azimuth] * radius * radial) < 0.0:
+				top = radial
+		var elevation := flank_surfaces[azimuth] - top
+		flank_min = minf(flank_min, elevation)
+		flank_max = maxf(flank_max, elevation)
+	_check(flank_max > 0.025 and flank_max - flank_min > 0.008,
+		"planet_volcanoes: generated flanks retained a uniform cone (height=%.4f range=%.4f)" % [flank_max, flank_max - flank_min])
+	sliders.volcano_count.value = original_volcano_count
+	await _planet_shape_scene_wait(demo, 30000)
+	var same_seed: PackedVector4Array = generator.generated_volcanoes.duplicate()
+	config.seed += 1
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	var changed_seed := generator.generated_volcanoes
+	_check(same_seed.size() > 0 and same_seed.size() == changed_seed.size()
+			and Vector3(same_seed[0].x, same_seed[0].y, same_seed[0].z).distance_to(
+				Vector3(changed_seed[0].x, changed_seed[0].y, changed_seed[0].z)) > 0.01,
+		"planet_volcanoes: changed seed did not change generated volcano descriptors")
+	config.seed -= 1
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	var scaled_reference := generator.generated_volcanoes.duplicate()
+	var scale_error := 0.0
+	for scaled_radius in [4.0, 120.0]:
+		sliders.radius.value = scaled_radius
+		demo.queue_regen()
+		await _planet_shape_scene_wait(demo, 30000)
+		_check(generator.generated_volcanoes.size() == scaled_reference.size(),
+			"planet_volcanoes: scaling changed descriptor count")
+		for index in scaled_reference.size():
+			var first := scaled_reference[index]
+			var current := generator.generated_volcanoes[index]
+			scale_error = maxf(scale_error, Vector3(first.x, first.y, first.z).distance_to(
+				Vector3(current.x, current.y, current.z)))
+			scale_error = maxf(scale_error, absf(first.w - current.w))
+	_check(scale_error < 0.001,
+		"planet_volcanoes: normalized descriptors changed with radius (%.6f)" % scale_error)
+	demo.quality.set_tier(PlanetQualityProfile.Tier.MEDIUM)
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(generator.generated_resolution == PlanetQualityProfile.RESOLUTION[PlanetQualityProfile.Tier.MEDIUM]
+			and demo.eruptions.capacity == 192,
+		"planet_volcanoes: medium quality did not update terrain and eruption budgets")
+	var standalone := PlanetEruptionSystem.new()
+	root.add_child(standalone)
+	standalone.set_process(false)
+	var test_config: PlanetConfig = config.duplicate()
+	test_config.seed = 127
+	standalone.start(test_config, generator.generated_volcanoes, 23.0, 0.32, 0.22,
+		PlanetQualityProfile.Tier.LOW)
+	for step in 30:
+		standalone.advance(1.0 / 30.0)
+	var positions := standalone.projectile_positions()
+	_check(standalone.active_count <= standalone.capacity and standalone.active_count > 0,
+		"planet_volcanoes: isolated eruption simulation missed its budget or emission")
+	for position in positions:
+		_check(position.is_finite(), "planet_volcanoes: projectile position is non-finite")
+	var standalone_repeat := PlanetEruptionSystem.new()
+	root.add_child(standalone_repeat)
+	standalone_repeat.set_process(false)
+	standalone_repeat.start(test_config, generator.generated_volcanoes, 23.0, 0.32, 0.22,
+		PlanetQualityProfile.Tier.LOW)
+	for step in 30:
+		standalone_repeat.advance(1.0 / 30.0)
+	_check(standalone_repeat.projectile_positions() == positions,
+		"planet_volcanoes: fixed seed and step changed projectile positions")
+	standalone_repeat.stop()
+	standalone_repeat.queue_free()
+	var normalized_positions := PackedVector3Array()
+	for position in positions:
+		normalized_positions.append(position / 23.0)
+	var particle_scale_error := 0.0
+	for scaled_radius in [4.0, 120.0]:
+		var scaled_system := PlanetEruptionSystem.new()
+		root.add_child(scaled_system)
+		scaled_system.set_process(false)
+		scaled_system.start(test_config, generator.generated_volcanoes, scaled_radius, 0.32, 0.22,
+			PlanetQualityProfile.Tier.LOW)
+		for step in 30:
+			scaled_system.advance(1.0 / 30.0)
+		var scaled_positions := scaled_system.projectile_positions()
+		_check(scaled_positions.size() == normalized_positions.size(),
+			"planet_volcanoes: particle count changed with radius")
+		for index in mini(scaled_positions.size(), normalized_positions.size()):
+			particle_scale_error = maxf(particle_scale_error,
+				(scaled_positions[index] / scaled_radius).distance_to(normalized_positions[index]))
+		scaled_system.stop()
+		scaled_system.queue_free()
+	_check(particle_scale_error < 0.0001,
+		"planet_volcanoes: normalized eruption positions changed with radius (%.6f)" % particle_scale_error)
+	standalone.stop()
+	standalone.stop()
+	_check(standalone.active_count == 0,
+		"planet_volcanoes: stop did not clear active projectiles idempotently")
+	standalone.queue_free()
+	demo.generator.iso_level = generator.generated_radius * 5.0
+	demo.queue_regen()
+	await _planet_shape_scene_wait(demo, 30000)
+	_check(demo.planet_mesh.mesh == null and generator.generated_volcanoes.is_empty()
+			and demo.eruptions.active_count == 0 and demo.eruptions.capacity == 0
+			and int(demo.view.surface.get_shader_parameter("volcano_count")) == 0
+			and not demo.view.environment.glow_enabled,
+		"planet_volcanoes: empty terrain retained volcano geometry or eruption runtime")
+	demo.queue_free()
+	await _boot_frames(3)
+	settings.clear_sim("planet_demo")
+	for key in saved:
+		settings.set_sim_value("planet_demo", key, saved[key])
+	settings._flush()
+	manager.set_setting("planet_quality_profile", quality_saved)
+	print("PLANET VOLCANOES count=%d field_delta=%.4f scale_error=%.6f particles=%d flank_range=%.4f" % [
+		 same_seed.size(), field_delta, maxf(scale_error, particle_scale_error), positions.size(), flank_max - flank_min])
+	_finish("planet_volcanoes")
+
+
+func _planet_field_at(field: PackedFloat32Array, generator: PlanetGenerator, position: Vector3) -> float:
+	var resolution: int = generator.generated_resolution
+	var half: float = generator.generated_world_size * 0.5
+	var grid := (position / (2.0 * half) + Vector3.ONE * 0.5) * float(resolution - 1)
+	var base := Vector3i(floori(grid.x), floori(grid.y), floori(grid.z))
+	var fraction := grid - Vector3(base)
+	base.x = clampi(base.x, 0, resolution - 2)
+	base.y = clampi(base.y, 0, resolution - 2)
+	base.z = clampi(base.z, 0, resolution - 2)
+	var value := 0.0
+	for dz in 2:
+		for dy in 2:
+			for dx in 2:
+				var weight := (fraction.x if dx == 1 else 1.0 - fraction.x)
+				weight *= fraction.y if dy == 1 else 1.0 - fraction.y
+				weight *= fraction.z if dz == 1 else 1.0 - fraction.z
+				value += field[(base.z + dz) * resolution * resolution
+					+ (base.y + dy) * resolution + base.x + dx] * weight
+	return value
 
 
 ## ── mixopt ──────────────────────────────────────────────────────────────

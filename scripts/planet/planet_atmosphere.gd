@@ -39,6 +39,8 @@ var planet_radius_m := 23.0
 var sun_direction := Vector3.RIGHT
 ## Halves the raymarch step count. Assign before [method start].
 var mobile := false
+var interior_enabled := false
+var fragmentation_strength := 0.0
 
 var _lut := AtmosphereLut.new()
 var _params := {}
@@ -65,13 +67,14 @@ func refresh() -> void:
 	_params["atmosphere_radius"] = planet_radius_m * (1.0 + shell_fraction)
 	_params["density_falloff"] = density_falloff
 	_params["intensity"] = intensity
+	_params["interior_enabled"] = interior_enabled
 	_params["dir_to_sun"] = sun_direction
 	# Rayleigh scattering goes as 1/wavelength^4, normalised at 400 nm.
 	_params["scattering_coefficients"] = Vector3(
 		pow(400.0 / wavelengths_nm.x, 4.0),
 		pow(400.0 / wavelengths_nm.y, 4.0),
 		pow(400.0 / wavelengths_nm.z, 4.0),
-	) * scattering_strength
+	) * scattering_strength * lerpf(1.0, 0.04, clampf(fragmentation_strength, 0.0, 1.0))
 	changed.emit(_params)
 
 
