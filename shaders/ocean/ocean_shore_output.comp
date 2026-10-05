@@ -1,0 +1,49 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+float alpha() {
+    float unfinished = control.clock.y > 0.0 ? params.current.z - control.clock.y : 0.0;
+    return clamp((control.clock.z + unfinished) / params.current.z, 0.0, 1.0);
+}
+
+vec4 interpolated(ivec2 p) {
+    uint i = uint(cell_index(clamp(p, ivec2(0), ivec2(params.sizes.x - 1))));
+    return mix(completed[i], completed[pixel_count() + i], alpha());
+}
+
+float wet_height(ivec2 p, float center) {
+    vec4 q = interpolated(p);
+    return q.x > params.domain.w ? q.x + read_bed(p) : center;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec4 q = interpolated(p);
+    float eta = q.x + bed[i];
+    vec4 f = mix(completed_foam[i], completed_foam[pixel_count() + i], alpha());
+    vec2 v = velocity(q);
+    vec2 gradient = vec2(0.0);
+    float eta_t = 0.0;
+    if (q.x > params.domain.w) {
+        gradient = vec2(wet_height(p + ivec2(1, 0), eta) - wet_height(p - ivec2(1, 0), eta),
+            wet_height(p + ivec2(0, 1), eta) - wet_height(p - ivec2(0, 1), eta)) / (2.0 * params.domain.y);
+        eta_t = (completed[pixel_count() + i].x - completed[i].x) / params.current.z;
+    } else {
+        float wet_sum = 0.0;
+        float wet_count = 0.0;
+        const ivec2 neighbors[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+        for (int side = 0; side < 4; ++side) {
+            ivec2 neighbor = p + neighbors[side];
+            vec4 nq = interpolated(neighbor);
+            if (nq.x > params.domain.w) {
+                wet_sum += nq.x + read_bed(neighbor);
+                wet_count += 1.0;
+            }
+        }
+        eta = wet_count > 0.0 ? wet_sum / wet_count : 0.0;
+    }
+    vec2 coverage = q.x > params.domain.w ? clamp(f.xy / q.x, vec2(0.0), vec2(1.0)) : vec2(0.0);
+    imageStore(surface_map, p, vec4(eta, v, q.x));
+    imageStore(foam_map, p, vec4(coverage, f.zw));
+    imageStore(derivative_map, p, vec4(gradient, eta_t, bed[i]));
+}

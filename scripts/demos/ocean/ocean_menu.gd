@@ -19,10 +19,18 @@ var host: Node
 
 var _preset_option: OptionButton
 var _look_option: OptionButton
+var _scene_option: OptionButton
+var _island_view_option: OptionButton
 var _wind_direction: HSlider
 var _wind_speed: HSlider
 var _fetch: HSlider
 var _swell: HSlider
+var _swell_height: HSlider
+var _swell_period: HSlider
+var _swell_direction: HSlider
+var _swell_spread: HSlider
+var _current_x: HSlider
+var _current_z: HSlider
 var _spread: HSlider
 var _detail: HSlider
 var _jonswap_gamma: HSlider
@@ -57,6 +65,12 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		var typed: OceanPreset = preset
 		names.append(typed.display_name)
 
+	menu.add_section("Scene")
+	_scene_option = menu.add_option_button("Scene", ["Open Ocean", "Island Beach"],
+		0, host.set_scene_mode)
+	_island_view_option = menu.add_option_button("View", ["Overview", "Beach", "Rocky coast"],
+		0, host.set_island_view)
+	_island_view_option.disabled = true
 	menu.add_section("Sea state")
 	_preset_option = menu.add_option_button("Preset", names, 1, host.apply_preset)
 	_wind_direction = _spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
@@ -65,7 +79,7 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		func(v: float): solver.wind_speed = v)
 	_fetch = _spectrum_slider(menu, "Fetch (km)", 5.0, 1000.0, solver.fetch_km,
 		func(v: float): solver.fetch_km = v)
-	_swell = _spectrum_slider(menu, "Swell", 0.0, 2.0, solver.swell,
+	_swell = _spectrum_slider(menu, "Directional concentration", 0.0, 2.0, solver.swell,
 		func(v: float): solver.swell = v)
 	_spread = _spectrum_slider(menu, "Spread", 0.0, 1.0, solver.spread,
 		func(v: float): solver.spread = v)
@@ -75,6 +89,24 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	_jonswap_gamma = _spectrum_slider(menu, "Peak enhancement (γ)", 1.0, 7.0,
 		solver.jonswap_gamma, func(v: float): solver.jonswap_gamma = v)
 	_jonswap_gamma.step = 0.1
+	menu.add_separator()
+	menu.add_section("Swell and current")
+	_swell_height = _spectrum_slider(menu, "Swell height Hs (m)", 0.0, 12.0,
+		solver.swell_height_m, func(v: float): solver.swell_height_m = v)
+	_swell_period = _spectrum_slider(menu, "Swell period (s)", 2.0, 30.0,
+		solver.swell_period_s, func(v: float): solver.swell_period_s = v)
+	_swell_direction = _spectrum_slider(menu, "Swell direction (rad)", -PI, PI,
+		solver.swell_direction_rad, func(v: float): solver.swell_direction_rad = v)
+	_swell_spread = _spectrum_slider(menu, "Swell spread (rad)", 0.05, 1.0,
+		solver.swell_spread, func(v: float): solver.swell_spread = v)
+	_current_x = menu.add_slider("Current X (m/s)", -5.0, 5.0,
+		solver.current_velocity_m_s.x, func(v: float):
+			solver.current_velocity_m_s.x = v
+			solver.request_render_refresh())
+	_current_z = menu.add_slider("Current Z (m/s)", -5.0, 5.0,
+		solver.current_velocity_m_s.y, func(v: float):
+			solver.current_velocity_m_s.y = v
+			solver.request_render_refresh())
 	menu.add_separator()
 
 	menu.add_section("Waves")
@@ -164,6 +196,12 @@ func sync_to_preset(preset: OceanPreset) -> void:
 	_wind_speed.value = preset.wind_speed_mps
 	_fetch.value = preset.fetch_km
 	_swell.value = preset.swell
+	_swell_height.value = preset.swell_height_m
+	_swell_period.value = preset.swell_period_s
+	_swell_direction.value = preset.swell_direction_rad
+	_swell_spread.value = preset.swell_spread
+	_current_x.set_value_no_signal(preset.current_velocity_m_s.x)
+	_current_z.set_value_no_signal(preset.current_velocity_m_s.y)
 	_spread.value = preset.spread
 	_detail.value = preset.detail
 	_jonswap_gamma.value = preset.jonswap_gamma
@@ -262,3 +300,11 @@ func _spectrum_slider(menu: SimMenu, label: String, lo: float, hi: float, value:
 		if not _updating:
 			solver.mark_spectrum_dirty()
 	)
+
+
+func sync_scene_mode(index: int) -> void:
+	if _scene_option != null:
+		_scene_option.select(index)
+	if _island_view_option != null:
+		_island_view_option.disabled = index == 0
+		_island_view_option.select(0)

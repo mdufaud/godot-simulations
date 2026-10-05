@@ -8,6 +8,7 @@ uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
 uniform sampler2DArray foam_near_a : filter_linear_mipmap, repeat_disable;
 uniform sampler2DArray foam_near_b : filter_linear_mipmap, repeat_disable;
+uniform sampler2D particle_state : filter_nearest, repeat_disable;
 uniform vec2 foam_near_center = vec2(0.0);
 uniform vec3 foam_domains = vec3(256.0, 1024.0, 4096.0);
 uniform float foam_near_index = 0.0;
@@ -20,6 +21,9 @@ uniform vec2 window_center = vec2(0.0);
 uniform float window_size = 168.0;
 uniform float storm_mood = 0.0;
 uniform float spray_amount = 0.0;
+uniform int particle_capacity = 0;
+uniform bool persistent_particles = false;
+uniform float particle_interpolation_s = 0.0;
 uniform float sim_time = 0.0;
 uniform float min_pixel_size = 0.75;
 uniform vec3 sun_direction = vec3(0.0, 1.0, 0.0);
@@ -77,6 +81,43 @@ float sample_foam_near(vec2 world_pos, float view_distance, float pixel_scale) {
 }
 
 void vertex() {
+	if (persistent_particles) {
+		int particle = int(INSTANCE_ID);
+		if (particle >= particle_capacity) {
+			particle_alpha = 0.0;
+			particle_uv = UV * 2.0 - 1.0;
+			POSITION = vec4(2.0, 2.0, 2.0, 1.0);
+		} else {
+		vec4 position_age = texelFetch(particle_state, ivec2(particle, 0), 0);
+		vec4 velocity_lifetime = texelFetch(particle_state, ivec2(particle, 1), 0);
+		vec4 seed_size = texelFetch(particle_state, ivec2(particle, 2), 0);
+		position_age.xyz += velocity_lifetime.xyz * particle_interpolation_s;
+		float age_fraction = (position_age.w + particle_interpolation_s)
+			/ max(velocity_lifetime.w, 1e-4);
+		float lifetime_fade = smoothstep(0.0, 0.08, age_fraction)
+			* (1.0 - smoothstep(0.78, 1.0, age_fraction));
+		particle_alpha = lifetime_fade * seed_size.z * 0.65;
+		particle_uv = UV * 2.0 - 1.0;
+		vec3 center = position_age.xyz;
+		vec3 center_view = (VIEW_MATRIX * vec4(center, 1.0)).xyz;
+		float size = seed_size.y;
+		float distance_to_camera = max(-center_view.z, 0.001);
+		float pixel_world = 2.0 * distance_to_camera
+			/ (VIEWPORT_SIZE.y * PROJECTION_MATRIX[1][1]);
+		float pixel_size = max(size, min_pixel_size * pixel_world);
+		vec3 wind_view = (VIEW_MATRIX
+			* vec4(velocity_lifetime.x, 0.0, velocity_lifetime.z, 0.0)).xyz;
+		vec2 projected_wind = normalize(vec2(wind_view.x, wind_view.y) + vec2(0.0, 0.001));
+		vec2 spray_axis = normalize(mix(vec2(0.0, 1.0), projected_wind, 0.55));
+		vec2 spray_side = vec2(spray_axis.y, -spray_axis.x);
+		vec2 billboard = spray_side * particle_uv.x * size
+			+ spray_axis * particle_uv.y * size * 3.4;
+		particle_alpha *= 1.0 - smoothstep(62.0, 122.0, distance_to_camera);
+		billboard *= pixel_size / max(size, 0.001);
+		POSITION = PROJECTION_MATRIX
+			* vec4(center_view + vec3(billboard, 0.0), 1.0);
+		}
+	} else {
 	int ix = int(INSTANCE_ID) % GRID;
 	int iz = int(INSTANCE_ID) / GRID;
 	float seed = float(INSTANCE_ID) + 17.0;
@@ -143,6 +184,7 @@ void vertex() {
 	particle_alpha *= horizon_fade;
 	billboard *= pixel_size / max(size, 0.001);
 	POSITION = PROJECTION_MATRIX * vec4(center_view + vec3(billboard, 0.0), 1.0);
+	}
 }
 
 void fragment() {

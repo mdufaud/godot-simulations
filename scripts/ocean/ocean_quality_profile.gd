@@ -80,6 +80,10 @@ const SHORT_CASCADE_HALF_RATE := {
 	Tier.ULTRA: true,
 }
 
+const COAST_SIZE := [64, 128, 256, 256]
+const WAKE_SIZE := [128, 128, 256, 256]
+const SPRAY_CAPACITY := [2048, 4096, 8192, 16384]
+
 
 ## The tier's knob bundle, keyed for SimQualityState.
 static func values(tier: int) -> Dictionary:

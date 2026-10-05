@@ -292,7 +292,8 @@ func _run() -> void:
 		_demo.set_capture_time(_capture_time)
 	# Foam equilibrium warmup (fix plan 0.6): live steps between the spectral
 	# time re-anchor and the unfreeze, so captured foam is stationary.
-	if _foam_warmup > 0.0 and _demo.has_method("warmup_foam"):
+	var foam_warmed := _foam_warmup > 0.0 and _demo.has_method("warmup_foam")
+	if foam_warmed:
 		await _demo.warmup_foam(_foam_warmup)
 		_demo.set_frozen(true)
 	if _coverage and _demo.has_method("set_capture_debug"):
@@ -304,7 +305,7 @@ func _run() -> void:
 			print("CAPTURE COVERAGE water=%.4f" % _demo.capture_water_coverage(coverage_image))
 		_demo.set_capture_debug(_debug_view if _debug_view >= 0 else 0)
 		await process_frame
-		if _capture_time >= 0.0 and _demo.has_method("set_capture_time"):
+		if not foam_warmed and _capture_time >= 0.0 and _demo.has_method("set_capture_time"):
 			_demo.set_capture_time(_capture_time)
 	if _profile and _demo.has_method("set_capture_profiling"):
 		_demo.set_capture_profiling(true)
@@ -350,7 +351,12 @@ func _run() -> void:
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
 	if _demo.has_method("capture_metadata_async"):
-		print(await _demo.capture_metadata_async(final_numbered))
+		var metadata: String = await _demo.capture_metadata_async(final_numbered)
+		print(metadata)
+		if metadata.begins_with("CAPTURE FAIL"):
+			await create_timer(0.1, true, false, true).timeout
+			quit(1)
+			return
 	elif _demo.has_method("capture_metadata"):
 		print(_demo.capture_metadata(final_numbered))
 	await _grab(final_numbered)

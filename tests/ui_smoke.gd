@@ -65,6 +65,7 @@ func _run() -> void:
 		return
 	if _demo == "ocean_demo":
 		await _check_ocean_actions(menu)
+		await _check_ocean_scene_selector()
 	if _demo == "ambient_fluid_demo":
 		await _check_ambient_fluid_actions(menu)
 	if _demo == "mixwell_demo":
@@ -415,6 +416,34 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 	freeze_button.toggled.emit(false)
 	if _demo_root._frozen:
 		_fail("ocean freeze action did not resume simulation")
+
+
+func _check_ocean_scene_selector() -> void:
+	var initial_scene: int = _demo_root.current_scene_index
+	var scene_option: OptionButton = _demo_root._menu_builder._scene_option
+	var view_option: OptionButton = _demo_root._menu_builder._island_view_option
+	if scene_option == null or view_option == null:
+		_fail("ocean scene/view selectors missing")
+		return
+	scene_option.select(1)
+	scene_option.item_selected.emit(1)
+	var deadline := Time.get_ticks_msec() + 45000
+	while Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+		if _demo_root.solver.initialized and _demo_root.texture_bound:
+			break
+	if _demo_root.current_scene_index != 1 or not _demo_root.solver.shore_enabled \
+			or not _demo_root.texture_bound or view_option.disabled:
+		_fail("ocean Island Beach selector did not initialize the shoreline")
+	view_option.select(2)
+	view_option.item_selected.emit(2)
+	await get_tree().process_frame
+	if _demo_root.island != null:
+		var framing: Dictionary = _demo_root.island.camera_view("island_rocks")
+		if _demo_root.orbit_cam.target != framing.target:
+			_fail("ocean rocky coast view selector did not move the camera")
+	scene_option.select(initial_scene)
+	scene_option.item_selected.emit(initial_scene)
 
 
 func _check_terrain_actions(menu: SimMenu) -> void:

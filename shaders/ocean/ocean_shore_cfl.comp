@@ -1,0 +1,24 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+shared float speeds[64];
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    vec4 q = read_water(p);
+    vec2 v = velocity(q);
+    float signal = abs(v.x) + abs(v.y) + 4.0 * sqrt(params.domain.z * max(q.x, 0.0));
+    vec2 world = world_position(p);
+    float distance_edge = params.domain.x * 0.5 - max(abs(world.x), abs(world.y));
+    if (distance_edge < params.physical.y) {
+        vec3 incoming = offshore(world);
+        float h = max(incoming.x - read_bed(p), 0.0);
+        signal = max(signal, abs(incoming.y) + abs(incoming.z) + 4.0 * sqrt(params.domain.z * h));
+    }
+    uint lane = gl_LocalInvocationIndex;
+    speeds[lane] = signal;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) speeds[lane] = max(speeds[lane], speeds[lane + stride]);
+        barrier();
+    }
+    if (lane == 0u) atomicMax(control.counts.y, floatBitsToUint(speeds[0]));
+}

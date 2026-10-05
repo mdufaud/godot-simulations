@@ -1,0 +1,29 @@
+layout(local_size_x = LOCAL_N_I, local_size_y = 1, local_size_z = 1) in;
+
+shared vec2 row_shared[2u * LOCAL_N];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.y;
+    uint layer = gl_WorkGroupID.z;
+    uint stages = uint(findMSB(LOCAL_N));
+    row_shared[col] = fft_data[FFT_IDX(col, row, layer, 0)];
+    for (uint stage = 0u; stage < stages; ++stage) {
+        barrier();
+        uint read_half = stage % 2u;
+        uint write_half = (stage + 1u) % 2u;
+        vec4 butterfly_value = butterfly[stage * LOCAL_N + col];
+        uvec2 indices = floatBitsToUint(butterfly_value.xy);
+        vec2 upper = row_shared[read_half * LOCAL_N + indices.x];
+        vec2 lower = row_shared[read_half * LOCAL_N + indices.y];
+        vec2 twiddle = butterfly_value.zw;
+        if (lp.cfg.z != 0) {
+            twiddle.y = -twiddle.y;
+        }
+        vec2 product = vec2(lower.x * twiddle.x - lower.y * twiddle.y,
+            lower.x * twiddle.y + lower.y * twiddle.x);
+        row_shared[write_half * LOCAL_N + col] = upper + product;
+    }
+    fft_data[FFT_IDX(col, row, layer, 1)] =
+        row_shared[(stages % 2u) * LOCAL_N + col];
+}

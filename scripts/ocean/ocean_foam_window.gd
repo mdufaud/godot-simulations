@@ -3,6 +3,7 @@ extends Node
 
 const MAP_SIZE := 512
 const WORLD_SIZE := 128.0
+const CONTACT_DIFFUSION_M2_S := 0.047
 const CAPTURE_LAYER := 1 << 19
 const CAPTURE_LAYER_INDEX := 20
 
@@ -54,11 +55,6 @@ func set_enabled(on: bool) -> void:
 
 
 func bind_ocean(displacements: Texture2DArrayRD, tile_lengths: PackedFloat32Array) -> void:
-	var scales := PackedVector4Array()
-	for tile in tile_lengths:
-		var inverse := 1.0 / tile
-		scales.append(Vector4(inverse, inverse, 1.0, 1.0))
-	_proxy_material.set_shader_parameter("map_scales", scales)
 	_proxy_material.set_shader_parameter("displacements", displacements)
 	_ocean_bound = true
 	_refresh_capture_state()
@@ -110,6 +106,7 @@ func update(delta: float, world_position: Vector3) -> void:
 	if not _enabled or not _ocean_bound:
 		return
 	_update_dynamic_proxies()
+	_sync_proxy_surface_state()
 	var texel_world := WORLD_SIZE / MAP_SIZE
 	_center = Vector2(
 		snappedf(world_position.x, texel_world),
@@ -125,9 +122,7 @@ func update(delta: float, world_position: Vector3) -> void:
 		_feedback_viewports[previous].get_texture() if _history_ready else _black_texture)
 	material.set_shader_parameter("scroll_uv",
 		(_center - _history_center) / WORLD_SIZE if _history_ready else Vector2.ZERO)
-	material.set_shader_parameter("decay", exp(-delta * 0.45))
-	material.set_shader_parameter("blur_amount", minf(delta * 3.0, 0.3))
-	material.set_shader_parameter("injection_strength", minf(delta * 8.0, 1.0))
+	material.set_shader_parameter("delta", delta)
 	_feedback_viewports[current].render_target_update_mode = SubViewport.UPDATE_ONCE
 	_surface_material.set_shader_parameter("interaction_foam",
 		_feedback_viewports[current].get_texture())
@@ -178,6 +173,9 @@ func _build_feedback() -> void:
 		material.set_shader_parameter("previous_foam", _black_texture)
 		material.set_shader_parameter("injection_mask", _capture_viewport.get_texture())
 		material.set_shader_parameter("texel_size", Vector2.ONE / MAP_SIZE)
+		var texel_world := WORLD_SIZE / MAP_SIZE
+		material.set_shader_parameter("diffusion_rate",
+			4.0 * CONTACT_DIFFUSION_M2_S / (texel_world * texel_world))
 		rect.material = material
 		viewport.add_child(rect)
 		add_child(viewport)
@@ -218,6 +216,18 @@ func _update_dynamic_proxies() -> void:
 			proxy.global_transform = body.global_transform
 	for body_value in stale:
 		_dynamic_proxies.erase(body_value)
+
+
+func _sync_proxy_surface_state() -> void:
+	for parameter in ["map_scales", "num_cascades", "cascade_wavelengths",
+			"clipmap_cell", "clipmap_half_extent", "clipmap_ring_levels",
+			"geometry_cascade", "local_waves_enabled", "coast_field", "wake_field",
+			"local_centers", "local_domains"]:
+		_proxy_material.set_shader_parameter(parameter,
+			_surface_material.get_shader_parameter(parameter))
+	_proxy_material.set_shader_parameter("main_camera_position", _main_camera.global_position)
+	_proxy_material.set_shader_parameter("mesh_center",
+		Vector2(_main_camera.global_position.x, _main_camera.global_position.z))
 
 
 func _make_black_texture() -> ImageTexture:

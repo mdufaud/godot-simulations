@@ -9,6 +9,7 @@ extends "res://tests/test_case.gd"
 
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const GRASS_HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
+const OceanParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -1139,6 +1140,274 @@ func _read_nbody_state(solver: NBodySolver, result: Dictionary) -> void:
 	result["done"] = true
 
 
+func _run_ocean_parameters() -> void:
+	await _boot_frames(2)
+	await OceanParameterProbe.new().run(self, _check, "parameters")
+	_finish("ocean_parameters_gpu")
+
+
+func _run_ocean_swell() -> void:
+	await _boot_frames(2)
+	await OceanParameterProbe.new().run(self, _check, "swell")
+	_finish("ocean_swell")
+
+
+func _run_ocean_extremes() -> void:
+	await _boot_frames(2)
+	await OceanParameterProbe.run(self, _check, "extremes")
+	_finish("ocean_extremes")
+
+
+func _run_ocean_contracts() -> void:
+	var empty: Array[float] = []
+	var values: Array[float] = [4.0, 1.0, 3.0, 2.0]
+	_check(OceanProfiling._median(empty, 7.0) == 7.0
+		and OceanProfiling._percentile(empty, 0.95, 7.0) == 7.0
+		and OceanProfiling._median(values, 0.0) == 2.5
+		and OceanProfiling._percentile(values, 0.95, 0.0) == 4.0
+		and values == [4.0, 1.0, 3.0, 2.0], "ocean_contracts: statistics changed")
+	var cancelled := TextureReadback.Request.new()
+	cancelled.cancel()
+	cancelled.complete(PackedByteArray([1]))
+	_check(cancelled.cancelled() and not cancelled.pending() and cancelled.data().is_empty(),
+		"ocean_contracts: cancelled readback accepted a late callback")
+	var expired := TextureReadback.Request.new()
+	expired.timeout()
+	expired.complete(PackedByteArray([1]))
+	_check(expired.timed_out() and expired.data().is_empty(),
+		"ocean_contracts: timed out readback accepted a late callback")
+	await _boot_frames(2)
+	for name in ["calm", "breeze", "swell", "storm"]:
+		var path := "res://resources/ocean/presets/%s.tres" % name
+		var text := FileAccess.get_file_as_string(path)
+		var properties := text.substr(text.find("[resource]") + 10).strip_edges()
+		_check(properties.begins_with("script ="),
+			"ocean_contracts: %s attaches its script after exported values" % name)
+		var preset: OceanPreset = load(path)
+		_check(preset.validate().is_empty(), "ocean_contracts: invalid preset %s" % name)
+	var fields: Array[PackedFloat32Array] = []
+	var displacement: Array[PackedFloat32Array] = []
+	for layer in 3:
+		var zero := PackedFloat32Array()
+		zero.resize(16)
+		fields.append(zero.duplicate())
+		displacement.append(zero.duplicate())
+	var capture := preload("res://scripts/ocean/ocean_capture_metrics.gd")
+	for strain in [Vector3(-0.4, 0.5, 0.0), Vector3(-0.5, 0.1, 0.0)]:
+		for index in range(0, 16, 4):
+			fields[0][index] = strain.x
+			fields[0][index + 1] = strain.y
+		var measured: Dictionary = capture.measure(displacement, fields, 2,
+			PackedFloat32Array([100.0, 20.0, 5.0]), 0.8)
+		var expected := 0.0 if strain.x > -0.5 else 0.25
+		_check(absf(measured.source_mean - expected) < 0.000001,
+			"ocean_contracts: capture source differs from the foam determinant")
+		print("OCEAN CONTRACTS source=%.6f expected=%.6f" % [measured.source_mean, expected])
+	if RenderingServer.get_rendering_device() == null:
+		var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+		root.add_child(demo)
+		await _boot_frames(2)
+		demo.queue_free()
+		await _boot_frames(2)
+		_check(not is_instance_valid(demo), "ocean_contracts: unsupported scene did not exit")
+	else:
+		var result := {"clean": false}
+		RenderingServer.call_on_render_thread(func():
+			var solver := OceanSolver.new()
+			solver._rd = RenderingServer.get_rendering_device()
+			var valid := "#version 450\nlayout(local_size_x=1) in;\nvoid main() {}\n"
+			var compiled := solver._compile_stage_render("contract_valid", valid)
+			solver._buffers["contract_buffer"] = solver._rd.storage_buffer_create(16)
+			print("OCEAN CONTRACTS expected_shader_failure")
+			var rejected := not solver._compile_stage_render("contract_invalid", "#version 450\n#error Expected failure\n")
+			result.clean = compiled and rejected and not solver.initialized \
+				and solver._shaders.is_empty() and solver._pipelines.is_empty() \
+				and solver._buffers.is_empty()
+			solver.free_render()
+		)
+		await RenderingServer.frame_post_draw
+		_check(result.clean, "ocean_contracts: failed compilation leaked GPU resources")
+		print("OCEAN CONTRACTS failed_compile_clean=%s" % result.clean)
+	_finish("ocean_contracts")
+
+
+func _record_ocean_metadata(demo: Node, result: Dictionary) -> void:
+	result.value = await demo.capture_metadata_async("probe")
+	result.done = true
+
+
+func _record_ocean_rings(demo: Node, result: Dictionary) -> void:
+	result.value = await demo.capture_foam_rings()
+	result.done = true
+
+
+func _wait_ocean_capture_ready(demo: Node) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return demo.capture_ready()
+
+
+func _run_ocean_capture() -> void:
+	await _boot_frames(2)
+	var manager: Node = root.get_node("/root/GameManager")
+	var saved_tier: int = manager.get_setting("ocean_quality_profile", OceanQualityProfile.Tier.HIGH)
+	manager.settings["ocean_quality_profile"] = OceanQualityProfile.Tier.HIGH \
+		if _extra.has("high=1") else OceanQualityProfile.Tier.LOW
+	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	root.add_child(demo)
+	manager.settings["ocean_quality_profile"] = saved_tier
+	if not await _wait_ocean_capture_ready(demo):
+		_check(false, "ocean_capture: boot did not initialize")
+		demo.queue_free()
+		_finish("ocean_capture")
+		return
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	if _extra.has("expected_failure=1"):
+		demo.set_frozen(true)
+		demo.set_capture_profiling(true)
+		demo.set_capture_debug(2)
+		var original: Environment = demo.world_env.environment
+		var failure := {"done": false, "value": ""}
+		_record_ocean_metadata(demo, failure)
+		await RenderingServer.frame_post_draw
+		var pending: TextureReadback.Request = demo._capture._pending_request
+		_check(pending != null and demo._capture._profile_suspended,
+			"ocean_capture: timeout injection did not reach GPU readback")
+		print("OCEAN CAPTURE expected_readback_timeout")
+		pending.timeout()
+		var restored: bool = failure.done and demo.world_env.environment == original \
+			and not demo._capture.measurement_active and demo.solver.profiling \
+			and demo._profiling.capture_enabled and demo._viewport.measure_render_time() \
+			and int(demo.surface_mat.get_shader_parameter("debug_view")) == 2
+		_check(restored, "ocean_capture: timeout did not restore runtime state")
+		print("OCEAN CAPTURE failure_restored=%s" % restored)
+		demo.queue_free()
+		manager.set_setting("ocean_quality_profile", saved_tier)
+		return
+	demo.set_frozen(false)
+	await RenderingServer.frame_post_draw
+	var time_before: float = demo._sim_time
+	var frame_before: int = demo.solver._frame
+	await demo.warmup_foam(0.2)
+	_check(absf(demo._sim_time - time_before - 0.2) < 0.000001
+		and demo.solver._frame - frame_before == 12 and not demo._warmup_active,
+		"ocean_capture: warmup also dispatched or advanced the normal clock")
+	demo.profiler.set_enabled(true)
+	demo.set_capture_profiling(true)
+	demo.profiler.set_enabled(false)
+	_check(demo.solver.profiling and demo._viewport.measure_render_time(),
+		"ocean_capture: closing overlay disabled capture profiling")
+	await _boot_frames(260)
+	var stats: Dictionary = demo._profiling.statistics()
+	_check(stats.profile_samples == 240 and stats.frame_ms > 0.0
+		and stats.frame_p95_ms >= stats.frame_ms,
+		"ocean_capture: sample limit or frame percentiles changed")
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	demo.set_capture_profiling(true)
+	demo._profiling.collect_sample()
+	var sample_count: int = demo._profiling.statistics().profile_samples
+	demo._profiling.collect_sample()
+	_check(sample_count == 1 and demo._profiling.statistics().profile_samples == sample_count,
+		"ocean_capture: repeated GPU frame was collected twice")
+	demo.profiler.set_enabled(true)
+	demo.set_capture_profiling(false)
+	_check(demo.solver.profiling and demo._viewport.measure_render_time(),
+		"ocean_capture: capture disabled active overlay profiling")
+	demo.profiler.set_enabled(false)
+	_check(not demo.solver.profiling and not demo._viewport.measure_render_time(),
+		"ocean_capture: profiling remained active without a user")
+	demo.set_capture_profiling(true)
+	demo.set_capture_debug(2)
+	var environment: Environment = demo.world_env.environment
+	var tint_visible: bool = demo.underwater_tint.visible
+	var metadata: String = await demo.capture_metadata_async("probe")
+	_check(metadata.begins_with("CAPTURE META ") and metadata.contains("measure_version=6")
+		and demo.world_env.environment == environment
+		and demo.underwater_tint.visible == tint_visible
+		and int(demo.surface_mat.get_shader_parameter("debug_view")) == 2
+		and not demo._capture.measurement_active and demo.solver.profiling
+		and demo._profiling.capture_enabled and demo._viewport.measure_render_time(),
+		"ocean_capture: metadata did not restore render or profiling state")
+	print("OCEAN CAPTURE samples=240 deduplicated=true restored=true warmup_steps=12")
+	var transition := {"done": false, "value": []}
+	_record_ocean_rings(demo, transition)
+	demo._camera_water = Vector4(10000.0, 0.0, 0.0, 1.0)
+	demo._camera_water_valid = true
+	demo._update_underwater(demo.main_camera.global_position)
+	_check(not demo.underwater_tint.visible, "ocean_capture: measurement showed underwater tint")
+	demo._capture.invalidate()
+	_check(transition.done and demo.underwater_tint.visible
+		and is_equal_approx(environment.fog_density, 0.03),
+		"ocean_capture: restoration lost the current underwater state")
+	demo._camera_water_valid = false
+	demo._update_underwater(demo.main_camera.global_position)
+	var replacement := {"done": false, "value": []}
+	_record_ocean_rings(demo, replacement)
+	var new_environment: Environment = environment.duplicate()
+	var new_material: ShaderMaterial = demo.surface_mat.duplicate()
+	new_material.set_shader_parameter("debug_view", 3)
+	demo.world_env.environment = new_environment
+	demo.ocean_mesh.material_override = new_material
+	demo._capture.invalidate()
+	_check(replacement.done and demo.world_env.environment == new_environment
+		and demo.ocean_mesh.material_override == new_material
+		and int(new_material.get_shader_parameter("debug_view")) == 3,
+		"ocean_capture: restoration overwrote replacement objects")
+	demo.world_env.environment = environment
+	demo.ocean_mesh.material_override = demo.surface_mat
+	demo.set_capture_debug(2)
+	var rings_result := {"done": false, "value": []}
+	_record_ocean_rings(demo, rings_result)
+	_check(demo._capture.measurement_active, "ocean_capture: ring measurement did not start")
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
+	_check(rings_result.done and rings_result.value.is_empty()
+		and demo.world_env.environment == environment
+		and not demo._capture.measurement_active
+		and int(demo.surface_mat.get_shader_parameter("debug_view")) == 2,
+		"ocean_capture: rebuild did not cancel and restore the ring measurement")
+	_check(await _wait_ocean_capture_ready(demo), "ocean_capture: rebuild did not initialize")
+	var read_result := {"done": false, "value": ""}
+	_record_ocean_metadata(demo, read_result)
+	await RenderingServer.frame_post_draw
+	_check(not read_result.done and demo._capture._profile_suspended,
+		"ocean_capture: metadata was not awaiting GPU readback")
+	demo.set_quality_profile(OceanQualityProfile.Tier.LOW)
+	_check(read_result.done and String(read_result.value).begins_with("CAPTURE FAIL")
+		and demo.solver.profiling and demo._profiling.capture_enabled,
+		"ocean_capture: rebuild did not settle the pending readback")
+	_check(await _wait_ocean_capture_ready(demo), "ocean_capture: second rebuild did not initialize")
+	var exit_result := {"done": false, "value": ""}
+	_record_ocean_metadata(demo, exit_result)
+	await RenderingServer.frame_post_draw
+	var retired_capture: OceanCapture = demo._capture
+	demo.queue_free()
+	await _boot_frames(2)
+	_check(not is_instance_valid(demo) and exit_result.done
+		and String(exit_result.value).begins_with("CAPTURE FAIL")
+		and not retired_capture.measurement_active
+		and retired_capture._pending_request == null
+		and not retired_capture._metadata_provider.is_valid()
+		and ViewportGuard.measured_viewports == 0,
+		"ocean_capture: exit left a coroutine, callback or measured viewport behind")
+	manager.settings["ocean_quality_profile"] = OceanQualityProfile.Tier.LOW
+	var next_demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
+	root.add_child(next_demo)
+	manager.settings["ocean_quality_profile"] = saved_tier
+	_check(await _wait_ocean_capture_ready(next_demo), "ocean_capture: reentry did not initialize")
+	if next_demo.capture_ready():
+		next_demo.set_frozen(true)
+		var reentry: String = await next_demo.capture_metadata_async("reentry")
+		_check(reentry.begins_with("CAPTURE META ") and not next_demo.solver.profiling,
+			"ocean_capture: reentry inherited profiling or capture state")
+	next_demo.queue_free()
+	await _boot_frames(2)
+	manager.set_setting("ocean_quality_profile", saved_tier)
+	print("OCEAN CAPTURE rebuild_cancelled=true exit_cancelled=true reentry=true")
+	_finish("ocean_capture")
+
+
 func _run_ocean_freeze() -> void:
 	await _boot_frames(2)
 	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()
@@ -1158,29 +1427,24 @@ func _run_ocean_freeze() -> void:
 	demo.set_time_scale(1.0)
 	await _boot_frames(2)
 	var live_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
-	var live_decay := float(live_material.get_shader_parameter("decay"))
-	_check(live_decay < 1.0
-		and float(live_material.get_shader_parameter("injection_strength")) > 0.0,
+	var live_delta := float(live_material.get_shader_parameter("delta"))
+	_check(live_delta > 0.0,
 		"ocean_freeze: live interaction foam did not advance")
 	demo.set_frozen(true)
 	await _boot_frames(2)
 	var frozen_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
-	_check(is_equal_approx(float(frozen_material.get_shader_parameter("decay")), 1.0)
-		and is_zero_approx(float(frozen_material.get_shader_parameter("blur_amount")))
-		and is_zero_approx(float(frozen_material.get_shader_parameter("injection_strength"))),
+	_check(is_zero_approx(float(frozen_material.get_shader_parameter("delta"))),
 		"ocean_freeze: paused waves still evolve interaction foam")
 	demo.set_frozen(false)
 	demo.set_time_scale(0.0)
 	await _boot_frames(2)
 	var paused_material: ShaderMaterial = foam._feedback_materials[(foam._frame - 1) & 1]
-	_check(is_equal_approx(float(paused_material.get_shader_parameter("decay")), 1.0)
-		and is_zero_approx(float(paused_material.get_shader_parameter("blur_amount")))
-		and is_zero_approx(float(paused_material.get_shader_parameter("injection_strength"))),
+	_check(is_zero_approx(float(paused_material.get_shader_parameter("delta"))),
 		"ocean_freeze: zero time scale still evolves interaction foam")
-	print("OCEAN FREEZE live_decay=%.6f frozen_decay=%.6f paused_decay=%.6f" % [
-		live_decay,
-		float(frozen_material.get_shader_parameter("decay")),
-		float(paused_material.get_shader_parameter("decay"))])
+	print("OCEAN FREEZE live_delta=%.6f frozen_delta=%.6f paused_delta=%.6f" % [
+		live_delta,
+		float(frozen_material.get_shader_parameter("delta")),
+		float(paused_material.get_shader_parameter("delta"))])
 	demo.queue_free()
 	await process_frame
 	_finish("ocean_freeze")
@@ -1208,27 +1472,31 @@ func _run_ocean_ultra() -> void:
 	await _boot_frames(2)
 	var displacement_rid: RID = demo.solver.get_displacement_tex_rid()
 	var foam_rid: RID = demo.solver.get_foam_near_tex_rid(0)
-	var frame_before: int = demo.solver._frame
 	_check(is_zero_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail"))),
 		"ocean_ultra: High boot has Ultra surface detail")
 	demo.set_quality_profile(OceanQualityProfile.Tier.ULTRA)
-	await _boot_frames(2)
+	_check(await _wait_ocean_capture_ready(demo), "ocean_ultra: Ultra rebuild did not initialize")
+	await RenderingServer.frame_post_draw
 	_check(demo.quality.effective == OceanQualityProfile.Tier.ULTRA
 		and is_equal_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail")), 1.0),
 		"ocean_ultra: Ultra profile did not update the material")
 	_check(demo.solver.short_cascade_half_rate,
 		"ocean_ultra: Ultra restored the expensive full-rate short cascade")
 	_check(demo.solver.initialized and demo.texture_bound
-		and demo.solver.get_displacement_tex_rid() == displacement_rid
-		and demo.solver.get_foam_near_tex_rid(0) == foam_rid
-		and demo.solver._frame == frame_before,
-		"ocean_ultra: High to Ultra rebuilt GPU resources or cleared foam")
+		and demo.solver.get_displacement_tex_rid() != displacement_rid
+		and demo.solver.get_foam_near_tex_rid(0) != foam_rid
+		and demo.spray._particle_capacity == OceanQualityProfile.SPRAY_CAPACITY[OceanQualityProfile.Tier.ULTRA],
+		"ocean_ultra: High to Ultra did not rebuild the physical resource budget")
+	displacement_rid = demo.solver.get_displacement_tex_rid()
+	foam_rid = demo.solver.get_foam_near_tex_rid(0)
 	demo.set_quality_profile(OceanQualityProfile.Tier.HIGH)
-	await _boot_frames(2)
+	_check(await _wait_ocean_capture_ready(demo), "ocean_ultra: High rebuild did not initialize")
+	await RenderingServer.frame_post_draw
 	_check(is_zero_approx(float(demo.surface_mat.get_shader_parameter("ultra_detail")))
-		and demo.solver.get_displacement_tex_rid() == displacement_rid
-		and demo.solver.get_foam_near_tex_rid(0) == foam_rid,
-		"ocean_ultra: Ultra to High did not preserve GPU resources")
+		and demo.solver.get_displacement_tex_rid() != displacement_rid
+		and demo.solver.get_foam_near_tex_rid(0) != foam_rid
+		and demo.spray._particle_capacity == OceanQualityProfile.SPRAY_CAPACITY[OceanQualityProfile.Tier.HIGH],
+		"ocean_ultra: Ultra to High did not rebuild the physical resource budget")
 	manager.set_setting(setting_key, saved_tier)
 	demo.queue_free()
 	await _boot_frames(2)
@@ -1250,7 +1518,7 @@ func _run_ocean_ultra() -> void:
 			"ocean_ultra: direct Ultra boot missed the efficient cascade cadence")
 	ultra_demo.queue_free()
 	await process_frame
-	print("OCEAN ULTRA resources_preserved=true boot_detail=1")
+	print("OCEAN ULTRA physical_budget_rebuilt=true boot_detail=1")
 	_finish("ocean_ultra")
 
 
@@ -1281,7 +1549,7 @@ func _run_ocean_single_wave() -> void:
 	RenderingServer.call_on_render_thread(func():
 		var rd := RenderingServer.get_rendering_device()
 		rd.texture_update(solver._spectrum_tex, 0, spectrum)
-		var pc := solver._pack_push_constant(0, 0.0, 0.0)
+		var pc := solver._pack_push_constant(0)
 		pc.encode_float(60, 0.0)
 		var cl := rd.compute_list_begin()
 		solver._dispatch(cl, "spectrum_evolve", pc, n / 16, n / 16, 1)

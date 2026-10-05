@@ -6,6 +6,7 @@
 // front of the surface falls back to the unrefracted one (anti-ghosting fix).
 
 shader_type spatial;
+#include "res://shaders/ocean/ocean_deformation.gdshaderinc"
 // Reading hint_screen_texture/hint_depth_texture moves this material into the
 // transparent pass, which does not write depth by default: waves stopped
 // occluding each other (horizon and other waves visible through every crest).
@@ -45,6 +46,15 @@ uniform sampler2DArray displacements : filter_linear, repeat_enable;
 uniform sampler2DArray normals : filter_linear, repeat_enable;
 uniform sampler2DArray derivatives : filter_linear, repeat_enable;
 uniform bool fft_surface = true;
+uniform bool local_waves_enabled = false;
+uniform sampler2D coast_field : filter_linear, repeat_disable;
+uniform sampler2D wake_field : filter_linear, repeat_disable;
+uniform vec4 local_centers = vec4(90.0, 35.0, 0.0, 0.0);
+uniform vec2 local_domains = vec2(256.0, 64.0);
+uniform bool shore_enabled = false;
+uniform sampler2D shore_field : filter_linear, repeat_disable;
+uniform sampler2D shore_foam : filter_linear, repeat_disable;
+uniform float shore_domain = 160.0;
 // Camera-centred near-field foam coverage. Each layer has its own domain and
 // the layers are blended radially so the coverage remains world anchored.
 uniform sampler2DArray foam_near_a : filter_linear_mipmap, repeat_disable;
@@ -83,6 +93,7 @@ uniform float beers_law = 0.35;
 uniform bool camera_underwater = false;
 
 varying vec2 world_uv;
+varying vec2 interaction_world_xz;
 varying float wave_height;
 varying float foam_factor;
 varying float fresnel;
@@ -93,6 +104,7 @@ varying float sss_crest_factor;
 varying float glitter_factor;
 varying float filtered_roughness;
 varying vec3 geometry_weights;
+varying vec3 spectral_displacement;
 uniform vec3 cascade_slope_variance = vec3(0.0);
 
 float cascade_wavelength(int index) {
@@ -123,6 +135,7 @@ void vertex() {
 		VIEWPORT_SIZE.y * abs(PROJECTION_MATRIX[1][1]), 1.0);
 
 	world_uv = VERTEX.xz;
+	float shore_vertex_weight = shore_enabled ? ocean_shore_weight(world_uv, shore_domain) : 0.0;
 	// Each cascade fades with distance in proportion to its tile length: storm
 	// swell (cascade 0, ~1 km tile) must stay visible for kilometres or the far
 	// sea collapses into a flat mirror that merges with the sky. P0-C (cause
@@ -135,6 +148,9 @@ void vertex() {
 	vec3 displacement = vec3(0.0);
 	geometry_weights = vec3(0.0);
 	for (int i = 0; i < num_cascades; i++) {
+		if (shore_vertex_weight >= 1.0) {
+			continue;
+		}
 		if (geometry_cascade >= 0 && i != geometry_cascade) {
 			continue;
 		}
@@ -155,7 +171,21 @@ void vertex() {
 		displacement += textureLod(displacements, vec3(world_uv * scales.xy, float(i)), 0.0).xyz
 			* scales.z * contribution;
 	}
+	spectral_displacement = displacement;
+	if (shore_enabled) {
+		float weight = shore_vertex_weight;
+		displacement.xz *= 1.0 - weight;
+		vec2 position = world_uv + displacement.xz;
+		vec4 shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, position);
+		displacement.y = mix(displacement.y, shore.x, weight);
+	} else if (local_waves_enabled) {
+		vec2 position = world_uv + displacement.xz;
+		displacement.y += ocean_local_sample(coast_field, local_centers.xy,
+			local_domains.x, position).x + ocean_local_sample(wake_field,
+			local_centers.zw, local_domains.y, position).x;
+	}
 	VERTEX += displacement;
+	interaction_world_xz = world_uv + displacement.xz;
 	wave_height = displacement.y;
 }
 
@@ -226,20 +256,39 @@ vec2 sample_foam_near(vec2 world_pos, vec2 dx, vec2 dy) {
 	}
 	float outer_radius = foam_domains.z * 0.5;
 	if (distance_to_camera < outer_radius) {
-		vec2 outer = sample_foam_near_layer(2, world_pos, foam_domains.z, dx, dy);
-		return outer * (1.0 - smoothstep(outer_radius * 0.75,
-			outer_radius, distance_to_camera));
+		return sample_foam_near_layer(2, world_pos, foam_domains.z, dx, dy);
 	}
 	return vec2(0.0);
 }
 
+vec2 sample_foam_mean() {
+	float mip = log2(float(textureSize(foam_near_a, 0).x));
+	return foam_near_index > 0.5
+		? textureLod(foam_near_b, vec3(0.5, 0.5, 2.0), mip).rg
+		: textureLod(foam_near_a, vec3(0.5, 0.5, 2.0), mip).rg;
+}
+
+vec4 local_surface(vec2 world) {
+	return ocean_local_sample(coast_field, local_centers.xy, local_domains.x, world)
+		+ ocean_local_sample(wake_field, local_centers.zw, local_domains.y, world);
+}
+
 void fragment() {
+	float shore_weight = shore_enabled ? ocean_shore_weight(world_uv, shore_domain) : 0.0;
+	vec4 shore = vec4(0.0);
+	if (shore_weight > 0.0) {
+		shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, interaction_world_xz);
+		if (shore_weight > 0.999 && shore.w <= 0.002) {
+			discard;
+		}
+	}
 	float map_size = float(textureSize(normals, 0).x);
 	// In fragment() VERTEX is view-space even with world_vertex_coords, and the
 	// view transform is rigid: its length is the true camera-to-pixel distance.
 	float dist = length(VERTEX);
 	vec2 gradient = vec2(0.0);
 	vec2 unresolved_gradient = vec2(0.0);
+	vec2 shore_detail_gradient = vec2(0.0);
 	vec3 deformation = vec3(0.0);
 	vec2 height_gradient = vec2(0.0);
 	float unresolved_slope_variance = 0.0;
@@ -252,6 +301,9 @@ void fragment() {
 	vec2 world_dy = dFdy(world_uv);
 	float pixel_footprint = max(length(world_dx), length(world_dy));
 	for (int i = 0; i < num_cascades; i++) {
+		if (shore_weight >= 1.0 && i == 0) {
+			continue;
+		}
 		if (geometry_cascade >= 0 && i != geometry_cascade) {
 			continue;
 		}
@@ -261,7 +313,7 @@ void fragment() {
 		float cascade_fade = exp(-dist * 0.32 / tile);
 		float distance_fade = min(exp(-(length(world_uv - CAMERA_POSITION_WORLD.xz)
 			- max(tile * 0.7, 60.0)) * 2.5 / max(tile, 80.0)), 1.0);
-		if (fft_surface) {
+		if (fft_surface && shore_weight < 1.0) {
 			vec4 differential = texture(derivatives, coords);
 			float geometry_fade = geometry_weights[i];
 			deformation += differential.xyz * scales.z * geometry_fade;
@@ -283,10 +335,16 @@ void fragment() {
 		}
 		float texel_size = tile / map_size;
 		float minification = smoothstep(texel_size, texel_size * 4.0, pixel_footprint);
-		vec4 magnified = texture_bicubic(normals, coords);
 		vec4 minified = texture_pixel_filtered(normals, coords,
 			world_dx * scales.xy, world_dy * scales.xy);
-		vec4 normal_sample = mix(magnified, minified, minification);
+		vec4 normal_sample = minified;
+		if (shore_weight < 1.0) {
+			normal_sample = mix(texture_bicubic(normals, coords), minified, minification);
+		}
+		if (shore_weight > 0.0 && i > 0) {
+			shore_detail_gradient += normal_sample.xy * scales.w * normal_strength
+				* normal_weight;
+		}
 		if (fft_surface) {
 			unresolved_gradient += normal_sample.xy * scales.w * normal_strength
 				* max(normal_weight - geometry_weights[i], 0.0);
@@ -310,15 +368,32 @@ void fragment() {
 			normal_sample.a * detail_filter);
 	}
 	if (fft_surface) {
-		float a = 1.0 + deformation.x;
-		float b = 1.0 + deformation.y;
-		float c = deformation.z;
-		float jacobian = a * b - c * c;
-		float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);
-		gradient = clamp(vec2(b * height_gradient.x - c * height_gradient.y,
-			a * height_gradient.y - c * height_gradient.x) / safe_jacobian,
+		gradient = clamp(ocean_world_gradient(deformation, height_gradient, 0.08),
 			vec2(-4.0), vec2(4.0)) * normal_strength;
 		gradient += unresolved_gradient;
+	}
+	if (shore_weight > 0.0) {
+		vec2 weight_gradient = ocean_shore_weight_gradient(world_uv, shore_domain);
+		mat2 jacobian = ocean_shore_jacobian(deformation, spectral_displacement.xz,
+			shore_weight, weight_gradient);
+		vec2 shore_gradient = ocean_shore_gradient(shore_field, interaction_world_xz, shore_domain);
+		vec2 material_gradient = (1.0 - shore_weight) * height_gradient
+			+ shore_weight * vec2(dot(jacobian[0], shore_gradient), dot(jacobian[1], shore_gradient))
+			+ (shore.x - spectral_displacement.y) * weight_gradient;
+		gradient = ocean_shore_world_gradient(jacobian, material_gradient) * normal_strength
+			+ unresolved_gradient * (1.0 - shore_weight)
+			+ shore_detail_gradient * shore_weight * smoothstep(0.08, 1.2, shore.w);
+		breaking_mask *= 1.0 - shore_weight;
+		peak_mask *= 1.0 - shore_weight;
+		sss_crest_mask *= 1.0 - shore_weight;
+	} else if (local_waves_enabled && !shore_enabled) {
+		vec2 position = interaction_world_xz;
+		float epsilon = 0.25;
+		gradient += vec2(local_surface(position + vec2(epsilon, 0.0)).x
+				- local_surface(position - vec2(epsilon, 0.0)).x,
+			local_surface(position + vec2(0.0, epsilon)).x
+				- local_surface(position - vec2(0.0, epsilon)).x) / (2.0 * epsilon);
+		breaking_mask = max(breaking_mask, local_surface(position).w);
 	}
 	// Distance de-sharpening (perf/aliasing trade): the base 250 m to 1.5 km
 	// range is scaled by the quality profile or the detail-distance slider.
@@ -329,10 +404,24 @@ void fragment() {
 	gradient *= far_sharpness;
 	peak_mask *= far_sharpness;
 	sss_crest_mask *= far_sharpness;
-	if (foam_near_enabled && foam_feedback_enabled) {
+	float far_foam_blend = 0.0;
+	if (foam_near_enabled && foam_feedback_enabled && shore_weight < 1.0) {
 		vec2 near_coverage = sample_foam_near(world_uv, world_dx, world_dy);
 		foam_history = near_coverage.r;
 		foam_fresh = near_coverage.g;
+		far_foam_blend = smoothstep(foam_domains.z * 0.375,
+			foam_domains.z * 0.5, length(world_uv - foam_near_center));
+		if (far_foam_blend > 0.0) {
+			vec2 far_mean = clamp(sample_foam_mean(), vec2(0.0), vec2(1.0));
+			foam_history = mix(foam_history, far_mean.r, far_foam_blend);
+			foam_fresh = mix(foam_fresh, far_mean.g, far_foam_blend);
+		}
+	}
+	if (shore_weight > 0.0 && foam_feedback_enabled) {
+		vec4 shore_coverage = ocean_local_sample(shore_foam, vec2(0.0), shore_domain,
+			interaction_world_xz);
+		foam_fresh = mix(foam_fresh, shore_coverage.x, shore_weight);
+		foam_history = mix(foam_history, shore_coverage.y, shore_weight);
 	}
 	crest_factor = clamp(peak_mask, 0.0, 1.0);
 	// P3-A + review: overcast storms get no through-crest transmission — the
@@ -377,40 +466,52 @@ void fragment() {
 	float micro_pixel_fade = 1.0 - smoothstep(6.0, 18.0, micro_texel_footprint);
 	vec2 micro_slope = (micro_a.xy + micro_b.xy * 0.62) * micro_normal_strength
 		* micro_distance_fade * micro_pixel_fade * mix(1.0, 1.18, ultra_detail);
-	gradient += wind * micro_slope.x + across * micro_slope.y;
-	float near_persistent_foam = clamp(foam_history * foam_strength, 0.0, 1.0);
-	float near_fresh_foam = clamp(foam_fresh * foam_strength, 0.0, 1.0);
-	float persistent_foam = near_persistent_foam;
-	float fresh_foam = near_fresh_foam;
+	float shore_micro = mix(1.0, smoothstep(0.04, 0.65, shore.w), shore_weight);
+	gradient += (wind * micro_slope.x + across * micro_slope.y) * shore_micro;
+	float persistent_foam = clamp(foam_history * foam_strength, 0.0, 1.0);
+	float fresh_foam = clamp(foam_fresh * foam_strength, 0.0, 1.0);
 	vec2 breakup_uv = world_uv * 0.08 - wind * sim_time * 0.003;
+	float breakup_detail = max(ultra_detail, step(1024.0, map_size));
 	float breakup_bias = mix(2.0, mix(1.0, 2.0,
-		smoothstep(40.0, 180.0, dist)), ultra_detail);
+		smoothstep(40.0, 180.0, dist)), breakup_detail);
 	float breakup = texture(foam_detail, breakup_uv, breakup_bias).g;
 	float interaction_foam_factor = 0.0;
 	if (foam_feedback_enabled) {
-		vec2 interaction_uv = (world_uv - interaction_center) / interaction_size + 0.5;
+		vec2 interaction_uv = (interaction_world_xz - interaction_center)
+			/ interaction_size + 0.5;
 		float inside = step(0.0, interaction_uv.x) * step(0.0, interaction_uv.y)
 			* step(interaction_uv.x, 1.0) * step(interaction_uv.y, 1.0);
 		if (inside > 0.0) {
 			float interaction = texture(interaction_foam, interaction_uv).r;
 			if (interaction > 0.0) {
-				interaction_foam_factor = interaction * mix(0.65, 1.0, breakup);
+				interaction_foam_factor = interaction * mix(mix(0.65, 1.0, breakup),
+					smoothstep(0.25, 0.65, breakup), breakup_detail);
 			}
 		}
 	}
-	float fresh_visual = fresh_foam * mix(1.0, mix(0.55, 1.45, breakup),
-		ultra_detail);
-	float persistent_visual = persistent_foam * mix(1.0,
-		mix(0.8, 1.2, breakup), ultra_detail);
-	float fresh_aa = max(fwidth(fresh_visual), 0.0005);
-	float persistent_aa = max(fwidth(persistent_visual), 0.0005);
-	float fresh_visible = smoothstep(0.022 - fresh_aa,
-		mix(0.160, 0.135, ultra_detail) + fresh_aa, fresh_visual);
-	float persistent_visible = smoothstep(0.018 - persistent_aa,
-		0.110 + persistent_aa, persistent_visual) * 0.35;
-	foam_factor = 1.0 - (1.0 - fresh_visible) * (1.0 - persistent_visible);
+	float fresh_visible = fresh_foam;
+	float persistent_visible = persistent_foam;
+	foam_factor = clamp(fresh_visible + persistent_visible, 0.0, 1.0);
+	if (shore_weight > 0.0 && foam_feedback_enabled) {
+		float fresh_visual = fresh_foam * mix(1.0, mix(0.55, 1.45, breakup), breakup_detail);
+		float persistent_visual = persistent_foam * mix(1.0, mix(0.8, 1.2, breakup), breakup_detail);
+		float fresh_aa = max(fwidth(fresh_visual), 0.0005);
+		float persistent_aa = max(fwidth(persistent_visual), 0.0005);
+		fresh_visible = smoothstep(0.022 - fresh_aa,
+			mix(0.160, 0.135, ultra_detail) + fresh_aa, fresh_visual);
+		persistent_visible = smoothstep(0.018 - persistent_aa, 0.110 + persistent_aa, persistent_visual) * 0.35;
+		vec2 shore_detail_uv = interaction_world_xz * 0.12 - wind * sim_time * 0.003;
+		vec4 shore_detail = texture(foam_detail, shore_detail_uv);
+		float lace_aa = max(fwidth(shore_detail.b), 0.02);
+		float network = smoothstep(0.16 - lace_aa, 0.60 + lace_aa, shore_detail.b);
+		float dense_front = smoothstep(0.60, 0.95, fresh_foam);
+		float shore_visible = fresh_visible * mix(network, 1.0, dense_front * 0.82)
+			+ persistent_visible * network;
+		foam_factor = mix(foam_factor, clamp(shore_visible, 0.0, 1.0), shore_weight);
+	}
 	foam_factor = max(foam_factor, interaction_foam_factor);
-	gradient = mix(gradient, macro_gradient, clamp(foam_factor * 0.8, 0.0, 0.8));
+	gradient = mix(gradient, macro_gradient,
+		clamp(foam_factor * mix(0.2, 0.8, shore_weight), 0.0, 0.8));
 	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
 	// decoupling specularity from detail keeps the sun path bright without
 	// dragging micro normals back behind a corridor gate.
@@ -466,11 +567,6 @@ void fragment() {
 			base_color = mix(base_color, screen_color * dye, refraction_weight);
 		}
 
-		float shore = 1.0 - smoothstep(0.0, 1.3, scene_depth);
-		float shore_foam = shore * shore * smoothstep(0.18, 0.76, breakup + shore * 0.35)
-			* exp(-dist * 0.02);
-		foam_factor = max(foam_factor, min(shore_foam, 0.6));
-
 		vec3 reflected_view = normalize(reflect(-VIEW, NORMAL));
 		vec3 reflected_world = normalize((INV_VIEW_MATRIX * vec4(reflected_view, 0.0)).xyz);
 		float sky_height = clamp(reflected_world.y * 1.8, 0.0, 1.0);
@@ -479,8 +575,9 @@ void fragment() {
 		if (cloud_reflection_enabled && reflected_view.z < -0.02) {
 			vec4 cloud_clip = PROJECTION_MATRIX * vec4(reflected_view, 0.0);
 			vec2 cloud_uv = cloud_clip.xy / max(cloud_clip.w, 1e-4) * 0.5 + 0.5;
-			float cloud_valid = step(0.0, cloud_uv.x) * step(0.0, cloud_uv.y)
-				* step(cloud_uv.x, 1.0) * step(cloud_uv.y, 1.0);
+			float cloud_edge = min(min(cloud_uv.x, 1.0 - cloud_uv.x),
+				min(cloud_uv.y, 1.0 - cloud_uv.y));
+			float cloud_valid = smoothstep(0.0, 0.16, cloud_edge);
 			// P2: explicit LOD + alpha floor kill the blocky-mip artefacts
 			// (swell_day crenellated blocks top-left).
 			vec4 cloud = textureLod(cloud_reflection,
@@ -502,6 +599,7 @@ void fragment() {
 		ROUGHNESS = mix(filtered_roughness, foam_roughness,
 			clamp(foam_factor * 1.1, 0.0, 1.0));
 		vec3 foam_tint = foam_color.rgb * mix(0.96, 1.04, fresh_ratio);
+		foam_tint = clamp(foam_tint, vec3(0.0), vec3(1.0));
 		ALBEDO = mix(base_color, foam_tint, foam_factor);
 		// P0-C.3: atmospheric perspective converges the far sea CONTINUOUSLY
 		// toward the sky, never below it — the old horizon_mix band pulled the
@@ -622,7 +720,7 @@ void light() {
 	float lambertian = 0.38 * wrapped;
 	vec3 transmission = sss_height * sss_tint / (1.0 + light_mask)
 		+ vec3(lambertian);
-	DIFFUSE_LIGHT += mix(transmission,
-		foam_color.rgb, foam_factor) * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR / PI;
+	DIFFUSE_LIGHT += mix(transmission, foam_color.rgb, foam_factor)
+		* (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR / PI;
 	}
 }

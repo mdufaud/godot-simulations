@@ -13,6 +13,7 @@ var settings: Dictionary = {
 
 	# Ocean demo
 	"ocean_map_size": 512,
+	"ocean_scene_mode": 0,
 
 	# Quality tiers (0 Low / 1 Medium / 2 High / 3 Ultra). Every key must exist
 	# here at startup: UserSettings only restores keys already in this dict.

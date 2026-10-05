@@ -1,0 +1,248 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(rgba32f, set = 0, binding = 0) restrict uniform image2D particle_state;
+layout(set = 0, binding = 1) uniform sampler2DArray displacement_fields;
+layout(set = 0, binding = 2) uniform sampler2DArray derivative_fields;
+layout(set = 0, binding = 3) uniform sampler2DArray foam_a;
+layout(set = 0, binding = 4) uniform sampler2DArray foam_b;
+layout(set = 0, binding = 5) uniform sampler2DArray velocity_fields;
+layout(set = 0, binding = 6) uniform sampler2D coast_field;
+layout(set = 0, binding = 7) uniform sampler2D wake_field;
+layout(set = 0, binding = 8) uniform sampler2D shore_surface;
+layout(set = 0, binding = 9) uniform sampler2D shore_foam;
+layout(set = 0, binding = 10) uniform sampler2D shore_derivative;
+layout(std430, set = 0, binding = 11) readonly buffer BreakingSettings {
+    vec4 swell_breaking;
+} breaking_settings;
+
+#define SHORE_DOMAIN_M sp.window.w
+
+layout(push_constant, std430) uniform SprayParams {
+    vec4 clock;
+    vec4 window;
+    vec4 motion;
+    vec4 foam_a_params;
+    vec4 foam_b_params;
+    vec4 tiles;
+    vec4 physical;
+    ivec4 cfg;
+} sp;
+
+uint hash_u32(uint value) {
+    value ^= value >> 16;
+    value *= 2246822519u;
+    value ^= value >> 13;
+    value *= 3266489917u;
+    return value ^ (value >> 16);
+}
+
+float random_value(inout uint seed) {
+    seed = hash_u32(seed + 374761393u);
+    return float(seed >> 8) / 16777215.0;
+}
+
+float foam_fresh_at(vec2 world) {
+    float domain = sp.foam_a_params.z;
+    float texel = domain / float(textureSize(foam_a, 0).x);
+    vec2 center = floor(sp.foam_a_params.xy / texel) * texel;
+    vec2 uv = (world - center) / domain + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return 0.0;
+    }
+    vec2 value = sp.foam_b_params.y > 0.5
+        ? textureLod(foam_b, vec3(uv, 0.0), 0.0).rg
+        : textureLod(foam_a, vec3(uv, 0.0), 0.0).rg;
+    return value.g;
+}
+
+vec3 displacement_at(vec2 world) {
+    vec3 displacement = vec3(0.0);
+    for (int cascade = 0; cascade < 3; cascade++) {
+        displacement += textureLod(displacement_fields,
+            vec3(world / sp.tiles[cascade], float(cascade)), 0.0).xyz;
+    }
+    return displacement;
+}
+
+float shore_weight_at(vec2 material) {
+    return sp.cfg.z != 0 ? ocean_shore_weight(material, SHORE_DOMAIN_M) : 0.0;
+}
+
+vec3 surface_displacement_at(vec2 material) {
+    vec3 displacement = displacement_at(material);
+    if (sp.cfg.z != 0) {
+        displacement.xz *= 1.0 - shore_weight_at(material);
+    }
+    return displacement;
+}
+
+vec4 local_surface_at(vec2 material, vec3 displacement) {
+    if (sp.cfg.z != 0) {
+        return vec4(0.0);
+    }
+    vec2 world = material + displacement.xz;
+    vec4 coast = ocean_local_sample(coast_field,
+        vec2(sp.foam_a_params.w, sp.foam_b_params.x), sp.tiles.w, world);
+    vec4 wake = ocean_local_sample(wake_field,
+        sp.foam_b_params.zw, sp.window.z, world);
+    return vec4(coast.xyz + wake.xyz, max(coast.w, wake.w));
+}
+
+float breaking_at(vec2 world) {
+    float spectral_breaking = ocean_breaking_source(derivative_fields, sp.tiles.xyz,
+        world, sp.physical.y, 7);
+    vec3 displacement = surface_displacement_at(world);
+    float breaking = max(spectral_breaking, local_surface_at(world, displacement).w);
+    float weight = shore_weight_at(world);
+    if (weight > 0.0) {
+        vec2 position = world + displacement.xz;
+        vec4 shore = ocean_local_sample(shore_surface, vec2(0.0), SHORE_DOMAIN_M, position);
+        if (weight > 0.999 && shore.w <= 0.002) {
+            return 0.0;
+        }
+        float fresh = ocean_local_sample(shore_foam, vec2(0.0), SHORE_DOMAIN_M, position).x;
+        breaking = mix(breaking, smoothstep(0.035, 0.32, fresh), weight);
+    }
+    return breaking;
+}
+
+bool water_height_at(vec2 world, out float height) {
+    vec2 material = world;
+    vec3 displacement = surface_displacement_at(material);
+    material = world - displacement.xz;
+    displacement = surface_displacement_at(material);
+    material = world - displacement.xz;
+    displacement = surface_displacement_at(material);
+    if (length(material + displacement.xz - world) > 0.05) {
+        return false;
+    }
+    height = displacement.y + local_surface_at(material, displacement).x;
+    float weight = shore_weight_at(material);
+    if (weight > 0.0) {
+        vec4 shore = ocean_local_sample(shore_surface, vec2(0.0), SHORE_DOMAIN_M, world);
+        height = mix(height, shore.x, weight);
+        if (weight > 0.999 && shore.w <= 0.002) {
+            float bed = ocean_local_sample(shore_derivative, vec2(0.0),
+                SHORE_DOMAIN_M, world).w;
+            height = max(height, bed);
+        }
+    }
+    return true;
+}
+
+vec3 orbital_velocity_at(vec2 world) {
+    vec3 velocity = vec3(0.0);
+    for (int cascade = 0; cascade < 3; cascade++) {
+        velocity += textureLod(velocity_fields,
+            vec3(world / sp.tiles[cascade], float(cascade)), 0.0).xyz;
+    }
+    return velocity;
+}
+
+void main() {
+    uint particle = gl_GlobalInvocationID.x;
+    if (particle >= uint(sp.cfg.x)) {
+        return;
+    }
+
+    ivec2 state_id = ivec2(int(particle), 0);
+    vec4 position_age = imageLoad(particle_state, state_id);
+    vec4 velocity_lifetime = imageLoad(particle_state, ivec2(state_id.x, 1));
+    vec4 seed_size = imageLoad(particle_state, ivec2(state_id.x, 2));
+    uint seed = hash_u32(particle ^ uint(sp.cfg.w));
+    float fixed_dt = sp.clock.x;
+    int step_count = sp.cfg.y;
+
+    for (int step = 0; step < 8; step++) {
+        if (step >= step_count) {
+            break;
+        }
+        bool alive = position_age.w < velocity_lifetime.w;
+        if (alive) {
+            velocity_lifetime.xz += (sp.motion.xy - velocity_lifetime.xz)
+                * sp.physical.w * fixed_dt;
+            velocity_lifetime.y -= sp.physical.x * fixed_dt;
+            position_age.xyz += velocity_lifetime.xyz * fixed_dt;
+            position_age.w += fixed_dt;
+            float water_height = 0.0;
+            bool surface_valid = water_height_at(position_age.xz, water_height);
+            if (position_age.w >= velocity_lifetime.w
+                    || (surface_valid && position_age.y <= water_height)) {
+                position_age.w = velocity_lifetime.w + 1.0;
+            }
+        } else {
+            float emission_draw = random_value(seed);
+            float maximum_probability = 1.0 - exp(-sp.physical.z
+                * max(sp.clock.w, 0.0) * fixed_dt / max(float(sp.cfg.x), 1.0));
+            if (emission_draw < maximum_probability) {
+                float x = random_value(seed);
+                float z = random_value(seed);
+                vec2 cell_world = sp.window.xy + (vec2(x, z) - 0.5) * sp.window.z;
+                vec3 displacement = surface_displacement_at(cell_world);
+                vec2 surface_world = cell_world + displacement.xz;
+                float shore_weight = shore_weight_at(cell_world);
+                vec4 shore = vec4(0.0);
+                if (shore_weight > 0.0) {
+                    shore = ocean_local_sample(shore_surface, vec2(0.0),
+                        SHORE_DOMAIN_M, surface_world);
+                    if (shore_weight > 0.999 && shore.w <= 0.002) {
+                        continue;
+                    }
+                }
+                float breaking = breaking_at(cell_world);
+                float foam = foam_fresh_at(cell_world);
+                if (shore_weight > 0.0) {
+                    float fresh = ocean_local_sample(shore_foam, vec2(0.0),
+                        SHORE_DOMAIN_M, surface_world).x;
+                    foam = mix(foam, fresh, shore_weight);
+                }
+                float gate = breaking * smoothstep(0.015, 0.10, foam);
+                float probability = 1.0 - exp(-sp.physical.z
+                    * max(sp.clock.w, 0.0) * gate * fixed_dt
+                    / max(float(sp.cfg.x), 1.0));
+                if (emission_draw < probability) {
+                    float lifetime_noise = random_value(seed);
+                    float size_noise = random_value(seed);
+                    vec4 local_surface = local_surface_at(cell_world, displacement);
+                    vec3 orbital = orbital_velocity_at(cell_world);
+                    float surface_height = displacement.y + local_surface.x;
+                    vec3 surface_velocity = vec3(orbital.x + local_surface.y + sp.motion.z,
+                        orbital.y, orbital.z + local_surface.z + sp.motion.w);
+                    if (shore_weight > 0.0) {
+                        surface_height = mix(surface_height, shore.x, shore_weight);
+                        vec2 gradient = ocean_shore_gradient(shore_surface,
+                            surface_world, SHORE_DOMAIN_M);
+                        float height_rate = ocean_local_sample(shore_derivative,
+                            vec2(0.0), SHORE_DOMAIN_M, surface_world).z;
+                        vec3 shore_velocity = vec3(shore.y,
+                            height_rate + dot(shore.yz, gradient), shore.z);
+                        surface_velocity = mix(surface_velocity, shore_velocity, shore_weight);
+                    }
+                    vec3 launch_noise = vec3(random_value(seed) - 0.5,
+                        random_value(seed) * 0.5, random_value(seed) - 0.5);
+                    position_age = vec4(cell_world.x + displacement.x,
+                        surface_height + 0.12,
+                        cell_world.y + displacement.z, 0.0);
+                    velocity_lifetime = vec4(surface_velocity.x + launch_noise.x,
+                        1.0 + 2.0 * breaking + surface_velocity.y + launch_noise.y,
+                        surface_velocity.z + launch_noise.z,
+                        mix(0.45, 1.65, lifetime_noise));
+                    vec4 swell_breaking = breaking_settings.swell_breaking;
+                    float swell_weight = swell_breaking.w * (1.0 - shore_weight);
+                    vec2 direction = vec2(cos(swell_breaking.x), sin(swell_breaking.x));
+                    velocity_lifetime.xz += direction * (0.75 * swell_breaking.y * swell_weight);
+                    velocity_lifetime.y = mix(velocity_lifetime.y,
+                        2.0 + max(surface_velocity.y, 0.0) * 0.25 + launch_noise.y, swell_weight);
+                    seed_size = vec4(float(seed), mix(0.035, 0.17, size_noise)
+                        * mix(0.8, 1.35, sp.clock.z), gate, 0.0);
+                }
+            }
+        }
+    }
+
+    imageStore(particle_state, state_id, position_age);
+    imageStore(particle_state, ivec2(state_id.x, 1), velocity_lifetime);
+    imageStore(particle_state, ivec2(state_id.x, 2), seed_size);
+}

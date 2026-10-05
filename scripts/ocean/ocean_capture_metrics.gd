@@ -40,7 +40,8 @@ static func measure(displacement: Array[PackedFloat32Array],
 		heights += height
 		height_squares += height * height
 		slopes += d.w * d.w + dz * dz
-		sources += smoothstep(0.0, 0.2, onset - stretch)
+		var jacobian := (1.0 + d.x) * (1.0 + d.y) - d.z * d.z
+		sources += maxf(onset - jacobian, 0.0)
 	stretches.sort()
 	return {"samples": 2048, "height_rms_m": sqrt(maxf(height_squares / 2048.0 - pow(heights / 2048.0, 2.0), 0.0)),
 		"band_variance_m2": band_variance, "slope_rms": sqrt(slopes / 2048.0),

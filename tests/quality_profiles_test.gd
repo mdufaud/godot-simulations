@@ -104,10 +104,10 @@ func _test_ocean_tables() -> void:
 		_check(values.foam_near_size in [512, 1024, 2048],
 			"ocean foam near size %s outside the calibrated set" % values.foam_near_size)
 	var ocean_config := OceanConfig.new()
-	for size in [32, 256, 512, 1024]:
+	for size in [256, 512, 1024]:
 		ocean_config.map_size = size
 		_check(ocean_config.validate() == "", "ocean FFT size %d should be valid" % size)
-	for size in [8, 16, 48, 2048]:
+	for size in [8, 16, 32, 48, 128, 2048]:
 		ocean_config.map_size = size
 		_check(ocean_config.validate() != "", "ocean FFT size %d should be rejected" % size)
 	_check(OceanQualityProfile.default_tier() == OceanQualityProfile.Tier.HIGH,

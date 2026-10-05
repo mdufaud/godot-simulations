@@ -14,28 +14,23 @@ float shifted_component(ivec2 id, int layer, int component) {
     return component == 0 ? value.x : value.y;
 }
 
-float height_sample(ivec2 id, int cascade) {
-    return shifted_component(id, cascade, 1);
+float height_sample(ivec2 id) {
+    return shifted_component(id, 0, 1);
 }
 
-// The tutorial field is periodic over a fixed 20 m domain regardless of the
-// short cascade's tile length: wave vectors are integer cycles of that domain
-// and the noise repeats an integer number of times per domain.
-const float TUTORIAL_DOMAIN = 20.0;
-
 float tutorial_noise(vec2 uv, vec2 direction) {
-    float repeats = params.spectrum_a.x / TUTORIAL_DOMAIN * 2.0;
     float loop_time = mod(params.foam_p.w, 200.0);
+    vec2 drift_cycles = round(direction * 14.0);
     return textureLod(foam_noise_texture,
-        uv * repeats * 2.0 + vec2(1.0) + loop_time * direction * 0.07, 0.0).r;
+        uv * 2.0 + vec2(1.0) + loop_time * drift_cycles / 200.0, 0.0).r;
 }
 
 vec3 tutorial_gerstner(vec2 pos, vec2 uv, vec2 direction, float amplitude,
         float frequency, float speed, float steepness, float scale) {
     direction = normalize(direction);
-    vec2 wave_vector = direction
-        * round(frequency * TUTORIAL_DOMAIN / (2.0 * PI))
-        * (2.0 * PI / TUTORIAL_DOMAIN);
+    float tile_length = params.spectrum_a.x;
+    vec2 lattice_cycles = round(direction * frequency * tile_length / (2.0 * PI));
+    vec2 wave_vector = lattice_cycles * (2.0 * PI / tile_length);
     float angular_speed = round(speed * 200.0 / (2.0 * PI))
         * (2.0 * PI / 200.0);
     float phase = mod(params.foam_p.w, 200.0) * angular_speed
@@ -144,10 +139,10 @@ void main() {
     float height_norm = hy / height_reference;
     float texel_m = params.spectrum_a.x / float(MAP_SIZE);
     float laplacian = (4.0 * hy
-        - height_sample(id + ivec2(1, 0), cascade)
-        - height_sample(id + ivec2(-1, 0), cascade)
-        - height_sample(id + ivec2(0, 1), cascade)
-        - height_sample(id + ivec2(0, -1), cascade))
+        - height_sample(id + ivec2(1, 0))
+        - height_sample(id + ivec2(-1, 0))
+        - height_sample(id + ivec2(0, 1))
+        - height_sample(id + ivec2(0, -1)))
         / max(texel_m * texel_m, 1e-4);
     float curvature_scale = height_reference
         * pow(2.0 * PI / max(band_length, 2.0), 2.0);
@@ -165,19 +160,12 @@ void main() {
     float breaking_source = 1.0 - smoothstep(0.0, 0.7, jacobian);
     if (!tutorial_model) {
         float source_onset = clamp(params.foam_p.x, 0.05, 0.95);
-        float stretch_discriminant = max(0.0,
-            (dhx_dx - dhz_dz) * (dhx_dx - dhz_dz)
-            + 4.0 * dhx_dz * dhz_dx);
-        float min_stretch = 0.5 * (2.0 + dhx_dx + dhz_dz
-            - sqrt(stretch_discriminant));
-        breaking_source = smoothstep(0.0, 0.2, source_onset - min_stretch);
+        float min_stretch = ocean_minimum_stretch(vec3(dhx_dx, dhz_dz, dhz_dx));
+        breaking_source = clamp(1.0 - min_stretch / source_onset, 0.0, 1.0);
     }
 
-    float safe_jacobian = (jacobian < 0.0 ? -1.0 : 1.0) * max(abs(jacobian), 0.08);
-    vec2 gradient = vec2(
-        ((1.0 + dhz_dz) * dhy_dx - dhz_dx * dhy_dz) / safe_jacobian,
-        ((1.0 + dhx_dx) * dhy_dz - dhx_dz * dhy_dx) / safe_jacobian
-    );
+    vec2 gradient = ocean_world_gradient(vec3(dhx_dx, dhz_dz, dhz_dx),
+        vec2(dhy_dx, dhy_dz), 0.08);
     gradient = clamp(gradient, vec2(-4.0), vec2(4.0));
 
     imageStore(derivative_map, ivec3(id, cascade), vec4(dhx_dx, dhz_dz, dhz_dx, dhy_dx));

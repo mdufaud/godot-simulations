@@ -3,63 +3,133 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(set = 0, binding = 0) uniform sampler2DArray derivative_fields;
 layout(set = 0, binding = 1) uniform sampler2DArray history_input;
 layout(rg32f, set = 0, binding = 2) restrict uniform image2D near_output;
+layout(set = 0, binding = 3) uniform sampler2D coast_map;
+layout(set = 0, binding = 4) uniform sampler2D wake_map;
+layout(set = 0, binding = 5) uniform sampler2DArray displacements;
 
 layout(push_constant, std430) uniform NearParams {
     vec4 camera;
     vec4 rates;
     vec4 cfg;
-    ivec4 icfg;
+    ivec2 icfg;
+    vec2 current;
     vec4 tiles;
     vec4 extra;
+    vec4 centers;
+    vec4 local;
 } np;
 
-float integrate_coverage(float previous, float growth, float decay) {
-    float rate = growth + decay;
-    float equilibrium = growth / max(rate, 1e-8);
-    return mix(previous, equilibrium, 1.0 - exp(-rate));
+vec4 local_surface(vec2 q) {
+	vec2 coast_delta = abs(q - np.centers.xy);
+	vec2 wake_delta = abs(q - np.centers.zw);
+	bool near_coast = all(lessThanEqual(coast_delta,
+		vec2(np.local.x * 0.5 + 16.0)));
+	bool near_wake = all(lessThanEqual(wake_delta,
+		vec2(np.local.y * 0.5 + 16.0)));
+	if (!near_coast && !near_wake) {
+		return vec4(0.0);
+	}
+    vec2 world = q;
+    for (int cascade = 0; cascade < 3; cascade++) {
+        world += textureLod(displacements, vec3(q / np.tiles[cascade], float(cascade)), 0.0).xz;
+    }
+    return ocean_local_sample(coast_map, np.centers.xy, np.local.x, world)
+        + ocean_local_sample(wake_map, np.centers.zw, np.local.y, world);
+}
+
+vec2 foam_density(vec2 coverage) {
+    vec2 target = clamp(coverage, vec2(0.0), vec2(0.84375));
+    vec2 value = sqrt(target / 3.0);
+    for (int iteration = 0; iteration < 4; iteration++) {
+        value -= (value * value * (3.0 - 2.0 * value) - target)
+            / max(6.0 * value * (1.0 - value), vec2(1e-8));
+    }
+    return clamp(value / 0.75, vec2(0.0), vec2(1.0));
+}
+
+vec2 foam_coverage(vec2 density) {
+    vec2 value = clamp(density * 0.75, vec2(0.0), vec2(1.0));
+    return value * value * (3.0 - 2.0 * value);
 }
 
 float breaking_at(vec2 position) {
-    vec3 derivative = vec3(0.0);
+    vec3 strain = vec3(0.0);
     for (int cascade = 0; cascade < 3; cascade++) {
         if ((np.icfg.y & (1 << cascade)) != 0) {
-            derivative += textureLod(derivative_fields,
+            strain += textureLod(derivative_fields,
                 vec3(position / np.tiles[cascade], float(cascade)), 0.0).xyz;
         }
     }
-    float a = 1.0 + derivative.x;
-    float b = 1.0 + derivative.y;
-    float c = derivative.z;
-    float stretch = 0.5 * (a + b - sqrt((a - b) * (a - b) + 4.0 * c * c));
-    return smoothstep(0.0, 0.2, np.tiles.w - stretch);
+    float jacobian = (1.0 + strain.x) * (1.0 + strain.y) - strain.z * strain.z;
+    return max(np.tiles.w - jacobian, 0.0);
+}
+
+vec2 history_at(vec2 material, vec2 drift) {
+    vec2 previous_uv = (material - np.camera.zw - drift * np.cfg.y) / np.cfg.x + 0.5;
+    vec2 border = min(previous_uv, 1.0 - previous_uv) * np.cfg.w;
+    if (min(border.x, border.y) < 0.5) {
+        return vec2(0.0);
+    }
+    return textureLod(history_input, vec3(previous_uv, float(np.icfg.x)), 0.0).rg;
+}
+
+vec2 sample_jitter(ivec2 world_cell) {
+    uint tick = uint(floor(np.extra.x * 30.0));
+    uint hash = uint(world_cell.x) * 1664525u
+        ^ uint(world_cell.y) * 1013904223u ^ tick * 747796405u;
+    hash ^= hash >> 16;
+    hash *= 2246822519u;
+    hash ^= hash >> 13;
+    return vec2(float(hash & 65535u), float(hash >> 16)) / 65535.0 - 0.5;
+}
+
+float filtered_source(vec2 world, float texel_world, float local_breaking) {
+    vec2 sample_world = world;
+    if (np.icfg.x != 0) {
+        ivec2 world_cell = ivec2(floor(world / texel_world));
+        sample_world += sample_jitter(world_cell) * texel_world;
+    }
+    return max(breaking_at(sample_world), local_breaking);
 }
 
 void main() {
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
     vec2 uv = (vec2(id) + 0.5) / np.cfg.w;
-    vec2 world = np.camera.xy + (uv - 0.5) * np.cfg.x;
-    vec2 previous_uv = (world - np.camera.zw
-        - np.extra.zw * np.cfg.z * np.cfg.y) / np.cfg.x + 0.5;
-    vec2 previous = vec2(0.0);
-    vec2 border = min(previous_uv, 1.0 - previous_uv) * np.cfg.w;
-    if (min(border.x, border.y) >= 0.5) {
-        previous = textureLod(history_input, vec3(previous_uv, float(np.icfg.x)), 0.0).rg;
+    vec2 material = np.camera.xy + (uv - 0.5) * np.cfg.x;
+    vec2 drift = np.extra.zw;
+    float local_breaking = 0.0;
+    if (np.local.z > 0.5) {
+        vec4 local = local_surface(material);
+        drift += local.yz;
+        local_breaking = local.w;
     }
-    float footprint = np.cfg.x / np.cfg.w * 0.25;
-    float source = 0.25 * (breaking_at(world + vec2(footprint, footprint))
-        + breaking_at(world + vec2(-footprint, footprint))
-        + breaking_at(world + vec2(footprint, -footprint))
-        + breaking_at(world - vec2(footprint, footprint)));
-    float fresh = integrate_coverage(previous.g, source * np.rates.w, np.rates.y);
-    float active_rate = source * np.rates.w + np.rates.y;
+    vec2 previous = foam_density(history_at(material, drift));
+    previous.g = foam_density(history_at(material, drift - np.extra.zw + np.current)).g;
+    float texel_world = np.cfg.x / np.cfg.w;
+    float source = filtered_source(material, texel_world, local_breaking);
+    float active_rate = max(np.rates.y, 1e-8);
     float active_equilibrium = source * np.rates.w / max(active_rate, 1e-8);
-    float residual_decay = exp(-np.rates.x);
+    float active_duration = 1.0;
+    if (active_equilibrium > 1.0) {
+        active_duration = active_rate < 1e-4
+            ? clamp((1.0 - previous.g) / max(source * np.rates.w, 1e-8), 0.0, 1.0)
+            : clamp(log((active_equilibrium - previous.g)
+                / (active_equilibrium - 1.0)) / active_rate, 0.0, 1.0);
+    }
+    float attack = active_rate < 1e-4 ? 1.0 - active_rate * 0.5
+        : (1.0 - exp(-active_rate)) / active_rate;
+    float fresh = clamp(previous.g * exp(-active_rate)
+        + source * np.rates.w * attack, 0.0, 1.0);
+    float residual_decay = exp(-np.rates.x * active_duration);
     float rate_difference = active_rate - np.rates.x;
     float transfer = abs(rate_difference) < 1e-5
-        ? residual_decay * (1.0 - 0.5 * rate_difference)
-        : (residual_decay - exp(-active_rate)) / rate_difference;
+        ? residual_decay * active_duration
+        : (residual_decay - exp(-active_rate * active_duration)) / rate_difference;
     float persistent = previous.r * residual_decay
         + np.rates.z / max(np.rates.x, 1e-8) * active_equilibrium * (1.0 - residual_decay)
         + np.rates.z * (previous.g - active_equilibrium) * transfer;
-    imageStore(near_output, id, vec4(persistent, fresh, 0.0, 1.0));
+    float capped_decay = exp(-np.rates.x * (1.0 - active_duration));
+    persistent = persistent * capped_decay
+        + np.rates.z / max(np.rates.x, 1e-8) * (1.0 - capped_decay);
+    imageStore(near_output, id, vec4(foam_coverage(vec2(persistent, fresh)), 0.0, 1.0));
 }

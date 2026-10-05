@@ -23,19 +23,23 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 ## Distance the wind has blown over open water; JONSWAP peaks lower and higher
 ## as it grows.
 @export_range(5.0, 1000.0, 1.0) var fetch_km := 120.0
-## Weight of the long, low-frequency swell relative to the wind sea.
+## Legacy swell factor used in wind-sea directional spreading.
 @export_range(0.0, 2.0, 0.01) var swell := 0.8
 ## Directional spreading: 0 is a narrow, aligned sea, 1 is confused.
 @export_range(0.0, 1.0, 0.01) var spread := 0.2
 @export_range(0.5, 1.0, 0.01) var detail := 1.0
 @export_range(1.0, 7.0, 0.1) var jonswap_gamma := 3.3
 
+@export_group("Independent Swell")
+@export_range(0.0, 12.0, 0.05) var swell_height_m := 0.6
+@export_range(2.0, 30.0, 0.1) var swell_period_s := 10.0
+@export_range(-3.14159, 3.14159, 0.01) var swell_direction_rad := 0.35
+@export_range(0.01, 1.0, 0.01) var swell_spread := 0.15
+@export var current_velocity_m_s := Vector2.ZERO
+
 @export_group("Waves")
 @export_range(0.0, 1.8, 0.01) var choppiness := 1.15
-## Overall sea amplitude. 1.0 = the physical JONSWAP amplitude for the wind
-## and fetch (the GodotOceanWaves reference look, waves near breaking
-## steepness); 0.25 = the old quarter-height calibration. Applied through the
-## spectrum alpha, so it scales every band and its derivatives together.
+## Overall amplitude multiplier for the combined wind sea and independent swell.
 @export_range(0.1, 2.0, 0.05) var amplitude_scale := 1.0
 @export_range(0.0, 5.0, 0.01) var height_gain := 1.0
 @export_range(0.0, 10.0, 0.01) var long_wave_height_m := 2.6
@@ -60,24 +64,28 @@ enum WaveModel { FFT, TUTORIAL_GERSTNER }
 @export_range(0.0, 1.0, 0.01) var storm_mood := 0.0
 
 func validate() -> String:
-	if wind_speed_mps <= 0.0:
-		return "wind_speed_mps must be positive"
-	if fetch_km <= 0.0:
-		return "fetch_km must be positive"
-	if detail < 0.5 or detail > 1.0:
-		return "detail must be in 0.5..1"
-	if jonswap_gamma < 1.0 or jonswap_gamma > 7.0:
-		return "jonswap_gamma must be in 1..7"
-	if height_gain < 0.0:
-		return "height_gain cannot be negative"
-	if long_wave_height_m < 0.0 or mid_wave_height_m < 0.0 \
-		or wind_wave_height_m < 0.0:
-		return "wave-band strengths cannot be negative"
-	if long_wave_length_m <= 0.0 or mid_wave_length_m <= 0.0 \
-		or wind_wave_length_m <= 0.0:
-		return "wave-band lengths must be positive"
-	if foam_persistence <= 0.0:
-		return "foam_persistence must be positive"
+	for property: Dictionary in get_property_list():
+		var usage: int = property.usage
+		if not usage & PROPERTY_USAGE_SCRIPT_VARIABLE or not usage & PROPERTY_USAGE_STORAGE:
+			continue
+		var field: String = property.name
+		if property.type == TYPE_FLOAT:
+			var value: float = get(field)
+			if not is_finite(value):
+				return "%s must be finite" % field
+			if property.hint == PROPERTY_HINT_RANGE:
+				var limits: PackedStringArray = String(property.hint_string).split(",")
+				if limits.size() >= 2:
+					var minimum: float = float(limits[0])
+					var maximum: float = float(limits[1])
+					if value < minimum or value > maximum:
+						return "%s must be in %s..%s" % [field, minimum, maximum]
+		elif field == "current_velocity_m_s" and not current_velocity_m_s.is_finite():
+			return "current_velocity_m_s must be finite"
+		elif field == "wave_model":
+			var enum_values: PackedStringArray = String(property.hint_string).split(",")
+			if wave_model < 0 or wave_model >= enum_values.size():
+				return "wave_model is invalid"
 	return ""
 
 
@@ -87,6 +95,11 @@ func apply_to(solver: OceanSolver) -> void:
 	solver.wind_speed = wind_speed_mps
 	solver.fetch_km = fetch_km
 	solver.swell = swell
+	solver.swell_height_m = swell_height_m
+	solver.swell_period_s = swell_period_s
+	solver.swell_direction_rad = swell_direction_rad
+	solver.swell_spread = swell_spread
+	solver.current_velocity_m_s = current_velocity_m_s
 	solver.spread = spread
 	solver.detail = detail
 	solver.jonswap_gamma = jonswap_gamma

@@ -1,0 +1,89 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+vec4 sample_previous(int bank, vec2 world) {
+    float n = float(LOCAL_N);
+    vec2 uv = (world - lp.domain.zw) / lp.grid.x + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return vec4(0.0);
+    }
+    vec2 grid = uv * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 max_index = ivec2(int(n) - 1);
+    ivec2 w0 = clamp(i0, ivec2(0), max_index);
+    ivec2 w1 = clamp(i0 + ivec2(1), ivec2(0), max_index);
+    vec4 c00 = imageLoad(local_state_previous, ivec3(w0, bank));
+    vec4 c10 = imageLoad(local_state_previous, ivec3(w1.x, w0.y, bank));
+    vec4 c01 = imageLoad(local_state_previous, ivec3(w0.x, w1.y, bank));
+    vec4 c11 = imageLoad(local_state_previous, ivec3(w1, bank));
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+vec4 sample_current(int bank, vec2 world) {
+    float n = float(LOCAL_N);
+    vec2 uv = (world - lp.domain.xy) / lp.grid.x + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return vec4(0.0);
+    }
+    vec2 grid = uv * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 max_index = ivec2(int(n) - 1);
+    ivec2 w0 = clamp(i0, ivec2(0), max_index);
+    ivec2 w1 = clamp(i0 + ivec2(1), ivec2(0), max_index);
+    vec4 c00 = imageLoad(local_state_current, ivec3(w0, bank));
+    vec4 c10 = imageLoad(local_state_current, ivec3(w1.x, w0.y, bank));
+    vec4 c01 = imageLoad(local_state_current, ivec3(w0.x, w1.y, bank));
+    vec4 c11 = imageLoad(local_state_current, ivec3(w1, bank));
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+vec4 blended_state(vec2 world, bool current) {
+    vec3 selection = depth_selection(bathymetry(world));
+    int first = int(selection.x);
+    int second = int(selection.y);
+    vec4 a = current ? sample_current(first, world) : sample_previous(first, world);
+    vec4 b = current ? sample_current(second, world) : sample_previous(second, world);
+    return mix(a, b, selection.z);
+}
+
+float residual_height(vec2 world, float alpha) {
+    vec4 previous = blended_state(world, false);
+    vec4 current = blended_state(world, true);
+    return mix(previous.x - previous.z, current.x - current.z, alpha);
+}
+
+float residual_potential(vec2 world, float alpha) {
+    vec4 previous = blended_state(world, false);
+    vec4 current = blended_state(world, true);
+    return mix(previous.y - previous.w, current.y - current.w, alpha);
+}
+
+float total_height(vec2 world, float alpha) {
+    vec4 previous = blended_state(world, false);
+    vec4 current = blended_state(world, true);
+    return mix(previous.x, current.x, alpha);
+}
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    vec2 world = world_at(id);
+    float alpha = clamp(lp.time.y, 0.0, 1.0);
+    float cell = lp.grid.x / float(LOCAL_N);
+    float height = residual_height(world, alpha);
+    float velocity_x = (residual_potential(world + vec2(cell, 0.0), alpha)
+        - residual_potential(world - vec2(cell, 0.0), alpha)) / (2.0 * cell);
+    float velocity_z = (residual_potential(world + vec2(0.0, cell), alpha)
+        - residual_potential(world - vec2(0.0, cell), alpha)) / (2.0 * cell);
+    float total_eta = total_height(world, alpha);
+    float slope_x = (total_height(world + vec2(cell, 0.0), alpha)
+        - total_height(world - vec2(cell, 0.0), alpha)) / (2.0 * cell);
+    float slope_z = (total_height(world + vec2(0.0, cell), alpha)
+        - total_height(world - vec2(0.0, cell), alpha)) / (2.0 * cell);
+    float depth = bathymetry(world);
+    float depth_breaking = smoothstep(0.78, 1.0, 2.0 * abs(total_eta) / depth);
+    float steepness_breaking = smoothstep(0.7, 1.0, length(vec2(slope_x, slope_z)));
+    float breaking = max(depth_breaking, steepness_breaking)
+        * (1.0 - smoothstep(20.0, 64.0, depth));
+    imageStore(local_output, id, vec4(height, velocity_x, velocity_z, breaking));
+}

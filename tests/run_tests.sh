@@ -3,7 +3,7 @@
 # with GPU=1 — the rendering suites in an invisible virtual Wayland display.
 #
 #   tests/run_tests.sh                 # CPU/value gates only (the default gate)
-#   GPU=1 tests/run_tests.sh           # + ocean FFT, portal views, scene cycle, fluid foam, UI smoke
+#   GPU=1 tests/run_tests.sh           # + ocean FFT/physics, portal views, scene cycle, fluid foam, UI smoke
 #   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
 #
 # JOBS caps the concurrently running suites in both phases (default 2). All
@@ -119,6 +119,8 @@ declare -a CPU_SUITES=(
 	"sim_step_clock|res://tests/sim_step_clock_test.gd"
 	"nbody_values|res://tests/nbody_value_test.gd"
 	"quality_profiles|res://tests/quality_profiles_test.gd"
+	"ocean_buoyancy|res://tests/ocean_buoyancy_test.gd"
+	"ocean_parameters|res://tests/ocean_parameter_test.gd"
 	"alpine_terrain|res://tests/alpine_terrain_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do
@@ -137,7 +139,7 @@ done
 
 # The GPU phase boots a virtual Wayland compositor and renders real frames —
 # heavy, and it contends with everything else running on the machine. It is a
-# last resort: opt in with GPU=1 for compute suites (ocean FFT, portal views),
+# last resort: opt in with GPU=1 for compute suites (ocean FFT/physics, portal views),
 # the fluid foam decay gate, the full scene cycle and the SimMenu touch smoke.
 # Evidence captures are never part of the gate: use tools/capture.sh and
 # tests/run_mixwell_capture.sh by hand instead.
@@ -152,7 +154,7 @@ if [[ "${GPU:-0}" != "1" ]]; then
 fi
 
 	if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-		failed+=(non_euclidean ocean_fft scene_cycle tornado_boot_look fluid_foam fluid_tier ui_smoke)
+		failed+=(non_euclidean ocean_fft ocean_physics scene_cycle tornado_boot_look fluid_foam fluid_tier ui_smoke)
 	else
 	export PHYSICS_TEST_DISPLAY_DRIVER
 	export PHYSICS_TEST_RENDERING_DRIVER
@@ -182,7 +184,7 @@ fi
 	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
 	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
 	ocean_fft_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
+	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
 		env -u DISPLAY \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
@@ -199,6 +201,48 @@ fi
 		printf 'Log: %s\n' "$ocean_fft_output" >&2
 		failed+=(ocean_fft)
 	fi
+
+	ocean_physics_output="$LOG_DIR/gpu-ocean_physics.stdout.log"
+	ocean_physics_log="$LOG_DIR/gpu-ocean_physics.godot.log"
+	ocean_physics_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS ocean_physics$' "$ocean_physics_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$ocean_physics_log" \
+			-s res://tests/ocean_physics_test.gd || ocean_physics_status=$?
+	if (( ocean_physics_status == 0 )) && grep -q '^TEST PASS ocean_physics$' "$ocean_physics_output"; then
+		printf 'TEST PASS ocean_physics\n'
+	else
+		printf 'TEST FAIL ocean_physics: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$ocean_physics_output" >&2
+		failed+=(ocean_physics)
+	fi
+
+	for ocean_suite in ocean_shore ocean_island; do
+		ocean_output="$LOG_DIR/gpu-${ocean_suite}.stdout.log"
+		ocean_status=0
+		physics_test_run_process "$TIMEOUT" "^TEST PASS ${ocean_suite}$" "$ocean_output" \
+			env -u DISPLAY \
+			XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+			WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+			"$GODOT" --path "$PROJECT_DIR" \
+				--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+				--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+				--log-file "$LOG_DIR/gpu-${ocean_suite}.godot.log" \
+				-s "res://tests/${ocean_suite}_test.gd" || ocean_status=$?
+		if (( ocean_status == 0 )); then
+			printf 'TEST PASS %s\n' "$ocean_suite"
+		else
+			printf 'TEST FAIL %s; log: %s\n' "$ocean_suite" "$ocean_output" >&2
+			failed+=("$ocean_suite")
+		fi
+	done
 
 	scene_cycle_output="$LOG_DIR/gpu-scene_cycle.stdout.log"
 	scene_cycle_log="$LOG_DIR/gpu-scene_cycle.godot.log"

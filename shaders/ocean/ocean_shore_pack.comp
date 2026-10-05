@@ -1,0 +1,28 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 mode = id - ivec2(MAP_SIZE / 2u);
+    ivec2 source_id = (mode + ivec2(params.sizes.y / 2) + ivec2(params.sizes.y)) % params.sizes.y;
+    vec4 h0 = imageLoad(spectrum_tex, ivec3(source_id, params.misc.y));
+    vec2 texture_k = vec2(mode) * (2.0 * PI / params.tiles[params.misc.y]);
+    float k = length(texture_k);
+    vec2 height = vec2(0.0);
+    vec2 horizontal = vec2(0.0);
+    vec2 vertical_z = vec2(0.0);
+    if (k > 1.0e-8 && k <= 2.0 * PI / params.current.w) {
+        vec2 world_k = texture_k.yx;
+        float omega = sqrt(params.domain.z * k * tanh(k * params.physical.x));
+        vec2 phase = exp_complex(-omega * control.forcing.x);
+        vec2 a = mul_complex(h0.xy, phase);
+        vec2 b = mul_complex(h0.zw, conj_complex(phase));
+        vec2 current_phase = exp_complex(-dot(world_k, control.forcing.yz) * control.forcing.x);
+        height = mul_complex(a + b, current_phase);
+        vec2 traveling = mul_complex(a - b, current_phase);
+        float depth_average = omega / max(k * params.tiles.w, 1.0e-8);
+        horizontal = traveling * (depth_average * world_k.x / k);
+        vertical_z = traveling * (depth_average * world_k.y / k);
+    }
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = vec2(height.x - horizontal.y, height.y + horizontal.x);
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vertical_z;
+}

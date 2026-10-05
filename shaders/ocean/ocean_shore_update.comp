@@ -1,0 +1,122 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    uint target = (1u - control.flags.x) * pixel_count() + i;
+    float dt = control.clock.w;
+    vec4 q = read_water(p);
+    vec4 f = read_foam(p);
+    vec4 original_q = water[target];
+    vec4 original_f = foam[target];
+    FaceFlux east = face_flux(p, p + ivec2(1, 0), 0);
+    FaceFlux west = face_flux(p - ivec2(1, 0), p, 0);
+    FaceFlux north = face_flux(p, p + ivec2(0, 1), 1);
+    FaceFlux south = face_flux(p - ivec2(0, 1), p, 1);
+    east.flow.y += east.left_correction;
+    west.flow.y += west.right_correction;
+    north.flow.z += north.left_correction;
+    south.flow.z += south.right_correction;
+    vec3 next = q.xyz - dt / params.domain.y * (east.flow - west.flow + north.flow - south.flow);
+    float clipping = max(-next.x, 0.0) * params.domain.y * params.domain.y;
+    next.x = max(next.x, 0.0);
+    vec2 tracer = max(f.xy - dt / params.domain.y * (east.tracer - west.tracer + north.tracer - south.tracer), vec2(0.0));
+    vec2 world = world_position(p);
+    float distance_edge = params.domain.x * 0.5 - max(abs(world.x), abs(world.y));
+    float sponge = pow(max(1.0 - distance_edge / params.physical.y, 0.0), 2.0);
+    float blend = min(4.0 * sqrt(params.domain.z * params.tiles.w) / params.physical.y * sponge * dt, 1.0);
+    float before_sponge = next.x;
+    if (blend > 0.0) {
+        vec3 incoming = offshore(world);
+        float h = max(incoming.x - bed[i], 0.0);
+        next = mix(next, vec3(h, h * incoming.yz), blend);
+        tracer *= 1.0 - blend;
+    }
+    float boundary_volume = 0.0;
+    if (p.x == 0) boundary_volume += dt * params.domain.y * west.flow.x;
+    if (p.x == params.sizes.x - 1) boundary_volume -= dt * params.domain.y * east.flow.x;
+    if (p.y == 0) boundary_volume += dt * params.domain.y * south.flow.x;
+    if (p.y == params.sizes.x - 1) boundary_volume -= dt * params.domain.y * north.flow.x;
+    balance[i] += 0.5 * vec4(boundary_volume, (next.x - before_sponge) * params.domain.y * params.domain.y, clipping, 0.0);
+    if (params.misc.z == 0) {
+        water[target] = vec4(next, 0.0);
+        foam[target] = vec4(tracer, f.zw);
+        return;
+    }
+    next = 0.5 * (original_q.xyz + next);
+    tracer = 0.5 * (original_f.xy + tracer);
+    q = original_q;
+    f = original_f;
+    if (next.x > params.domain.w) {
+        for (uint force = 0u; force < control.counts.x; ++force) {
+            vec4 event = events[uint(params.misc.w) + force];
+            vec2 offset = world - event.xy;
+            float radius = max(1.5, params.domain.y * 1.5);
+            float kernel = exp(-dot(offset, offset) / (radius * radius)) / (PI * radius * radius);
+            next.yz += event.zw * (kernel / params.physical.w);
+        }
+        for (int force = 0; force < params.sizes.w; ++force) {
+            vec4 support = pressures[force];
+            vec2 offset = world - support.xy;
+            float radius2 = support.w * support.w;
+            float pressure = support.z * exp(-dot(offset, offset) / radius2) / (PI * radius2);
+            next.yz += dt * next.x * 2.0 * pressure / (params.physical.w * radius2) * offset;
+        }
+        float drag = 0.018 * length(next.yz) / max(next.x * next.x, params.domain.w * params.domain.w);
+        next.yz /= 1.0 + dt * drag;
+    } else next.yz = vec2(0.0);
+    vec2 v = next.x > params.domain.w ? next.yz / next.x : vec2(0.0);
+    vec4 qe = read_water(p + ivec2(1, 0));
+    vec4 qw = read_water(p - ivec2(1, 0));
+    vec4 qn = read_water(p + ivec2(0, 1));
+    vec4 qs = read_water(p - ivec2(0, 1));
+    vec2 ve = velocity(qe);
+    vec2 vw = velocity(qw);
+    vec2 vn = velocity(qn);
+    vec2 vs = velocity(qs);
+    float compression = max(-(ve.x - vw.x + vn.y - vs.y) / (2.0 * params.domain.y) - 0.18, 0.0);
+    float incoming_mass = max(west.flow.x, 0.0) + max(-east.flow.x, 0.0)
+        + max(south.flow.x, 0.0) + max(-north.flow.x, 0.0);
+    float moving = smoothstep(0.12, 0.5, length(v));
+    bool dry_neighbor = min(min(qe.x, qw.x), min(qn.x, qs.x)) <= params.domain.w * 4.0;
+    float advancing = dry_neighbor && next.x > q.x ? 1.0 : 0.0;
+    float front = advancing * (1.0 - smoothstep(0.02, 0.35, next.x))
+        * incoming_mass / max(next.x * params.domain.y, 0.01);
+    float shallow = 1.0 - smoothstep(0.4, 2.0, next.x);
+    float source = min((compression * max(shallow, dry_neighbor ? 1.0 : 0.0) + front)
+        * moving, 10.0) * params.step.z;
+    float fresh = tracer.x / max(next.x, 1.0e-8);
+    float generated = (1.0 - exp(-source * dt)) * max(1.0 - fresh, 0.0) * next.x;
+    tracer.x += generated;
+    float released = tracer.x * (1.0 - exp(-params.step.w / 0.167 * dt));
+    tracer.x -= released;
+    tracer.y = tracer.y * exp(-params.step.w * dt) + released * 0.75;
+    tracer = clamp(tracer, vec2(0.0), vec2(next.x));
+    float slope = length(vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+        read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1)))) / (2.0 * params.domain.y);
+    float sand = bed[i] >= -0.4 && slope < 0.75 ? 1.0 : 0.0;
+    float retention = exp(-dt / params.physical.z);
+    float deposit = f.z * retention;
+    float wetness = f.w * retention;
+    if (sand > 0.0) {
+        if (next.x > params.domain.w) wetness = 1.0;
+        float receding = max(q.x - next.x, 0.0) / max(q.x, params.domain.w);
+        float coverage = max(f.x, f.y) / max(q.x, params.domain.w);
+        deposit = max(deposit, clamp(coverage * receding * 2.0, 0.0, 1.0));
+        if (next.x <= params.domain.w && q.x > params.domain.w) deposit = max(deposit, min(coverage, 1.0));
+    }
+    if (next.x <= params.domain.w) {
+        next.yz = vec2(0.0);
+        tracer = vec2(0.0);
+    }
+    vec4 result = vec4(next, 0.0);
+    vec4 foam_result = vec4(tracer, deposit, wetness);
+    water[target] = result;
+    foam[target] = foam_result;
+    if (control.counts.z != 0u) {
+        completed[i] = completed[pixel_count() + i];
+        completed[pixel_count() + i] = result;
+        completed_foam[i] = completed_foam[pixel_count() + i];
+        completed_foam[pixel_count() + i] = foam_result;
+    }
+}

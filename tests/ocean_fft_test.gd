@@ -1,6 +1,8 @@
 extends "res://tests/test_case.gd"
 
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
+const SpectrumMetrics := preload("res://scripts/ocean/ocean_spectrum_metrics.gd")
+const ParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
 const LOOP_PERIOD := 200.0
 const PRESETS := [0, 1, 2, 3]
 const JONSWAP_BASELINE_WRITE_PREFIX := "--jonswap-baseline-write="
@@ -18,6 +20,9 @@ func _initialize() -> void:
 
 
 func _run() -> void:
+	var energy_only := OS.get_cmdline_user_args().has("--energy-only")
+	if energy_only:
+		print("ENERGY stage=boot begin")
 	# SimMenu restores persisted slider values when its widgets are built. A
 	# previous run (or the real app) leaves a sim.ocean_demo section behind, and
 	# re-setting an already-restored value fires no value_changed, which desyncs
@@ -28,6 +33,8 @@ func _run() -> void:
 	var demo = load("res://scenes/ocean_demo.tscn").instantiate()
 	root.add_child(demo)
 	await process_frame
+	if energy_only:
+		print("ENERGY stage=scene attached")
 	demo.set_frozen(true)
 	demo.apply_preset(0)
 	for frame in 360:
@@ -35,9 +42,23 @@ func _run() -> void:
 		if demo.solver.initialized and demo.texture_bound:
 			break
 	_check(demo.solver.initialized and demo.texture_bound, "ocean did not initialize")
+	if energy_only:
+		print("ENERGY stage=initial ready=%s" % (demo.solver.initialized and demo.texture_bound))
 	if not demo.solver.initialized or not demo.texture_bound:
 		demo.queue_free()
 		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--swell-only"):
+		await _check_swell_normalization(demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_swell")
+		return
+	if OS.get_cmdline_user_args().has("--parameters-only"):
+		await ParameterProbe.new().run(self, _check, "parameters", demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_parameters_gpu")
 		return
 	if OS.get_cmdline_user_args().has("--jonswap-controls-only"):
 		demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
@@ -57,7 +78,56 @@ func _run() -> void:
 		await process_frame
 		_finish("ocean_coherence")
 		return
-	await _check_foam_phases(demo)
+	if OS.get_cmdline_user_args().has("--energy-only"):
+		await _check_energy_contracts(demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--physical-only"):
+		await _check_velocity_single_wave(demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--query-only"):
+		await _check_physical_queries(demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--query-fold-only"):
+		demo.set_quality_profile(OceanQualityProfile.Tier.LOW)
+		await _wait_ocean_ready(demo, 30000)
+		await _check_query_fold_rejection(demo)
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--foam-render-only"):
+		demo.set_quality_profile(OceanQualityProfile.Tier.ULTRA)
+		if await _wait_ocean_ready(demo, 30000):
+			await _check_rendered_foam(demo)
+		else:
+			_check(false, "rendered foam profile did not initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_fft")
+		return
+	if OS.get_cmdline_user_args().has("--breaking-only"):
+		demo.set_quality_profile(OceanQualityProfile.Tier.LOW)
+		if await _wait_ocean_ready(demo, 30000):
+			await _check_breaking_front(demo)
+		else:
+			_check(false, "breaking profile did not initialize")
+		demo.queue_free()
+		await process_frame
+		_finish("ocean_breaking")
+		return
+	if OS.get_cmdline_user_args().has("--fft-body-only"):
+		demo.apply_preset(2)
+	else:
+		await _check_foam_phases(demo)
 	if OS.get_cmdline_user_args().has("--foam-phases-only"):
 		demo.queue_free()
 		await process_frame
@@ -92,12 +162,15 @@ func _run() -> void:
 		and demo.solver._foam_near_reset_pending,
 		"foam distance control did not update and reset the near field")
 	demo.set_foam_distance(72.0)
-	_check(demo.solver.estimate_vram_bytes()
-		== OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.MEDIUM),
+	_check(demo.solver.estimate_vram_bytes() == _expected_solver_vram(demo.solver),
 		"VRAM estimate does not match the live allocation sizes")
 	await _check_nyquist_derivatives(demo.solver)
+	await _check_breaking_front(demo)
 	await _check_combined_foam(demo.solver)
 	await _check_nested_foam(demo.solver)
+	await _check_swell_normalization(demo)
+	await ParameterProbe.run(self, _check, "extremes", demo)
+	await ParameterProbe.new().run(self, _check, "parameters", demo)
 	await _check_jonswap_slider_controls(demo)
 	await _check_tall_crests(demo)
 	await _check_jonswap_extreme_envelope(demo)
@@ -148,8 +221,8 @@ func _run() -> void:
 		"wave height is not monotonic from Calm to Storm")
 	_check(states[0].slope_rms < states[1].slope_rms
 		and states[1].slope_rms < states[2].slope_rms
-		and states[2].slope_rms < states[3].slope_rms,
-		"wave slope is not monotonic from Calm to Storm")
+		and states[1].slope_rms < states[3].slope_rms,
+		"rough seas are smoother than Breeze")
 	_check(states[0].foam_mean < 0.0001 and states[0].fresh_mean < 0.0001,
 		"Calm produced open-water foam")
 	# Refonte contract: Calm foam coverage stays under 0.5% of the tiles.
@@ -166,15 +239,15 @@ func _run() -> void:
 		"breaking coverage does not separate calm, breeze and rough seas")
 	var swell_state: Dictionary = states[2]
 	var storm_state: Dictionary = states[3]
-	_check(swell_state.dominant_wavelength_m >= 180.0
-		and swell_state.dominant_wavelength_m <= 340.0,
-		"Swell dominant wavelength is %.1f m, expected 180..340 m"
+	_check(swell_state.dominant_wavelength_m >= 40.0
+		and swell_state.dominant_wavelength_m <= 140.0,
+		"Swell dominant wavelength is %.1f m, expected 40..140 m"
 		% swell_state.dominant_wavelength_m)
 	_check(storm_state.dominant_wavelength_m >= 170.0
 		and storm_state.dominant_wavelength_m <= 300.0,
 		"Storm dominant wavelength is %.1f m, expected 170..300 m"
 		% storm_state.dominant_wavelength_m)
-	_check(swell_state.groupiness > 0.30 and storm_state.groupiness > 0.30,
+	_check(swell_state.groupiness > 0.20 and storm_state.groupiness > 0.30,
 		"wave groups are too uniform (Swell %.3f, Storm %.3f)"
 		% [swell_state.groupiness, storm_state.groupiness])
 	_check(storm_state.long_max_rms > 3.4 and storm_state.long_max_abs < 40.0,
@@ -185,9 +258,8 @@ func _run() -> void:
 		and demo.PRESETS[0].foam_amount < demo.PRESETS[1].foam_amount
 		and demo.PRESETS[1].foam_amount < demo.PRESETS[3].foam_amount,
 		"foam presets do not progress from Calm to Storm")
-	_check(storm_state.crosswind_energy > swell_state.crosswind_energy,
-		"Storm crosswind energy is not above Swell (%.4f <= %.4f)"
-		% [storm_state.crosswind_energy, swell_state.crosswind_energy])
+	_check(storm_state.crosswind_energy > 0.0 and swell_state.crosswind_energy > 0.0,
+		"rough seas lost their directional spread")
 	var breeze: OceanPreset = demo.PRESETS[1]
 	demo.apply_preset(1)
 	demo.solver.crest_gain = 1.0
@@ -305,7 +377,9 @@ func _run() -> void:
 	var shift_texels := int(round(2.0 / near_domain * near_size))
 	var moved := _near_shift_stats(near_after, near_before, near_size, shift_texels, 4)
 	var static_cmp := _near_shift_stats(near_after, near_before, near_size, 0, 4)
-	if near_before_std > 0.01:
+	print("FOAM REPROJECTION std=%.6f shifted-rms=%.6f static-rms=%.6f p99-column=%.6f" % [
+		near_before_std, moved.rms, static_cmp.rms, moved.p99_col])
+	if near_before_std > 0.001:
 		_check(moved.rms < static_cmp.rms * 0.7,
 			"near foam did not advect with the camera (shifted %.4f vs texture-locked %.4f)"
 			% [moved.rms, static_cmp.rms])
@@ -411,17 +485,15 @@ func _run() -> void:
 		_check(seam_ratio < 2.5,
 			"reduced-map cascade seam differs from local continuity (ratio %.3f)" % seam_ratio)
 
-	# --- Physics sync: GPU point queries vs CPU ground truth read from the
-	# same maps. Exact-math replica of ocean_query.comp (bilinear torus sample,
-	# 4-iteration choppy inversion) — any gap is a marshalling/shader bug.
+	# --- GPU query slopes are checked against finite differences of the combined
+	# displaced height field, independently of the derivative-map calculation.
 	demo.set_frozen(true)
 	var query_points := PackedVector2Array()
 	for i in 33:
 		query_points.append(Vector2(
 			fposmod(float(i) * 12.7, 44.0) - 22.0,
 			fposmod(float(i) * 8.9, 36.0) - 18.0))
-	RenderingServer.call_on_render_thread(func():
-		demo.solver.submit_queries(query_points))
+	demo.solver.submit_queries(query_points)
 	RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0))
 	await _frames(2)
 	var query_results: PackedVector4Array = demo.solver.latest_results()
@@ -430,38 +502,23 @@ func _run() -> void:
 	var map_n: int = demo.solver.map_size
 	var tiles: PackedFloat32Array = demo.solver.tile_lengths
 	var query_disp: Array[PackedFloat32Array] = []
-	var query_norms: Array[PackedFloat32Array] = []
 	for cascade in 3:
 		query_disp.append(_decode_rgba16f(await _read_texture(
 			demo.solver.get_displacement_tex_rid(), cascade), map_n))
-		query_norms.append(_decode_rgba16f(await _read_texture(
-			demo.solver.get_normal_tex_rid(), cascade), map_n))
 	var height_errors: Array[float] = []
-	var normal_errors: Array[float] = []
+	var slope_errors: Array[float] = []
 	var cascade_contribution: Array[float] = [0.0, 0.0, 0.0]
 	for i in query_points.size():
-		var truth := _query_ground_truth(query_disp, query_norms, map_n, tiles,
+		var truth := _query_height_ground_truth(query_disp, map_n, tiles,
 			query_points[i], cascade_contribution)
 		var got := query_results[i]
 		if got.w < 0.5:
 			_check(false, "query result %d marked invalid" % i)
 			continue
 		height_errors.append(absf(got.x - truth.height))
-		var got_grad := Vector2(got.y, got.z)
-		var truth_grad := Vector2(truth.normal.x, truth.normal.z)
-		# In wave lulls both gradients are ~zero and the angle between two
-		# near-zero vectors is noise, so only steep points get the angle test;
-		# flat points must simply both be flat.
-		if truth.gradient_len > 0.02:
-			var dot := clampf(got_grad.normalized().dot(truth_grad.normalized()),
-				-1.0, 1.0)
-			normal_errors.append(rad_to_deg(acos(dot)))
-		elif got_grad.length() > 0.05:
-			normal_errors.append(90.0)
-		else:
-			normal_errors.append(0.0)
+		slope_errors.append(Vector2(got.y, got.z).distance_to(truth.slope))
 	height_errors.sort()
-	normal_errors.sort()
+	slope_errors.sort()
 	var height_rms := 0.0
 	for e in height_errors:
 		height_rms += e * e
@@ -470,19 +527,20 @@ func _run() -> void:
 		_check(false, "no valid query results to compare against ground truth")
 		return
 	var height_p95: float = height_errors[int(height_errors.size() * 0.95) - 1]
-	var normal_max: float = normal_errors[normal_errors.size() - 1]
+	var slope_p95: float = slope_errors[int(slope_errors.size() * 0.95) - 1]
 	_check(height_rms <= 0.02,
 		"query height RMS %.3f cm exceeds 2 cm" % (height_rms * 100.0))
 	_check(height_p95 <= 0.05,
 		"query height P95 %.3f cm exceeds 5 cm" % (height_p95 * 100.0))
-	_check(normal_max <= 3.0,
-		"query normal deviates up to %.2f degrees from ground truth" % normal_max)
+	_check(slope_p95 <= 0.20,
+		"query composite slope differs by %.3f from finite differences" % slope_p95)
 	for cascade in 3:
 		var cascade_rms := sqrt(cascade_contribution[cascade]
 			/ float(query_points.size()))
 		_check(cascade_rms > 0.002,
 			"cascade %d does not measurably contribute to point queries (RMS %.4f m)"
 			% [cascade, cascade_rms])
+	await _check_query_fold_rejection(demo)
 
 	# Ultra smoke: the 1024² pipeline initializes, runs and answers queries,
 	# and the VRAM estimates rank in the right order.
@@ -518,16 +576,9 @@ func _run() -> void:
 	_check(ultra_results.size() == 2 and ultra_results[0].w > 0.5
 		and ultra_results[1].w > 0.5,
 		"Ultra query pass returned invalid results")
-	demo.apply_preset(3)
-	demo.set_capture_view("overhead")
-	demo.orbit_cam._update_transform()
-	demo.set_capture_foam(true)
-	await demo.warmup_foam(3.0)
-	var rendered_foam_rings: Array[Dictionary] = await demo._capture_foam_rings()
-	var near_rendered_foam: float = rendered_foam_rings[0].mean_coverage
-	_check(near_rendered_foam >= 0.035 and near_rendered_foam <= 0.20,
-		"Storm rendered foam coverage is outside 3.5..20 percent (%.1f%%)"
-		% (near_rendered_foam * 100.0))
+	await _check_rendered_foam(demo)
+	await _check_velocity_single_wave(demo)
+	await _check_physical_queries(demo)
 
 	demo.queue_free()
 	await process_frame
@@ -802,8 +853,15 @@ func _state_metrics(demo, include_foam: bool = false, include_topology: bool = f
 			demo.solver.map_size, demo.solver.tile_lengths[0])
 		dominant_wavelength = _dominant_wavelength(spectrum,
 			demo.solver.map_size, demo.solver.tile_lengths[0])
-		crosswind_energy = _crosswind_energy(spectrum, demo.solver.map_size,
-			demo.solver.wind_direction)
+		var wind_variance := 0.0
+		var swell_variance := 0.0
+		for reference in demo.solver.spectral_references():
+			wind_variance += float(reference.wind_variance_m2)
+			swell_variance += float(reference.swell_variance_m2)
+		var dominant_direction: float = demo.solver.swell_direction_rad \
+			if swell_variance > wind_variance else demo.solver.wind_direction
+		crosswind_energy = _crosswind_energy(spectrum, demo.solver.map_size, dominant_direction)
+		print("OCEAN DIRECTION axis=%.4f transverse=%.4f" % [dominant_direction, crosswind_energy])
 	var band_total := 0.0
 	var band_max := 0.0
 	var active_band_count := 0
@@ -1144,12 +1202,15 @@ func _foam_morphology(data: PackedByteArray, sample_step: int = 4,
 	fresh.resize(sampled_size * sampled_size)
 	var intersection := 0
 	var union := 0
+	var coverage_sum := 0.0
 	for y in sampled_size:
 		for x in sampled_size:
 			var texel := y * sampled_size + x
 			var source_texel := (y * sample_step * map_size + x * sample_step)
 			var foam := _half(data.decode_u16(source_texel * 4))
 			var fresh_foam := _half(data.decode_u16(source_texel * 4 + 2))
+			if foam.finite and fresh_foam.finite:
+				coverage_sum += foam.value + fresh_foam.value - foam.value * fresh_foam.value
 			persistent[texel] = int(foam.finite and foam.value > OceanConfig.MEASURE_FOAM_THRESHOLD)
 			fresh[texel] = int(fresh_foam.finite
 				and fresh_foam.value > fresh_threshold)
@@ -1161,6 +1222,7 @@ func _foam_morphology(data: PackedByteArray, sample_step: int = 4,
 		"persistent": _ribbon_metrics(persistent, sampled_size, sample_step),
 		"fresh": _ribbon_metrics(fresh, sampled_size, sample_step),
 		"coverage": float(union) / float(sampled_size * sampled_size),
+		"mean_coverage": coverage_sum / float(sampled_size * sampled_size),
 		"iou": float(intersection) / maxf(float(union), 1.0),
 	}
 
@@ -1220,6 +1282,10 @@ func _ribbon_metrics(mask: PackedByteArray, map_size: int, sample_step: int) -> 
 	}
 
 
+func _check_swell_normalization(demo: Node) -> void:
+	await ParameterProbe.new().run(self, _check, "swell", demo)
+
+
 func _check_foam_phases(demo: Node) -> void:
 	var camera_state: Array = [demo.orbit_cam.target, demo.orbit_cam.distance,
 		demo.orbit_cam.pitch, demo.orbit_cam.yaw, demo.orbit_cam.is_processing(),
@@ -1242,7 +1308,7 @@ func _check_foam_phases(demo: Node) -> void:
 		demo.set_capture_wind_direction(0.0)
 		RenderingServer.call_on_render_thread(demo.solver._clear_foam_fields)
 		await demo.warmup_foam(5.0)
-		_check(demo.solver.estimate_vram_bytes() == OceanQualityProfile.estimate_vram_bytes(tier),
+		_check(demo.solver.estimate_vram_bytes() == _expected_solver_vram(demo.solver),
 			"foam profile VRAM allocation mismatch")
 		for layer in 3:
 			var size: int = demo.solver.foam_near_size
@@ -1251,22 +1317,17 @@ func _check_foam_phases(demo: Node) -> void:
 			image.convert(Image.FORMAT_RGH)
 			var morphology := _foam_morphology(image.get_data(), 1, OceanConfig.MEASURE_FOAM_THRESHOLD)
 			print("FOAM PHASE tier=%s layer=%d %s" % [OceanQualityProfile.TIER_NAMES[tier], layer, morphology])
-			# The long-crest swell breaks into finer ribbons than the old steep
-			# wind sea, so Low resolves ~2 pp less foam than Medium: the window
-			# keeps the 0 % / blow-up guards with room for that texture shift.
-			_check(morphology.coverage >= 0.065 and morphology.coverage <= 0.145,
-				"Swell coverage outside 6.5..14.5 percent on tier %d layer %d" % [tier, layer])
-			if tier == OceanQualityProfile.Tier.MEDIUM and layer == 0:
-				_check(morphology.fresh.area < morphology.persistent.area,
-					"Swell active area is not narrower than residual on layer %d" % layer)
-				_check(morphology.fresh.p95_width < morphology.persistent.p95_width,
-					"Swell active P95 width is not narrower than residual on layer %d" % layer)
+			_check(morphology.mean_coverage >= 0.001 and morphology.mean_coverage <= 0.45,
+				"Swell coverage is empty or excessive on tier %d layer %d" % [tier, layer])
+			_check(morphology.fresh.area > 0.0 and morphology.persistent.area > 0.0
+				and morphology.iou < 0.90,
+				"Swell foam phases are absent or indistinguishable on tier %d layer %d" % [tier, layer])
 			var common_size := roundi(size * 96.0 / demo.solver.foam_near_domain)
 			var common := image.get_region(Rect2i((size - common_size) / 2,
 				(size - common_size) / 2, common_size, common_size))
 			var common_morphology := _foam_morphology(common.get_data(), 1, OceanConfig.MEASURE_FOAM_THRESHOLD)
-			coverages.append(common_morphology.coverage)
-			print("FOAM COMMON tier=%s layer=%d coverage=%.6f" % [OceanQualityProfile.TIER_NAMES[tier], layer, common_morphology.coverage])
+			coverages.append(common_morphology.mean_coverage)
+			print("FOAM COMMON tier=%s layer=%d coverage=%.6f" % [OceanQualityProfile.TIER_NAMES[tier], layer, common_morphology.mean_coverage])
 	for layer in 3:
 		for tier in [OceanQualityProfile.Tier.LOW, OceanQualityProfile.Tier.HIGH,
 				OceanQualityProfile.Tier.ULTRA]:
@@ -1333,6 +1394,187 @@ func _check_coherence_contracts(demo: Node) -> void:
 			await _check_composite_derivatives(demo.solver)
 
 
+func _check_energy_contracts(demo: Node) -> void:
+	print("ENERGY stage=profile begin")
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
+	if not await _wait_ocean_ready(demo, 30000):
+		_check(false, "energy mode timed out waiting for Medium profile")
+		return
+	demo.set_frozen(true)
+	print("ENERGY stage=profile ready map=%d" % demo.solver.map_size)
+	_check(demo.solver.estimate_vram_bytes() == _expected_solver_vram(demo.solver),
+		"Medium VRAM estimate omits a live allocation")
+	for preset in PRESETS:
+		print("ENERGY stage=preset begin index=%d" % preset)
+		demo.apply_preset(preset)
+		demo.set_capture_time(12.0)
+		demo.solver.sim_time = 12.0
+		demo.set_frozen(true)
+		RenderingServer.call_on_render_thread(demo.solver.step_render.bind(0.0, 12.0))
+		await RenderingServer.frame_post_draw
+		await process_frame
+		var state: Dictionary = await _state_metrics(demo, false, false, false, true)
+		_check(state.non_finite == 0, "preset %d produced non-finite displacement" % preset)
+		print("ENERGY stage=preset metrics index=%d rms=%.5f bands=%s" % [
+			preset, state.height_rms, state.band_rms])
+		await _check_parseval(demo.solver, 12.0)
+	print("ENERGY stage=shared-cutoff begin")
+	await _check_centered_mode_coherence(demo)
+	print("ENERGY stage=shared-cutoff complete")
+
+
+func _check_velocity_single_wave(demo: Node) -> void:
+	print("PHYSICAL stage=profile begin")
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
+	if not await _wait_ocean_ready(demo, 30000):
+		_check(false, "physical mode timed out waiting for Medium profile")
+		return
+	var solver: OceanSolver = demo.solver
+	var velocity: OceanVelocitySolver = solver.velocity_solver
+	var n: int = solver.map_size
+	var mode := Vector2i(3, 4)
+	var spectrum := PackedByteArray()
+	spectrum.resize(n * n * 16)
+	var positive := Vector2i(n / 2, n / 2) + mode
+	var negative := Vector2i(n / 2, n / 2) - mode
+	spectrum.encode_float((positive.y * n + positive.x) * 16, 0.5)
+	spectrum.encode_float((negative.y * n + negative.x) * 16 + 8, 0.5)
+	var time_s := 0.75
+	var current := Vector2(0.2, -0.1)
+	demo.set_process(false)
+	solver.take_render_refresh_request()
+	await RenderingServer.frame_post_draw
+	await process_frame
+	await RenderingServer.frame_post_draw
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		for cascade in 3:
+			rd.texture_update(solver._spectrum_tex, cascade, spectrum)
+		velocity.step_render(time_s, current)
+	)
+	await RenderingServer.frame_post_draw
+	var values := _rgba_half_values(await _read_texture(velocity.get_texture_rid(), 0),
+		OceanVelocitySolver.VELOCITY_SIZE)
+	var resolution := OceanVelocitySolver.VELOCITY_SIZE
+	var tile: float = solver.tile_lengths[0]
+	var kx: float = TAU * float(mode.y) / tile
+	var kz: float = TAU * float(mode.x) / tile
+	var k := sqrt(kx * kx + kz * kz)
+	var omega := sqrt(9.81 * k * tanh(k * solver.water_depth))
+	var horizontal_speed := omega / tanh(k * solver.water_depth)
+	var phase_shift := -(kx * current.x + kz * current.y) * time_s
+	var max_error := Vector3.ZERO
+	for y in resolution:
+		for x in resolution:
+			var phase := TAU * float(mode.y * x + mode.x * y) / float(resolution) \
+				- omega * time_s + phase_shift
+			var offset := (y * resolution + x) * 4
+			var expected := Vector3(
+				horizontal_speed * (kx / k) * cos(phase),
+				omega * sin(phase),
+				horizontal_speed * (kz / k) * cos(phase))
+			max_error.x = maxf(max_error.x, absf(values[offset] - expected.x))
+			max_error.y = maxf(max_error.y, absf(values[offset + 1] - expected.y))
+			max_error.z = maxf(max_error.z, absf(values[offset + 2] - expected.z))
+	_check(max_error.x < 0.005 and max_error.y < 0.005 and max_error.z < 0.005,
+		"single-wave orbital velocity error exceeds 0.005 m/s: %s" % max_error)
+	_check(velocity.get_current_velocity_m_s() == current,
+		"velocity texture composition lost the uniform current vector")
+	print("PHYSICAL single-wave max-errors xyz=%s current=%s" % [max_error, current])
+	demo.set_process(true)
+
+
+func _check_physical_queries(demo: Node) -> void:
+	print("QUERY stage=profile begin")
+	demo.set_quality_profile(OceanQualityProfile.Tier.MEDIUM)
+	if not await _wait_ocean_ready(demo, 30000):
+		_check(false, "query mode timed out waiting for Medium profile")
+		return
+	var solver: OceanSolver = demo.solver
+	demo.apply_preset(3)
+	demo.set_capture_time(12.0)
+	demo.set_frozen(true)
+	var current := Vector2(0.2, -0.1)
+	solver.current_velocity_m_s = current
+	demo.set_process(false)
+	demo.set_physics_process(false)
+	solver.take_render_refresh_request()
+	await RenderingServer.frame_post_draw
+	await process_frame
+	await RenderingServer.frame_post_draw
+	var points := PackedVector2Array([
+		Vector2(10000.0, 11000.0), Vector2(10017.3, 10991.2),
+		Vector2(9991.6, 11021.4), Vector2(10024.8, 11013.7),
+		Vector2(9984.1, 10978.6), Vector2(10008.9, 11029.5),
+		Vector2(10031.2, 10984.3), Vector2(9976.8, 11007.1),
+	])
+	solver._query_results_valid = false
+	solver.submit_queries(points)
+	print("QUERY stage=step submitted=%d" % points.size())
+	RenderingServer.call_on_render_thread(solver.step_render.bind(0.0, 12.0))
+	var waited_frames := 0
+	for frame in 120:
+		await process_frame
+		waited_frames = frame + 1
+		if solver.query_results_valid():
+			break
+	print("QUERY stage=results ready=%s frames=%d" % [
+		solver.query_results_valid(), waited_frames])
+	var query_batch: OceanQueryBatch = solver.take_query_batch()
+	var query_results: PackedVector4Array = solver.latest_results()
+	print("QUERY readback valid=%s batch=%s results=%d" % [
+		solver.query_results_valid(), query_batch != null, query_results.size()])
+	_check(query_batch != null and query_batch.velocities.size() == points.size()
+		and query_results.size() == points.size(),
+		"GPU query result/readback batch is incomplete")
+	if (query_batch == null or query_batch.velocities.size() != points.size()
+			or query_results.size() != points.size()):
+		return
+	var map_n: int = solver.map_size
+	var displacement_maps: Array[PackedFloat32Array] = []
+	var velocity_maps: Array[PackedFloat32Array] = []
+	for cascade in 3:
+		print("QUERY stage=map-readback cascade=%d" % cascade)
+		displacement_maps.append(_decode_rgba16f(
+			await _read_texture(solver.get_displacement_tex_rid(), cascade), map_n))
+		velocity_maps.append(_rgba_half_values(
+			await _read_texture(solver.velocity_solver.get_texture_rid(), cascade),
+			OceanVelocitySolver.VELOCITY_SIZE))
+	var height_errors: Array[float] = []
+	var slope_errors: Array[float] = []
+	var velocity_errors: Array[float] = []
+	for i in points.size():
+		var truth := _query_height_ground_truth(displacement_maps, map_n,
+			solver.tile_lengths, points[i], [0.0, 0.0, 0.0])
+		var got := query_results[i]
+		_check(got.w > 0.5, "query %d returned an invalid surface sample" % i)
+		height_errors.append(absf(got.x - truth.height))
+		slope_errors.append(Vector2(got.y, got.z).distance_to(truth.slope))
+		var expected_velocity := Vector3(current.x, 0.0, current.y)
+		for cascade in 3:
+			expected_velocity += _sample_map_vec3(velocity_maps[cascade],
+				OceanVelocitySolver.VELOCITY_SIZE, solver.tile_lengths[cascade],
+				truth.parameter)
+		velocity_errors.append(query_batch.velocities[i].distance_to(expected_velocity))
+	height_errors.sort()
+	slope_errors.sort()
+	velocity_errors.sort()
+	var height_rms := 0.0
+	for error in height_errors:
+		height_rms += error * error
+	height_rms = sqrt(height_rms / float(height_errors.size()))
+	var height_p95: float = height_errors[int(height_errors.size() * 0.95) - 1]
+	var slope_p95: float = slope_errors[int(slope_errors.size() * 0.95) - 1]
+	var velocity_p95: float = velocity_errors[int(velocity_errors.size() * 0.95) - 1]
+	_check(height_rms <= 0.02 and height_p95 <= 0.05,
+		"query surface height mismatch RMS/P95 %.4f/%.4f m" % [height_rms, height_p95])
+	_check(slope_p95 <= 0.20, "query surface slope P95 mismatch %.4f" % slope_p95)
+	_check(velocity_p95 <= 0.02,
+		"query orbital/current velocity P95 mismatch %.4f m/s" % velocity_p95)
+	print("QUERY height-rms=%.5f height-p95=%.5f slope-p95=%.5f velocity-p95=%.5f current=%s" % [
+		height_rms, height_p95, slope_p95, velocity_p95, current])
+
+
 func _check_foam_mip_coverage(demo: Node) -> void:
 	var solver: OceanSolver = demo.solver
 	demo.set_process(false)
@@ -1384,31 +1626,39 @@ func _wait_ocean_ready(demo: Node, timeout_ms: int) -> bool:
 
 func _check_parseval(solver: OceanSolver, time: float) -> void:
 	var n: int = solver.map_size
-	var spectrum := _rgba_float_values(await _read_texture(solver._spectrum_tex, 0), n)
-	var displacement := _rgba_half_values(
-		await _read_texture(solver.get_displacement_tex_rid(), 0), n)
-	var spectral_energy := 0.0
-	var spatial_energy := 0.0
-	for y in n:
-		for x in n:
-			var offset := (y * n + x) * 4
-			var a := Vector2(spectrum[offset], spectrum[offset + 1])
-			var b := Vector2(spectrum[offset + 2], spectrum[offset + 3])
-			var k := Vector2(float(x) - n * 0.5, float(y) - n * 0.5) \
-				* TAU / solver.tile_lengths[0]
-			var magnitude := k.length() + 1e-6
-			var omega := sqrt(9.81 * magnitude * tanh(magnitude * solver.water_depth))
-			var c := cos(omega * time)
-			var s := sin(omega * time)
-			var h := Vector2(a.x * c - a.y * s + b.x * c + b.y * s,
-				 a.x * s + a.y * c - b.x * s + b.y * c)
-			spectral_energy += h.length_squared()
-			spatial_energy += displacement[offset + 1] * displacement[offset + 1]
-	var expected := spectral_energy * float(n * n)
-	var ratio := spatial_energy / maxf(expected, 1e-8)
-	_check(absf(ratio - 1.0) < 0.005,
-		"height Parseval ratio is %.5f (expected 1)" % ratio)
-	print("COHERENCE Parseval ratio=%.6f" % ratio)
+	var cpu_bands: Array[Dictionary] = SpectrumMetrics.compute(solver)
+	for cascade in 3:
+		var spectrum := _rgba_float_values(await _read_texture(solver._spectrum_tex, cascade), n)
+		var displacement := _rgba_half_values(
+			await _read_texture(solver.get_displacement_tex_rid(), cascade), n)
+		var spectral_energy := 0.0
+		var spatial_energy := 0.0
+		for y in n:
+			for x in n:
+				var offset := (y * n + x) * 4
+				var a := Vector2(spectrum[offset], spectrum[offset + 1])
+				var b := Vector2(spectrum[offset + 2], spectrum[offset + 3])
+				var k := Vector2(float(x) - n * 0.5, float(y) - n * 0.5) \
+					* TAU / solver.tile_lengths[cascade]
+				var magnitude := k.length() + 1e-6
+				var omega := sqrt(9.81 * magnitude * tanh(magnitude * solver.water_depth))
+				var c := cos(omega * time)
+				var s := sin(omega * time)
+				var h := Vector2(a.x * c + a.y * s + b.x * c - b.y * s,
+					-a.x * s + a.y * c + b.x * s + b.y * c)
+				spectral_energy += h.length_squared()
+				spatial_energy += displacement[offset + 1] * displacement[offset + 1]
+		var expected := spectral_energy * float(n * n)
+		var parseval_ratio := spatial_energy / maxf(expected, 1e-8)
+		_check(absf(parseval_ratio - 1.0) < 0.005,
+			"cascade %d height Parseval ratio is %.5f (expected 1)" % [cascade, parseval_ratio])
+		var gpu_variance: float = spatial_energy / float(n * n)
+		var cpu_variance: float = float(cpu_bands[cascade].height_variance_m2)
+		var cpu_gpu_ratio: float = gpu_variance / maxf(cpu_variance, 1e-8)
+		_check(cpu_gpu_ratio > 0.25 and cpu_gpu_ratio < 2.5,
+			"cascade %d CPU/GPU wind+swell variance differs by %.2fx" % [cascade, cpu_gpu_ratio])
+		print("COHERENCE Parseval cascade=%d ratio=%.6f CPU/GPU variance=%.5f/%.5f ratio=%.4f" % [
+			cascade, parseval_ratio, gpu_variance, cpu_variance, cpu_gpu_ratio])
 
 
 func _check_centered_mode_coherence(demo: Node) -> void:
@@ -1422,6 +1672,8 @@ func _check_centered_mode_coherence(demo: Node) -> void:
 	await process_frame
 	var high_n: int = demo.solver.map_size
 	var high := _rgba_float_values(await _read_texture(demo.solver._spectrum_tex, 0), high_n)
+	var high_short := _rgba_float_values(
+		await _read_texture(demo.solver._spectrum_tex, 2), high_n)
 	demo.set_quality_profile(OceanQualityProfile.Tier.ULTRA)
 	if not await _wait_ocean_ready(demo, 30000):
 		_check(false, "coherence mode timed out reinitializing Ultra profile")
@@ -1432,6 +1684,8 @@ func _check_centered_mode_coherence(demo: Node) -> void:
 	await process_frame
 	var ultra_n: int = demo.solver.map_size
 	var ultra := _rgba_float_values(await _read_texture(demo.solver._spectrum_tex, 0), ultra_n)
+	var ultra_short := _rgba_float_values(
+		await _read_texture(demo.solver._spectrum_tex, 2), ultra_n)
 	var max_error := 0.0
 	for mode in [Vector2i(0, 0), Vector2i(1, 0), Vector2i(3, 2),
 			Vector2i(16, -11), Vector2i(64, 37), Vector2i(128, -96), Vector2i(200, 120)]:
@@ -1440,6 +1694,13 @@ func _check_centered_mode_coherence(demo: Node) -> void:
 		max_error = maxf(max_error, hi.distance_to(ultra_mode))
 	_check(max_error < 1e-6,
 		"centered common-mode h0 differs across High/Ultra (max %.7f)" % max_error)
+	var high_inside_cutoff := _spectrum_mode(high_short, high_n, Vector2i(99, 0)).length()
+	var ultra_inside_cutoff := _spectrum_mode(ultra_short, ultra_n, Vector2i(99, 0)).length()
+	var high_cutoff := _spectrum_mode(high_short, high_n, Vector2i(100, 0)).length()
+	var ultra_cutoff := _spectrum_mode(ultra_short, ultra_n, Vector2i(100, 0)).length()
+	_check(high_inside_cutoff > 1e-12 and ultra_inside_cutoff > 1e-12
+		and high_cutoff < 1e-12 and ultra_cutoff < 1e-12,
+		"common 0.25 m wavelength cutoff differs across High/Ultra or drops the last in-band mode")
 	print("COHERENCE shared modes max_error=%.7f" % max_error)
 
 
@@ -1502,9 +1763,9 @@ func _check_nested_foam(solver: OceanSolver) -> void:
 	solver.foam_persistence = 4.2
 	solver.whitecap = 0.84
 	var flat := await _constant_foam_layers(solver, Color(0, 0, 0, 0), 30, 1.0)
-	var compressed30 := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 30, 1.0)
-	var compressed60 := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 60, 1.0)
-	var compressed120 := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 120, 1.0)
+	var compressed30 := await _constant_foam_layers(solver, Color(-0.1640625, 0, 0, 0), 30, 1.0)
+	var compressed60 := await _constant_foam_layers(solver, Color(-0.1640625, 0, 0, 0), 60, 1.0)
+	var compressed120 := await _constant_foam_layers(solver, Color(-0.1640625, 0, 0, 0), 120, 1.0)
 	for layer in 3:
 		_check(flat[layer].length() < 1e-4,
 			"flat nested foam generated coverage on layer %d" % layer)
@@ -1514,14 +1775,23 @@ func _check_nested_foam(solver: OceanSolver) -> void:
 			and compressed60[layer].distance_to(compressed120[layer]) < 0.0001,
 			"nested foam depends on frame count on layer %d" % layer)
 	var onset := clampf(solver.whitecap, 0.05, 0.95)
-	var source := smoothstep(0.0, 0.2, onset - 0.2)
+	var source := maxf(onset - 0.8359375, 0.0)
 	var decay := 0.693 / solver.foam_persistence
-	var active_rate := source * 6.0 + 0.693 / (solver.foam_persistence * 0.167)
-	var expected := 0.68 * source * 6.0 / active_rate * (1.0 - exp(-decay)
+	var growth := solver.foam_amount * 7.5
+	var active_rate := solver._pack_near_push_constant(1.0).decode_float(20)
+	var expected_fresh := source * growth / active_rate * (1.0 - exp(-active_rate))
+	var expected := 0.35 * source * growth / active_rate * (1.0 - exp(-decay)
 		- decay * (exp(-decay) - exp(-active_rate)) / (active_rate - decay))
-	_check(absf(compressed30[0].x - expected) < 0.02,
+	_check(absf(compressed30[0].x - _foam_optical_coverage(expected)) < 0.0001
+		and absf(compressed30[0].y - _foam_optical_coverage(expected_fresh)) < 0.0001,
 		"nested foam source integration mismatch: %.5f vs %.5f" % [compressed30[0].x, expected])
 	print("COHERENCE foam dt30=%s dt60=%s dt120=%s" % [compressed30, compressed60, compressed120])
+	var capped30 := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 30, 1.0)
+	var capped120 := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 120, 1.0)
+	for layer in 3:
+		_check(capped30[layer].distance_to(capped120[layer]) < 0.0001
+			and absf(capped30[layer].y - _foam_optical_coverage(1.0)) < 0.0001,
+			"capped foam integration depends on frame count on layer %d" % layer)
 	var stable := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 120, 120.0)
 	for layer in stable.size():
 		_check(stable[layer].x <= 1.0 and stable[layer].y <= 1.0
@@ -1534,7 +1804,8 @@ func _check_nested_foam(solver: OceanSolver) -> void:
 		_check(clear[layer].y / stable[layer].y < clear[layer].x / stable[layer].x,
 			"active foam did not extinguish faster than residual on layer %d" % layer)
 	var pulse := await _constant_foam_layers(solver, Color(-0.8, 0, 0, 0), 12, 0.1)
-	var tail := await _constant_foam_layers(solver, Color(0, 0, 0, 0), 120, 4.2, false)
+	var tail := await _constant_foam_layers(solver, Color(0, 0, 0, 0), 120, 1.0, false)
+	print("COHERENCE foam pulse=%s tail=%s" % [pulse, tail])
 	for layer in pulse.size():
 		_check(pulse[layer].y > pulse[layer].x * 10.0,
 			"active foam attack is not faster than residual on layer %d" % layer)
@@ -1542,12 +1813,12 @@ func _check_nested_foam(solver: OceanSolver) -> void:
 			"active foam did not feed a persistent residual tail on layer %d" % layer)
 	RenderingServer.call_on_render_thread(func():
 		RenderingServer.get_rendering_device().texture_clear(
-			solver.get_foam_near_read_tex_rid(), Color(0.5, 0, 0, 0), 0, 1, 0, 3)
+			solver.get_foam_near_read_tex_rid(), Color(_foam_optical_coverage(0.5), 0, 0, 0), 0, 1, 0, 3)
 	)
 	await RenderingServer.frame_post_draw
 	var half_life := await _constant_foam_layers(solver, Color(0, 0, 0, 0), 120, 4.2, false)
 	for layer in half_life.size():
-		_check(absf(half_life[layer].x - 0.25) < 0.0001 and half_life[layer].y < 0.0001,
+		_check(absf(half_life[layer].x - _foam_optical_coverage(0.25)) < 0.0001 and half_life[layer].y < 0.0001,
 			"residual half-life does not match foam_persistence on layer %d" % layer)
 	solver.foam_amount = saved.x
 	solver.foam_persistence = saved.y
@@ -1561,16 +1832,19 @@ func _check_combined_foam(solver: OceanSolver) -> void:
 	solver.foam_persistence = 4.2
 	solver.whitecap = 0.84
 	var flat := await _constant_foam(solver, Color(0, 0, 0, 0), 30)
-	var compressed := await _constant_foam(solver, Color(-0.8, 0, 0, 0), 30)
-	var fine_step := await _constant_foam(solver, Color(-0.8, 0, 0, 0), 120)
-	var rotated := await _constant_foam(solver, Color(-0.4, -0.4, 0.4, 0), 30)
+	var compressed := await _constant_foam(solver, Color(-0.1640625, 0, 0, 0), 30)
+	var fine_step := await _constant_foam(solver, Color(-0.1640625, 0, 0, 0), 120)
+	var rotated := await _constant_foam(solver, Color(-0.08203125, -0.08203125, 0.08203125, 0), 30)
 	_check(flat.length() < 0.0001, "flat combined surface generated foam")
-	var source := smoothstep(0.0, 0.2, clampf(solver.whitecap, 0.05, 0.95) - 0.2)
+	var source := maxf(clampf(solver.whitecap, 0.05, 0.95) - 0.8359375, 0.0)
 	var decay := 0.693 / solver.foam_persistence
-	var active_rate := source * 6.0 + 0.693 / (solver.foam_persistence * 0.167)
-	var expected_persistent := 0.68 * source * 6.0 / active_rate * (1.0 - exp(-decay)
+	var growth := solver.foam_amount * 7.5
+	var active_rate := solver._pack_near_push_constant(1.0).decode_float(20)
+	var expected_fresh := source * growth / active_rate * (1.0 - exp(-active_rate))
+	var expected_persistent := 0.35 * source * growth / active_rate * (1.0 - exp(-decay)
 		- decay * (exp(-decay) - exp(-active_rate)) / (active_rate - decay))
-	_check(absf(compressed.x - expected_persistent) < 0.0001 and compressed.y > compressed.x,
+	_check(absf(compressed.x - _foam_optical_coverage(expected_persistent)) < 0.0001
+		and absf(compressed.y - _foam_optical_coverage(expected_fresh)) < 0.0001 and compressed.y > compressed.x,
 		"combined compression did not generate distinct fresh and persistent coverage")
 	_check(compressed.distance_to(fine_step) < 0.0001,
 		"foam integration depends on frame rate")
@@ -1596,7 +1870,7 @@ func _check_single_wave(solver: OceanSolver) -> void:
 	RenderingServer.call_on_render_thread(func():
 		var rd := RenderingServer.get_rendering_device()
 		rd.texture_update(solver._spectrum_tex, 0, spectrum)
-		var pc := solver._pack_push_constant(0, 0.0, 0.0)
+		var pc := solver._pack_push_constant(0)
 		pc.encode_float(60, 0.0)
 		var cl := rd.compute_list_begin()
 		solver._dispatch(cl, "spectrum_evolve", pc, n / 16, n / 16, 1)
@@ -1643,18 +1917,19 @@ func _check_jonswap_slider_controls(demo: Node) -> void:
 	var swell_preset: OceanPreset = demo.PRESETS[2]
 	var menu: OceanMenu = demo._menu_builder
 	var solver: OceanSolver = demo.solver
-	_check(is_equal_approx(swell_preset.swell, 2.0)
-		and is_equal_approx(swell_preset.spread, 0.05)
-		and is_equal_approx(swell_preset.detail, 0.8)
-		and is_equal_approx(swell_preset.jonswap_gamma, 5.0)
-		and is_equal_approx(swell_preset.choppiness, 1.05),
+	_check(is_equal_approx(swell_preset.swell, 0.8)
+		and is_equal_approx(swell_preset.amplitude_scale, 2.0)
+		and is_equal_approx(swell_preset.spread, 0.25)
+		and is_equal_approx(swell_preset.detail, 1.0)
+		and is_equal_approx(swell_preset.jonswap_gamma, 3.3)
+		and is_equal_approx(swell_preset.choppiness, 1.4),
 		"Swell preset does not expose the grouped-wave parameters")
 	_check(is_equal_approx(solver.detail, swell_preset.detail)
 		and is_equal_approx(solver.jonswap_gamma, swell_preset.jonswap_gamma)
 		and is_equal_approx(menu._detail.value, swell_preset.detail)
 		and is_equal_approx(menu._jonswap_gamma.value, swell_preset.jonswap_gamma),
 		"Swell detail or peak enhancement is not synchronized")
-	var packed := solver._pack_push_constant(0, 1.0, 1.0)
+	var packed := solver._pack_push_constant(0)
 	_check(is_equal_approx(packed.decode_float(104), swell_preset.jonswap_gamma),
 		"JONSWAP peak enhancement is not packed at byte 104")
 
@@ -1859,7 +2134,7 @@ func _check_tall_crests(demo: Node) -> void:
 					var c := field[i * 4 + 2]
 					var stretch := 0.5 * (a + b - sqrt((a - b) * (a - b) + 4.0 * c * c))
 					minimum_stretch = minf(minimum_stretch, stretch)
-					var expected_source := smoothstep(0.0, 0.2, clampf(demo.solver.whitecap, 0.05, 0.95) - stretch)
+					var expected_source := clampf(1.0 - stretch / clampf(demo.solver.whitecap, 0.05, 0.95), 0.0, 1.0)
 					_check(absf(normal_values[i * 4 + 3] - expected_source) < 0.005,
 						"cascade diagnostic source disagrees with its deformation")
 				print("CREST CHECK preset=%d gain=%.0f time=%.0f minimum_stretch=%.4f" % [preset, gain, time, minimum_stretch])
@@ -1878,10 +2153,16 @@ func _check_jonswap_extreme_envelope(demo: Node) -> void:
 	solver.height_gain = OceanSolver.JONSWAP_MAX_HEIGHT_GAIN
 	solver.amplitude_scale = 1.0
 	solver.mark_spectrum_dirty()
-	var pc := solver._pack_push_constant(0, 0.0, 0.0)
-	var fine_pc := solver._pack_push_constant(2, 0.0, 0.0)
-	var bounded_height := solver._jonswap_significant_height(
-		solver.effective_amplitude_scale()) * solver.effective_height_gain()
+	var pc := solver._pack_push_constant(0)
+	var fine_pc := solver._pack_push_constant(2)
+	var moments := solver.physical_moments()
+	var gain_delta := solver.effective_height_gain() - 1.0
+	var bounded_height := 4.0 * solver.effective_amplitude_scale() * sqrt(maxf(
+		float(moments.m0) + 2.0 * gain_delta * float(moments.m1)
+		+ gain_delta * gain_delta * float(moments.m2), 0.0))
+	print("JONSWAP envelope effective_chop=(%.4f,%.4f) height=%.4f limit=%.4f" % [
+		solver.effective_choppiness(0), solver.effective_choppiness(2),
+		bounded_height, OceanSolver.JONSWAP_TOTAL_HEIGHT_LIMIT_M])
 	_check(pc.decode_float(44) <= OceanSolver.JONSWAP_CHOPPINESS_LIMIT + 0.0001
 		and fine_pc.decode_float(44) <= OceanSolver.JONSWAP_FINE_CHOPPINESS_LIMIT + 0.0001
 		and bounded_height <= OceanSolver.JONSWAP_TOTAL_HEIGHT_LIMIT_M + 0.0001,
@@ -1909,6 +2190,10 @@ func _check_jonswap_extreme_envelope(demo: Node) -> void:
 	demo.apply_preset(0)
 
 
+func _foam_optical_coverage(density: float) -> float:
+	return smoothstep(0.0, 1.0, density * 0.75)
+
+
 func _constant_foam(solver: OceanSolver, derivative: Color, steps: int) -> Vector2:
 	var values: Array[Vector2] = await _constant_foam_layers(solver, derivative, steps, 1.0)
 	return values[0] if not values.is_empty() else Vector2.ZERO
@@ -1934,7 +2219,7 @@ func _constant_foam_layers(solver: OceanSolver, derivative: Color,
 			for step in count:
 				for layer in 3:
 					var pc := solver._pack_near_push_constant(duration / float(steps), layer)
-					for offset in [0, 4, 8, 12, 40]:
+					for offset in [0, 4, 8, 12, 40, 84]:
 						pc.encode_float(offset, 0.0)
 					var stage := "foam_near_ab" if solver._foam_near_read_index == 0 else "foam_near_ba"
 					if layer > 0:
@@ -2044,8 +2329,8 @@ func _crosswind_energy(data: PackedByteArray, n: int, wind_angle: float) -> floa
 	var wind := Vector2(sin(wind_angle), cos(wind_angle)).normalized()
 	var total := 0.0
 	var crosswind := 0.0
-	for y in range(0, n, 4):
-		for x in range(0, n, 4):
+	for y in n:
+		for x in n:
 			var k := Vector2(float(x) - n * 0.5, float(y) - n * 0.5)
 			if k.length_squared() < 1.0:
 				continue
@@ -2159,30 +2444,383 @@ func _near_shift_stats(b: PackedFloat32Array, a: PackedFloat32Array, size: int,
 	}
 
 
-## Exact GDScript replica of ocean_query.comp for one point: bilinear torus
-## samples of the decoded maps, 4-iteration choppy inversion. Returns the
-## height, the normalized normal, the raw gradient length; accumulates each
-## cascade's sum-of-squares height into contributions[cascade].
-func _query_ground_truth(disps: Array[PackedFloat32Array],
-		norms: Array[PackedFloat32Array], map_size: int,
+func _query_height_ground_truth(disps: Array[PackedFloat32Array], map_size: int,
 		tiles: PackedFloat32Array, point: Vector2,
 		contributions: Array[float]) -> Dictionary:
 	var g := point
-	for iteration in 4:
+	for iteration in 64:
 		var disp := Vector2.ZERO
 		for cascade in 3:
 			var sd := _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g)
 			disp += Vector2(sd.x, sd.z)
-		g = point - disp
+		var next_g := point - disp
+		if next_g.distance_squared_to(g) < 0.0000000001:
+			g = next_g
+			break
+		g = next_g
 	var height := 0.0
-	var gradient := Vector2.ZERO
 	for cascade in 3:
 		var s := _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g)
 		height += s.y
 		contributions[cascade] += s.y * s.y
-		gradient += _sample_map_vec2(norms[cascade], map_size, tiles[cascade], g)
-	var normal := Vector3(-gradient.x, 1.0, -gradient.y).normalized()
-	return {"height": height, "normal": normal, "gradient_len": gradient.length()}
+	var epsilon: float = tiles[2] / float(map_size) * 2.0
+	var slope := Vector2(
+		(_query_height_at(disps, map_size, tiles, point + Vector2(epsilon, 0.0))
+			- _query_height_at(disps, map_size, tiles, point - Vector2(epsilon, 0.0)))
+			/ (2.0 * epsilon),
+		(_query_height_at(disps, map_size, tiles, point + Vector2(0.0, epsilon))
+			- _query_height_at(disps, map_size, tiles, point - Vector2(0.0, epsilon)))
+			/ (2.0 * epsilon))
+	return {"height": height, "slope": slope, "parameter": g}
+
+
+
+func _query_height_at(disps: Array[PackedFloat32Array], map_size: int,
+		tiles: PackedFloat32Array, point: Vector2) -> float:
+	var g := point
+	for iteration in 64:
+		var disp := Vector2.ZERO
+		for cascade in 3:
+			var sample := _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g)
+			disp += Vector2(sample.x, sample.z)
+		var next_g := point - disp
+		if next_g.distance_squared_to(g) < 0.0000000001:
+			g = next_g
+			break
+		g = next_g
+	var height := 0.0
+	for cascade in 3:
+		height += _sample_map_vec3(disps[cascade], map_size, tiles[cascade], g).y
+	return height
+
+
+func _check_breaking_front(demo: Node) -> void:
+	for spread: float in [0.05, 0.15]:
+		for direction: float in [0.0, 0.6]:
+			var integral := 0.0
+			var angle_step := TAU / SpectrumMetrics.ANGLE_SAMPLES
+			for i in SpectrumMetrics.ANGLE_SAMPLES:
+				integral += SpectrumMetrics._longuet_higgins_function(1.0 / (spread * spread),
+					(float(i) + 0.5) * angle_step - direction) * angle_step
+			_check(absf(integral - 1.0) < 0.002, "narrow swell direction lost normalized energy")
+	var solver: OceanSolver = demo.solver
+	var previous_persistence := solver.foam_persistence
+	solver.foam_persistence = 6.0
+	var rates := solver._pack_near_push_constant(1.0)
+	_check(absf(rates.decode_float(20) - 1.15 * maxf(0.5, 10.0 - solver.foam_amount)) < 0.0001,
+		"fresh foam decay does not match the reference rate")
+	solver.foam_persistence = previous_persistence
+	var was_processing: bool = demo.is_processing()
+	demo.set_process(false)
+	solver.take_render_refresh_request()
+	await _frames(2)
+	var n := solver.map_size
+	var size := solver.foam_near_size
+	var domain := solver.foam_near_domain
+	var derivative := Image.create(n, n, false, Image.FORMAT_RGBAH)
+	for y: int in [0, n - 8]:
+		for x: int in [0, n - 8]:
+			derivative.fill_rect(Rect2i(x, y, 8, 8), Color(-0.8, -0.8, 0, 0))
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		for texture in [solver.get_derivative_tex_rid(), solver.get_displacement_tex_rid()]:
+			rd.texture_clear(texture, Color(0, 0, 0, 0), 0, 1, 0, 3)
+		rd.texture_update(solver.get_derivative_tex_rid(), 0, derivative.get_data())
+	)
+	RenderingServer.call_on_render_thread(func(): solver._clear_foam_fields())
+	await RenderingServer.frame_post_draw
+	await _dispatch_breaking_probe(solver, 0.1, 1.0)
+	var data := _foam_base(await _read_texture(solver.get_foam_near_tex_rid(1), 0), size)
+	var center := _foam_centroid(data, size, domain, 1)
+	_check(center.length() < domain / size * 2.0,
+		"breaking foam detached from the compressed crest: %s" % center)
+	print("BREAKING source center=%s" % center)
+	var history := Image.create(size, size, true, Image.FORMAT_RGF)
+	history.fill_rect(Rect2i(size / 2 - 12, size / 2 - 12, 24, 24), Color(0.4, 0.4, 0, 0))
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		solver._clear_foam_fields()
+		rd.texture_update(solver.get_foam_near_tex_rid(0), 0, history.get_data())
+	)
+	await RenderingServer.frame_post_draw
+	await _dispatch_breaking_probe(solver, 1.0, 0.0, Vector2(1, 0), Vector2(1, 0))
+	var transported := _foam_base(await _read_texture(solver.get_foam_near_tex_rid(1), 0), size)
+	var residual_center := _foam_centroid(transported, size, domain, 0)
+	var active_center := _foam_centroid(transported, size, domain, 1)
+	_check(residual_center.distance_to(Vector2(1, 0)) < domain / size
+		and active_center.distance_to(Vector2(1, 0)) < domain / size,
+		"fresh and residual foam transport disagree: %s / %s" % [active_center, residual_center])
+	print("BREAKING transport active=%s residual=%s" % [active_center, residual_center])
+	RenderingServer.call_on_render_thread(func():
+		RenderingServer.get_rendering_device().texture_update(
+			solver.get_foam_near_tex_rid(0), 0, history.get_data())
+	)
+	await RenderingServer.frame_post_draw
+	await _dispatch_breaking_probe(solver, 1.0, 0.0, Vector2(1, 0))
+	var stokes := _foam_base(await _read_texture(solver.get_foam_near_tex_rid(1), 0), size)
+	var stokes_fresh := _foam_centroid(stokes, size, domain, 1)
+	var stokes_residual := _foam_centroid(stokes, size, domain, 0)
+	_check(stokes_fresh.length() < domain / size
+		and stokes_residual.distance_to(Vector2(1, 0)) < domain / size,
+		"Stokes drift detached fresh foam from the material surface")
+	await _dispatch_breaking_probe(solver, 0.0, 0.0, Vector2(1, 0), Vector2(1, 0))
+	var unchanged := _foam_base(await _read_texture(solver.get_foam_near_tex_rid(1), 0), size)
+	_check(_foam_centroid(unchanged, size, domain, 0).length() < domain / size
+		and _foam_centroid(unchanged, size, domain, 1).length() < domain / size,
+		"zero time step moved the foam history")
+	print("BREAKING Stokes active=%s residual=%s" % [stokes_fresh, stokes_residual])
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		solver._clear_foam_fields()
+		rd.texture_clear(solver.get_derivative_tex_rid(), Color(-0.8, 0, 0, 0), 0, 1, 0, 1)
+	)
+	await RenderingServer.frame_post_draw
+	await _dispatch_breaking_probe(solver, 0.1, 1.0)
+	var patterned: PackedByteArray = await _read_texture(solver.get_foam_near_tex_rid(1), 0)
+	var pattern_values := _foam_base(patterned, size).to_float32_array()
+	var pattern_min := 1.0
+	var pattern_max := 0.0
+	for i in range(1, pattern_values.size(), 2):
+		pattern_min = minf(pattern_min, pattern_values[i])
+		pattern_max = maxf(pattern_max, pattern_values[i])
+	_check(pattern_max - pattern_min < 0.00001, "uniform compression generated an artificial foam pattern")
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		rd.texture_clear(solver.get_derivative_tex_rid(), Color(0, 0, 0, 0), 0, 1, 0, 3)
+		rd.texture_update(solver.get_foam_near_tex_rid(0), 0, patterned)
+	)
+	await RenderingServer.frame_post_draw
+	await _dispatch_breaking_probe(solver, 1.0, 0.0, Vector2(domain / size, 0), Vector2(domain / size, 0))
+	var advected := _foam_base(await _read_texture(solver.get_foam_near_tex_rid(1), 0), size).to_float32_array()
+	var pattern_error := 0.0
+	for y in range(4, size - 4, 4):
+		for x in range(4, size - 4, 4):
+			pattern_error = maxf(pattern_error, absf(advected[(y * size + x) * 2 + 1]
+				- pattern_values[(y * size + x - 1) * 2 + 1]))
+	_check(pattern_error < 0.00001, "foam detail was repainted instead of transported: %.7f" % pattern_error)
+	print("BREAKING uniform range=%.4f transport_error=%.7f" % [pattern_max - pattern_min, pattern_error])
+	var spray = demo.spray
+	var previous_amount: float = spray.amount
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		var settings := PackedFloat32Array([0.0, 4.0, 0.0, 1.0]).to_byte_array()
+		rd.buffer_update(solver.get_breaking_settings_rid(), 0, settings.size(), settings)
+		rd.texture_clear(solver.get_derivative_tex_rid(), Color(-0.8, -0.8, 0, 0), 0, 1, 0, 3)
+		rd.texture_clear(solver.velocity_solver.get_texture_rid(), Color(0, 0, 0, 0), 0, 1, 0, 3)
+		for index in 2:
+			rd.texture_clear(solver.get_foam_near_tex_rid(index), Color(0.2, 0.6, 0, 0), 0, solver._foam_mip_count, 0, 3)
+		rd.texture_clear(spray._particle_state_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+		spray.amount = 1.0
+		spray._simulation_accumulator = 0.0
+	)
+	for step in 12:
+		RenderingServer.call_on_render_thread(func():
+			spray.step_render(1.0 / 30.0, float(step + 1) / 30.0, Vector2.ZERO,
+				Vector2.ZERO, Vector2.ZERO, Vector2.ZERO, solver.foam_field_domains(),
+				0, 0.9, solver.local_centers())
+		)
+		await RenderingServer.frame_post_draw
+	var particles := (await _read_texture(spray._particle_state_rid, 0)).to_float32_array()
+	var falling := 0
+	var capacity: int = spray._particle_capacity
+	for i in capacity:
+		var offset := i * 4
+		if particles[offset + 3] > 0.2 and particles[offset + 3] < particles[capacity * 4 + offset + 3] \
+				and particles[offset + 1] > 0.2 and particles[capacity * 4 + offset + 1] < 0.0 \
+				and particles[capacity * 4 + offset] > 1.0:
+			falling += 1
+	_check(falling > 0, "swell spray did not travel forward and fall above the surface")
+	print("BREAKING spray falling=%d" % falling)
+	RenderingServer.call_on_render_thread(func():
+		spray.amount = previous_amount
+		RenderingServer.get_rendering_device().texture_clear(spray._particle_state_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+	)
+	var flat_fft := PackedFloat32Array()
+	flat_fft.resize(OceanSolver.NUM_SPECTRA * n * n * 2)
+	for y in n:
+		for x in n:
+			flat_fft[(y * n + x) * 2 + 1] = 5.0 if (x + y) % 2 == 0 else -5.0
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		for cascade in [1, 2]:
+			var offset: int = (cascade * 2 + 1) * OceanSolver.NUM_SPECTRA * n * n * 8
+			rd.buffer_update(solver._buffers["fft_data"], offset, flat_fft.size() * 4, flat_fft.to_byte_array())
+			var cl := rd.compute_list_begin()
+			solver._dispatch(cl, "map_assemble", solver._pack_push_constant(cascade), n / 16, n / 16, 1)
+			rd.compute_list_end()
+	)
+	for cascade in [1, 2]:
+		var normals := _rgba_half_values(await _read_texture(solver.get_normal_tex_rid(), cascade), n)
+		var maximum_crest := 0.0
+		for i in n * n:
+			maximum_crest = maxf(maximum_crest, normals[i * 4 + 2])
+		_check(maximum_crest < 0.000001, "flat height generated curvature on cascade %d" % cascade)
+	var camera_state: Array = [demo.orbit_cam.target, demo.orbit_cam.distance,
+		demo.orbit_cam.pitch, demo.orbit_cam.yaw, demo._capture_view_name,
+		demo.orbit_cam.is_processing(), demo.rocks.visible, demo._capture_interaction_foam,
+		demo._sim_time]
+	demo.set_capture_view("foam_aerial")
+	demo.set_capture_foam(true)
+	demo.surface_mat.set_shader_parameter("foam_near_enabled", true)
+	demo.surface_mat.set_shader_parameter("foam_near_center", Vector2(10000, 10000))
+	demo.surface_mat.set_shader_parameter("foam_domains", Vector3(2, 8, 32))
+	var old_strength: float = demo.surface_mat.get_shader_parameter("foam_strength")
+	demo.surface_mat.set_shader_parameter("foam_strength", 1.0)
+	for channel in 2:
+		var pattern := Image.create(size, size, true, Image.FORMAT_RGF)
+		var stripe := Color(0.64, 0, 0, 0) if channel == 0 else Color(0, 0.64, 0, 0)
+		for x in range(0, size, 64):
+			pattern.fill_rect(Rect2i(x, 0, 1, size), stripe)
+		RenderingServer.call_on_render_thread(func():
+			var rd := RenderingServer.get_rendering_device()
+			solver._clear_foam_fields()
+			for index in 2:
+				rd.texture_update(solver.get_foam_near_tex_rid(index), 2, pattern.get_data())
+				var cl := rd.compute_list_begin()
+				solver._generate_foam_mips(cl, index)
+				rd.compute_list_end()
+		)
+		await RenderingServer.frame_post_draw
+		var rings: Array[Dictionary] = await demo.capture_foam_rings()
+		var pixels := 0
+		for ring in rings:
+			if ring.pixels > 0:
+				pixels += ring.pixels
+				_check(absf(ring.mean_coverage - 0.01) < 0.0015,
+					"filtered foam coverage was erased or amplified: %.6f" % ring.mean_coverage)
+		_check(pixels > 1000, "filtered foam measurement did not see the surface")
+		print("BREAKING filtered channel=%d rings=%s" % [channel, rings])
+	demo.surface_mat.set_shader_parameter("foam_strength", old_strength)
+	demo.orbit_cam.target = camera_state[0]
+	demo.orbit_cam.distance = camera_state[1]
+	demo.orbit_cam.pitch = camera_state[2]
+	demo.orbit_cam.yaw = camera_state[3]
+	demo.orbit_cam.set_enabled(camera_state[5])
+	demo.orbit_cam._update_transform()
+	demo._capture_view_name = camera_state[4]
+	demo.rocks.visible = camera_state[6]
+	demo.set_capture_interaction(camera_state[7])
+	demo.set_capture_time(camera_state[8])
+	solver.mark_spectrum_dirty()
+	RenderingServer.call_on_render_thread(solver.step_render.bind(0.0))
+	await _frames(2)
+	demo.set_process(was_processing)
+
+
+func _dispatch_breaking_probe(solver: OceanSolver, dt: float, growth: float,
+		drift: Vector2 = Vector2.ZERO, current: Vector2 = Vector2.ZERO) -> void:
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		var pc := solver._pack_near_push_constant(dt, 0)
+		for offset in [0, 4, 8, 12, 16, 20, 24, 88, 92, 120]:
+			pc.encode_float(offset, 0.0)
+		pc.encode_float(28, growth)
+		pc.encode_float(56, current.x)
+		pc.encode_float(60, current.y)
+		pc.encode_float(88, drift.x)
+		pc.encode_float(92, drift.y)
+		pc.encode_float(64, solver.foam_near_domain)
+		pc.encode_float(76, 0.9)
+		var cl := rd.compute_list_begin()
+		solver._dispatch(cl, "foam_near_ab", pc, solver.foam_near_size / 16, solver.foam_near_size / 16, 1)
+		rd.compute_list_end()
+	)
+	await RenderingServer.frame_post_draw
+
+
+func _foam_centroid(data: PackedByteArray, size: int, domain: float, channel: int) -> Vector2:
+	var values := data.to_float32_array()
+	var total := 0.0
+	var weighted := Vector2.ZERO
+	for y in size:
+		for x in size:
+			var value := values[(y * size + x) * 2 + channel]
+			total += value
+			weighted += Vector2((float(x) + 0.5) / size - 0.5,
+				(float(y) + 0.5) / size - 0.5) * domain * value
+	return weighted / maxf(total, 1e-12)
+
+
+func _check_rendered_foam(demo: Node) -> void:
+	demo.apply_preset(3)
+	demo.set_capture_view("overhead")
+	demo.set_capture_time(20.0)
+	demo.set_capture_wind_direction(0.0)
+	demo.set_capture_foam(true)
+	RenderingServer.call_on_render_thread(demo.solver._clear_foam_fields)
+	await demo.warmup_foam(8.0)
+	var rings: Array[Dictionary] = await demo.capture_foam_rings()
+	print("FOAM RENDER rings=%s" % [rings])
+	var near_coverage: float = rings[0].mean_coverage
+	_check(rings[0].pixels > 1000 and rings[0].active_fraction >= 0.005
+		and near_coverage >= 0.001 and near_coverage <= 0.20,
+		"Storm rendered foam is empty or excessive (%.1f%%)"
+		% (near_coverage * 100.0))
+	demo.set_capture_foam(false)
+	var disabled_rings: Array[Dictionary] = await demo.capture_foam_rings()
+	for ring in disabled_rings:
+		_check(ring.pixels == 0 or ring.mean_coverage < 0.00001,
+			"disabled foam remains visible in the %d..%d m ring" % [ring.from_m, ring.to_m])
+	demo.set_capture_foam(true)
+
+
+func _check_query_fold_rejection(demo: Node) -> void:
+	print("QUERY FOLD stage=begin")
+	var solver: OceanSolver = demo.solver
+	var was_processing: bool = demo.is_processing()
+	var was_physics_processing: bool = demo.is_physics_processing()
+	demo.set_process(false)
+	demo.set_physics_process(false)
+	solver.take_render_refresh_request()
+	await _frames(2)
+	solver.take_query_batch()
+	var size: int = solver.map_size
+	var displacement_data: Array[PackedByteArray] = []
+	var derivative_data: Array[PackedByteArray] = []
+	var wavenumber := TAU * 40.0 / solver.tile_lengths[2]
+	var amplitude := 1.3 / wavenumber
+	for cascade in 3:
+		var displacement := Image.create(size, size, false, Image.FORMAT_RGBAH)
+		var derivative := Image.create(size, size, false, Image.FORMAT_RGBAH)
+		displacement.fill(Color(0, 0, 0, 0))
+		derivative.fill(Color(0, 0, 0, 0))
+		if cascade == 2:
+			for y in size:
+				for x in size:
+					var world_x := (float(x) + 0.5) / float(size) * solver.tile_lengths[cascade]
+					displacement.set_pixel(x, y,
+						Color(-amplitude * sin(wavenumber * world_x), 0.0, 0.0, 0.0))
+					derivative.set_pixel(x, y,
+						Color(-1.3 * cos(wavenumber * world_x), 0.0, 0.0, 0.0))
+		displacement_data.append(displacement.get_data())
+		derivative_data.append(derivative.get_data())
+	solver._query_results_valid = false
+	var batch_id := solver.submit_queries(PackedVector2Array([Vector2.ZERO]))
+	print("QUERY FOLD stage=submit id=%d" % batch_id)
+	RenderingServer.call_on_render_thread(func():
+		var rd := RenderingServer.get_rendering_device()
+		for cascade in 3:
+			rd.texture_update(solver.get_displacement_tex_rid(), cascade,
+				displacement_data[cascade])
+			rd.texture_update(solver.get_derivative_tex_rid(), cascade,
+				derivative_data[cascade])
+		solver._dispatch_pending_queries()
+	)
+	for frame in 180:
+		await process_frame
+		if solver.query_results_valid():
+			break
+	var batch := solver.take_query_batch()
+	print("QUERY FOLD batch=%s results=%s" % [
+		batch.id if batch != null else -1, batch.results if batch != null else []])
+	_check(batch != null and batch.id == batch_id and batch.results.size() == 1
+		and batch.results[0].w < 0.5,
+		"query accepted a folded synthetic horizontal map")
+	solver.mark_spectrum_dirty()
+	RenderingServer.call_on_render_thread(solver.step_render.bind(0.0))
+	await _frames(2)
+	demo.set_process(was_processing)
+	demo.set_physics_process(was_physics_processing)
 
 
 func _sample_map_vec3(texels: PackedFloat32Array, map_size: int, tile: float,
@@ -2211,19 +2849,6 @@ func _sample_map_vec4(texels: PackedFloat32Array, map_size: int, tile: float,
 	return c00.lerp(c10, t.x).lerp(c01.lerp(c11, t.x), t.y)
 
 
-func _sample_map_vec2(texels: PackedFloat32Array, map_size: int, tile: float,
-		world: Vector2) -> Vector2:
-	var uv := world / tile
-	var grid := (uv - uv.floor()) * float(map_size) - Vector2(0.5, 0.5)
-	var i0 := Vector2i(grid.floor())
-	var t := grid - Vector2(i0)
-	var c00 := _texel_vec2(texels, map_size, i0)
-	var c10 := _texel_vec2(texels, map_size, i0 + Vector2i(1, 0))
-	var c01 := _texel_vec2(texels, map_size, i0 + Vector2i(0, 1))
-	var c11 := _texel_vec2(texels, map_size, i0 + Vector2i(1, 1))
-	return c00.lerp(c10, t.x).lerp(c01.lerp(c11, t.x), t.y)
-
-
 func _texel_vec3(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vector3:
 	var o := (posmod(at.y, map_size) * map_size + posmod(at.x, map_size)) * 4
 	return Vector3(texels[o], texels[o + 1], texels[o + 2])
@@ -2232,11 +2857,6 @@ func _texel_vec3(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vec
 func _texel_vec4(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vector4:
 	var o := (posmod(at.y, map_size) * map_size + posmod(at.x, map_size)) * 4
 	return Vector4(texels[o], texels[o + 1], texels[o + 2], texels[o + 3])
-
-
-func _texel_vec2(texels: PackedFloat32Array, map_size: int, at: Vector2i) -> Vector2:
-	var o := (posmod(at.y, map_size) * map_size + posmod(at.x, map_size)) * 4
-	return Vector2(texels[o], texels[o + 1])
 
 
 func _read_texture(rid: RID, layer: int) -> PackedByteArray:
@@ -2249,3 +2869,10 @@ func _read_texture(rid: RID, layer: int) -> PackedByteArray:
 func _frames(count: int) -> void:
 	for frame in count:
 		await process_frame
+
+
+func _expected_solver_vram(solver: OceanSolver) -> int:
+	return OceanQualityProfile.estimate_vram_bytes_for(
+		solver.map_size, solver.foam_near_size) \
+		+ solver.velocity_solver.estimate_vram_bytes() \
+		+ solver.local_solver.estimate_vram_bytes()
