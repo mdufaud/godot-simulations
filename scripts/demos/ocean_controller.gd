@@ -698,6 +698,8 @@ func set_scene_mode(index: int, persist: bool = true) -> void:
 	solver.foam_near_size = solver.shore_solver.config.foam_texture_size_px(
 		quality.effective, OceanQualityProfile.FOAM_NEAR_SIZE[quality.effective])
 	if solver.shore_enabled:
+		solver.shore_solver.config.foam_retention_s = 1.5
+		solver.shore_solver.config.contact_retention_s = 2.5
 		island = OceanIsland.new()
 		island.name = "Island"
 		add_child(island)

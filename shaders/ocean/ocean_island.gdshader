@@ -80,7 +80,7 @@ void fragment() {
 	NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
 	vec3 wet_sand = dry_sand * vec3(0.64, 0.61, 0.54);
 	vec3 sand_albedo_value = mix(dry_sand, wet_sand, wetness);
-	float deposit = clamp(shore.b * 1.5, 0.0, 0.45) * step(0.001, foam_amount);
+	float deposit = clamp(shore.b * 3.0, 0.0, 0.22) * step(0.001, foam_amount);
 	deposit *= (1.0 - smoothstep(0.0, 0.05, -above_surface)) * wetness * sand;
 	float network = texture(foam_detail, p * 0.36).r;
 	float network_aa = max(fwidth(network), 0.015);

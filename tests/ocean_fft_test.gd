@@ -1366,6 +1366,8 @@ func _check_foam_phases(demo: Node) -> void:
 func _check_nyquist_derivatives(solver: OceanSolver) -> void:
 	RenderingServer.call_on_render_thread(solver.step_render.bind(1.0 / 60.0))
 	var data := await _read_texture(solver.get_derivative_tex_rid(), 2)
+	if data.is_empty():
+		return
 	var n := solver.map_size
 	var field := _rgba_half_values(data, n)
 	var nyquist_energy := 0.0

@@ -35,11 +35,22 @@ void fragment() {
 	float wet = max(live_wet, retained_wet);
 	if (wet < 0.001) { discard; }
 	float contact = 1.0 - smoothstep(0.08, 0.5, abs(rock_world_position.y - water.x));
-	float breakup = texture(foam_detail, rock_world_position.xz * 0.36 + rock_world_position.y * 0.08).r;
-	float foam = wet * contact * smoothstep(0.04, 0.4, max(coverage.x * history.z, history.w) * foam_amount)
+	vec3 weights = pow(abs(normalize(rock_world_normal)), vec3(4.0));
+	weights /= max(dot(weights, vec3(1.0)), 0.001);
+	vec3 detail_position = rock_world_position * 0.36;
+	float breakup = texture(foam_detail, detail_position.zy).r * weights.x
+		+ texture(foam_detail, detail_position.xz).r * weights.y
+		+ texture(foam_detail, detail_position.xy).r * weights.z;
+	float breakup_aa = max(fwidth(breakup), 0.015);
+	float live_foam = wet * contact
+		* smoothstep(0.04, 0.4, max(coverage.x * history.z, history.w) * foam_amount)
 		* mix(0.25, 1.0, breakup);
-	ALBEDO = mix(vec3(0.045, 0.065, 0.075), vec3(0.8, 0.87, 0.86), foam);
+	float residue = clamp(coverage.b * 3.0, 0.0, 0.22) * retained_wet * (1.0 - live_wet)
+		* smoothstep(0.35 - breakup_aa, 0.65 + breakup_aa, breakup) * step(0.001, foam_amount);
+	float foam = max(live_foam, residue);
+	float opacity = clamp(wet * 0.22 + foam * 0.7, 0.0, 0.85);
+	ALBEDO = mix(vec3(0.045, 0.065, 0.075), vec3(0.8, 0.87, 0.86), foam * 0.7 / max(opacity, 0.001));
 	ROUGHNESS = mix(0.18, 0.85, foam);
 	SPECULAR = 0.5;
-	ALPHA = clamp(wet * 0.22 + foam * 0.7, 0.0, 0.85);
+	ALPHA = opacity;
 }

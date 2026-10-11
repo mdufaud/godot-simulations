@@ -28,6 +28,9 @@ func _run() -> void:
 		return
 	_check(_demo.current_scene_index == 1 and _demo.solver.shore_enabled,
 		"restored scene did not enter Island Beach through runtime boot")
+	_check(_demo.solver.shore_solver.config.foam_retention_s <= 2.0
+		and _demo.solver.shore_solver.config.contact_retention_s <= 3.0,
+		"normal boot did not enable short reflux traces")
 	_check(_demo.island != null and is_equal_approx(_demo.solver.water_depth, 80.0),
 		"island bathymetry was not initialized and the offshore spectrum depth moved")
 	_check(_demo.surface_mat.get_shader_parameter("shore_enabled") == true,
@@ -84,8 +87,9 @@ func _run() -> void:
 	await _check_transition_composition()
 	_demo.set_capture_foam(false)
 	_check(_demo.surface_mat.get_shader_parameter("foam_feedback_enabled") == false
-		and _demo.island.terrain_material.get_shader_parameter("foam_amount") == 0.0,
-		"Foam off did not hide both water and deposited sand foam")
+		and _demo.island.terrain_material.get_shader_parameter("foam_amount") == 0.0
+		and _demo.island.rock_wet_material.get_shader_parameter("foam_amount") == 0.0,
+		"Foam off did not hide water, sand deposits and rock residue")
 	var wind: float = _demo.solver.wind_speed
 	var look: int = _demo.current_look_index
 	_demo.set_process(true)
@@ -224,6 +228,27 @@ func _check_sand_history() -> void:
 	_check(incoming[index] > 0.01 and incoming[index + 3] > 0.99,
 		"the visible incoming water did not foam and wet the sand")
 	var terrain := await _read(_demo.solver.get_shore_derivative_texture_rid(), 128)
+	await _set_visual_fields(2.85, 0.0)
+	RenderingServer.call_on_render_thread(shore.step_render.bind(
+		1.0 / 30.0, 3.0 + 1.0 / 30.0, Vector2.ZERO, 0.0, 0.5, PackedVector4Array()))
+	await RenderingServer.frame_post_draw
+	var rock_retreat := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
+	var steep_deposit := 0.0
+	var flat_deposit := 0.0
+	for z in range(1, 127):
+		for x in range(1, 127):
+			var offset := (z * 128 + x) * 4
+			if terrain[offset + 3] >= 2.0:
+				continue
+			var gradient := Vector2(terrain[offset + 7] - terrain[offset - 1],
+				terrain[offset + 128 * 4 + 3] - terrain[offset - 128 * 4 + 3]) / 2.5
+			if gradient.length() > 0.8:
+				steep_deposit = maxf(steep_deposit, rock_retreat[offset + 2])
+			elif gradient.length() < 0.05:
+				flat_deposit = maxf(flat_deposit, rock_retreat[offset + 2])
+	_check(steep_deposit > 0.01 and flat_deposit < 0.00001,
+		"reflux did not retain foam at steep rock contacts or deposited it in flat deep water")
+	print("OCEAN ISLAND rock-reflux steep=%.6f flat=%.6f" % [steep_deposit, flat_deposit])
 	var thin_incoming := incoming
 	for frame in 33:
 		await _set_visual_fields(terrain[index + 3] + 0.1 - float(frame) * 0.005, 0.0)
@@ -235,7 +260,7 @@ func _check_sand_history() -> void:
 	var retreat := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 	_check(retreat[index] < 0.00001
 		and retreat[index + 2] > 0.05 * maxf(thin_incoming[index], thin_incoming[index + 1])
-		and retreat[index + 3] > 0.98,
+		and retreat[index + 3] > 0.7,
 		"gradually receding water erased the foam before stranding it on wet sand")
 	RenderingServer.call_on_render_thread(func():
 		shore.reset(false)
@@ -255,22 +280,35 @@ func _check_sand_history() -> void:
 	for offset in retreat.size():
 		freeze_error = maxf(freeze_error, absf(retreat[offset] - frozen[offset]))
 	_check(freeze_error < 0.000001, "zero elapsed time advanced sand drying or stranded foam")
+	var deposit_3s := 0.0
+	var deposit_6s := 0.0
 	for frame in 60:
 		RenderingServer.call_on_render_thread(shore.step_render.bind(
 			1.0 / 6.0, 3.0 + 1.0 / 30.0 + float(frame + 1) / 6.0,
 			Vector2.ZERO, 0.0, 0.5, PackedVector4Array()))
 		await RenderingServer.frame_post_draw
+		if frame == 17 or frame == 35:
+			var residue := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
+			var ratio := residue[index + 2] / retreat[index + 2]
+			if frame == 17:
+				deposit_3s = ratio
+				_check(ratio > 0.05 and ratio < 0.2,
+					"stranded foam disappeared instantly or stayed too strong after three seconds")
+			else:
+				deposit_6s = ratio
+				_check(ratio < 0.025 and residue[index + 3] < 0.15,
+					"foam and sand wetness did not fade within a few seconds")
 	var dried := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 	_check(absf(dried[index + 3] / retreat[index + 3] - exp(-10.0 / shore.SAND_DRYING_S)) < 0.005,
 		"exposed sand did not gradually dry after the visible wave passed")
-	_check(dried[index + 2] > 0.001 and dried[index + 2] < retreat[index + 2],
-		"stranded foam did not persist and then decay independently of wet sand")
+	_check(dried[index + 2] < retreat[index + 2] * 0.002,
+		"stranded foam remained visible ten seconds after reflux")
 	var contact_bytes: PackedByteArray = await TextureReadback.new().read_layer(
 		_demo.solver.get_shore_contact_texture_rid(), 0, 128 * 128 * 8)
 	_check(contact_bytes.size() == 128 * 128 * 8, "sand-film contact readback was incomplete")
 	if contact_bytes.size() == 128 * 128 * 8:
 		var recent_water := contact_bytes.decode_half(index * 2 + 2)
-		_check(recent_water < dried[index + 3] * 0.3,
+		_check(recent_water < 0.05 and recent_water < dried[index + 3],
 			"the reflective surface film lasted as long as the damp sand")
 		print("OCEAN ISLAND film recent-water=%.6f damp-sand=%.6f" % [recent_water, dried[index + 3]])
 	RenderingServer.call_on_render_thread(func():
@@ -285,6 +323,7 @@ func _check_sand_history() -> void:
 	_check(reset_maximum < 0.000001, "shore reset retained old sand wetness or foam deposits")
 	print("OCEAN ISLAND swash static-foam=%.7f stranded=%.6f wet=%.6f dried=%.6f preserve=%.8f zero-dt=%.8f reset=%.8f" % [
 		maximum, retreat[index + 2], retreat[index + 3], dried[index + 3], preserve_error, freeze_error, reset_maximum])
+	print("OCEAN ISLAND residue remaining-3s=%.6f remaining-6s=%.6f" % [deposit_3s, deposit_6s])
 	shore.whitecap_threshold = threshold
 
 

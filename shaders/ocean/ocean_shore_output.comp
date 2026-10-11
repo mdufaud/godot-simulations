@@ -79,8 +79,9 @@ void output_visual_history(ivec2 p, uint i) {
         float retreat = smoothstep(0.0, 0.5, (past.y - depth) / dt);
         float deposit = previous.z * exp(-dt / SHORE_FOAM_RETENTION_S);
         vec2 previous_coverage = foam_coverage(previous.xy);
+        float exposed_contact = max(1.0 - smoothstep(0.0, 0.05, depth), smoothstep(0.25, 0.8, slope));
         float stranded = max(previous_coverage.x, previous_coverage.y) * retreat
-            * (1.0 - smoothstep(0.0, 0.05, depth)) * 0.5;
+            * exposed_contact * 0.5;
         deposit = max(deposit, stranded);
         float wetness = max(previous.w * exp(-dt / SHORE_SAND_DRYING_S), wet);
         float contact_strength = max(past.w * exp(-dt / SHORE_CONTACT_RETENTION_S), wet);
