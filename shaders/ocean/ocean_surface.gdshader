@@ -49,22 +49,28 @@ uniform bool fft_surface = true;
 uniform bool local_waves_enabled = false;
 uniform sampler2D coast_field : filter_linear, repeat_disable;
 uniform sampler2D wake_field : filter_linear, repeat_disable;
-uniform vec4 local_centers = vec4(90.0, 35.0, 0.0, 0.0);
+uniform vec4 local_centers = vec4(0.0, 20.0, 0.0, 0.0);
 uniform vec2 local_domains = vec2(256.0, 64.0);
 uniform bool shore_enabled = false;
 uniform sampler2D shore_field : filter_linear, repeat_disable;
 uniform sampler2D shore_foam : filter_linear, repeat_disable;
+uniform sampler2D shore_breaker : filter_linear, repeat_disable;
+uniform sampler2D shore_contact : filter_linear, repeat_disable;
+uniform float shore_blend_width_m = 12.0;
+uniform vec2 shore_depth_blend_m = vec2(0.0);
 uniform float shore_domain = 160.0;
+uniform bool shore_visual_breakers_enabled = false;
 // Camera-centred near-field foam coverage. Each layer has its own domain and
 // the layers are blended radially so the coverage remains world anchored.
-uniform sampler2DArray foam_near_a : filter_linear_mipmap, repeat_disable;
-uniform sampler2DArray foam_near_b : filter_linear_mipmap, repeat_disable;
+uniform sampler2DArray foam_near_a : filter_linear_mipmap_anisotropic, repeat_disable;
+uniform sampler2DArray foam_near_b : filter_linear_mipmap_anisotropic, repeat_disable;
 uniform vec2 foam_near_center = vec2(0.0);
 uniform vec3 foam_domains = vec3(256.0, 1024.0, 4096.0);
 uniform float foam_near_index = 0.0;
 uniform bool foam_near_enabled = false;
 // Locally generated seamless detail used by shore and interaction foam.
-uniform sampler2D foam_detail : filter_linear_mipmap, repeat_enable, hint_default_white;
+uniform sampler2D foam_detail : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_white;
+uniform sampler2D foam_pattern : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_white;
 uniform sampler2D micro_normal : hint_normal, filter_linear_mipmap, repeat_enable;
 uniform vec2 micro_normal_scales = vec2(0.085, 0.23);
 uniform float micro_normal_strength = 0.42;
@@ -105,6 +111,7 @@ varying float glitter_factor;
 varying float filtered_roughness;
 varying vec3 geometry_weights;
 varying vec3 spectral_displacement;
+varying float shore_roll_foam;
 uniform vec3 cascade_slope_variance = vec3(0.0);
 
 float cascade_wavelength(int index) {
@@ -135,7 +142,8 @@ void vertex() {
 		VIEWPORT_SIZE.y * abs(PROJECTION_MATRIX[1][1]), 1.0);
 
 	world_uv = VERTEX.xz;
-	float shore_vertex_weight = shore_enabled ? ocean_shore_weight(world_uv, shore_domain) : 0.0;
+	float shore_vertex_weight = shore_enabled ? ocean_shore_surface_weight(shore_field, world_uv,
+		shore_domain, shore_blend_width_m, shore_depth_blend_m) : 0.0;
 	// Each cascade fades with distance in proportion to its tile length: storm
 	// swell (cascade 0, ~1 km tile) must stay visible for kilometres or the far
 	// sea collapses into a flat mirror that merges with the sky. P0-C (cause
@@ -148,7 +156,7 @@ void vertex() {
 	vec3 displacement = vec3(0.0);
 	geometry_weights = vec3(0.0);
 	for (int i = 0; i < num_cascades; i++) {
-		if (shore_vertex_weight >= 1.0) {
+		if (shore_vertex_weight >= 1.0 && !shore_visual_breakers_enabled) {
 			continue;
 		}
 		if (geometry_cascade >= 0 && i != geometry_cascade) {
@@ -172,12 +180,20 @@ void vertex() {
 			* scales.z * contribution;
 	}
 	spectral_displacement = displacement;
+	shore_roll_foam = 0.0;
 	if (shore_enabled) {
-		float weight = shore_vertex_weight;
-		displacement.xz *= 1.0 - weight;
+		displacement.xz *= shore_visual_breakers_enabled ? 1.0 : 1.0 - shore_vertex_weight;
 		vec2 position = world_uv + displacement.xz;
-		vec4 shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, position);
-		displacement.y = mix(displacement.y, shore.x, weight);
+		float weight = shore_visual_breakers_enabled
+			? ocean_shore_surface_weight(shore_field, position, shore_domain,
+				shore_blend_width_m, shore_depth_blend_m) : shore_vertex_weight;
+		if (shore_visual_breakers_enabled && weight > 0.0) {
+			vec4 roll = ocean_shore_roll(shore_breaker, position, shore_domain);
+			shore_roll_foam = roll.w * weight;
+		} else if (!shore_visual_breakers_enabled) {
+			vec4 shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, position);
+			displacement.y = mix(displacement.y, shore.x, weight);
+		}
 	} else if (local_waves_enabled) {
 		vec2 position = world_uv + displacement.xz;
 		displacement.y += ocean_local_sample(coast_field, local_centers.xy,
@@ -219,6 +235,20 @@ vec4 texture_bicubic(in sampler2DArray sampler, in vec3 uvw) {
 		mix(texture(sampler, vec3(h.yz, uvw.z)), texture(sampler, vec3(h.xz, uvw.z)), w.x), w.y);
 }
 
+vec2 texture_foam_bicubic(in sampler2DArray sampler, in vec3 uvw) {
+	vec2 dims = vec2(textureSize(sampler, 0).xy);
+	vec2 dims_inv = 1.0 / dims;
+	uvw.xy = uvw.xy * dims + 0.5;
+	vec4 wx = cubic_weights(fract(uvw.x));
+	vec4 wy = cubic_weights(fract(uvw.y));
+	vec4 g = vec4(wx.xz + wx.yw, wy.xz + wy.yw);
+	vec4 h = (vec4(wx.yw, wy.yw) / g + vec2(-1.5, 0.5).xyxy + floor(uvw.xy).xxyy) * dims_inv.xxyy;
+	vec2 w = g.xz / (g.xz + g.yw);
+	return mix(
+		mix(textureLod(sampler, vec3(h.yw, uvw.z), 0.0), textureLod(sampler, vec3(h.xw, uvw.z), 0.0), w.x),
+		mix(textureLod(sampler, vec3(h.yz, uvw.z), 0.0), textureLod(sampler, vec3(h.xz, uvw.z), 0.0), w.x), w.y).rg;
+}
+
 vec4 texture_pixel_filtered(in sampler2DArray sampler, in vec3 uvw,
 		in vec2 uv_dx, in vec2 uv_dy) {
 	vec2 x = uv_dx * 0.35;
@@ -237,6 +267,13 @@ vec2 sample_foam_near_layer(int layer, vec2 world_pos, float domain, vec2 dx, ve
 	vec2 coverage = foam_near_index > 0.5
 		? textureGrad(foam_near_b, vec3(uv, float(layer)), dx / domain, dy / domain).rg
 		: textureGrad(foam_near_a, vec3(uv, float(layer)), dx / domain, dy / domain).rg;
+	float footprint = max(length(dx), length(dy)) / texel;
+	if (textureSize(normals, 0).x >= 512 && footprint < 1.0) {
+		vec2 reconstructed = foam_near_index > 0.5
+			? texture_foam_bicubic(foam_near_b, vec3(uv, float(layer)))
+			: texture_foam_bicubic(foam_near_a, vec3(uv, float(layer)));
+		coverage = mix(reconstructed, coverage, smoothstep(0.5, 1.0, footprint));
+	}
 	return coverage * inside.x * inside.y;
 }
 
@@ -273,12 +310,28 @@ vec4 local_surface(vec2 world) {
 		+ ocean_local_sample(wake_field, local_centers.zw, local_domains.y, world);
 }
 
+float shore_foam_pattern(vec3 position, vec3 dx, vec3 dy, vec3 weights) {
+	float detail = 0.0;
+	if (weights.x > 0.001) {
+		detail += textureGrad(foam_pattern, position.zy, dx.zy, dy.zy).b * weights.x;
+	}
+	if (weights.y > 0.001) {
+		detail += textureGrad(foam_pattern, position.xz, dx.xz, dy.xz).b * weights.y;
+	}
+	if (weights.z > 0.001) {
+		detail += textureGrad(foam_pattern, position.xy, dx.xy, dy.xy).b * weights.z;
+	}
+	return detail;
+}
+
 void fragment() {
-	float shore_weight = shore_enabled ? ocean_shore_weight(world_uv, shore_domain) : 0.0;
+	vec2 shore_position = shore_visual_breakers_enabled ? interaction_world_xz : world_uv;
+	float shore_weight = shore_enabled ? ocean_shore_surface_weight(shore_field, shore_position,
+		shore_domain, shore_blend_width_m, shore_depth_blend_m) : 0.0;
 	vec4 shore = vec4(0.0);
 	if (shore_weight > 0.0) {
 		shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, interaction_world_xz);
-		if (shore_weight > 0.999 && shore.w <= 0.002) {
+		if (!shore_visual_breakers_enabled && shore_weight > 0.999 && shore.w <= 0.002) {
 			discard;
 		}
 	}
@@ -300,8 +353,10 @@ void fragment() {
 	vec2 world_dx = dFdx(world_uv);
 	vec2 world_dy = dFdy(world_uv);
 	float pixel_footprint = max(length(world_dx), length(world_dy));
+	vec2 contact_pattern_dx = dFdx(interaction_world_xz) * 1.1;
+	vec2 contact_pattern_dy = dFdy(interaction_world_xz) * 1.1;
 	for (int i = 0; i < num_cascades; i++) {
-		if (shore_weight >= 1.0 && i == 0) {
+		if (shore_weight >= 1.0 && i == 0 && !shore_visual_breakers_enabled) {
 			continue;
 		}
 		if (geometry_cascade >= 0 && i != geometry_cascade) {
@@ -313,7 +368,7 @@ void fragment() {
 		float cascade_fade = exp(-dist * 0.32 / tile);
 		float distance_fade = min(exp(-(length(world_uv - CAMERA_POSITION_WORLD.xz)
 			- max(tile * 0.7, 60.0)) * 2.5 / max(tile, 80.0)), 1.0);
-		if (fft_surface && shore_weight < 1.0) {
+		if (fft_surface && (shore_weight < 1.0 || shore_visual_breakers_enabled)) {
 			vec4 differential = texture(derivatives, coords);
 			float geometry_fade = geometry_weights[i];
 			deformation += differential.xyz * scales.z * geometry_fade;
@@ -373,19 +428,29 @@ void fragment() {
 		gradient += unresolved_gradient;
 	}
 	if (shore_weight > 0.0) {
-		vec2 weight_gradient = ocean_shore_weight_gradient(world_uv, shore_domain);
+		vec2 weight_gradient = shore_visual_breakers_enabled && shore_weight >= 1.0
+			? vec2(0.0) : ocean_shore_surface_weight_gradient(shore_field, shore_position,
+				shore_domain, shore_blend_width_m, shore_depth_blend_m);
 		mat2 jacobian = ocean_shore_jacobian(deformation, spectral_displacement.xz,
-			shore_weight, weight_gradient);
-		vec2 shore_gradient = ocean_shore_gradient(shore_field, interaction_world_xz, shore_domain);
-		vec2 material_gradient = (1.0 - shore_weight) * height_gradient
+			shore_visual_breakers_enabled ? 0.0 : shore_weight,
+			shore_visual_breakers_enabled ? vec2(0.0) : weight_gradient);
+		if (shore_visual_breakers_enabled) {
+			weight_gradient = vec2(dot(jacobian[0], weight_gradient), dot(jacobian[1], weight_gradient));
+		}
+		vec2 shore_gradient = shore_visual_breakers_enabled
+			? vec2(0.0)
+			: ocean_shore_gradient(shore_field, interaction_world_xz, shore_domain);
+		vec2 material_gradient = (shore_visual_breakers_enabled ? 1.0 : 1.0 - shore_weight) * height_gradient
 			+ shore_weight * vec2(dot(jacobian[0], shore_gradient), dot(jacobian[1], shore_gradient))
-			+ (shore.x - spectral_displacement.y) * weight_gradient;
+			+ (shore_visual_breakers_enabled ? 0.0 : shore.x - spectral_displacement.y) * weight_gradient;
 		gradient = ocean_shore_world_gradient(jacobian, material_gradient) * normal_strength
-			+ unresolved_gradient * (1.0 - shore_weight)
-			+ shore_detail_gradient * shore_weight * smoothstep(0.08, 1.2, shore.w);
-		breaking_mask *= 1.0 - shore_weight;
-		peak_mask *= 1.0 - shore_weight;
-		sss_crest_mask *= 1.0 - shore_weight;
+			+ unresolved_gradient * (shore_visual_breakers_enabled ? 1.0 : 1.0 - shore_weight)
+			+ shore_detail_gradient * (shore_visual_breakers_enabled ? 0.0 : shore_weight) * smoothstep(0.08, 1.2, shore.w);
+		if (!shore_visual_breakers_enabled) {
+			breaking_mask *= 1.0 - shore_weight;
+			peak_mask *= 1.0 - shore_weight;
+			sss_crest_mask *= 1.0 - shore_weight;
+		}
 	} else if (local_waves_enabled && !shore_enabled) {
 		vec2 position = interaction_world_xz;
 		float epsilon = 0.25;
@@ -405,7 +470,12 @@ void fragment() {
 	peak_mask *= far_sharpness;
 	sss_crest_mask *= far_sharpness;
 	float far_foam_blend = 0.0;
-	if (foam_near_enabled && foam_feedback_enabled && shore_weight < 1.0) {
+	float coastal_foam_weight = shore_weight;
+	if (shore_visual_breakers_enabled) {
+		float visible_depth = max(wave_height + shore.w - shore.x, 0.0);
+		coastal_foam_weight *= 1.0 - smoothstep(0.15, 1.0, visible_depth);
+	}
+	if (foam_near_enabled && foam_feedback_enabled && (coastal_foam_weight < 1.0 || shore_visual_breakers_enabled)) {
 		vec2 near_coverage = sample_foam_near(world_uv, world_dx, world_dy);
 		foam_history = near_coverage.r;
 		foam_fresh = near_coverage.g;
@@ -417,11 +487,15 @@ void fragment() {
 			foam_fresh = mix(foam_fresh, far_mean.g, far_foam_blend);
 		}
 	}
+	float offshore_foam_coverage = clamp((foam_fresh + foam_history) * foam_strength, 0.0, 1.0);
 	if (shore_weight > 0.0 && foam_feedback_enabled) {
-		vec4 shore_coverage = ocean_local_sample(shore_foam, vec2(0.0), shore_domain,
-			interaction_world_xz);
-		foam_fresh = mix(foam_fresh, shore_coverage.x, shore_weight);
-		foam_history = mix(foam_history, shore_coverage.y, shore_weight);
+		vec4 shore_coverage = shore_visual_breakers_enabled
+			? ocean_shore_roll(shore_foam, interaction_world_xz, shore_domain)
+			: ocean_local_sample(shore_foam, vec2(0.0), shore_domain, interaction_world_xz);
+		foam_fresh = shore_visual_breakers_enabled ? max(foam_fresh, shore_coverage.x * shore_weight)
+			: mix(foam_fresh, shore_coverage.x, coastal_foam_weight);
+		foam_history = shore_visual_breakers_enabled ? max(foam_history, shore_coverage.y * shore_weight)
+			: mix(foam_history, shore_coverage.y, coastal_foam_weight);
 	}
 	crest_factor = clamp(peak_mask, 0.0, 1.0);
 	// P3-A + review: overcast storms get no through-crest transmission — the
@@ -471,7 +545,7 @@ void fragment() {
 	float persistent_foam = clamp(foam_history * foam_strength, 0.0, 1.0);
 	float fresh_foam = clamp(foam_fresh * foam_strength, 0.0, 1.0);
 	vec2 breakup_uv = world_uv * 0.08 - wind * sim_time * 0.003;
-	float breakup_detail = max(ultra_detail, step(1024.0, map_size));
+	float breakup_detail = max(ultra_detail, step(512.0, map_size));
 	float breakup_bias = mix(2.0, mix(1.0, 2.0,
 		smoothstep(40.0, 180.0, dist)), breakup_detail);
 	float breakup = texture(foam_detail, breakup_uv, breakup_bias).g;
@@ -492,24 +566,70 @@ void fragment() {
 	float fresh_visible = fresh_foam;
 	float persistent_visible = persistent_foam;
 	foam_factor = clamp(fresh_visible + persistent_visible, 0.0, 1.0);
-	if (shore_weight > 0.0 && foam_feedback_enabled) {
-		float fresh_visual = fresh_foam * mix(1.0, mix(0.55, 1.45, breakup), breakup_detail);
-		float persistent_visual = persistent_foam * mix(1.0, mix(0.8, 1.2, breakup), breakup_detail);
-		float fresh_aa = max(fwidth(fresh_visual), 0.0005);
-		float persistent_aa = max(fwidth(persistent_visual), 0.0005);
-		fresh_visible = smoothstep(0.022 - fresh_aa,
-			mix(0.160, 0.135, ultra_detail) + fresh_aa, fresh_visual);
-		persistent_visible = smoothstep(0.018 - persistent_aa, 0.110 + persistent_aa, persistent_visual) * 0.35;
-		vec2 shore_detail_uv = interaction_world_xz * 0.12 - wind * sim_time * 0.003;
-		vec4 shore_detail = texture(foam_detail, shore_detail_uv);
-		float lace_aa = max(fwidth(shore_detail.b), 0.02);
-		float network = smoothstep(0.16 - lace_aa, 0.60 + lace_aa, shore_detail.b);
+	if (breakup_detail > 0.0) {
+		float lace_scale = mix(0.24, 0.38, ultra_detail);
+		vec2 lace_uv = (world_uv - wind * sim_time * 0.08) * lace_scale;
+		float lace = textureGrad(foam_pattern, lace_uv,
+			world_dx * lace_scale, world_dy * lace_scale).b;
+		float lace_mean = textureLod(foam_pattern, vec2(0.5),
+			log2(float(textureSize(foam_pattern, 0).x))).b;
+		float modulation = (lace - lace_mean) / max(lace_mean, 1.0 - lace_mean)
+			* breakup_detail;
+		foam_factor += modulation * min(foam_factor, 1.0 - foam_factor);
+		offshore_foam_coverage += modulation
+			* min(offshore_foam_coverage, 1.0 - offshore_foam_coverage);
+	}
+	float fresh_visual = fresh_foam * mix(1.0, mix(0.55, 1.45, breakup), breakup_detail);
+	float persistent_visual = persistent_foam * mix(1.0, mix(0.8, 1.2, breakup), breakup_detail);
+	float fresh_aa = max(fwidth(fresh_visual), 0.0005);
+	float persistent_aa = max(fwidth(persistent_visual), 0.0005);
+	float phase = fract(sim_time * 0.5);
+	float other_phase = fract(phase + 0.5);
+	float phase_blend = 1.0 - abs(2.0 * phase - 1.0);
+	vec3 shore_detail_position = vec3(interaction_world_xz.x, wave_height, interaction_world_xz.y) * 0.12;
+	vec2 shore_velocity = shore_visual_breakers_enabled
+		? ocean_local_sample(shore_breaker, vec2(0.0), shore_domain, interaction_world_xz).xz : shore.yz;
+	vec3 flow = vec3(shore_velocity.x, dot(shore_velocity, macro_gradient), shore_velocity.y) * 0.24;
+	flow *= 0.04 / (0.04 + length(flow));
+	vec3 projection_weights = pow(abs(normalize(vec3(-macro_gradient.x, 1.0, -macro_gradient.y))), vec3(4.0));
+	projection_weights /= max(dot(projection_weights, vec3(1.0)), 0.00001);
+	vec3 first_position = shore_detail_position - flow * phase;
+	vec3 second_position = shore_detail_position - flow * other_phase;
+	vec3 first_dx = dFdx(first_position);
+	vec3 first_dy = dFdy(first_position);
+	vec3 second_dx = dFdx(second_position);
+	vec3 second_dy = dFdy(second_position);
+	float shore_detail = 0.0;
+	if (coastal_foam_weight > 0.0 && foam_feedback_enabled) {
+		shore_detail = mix(shore_foam_pattern(second_position, second_dx, second_dy, projection_weights),
+			shore_foam_pattern(first_position, first_dx, first_dy, projection_weights), phase_blend);
+	}
+	float lace_aa = max(fwidth(shore_detail), 0.02);
+	if (coastal_foam_weight > 0.0 && foam_feedback_enabled) {
+		fresh_visible = smoothstep((shore_visual_breakers_enabled ? 0.08 : 0.022) - fresh_aa,
+			(shore_visual_breakers_enabled ? 0.5 : mix(0.160, 0.135, ultra_detail)) + fresh_aa, fresh_visual);
+		persistent_visible = smoothstep((shore_visual_breakers_enabled ? 0.04 : 0.018) - persistent_aa,
+			(shore_visual_breakers_enabled ? 0.3 : 0.110) + persistent_aa, persistent_visual) * 0.35;
+		float network = smoothstep(0.16 - lace_aa, 0.60 + lace_aa, shore_detail);
 		float dense_front = smoothstep(0.60, 0.95, fresh_foam);
+		if (shore_visual_breakers_enabled) {
+			vec4 contact = ocean_local_sample(shore_contact, vec2(0.0), shore_domain, interaction_world_xz);
+			float front_activity = max(shore_roll_foam, max(contact.z,
+				1.0 - smoothstep(0.03, 0.45, shore.w)));
+			fresh_visible *= mix(0.3, 1.0, front_activity);
+			dense_front *= front_activity;
+		}
 		float shore_visible = fresh_visible * mix(network, 1.0, dense_front * 0.82)
 			+ persistent_visible * network;
-		foam_factor = mix(foam_factor, clamp(shore_visible, 0.0, 1.0), shore_weight);
+		foam_factor = shore_visual_breakers_enabled
+			? max(offshore_foam_coverage, clamp(shore_visible, 0.0, 1.0) * coastal_foam_weight)
+			: mix(foam_factor, clamp(shore_visible, 0.0, 1.0), coastal_foam_weight);
 	}
 	foam_factor = max(foam_factor, interaction_foam_factor);
+	if (shore_visual_breakers_enabled) {
+		float face_up = inversesqrt(1.0 + dot(macro_gradient, macro_gradient));
+		foam_factor *= mix(1.0, mix(0.35, 1.0, smoothstep(0.15, 0.8, face_up)), coastal_foam_weight);
+	}
 	gradient = mix(gradient, macro_gradient,
 		clamp(foam_factor * mix(0.2, 0.8, shore_weight), 0.0, 0.8));
 	// P2: the glitter gets its OWN corridor (wider than the micro-relief one):
@@ -534,6 +654,22 @@ void fragment() {
 	float depth_raw = texture(depth_texture, SCREEN_UV).r;
 	float depth_lin = PROJECTION_MATRIX[3][2] / (depth_raw + PROJECTION_MATRIX[2][2]);
 	float scene_depth = depth_lin + VERTEX.z;
+	float signed_thickness = scene_depth
+		* (INV_VIEW_MATRIX * vec4(VERTEX / VERTEX.z, 0.0)).y;
+	float water_thickness = max(signed_thickness, 0.0);
+	float contact_width = max(fwidth(water_thickness) * 1.5, 0.005);
+	float shore_contact_weight = shore_visual_breakers_enabled
+		? shore_weight * step(0.00001, depth_raw) * step(0.0, signed_thickness) : 0.0;
+	float contact_edge = smoothstep(0.0, contact_width, water_thickness);
+	foam_factor *= mix(1.0, contact_edge, shore_contact_weight);
+	if (foam_feedback_enabled && shore_contact_weight > 0.0) {
+		float activity = max(shore_roll_foam, max(foam_fresh, foam_history));
+		float rim_detail = textureGrad(foam_pattern, interaction_world_xz * 1.1,
+			contact_pattern_dx, contact_pattern_dy).b;
+		float rim = (1.0 - smoothstep(0.04, 0.12, water_thickness)) * contact_edge
+			* smoothstep(0.025, 0.15, activity) * smoothstep(0.25, 0.7, rim_detail);
+		foam_factor = max(foam_factor, rim * shore_contact_weight);
+	}
 
 	// Branch on which side of the interface the CAMERA is, never on the triangle
 	// winding. Seen from near water level the far sea is edge-on, so the lee
@@ -548,8 +684,11 @@ void fragment() {
 		vec3 deep_water = water_color.rgb;
 		vec3 shallow_water = color_shallow.rgb;
 		vec3 base_color = water_color.rgb;
+		vec3 shore_transmission = vec3(0.0);
+		float shore_transparency = 0.0;
 		if (scene_depth < 12.0) {
-			vec2 ref_uv = SCREEN_UV + NORMAL.xy * refraction_strength / max(dist * 0.2, 1.0);
+			float refraction_fade = mix(1.0, smoothstep(0.0, 0.35, water_thickness), shore_contact_weight);
+			vec2 ref_uv = SCREEN_UV + NORMAL.xy * refraction_strength * refraction_fade / max(dist * 0.2, 1.0);
 			ref_uv = clamp(ref_uv, vec2(0.001), vec2(0.999));
 			float r_raw = texture(depth_texture, ref_uv).r;
 			float r_lin = PROJECTION_MATRIX[3][2] / (r_raw + PROJECTION_MATRIX[2][2]);
@@ -560,11 +699,17 @@ void fragment() {
 				r_lin = depth_lin;
 			}
 			float water_depth = r_lin + VERTEX.z;
+			float ndv = clamp(dot(VIEW, NORMAL), 0.0, 1.0);
+			float refracted_cosine = sqrt(1.0 - (1.0 - ndv * ndv) / (1.33 * 1.33));
+			water_depth = mix(water_depth, water_thickness / refracted_cosine, shore_contact_weight);
 			float depth_blend = clamp(1.0 - exp(-water_depth * beers_law), 0.0, 1.0);
 			vec3 screen_color = textureLod(screen_texture, ref_uv, pow(depth_blend, 2.5) * 2.5).rgb;
 			vec3 dye = mix(shallow_water, water_color.rgb, pow(depth_blend, 2.5));
+			dye = mix(dye, mix(vec3(1.0), shallow_water, depth_blend), shore_contact_weight);
 			float refraction_weight = 1.0 - depth_blend;
 			base_color = mix(base_color, screen_color * dye, refraction_weight);
+			shore_transmission = screen_color * dye * refraction_weight;
+			shore_transparency = shore_contact_weight * (1.0 - smoothstep(0.05, 0.6, water_thickness));
 		}
 
 		vec3 reflected_view = normalize(reflect(-VIEW, NORMAL));
@@ -600,7 +745,7 @@ void fragment() {
 			clamp(foam_factor * 1.1, 0.0, 1.0));
 		vec3 foam_tint = foam_color.rgb * mix(0.96, 1.04, fresh_ratio);
 		foam_tint = clamp(foam_tint, vec3(0.0), vec3(1.0));
-		ALBEDO = mix(base_color, foam_tint, foam_factor);
+		ALBEDO = mix(base_color * (1.0 - shore_transparency), foam_tint, foam_factor);
 		// P0-C.3: atmospheric perspective converges the far sea CONTINUOUSLY
 		// toward the sky, never below it — the old horizon_mix band pulled the
 		// distance toward color_shallow*0.8, rendering darker than both the
@@ -609,6 +754,7 @@ void fragment() {
 		vec3 horizon_color = mix(sky_horizon, sky_zenith, 0.15);
 		ALBEDO = mix(ALBEDO, horizon_color, aerial);
 		EMISSION = reflection_emission
+			+ shore_transmission * shore_transparency * (1.0 - fresnel) * (1.0 - foam_factor)
 			+ foam_tint * foam_factor * mix(0.03, 0.09, storm_mood);
 		// P0-C.3 (completion): the haze replaces the OUTGOING radiance, not just
 		// ALBEDO — otherwise the far field keeps mirroring the dark cloud base

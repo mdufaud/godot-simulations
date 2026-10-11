@@ -18,6 +18,12 @@ const LOOKS := [
 	preload("res://resources/ocean/looks/tropical_day.tres"),
 	preload("res://resources/ocean/looks/storm_overcast.tres"),
 ]
+const FOAM_TEXTURES := [
+	{"name": "1 - Airy bubbles", "path": "res://resources/ocean/foam_variant_01_microbubbles.png"},
+	{"name": "2 - Dense froth", "path": "res://resources/ocean/foam_variant_02_dense_froth.png"},
+	{"name": "3 - Filaments", "path": "res://resources/ocean/foam_variant_03_flowing_filaments.png"},
+	{"name": "4 - Torn patches", "path": "res://resources/ocean/foam_variant_04_torn_patches.png"},
+]
 
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var orbit_cam: OrbitCamera = $CameraPivot
@@ -48,9 +54,10 @@ var coast_texture: Texture2DRD
 var wake_texture: Texture2DRD
 var shore_texture: Texture2DRD
 var shore_foam_texture: Texture2DRD
+var shore_breaker_texture: Texture2DRD
+var shore_contact_texture: Texture2DRD
 var island: OceanIsland
 var current_scene_index := 0
-var _open_ocean_depth := 80.0
 var texture_bound := false
 var _allocated_foam_near_size := 0
 var _allocated_physical_tier := -1
@@ -59,6 +66,7 @@ var sun_elevation := 32.0
 var sun_azimuth := 140.0
 var current_preset_index := 1
 var current_look_index := 0
+var current_foam_texture_index := 0
 var sky_material := ShaderMaterial.new()
 
 var storm := OceanStorm.new()
@@ -123,6 +131,7 @@ func _ready() -> void:
 	# back to the root viewport when the demo exits.
 	_viewport.set_msaa(Viewport.MSAA_2X)
 	_viewport.set_taa(false)
+	_viewport.set_screen_space_aa(Viewport.SCREEN_SPACE_AA_FXAA)
 
 	_setup_sky()
 	_setup_ocean_mesh()
@@ -217,6 +226,7 @@ func _process(delta: float) -> void:
 		surface_mat.set_shader_parameter("storm_mood", storm.current_mood())
 		surface_mat.set_shader_parameter("sky_zenith", sky_material.get_shader_parameter("zenith_color"))
 		surface_mat.set_shader_parameter("sky_horizon", sky_material.get_shader_parameter("horizon_color"))
+		_sync_island_reflection()
 		storm.set_rain_wind(Vector3(cos(solver.wind_direction), 0.0,
 			sin(solver.wind_direction)))
 		storm.set_rain_time(_sim_time)
@@ -247,7 +257,8 @@ func _render_step(delta: float, time_s: float, center: Vector2) -> void:
 		spray.step_render(delta, time_s, center,
 			Vector2(cos(solver.wind_direction), sin(solver.wind_direction)) * solver.wind_speed,
 			solver.current_velocity_m_s, state.center, solver.foam_field_domains(),
-			state.index, solver.whitecap, solver.local_centers(), solver.shore_enabled)
+			state.index, solver.whitecap, solver.local_centers(), solver.shore_enabled, solver.shore_solver.config.domain_m,
+			solver.shore_solver.config.visual_breakers_enabled)
 		if solver.profiling:
 			rd.capture_timestamp("ocean_spray/end")
 
@@ -479,8 +490,6 @@ func set_capture_view(view: String) -> void:
 		return
 	if _capture_view_name == "beach_reference":
 		set_scene_mode(0, false)
-		solver.water_depth = OceanShoreSolver.OUTER_DEPTH_M
-		solver.mark_spectrum_dirty()
 		var reference := OceanIsland.new()
 		var framing := reference.camera_view("island_beach")
 		reference.free()
@@ -545,7 +554,7 @@ func set_capture_view(view: String) -> void:
 			orbit_cam.yaw = 90.0
 		"coast":
 			rocks.visible = true
-			orbit_cam.target = Vector3(90.0, 0.8, 35.0)
+			orbit_cam.target = Vector3(OceanLocalSolver.COAST_CENTER.x, 0.8, OceanLocalSolver.COAST_CENTER.y)
 			orbit_cam.distance = 45.0
 			orbit_cam.pitch = -32.0
 			orbit_cam.yaw = 35.0
@@ -641,7 +650,7 @@ func _apply_quality(values: Dictionary) -> void:
 	solver.amortize = values.amortize
 	solver.short_cascade_half_rate = values.short_cascade_half_rate
 	solver.foam_near_stride = values.foam_near_stride
-	solver.foam_near_size = values.foam_near_size
+	solver.foam_near_size = solver.shore_solver.config.foam_texture_size_px(quality.effective, values.foam_near_size)
 	if _menu_builder.sync_foam_distance(values.foam_near_distance):
 		solver.set_foam_distance(values.foam_near_distance)
 	if _menu_builder.sync_detail_distance(values.detail_distance_m):
@@ -661,7 +670,7 @@ func _rebuild_quality_resources(force: bool = false) -> void:
 		return
 	if solver.shore_enabled and island != null:
 		solver.shore_bathymetry = island.create_bathymetry(
-			OceanShoreSolver.GRID_SIZES[quality.effective])
+			solver.shore_solver.config.resolution_cells(quality.effective), solver.shore_solver.config.domain_m)
 	solver.initialized = false
 	_capture.invalidate()
 	_release_textures()
@@ -685,17 +694,17 @@ func set_scene_mode(index: int, persist: bool = true) -> void:
 	_camera_water_valid = false
 	current_scene_index = index
 	solver.shore_enabled = index == 1
+	solver.shore_solver.config.visual_breakers_enabled = solver.shore_enabled
+	solver.foam_near_size = solver.shore_solver.config.foam_texture_size_px(
+		quality.effective, OceanQualityProfile.FOAM_NEAR_SIZE[quality.effective])
 	if solver.shore_enabled:
-		_open_ocean_depth = solver.water_depth
-		solver.water_depth = 4.0
 		island = OceanIsland.new()
 		island.name = "Island"
 		add_child(island)
 		solver.shore_bathymetry = island.create_bathymetry(
-			OceanShoreSolver.GRID_SIZES[quality.effective])
+			solver.shore_solver.config.resolution_cells(quality.effective), solver.shore_solver.config.domain_m)
 		_apply_island_camera("island_overview")
 	else:
-		solver.water_depth = _open_ocean_depth
 		solver.shore_bathymetry = PackedFloat32Array()
 		if island != null:
 			island.queue_free()
@@ -721,15 +730,22 @@ func set_capture_scene(index: int) -> void:
 
 
 func set_capture_params(values: Dictionary) -> void:
+	if values.has("swell_height_m"):
+		solver.swell_height_m = clampf(float(values.swell_height_m), 0.0, 12.0)
+		solver.mark_spectrum_dirty()
 	if values.has("water_depth"):
 		solver.water_depth = clampf(float(values.water_depth), 0.01, 1000.0)
 		solver.mark_spectrum_dirty()
+	if values.has("foam_texture"):
+		set_foam_texture(int(values.foam_texture))
 
 
-func set_island_view(index: int) -> void:
-	var views := ["island_overview", "island_beach", "island_rocks"]
-	if current_scene_index == 1:
-		_apply_island_camera(views[clampi(index, 0, 2)])
+func set_foam_texture(index: int) -> void:
+	current_foam_texture_index = clampi(index, 0, FOAM_TEXTURES.size() - 1)
+	if surface_mat != null:
+		surface_mat.set_shader_parameter("foam_pattern",
+			load(FOAM_TEXTURES[current_foam_texture_index].path))
+	_menu_builder.sync_foam_texture(current_foam_texture_index)
 
 
 func _apply_island_camera(view: String) -> void:
@@ -823,6 +839,7 @@ func _sync_foam_textures() -> void:
 		return
 	surface_mat.set_shader_parameter("foam_detail", load(
 		"res://resources/ocean/foam_detail.png"))
+	set_foam_texture(current_foam_texture_index)
 	surface_mat.set_shader_parameter("micro_normal", load(
 		"res://resources/ocean/micro_normal.png"))
 
@@ -905,18 +922,40 @@ func _bind_textures() -> void:
 	shore_texture.texture_rd_rid = solver.get_shore_texture_rid()
 	shore_foam_texture = Texture2DRD.new()
 	shore_foam_texture.texture_rd_rid = solver.get_shore_foam_texture_rid()
+	shore_breaker_texture = Texture2DRD.new()
+	shore_breaker_texture.texture_rd_rid = solver.get_shore_breaker_texture_rid()
+	shore_contact_texture = Texture2DRD.new()
+	shore_contact_texture.texture_rd_rid = solver.get_shore_contact_texture_rid()
 	surface_mat.set_shader_parameter("shore_field", shore_texture)
 	surface_mat.set_shader_parameter("shore_foam", shore_foam_texture)
+	surface_mat.set_shader_parameter("shore_breaker", shore_breaker_texture)
+	surface_mat.set_shader_parameter("shore_contact", shore_contact_texture)
 	surface_mat.set_shader_parameter("shore_enabled", solver.shore_enabled)
+	surface_mat.set_shader_parameter("shore_domain", solver.shore_solver.config.domain_m)
+	surface_mat.set_shader_parameter("shore_blend_width_m", solver.shore_solver.config.surface_blend_width_m())
+	surface_mat.set_shader_parameter("shore_depth_blend_m", solver.shore_solver.config.surface_depth_blend_m())
+	surface_mat.set_shader_parameter("shore_visual_breakers_enabled", solver.shore_enabled
+		and solver.shore_solver.config.visual_breakers_enabled)
 	if island != null:
-		island.bind_shore(shore_texture, shore_foam_texture)
+		island.bind_shore(shore_texture, shore_foam_texture, solver.shore_solver.config.domain_m,
+			shore_contact_texture, shore_breaker_texture)
+		_sync_island_reflection()
 	foam_window.bind_ocean(disp_texture, solver.tile_lengths)
 	spray.build(disp_texture, norm_texture, solver.tile_lengths, main_camera)
 	spray.bind_foam_fields(foam_near_texture_a, foam_near_texture_b)
 	spray.set_sun_direction(sun.global_transform.basis.z.normalized())
 	_allocated_physical_tier = quality.effective
+	_allocated_foam_near_size = solver.foam_near_size
 	RenderingServer.call_on_render_thread(_init_spray_render)
 	texture_bound = true
+
+
+func _sync_island_reflection() -> void:
+	if island == null:
+		return
+	for parameter in ["sky_zenith", "sky_horizon", "cloud_reflection", "cloud_reflection_enabled"]:
+		island.terrain_material.set_shader_parameter(parameter, surface_mat.get_shader_parameter(parameter))
+	island.terrain_material.set_shader_parameter("sky_energy", sky_material.get_shader_parameter("energy"))
 
 
 func _init_spray_render() -> void:
@@ -926,7 +965,8 @@ func _init_spray_render() -> void:
 		OceanQualityProfile.SPRAY_CAPACITY[quality.effective],
 		solver.local_solver.get_coast_texture_rid(), solver.local_solver.get_wake_texture_rid(),
 		solver.get_shore_texture_rid(), solver.get_shore_foam_texture_rid(),
-		solver.get_shore_derivative_texture_rid(), solver.get_breaking_settings_rid())
+		solver.get_shore_derivative_texture_rid(), solver.get_breaking_settings_rid(), solver.shore_solver.config,
+		solver.get_shore_breaker_texture_rid(), solver.get_shore_contact_texture_rid())
 	spray.set_physical_enabled(solver.physical_features_enabled)
 
 
@@ -952,6 +992,9 @@ func _release_textures() -> void:
 		shore_texture.texture_rd_rid = RID()
 	if shore_foam_texture != null:
 		shore_foam_texture.texture_rd_rid = RID()
+	for texture: Texture2DRD in [shore_breaker_texture, shore_contact_texture]:
+		if texture != null:
+			texture.texture_rd_rid = RID()
 	if surface_mat != null:
 		surface_mat.set_shader_parameter("shore_enabled", false)
 		surface_mat.set_shader_parameter("foam_near_enabled", false)

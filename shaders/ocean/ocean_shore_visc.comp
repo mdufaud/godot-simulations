@@ -1,0 +1,103 @@
+layout(local_size_x = SHORE_LINE_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+shared vec4 line_coeff[SHORE_LINE_SIZE];
+shared float line_rhs_z[SHORE_LINE_SIZE];
+shared uint has_viscosity;
+
+ivec2 line_cell(int lane) {
+    int line = int(gl_WorkGroupID.x);
+    return SHORE_VISC_AXIS == 0 ? ivec2(lane, line) : ivec2(line, lane);
+}
+
+float face_viscosity(ivec2 p, ivec2 neighbor) {
+    if (any(lessThan(neighbor, ivec2(0))) || any(greaterThanEqual(neighbor, ivec2(params.sizes.x)))) {
+        return 0.0;
+    }
+    uint half_offset = (1u - control.flags.x) * pixel_count();
+    uint i = uint(cell_index(p));
+    uint j = uint(cell_index(neighbor));
+    float depth = min(water[half_offset + i].x, water[half_offset + j].x);
+    if (depth <= params.domain.w) return 0.0;
+    float breaking_weight = 0.5 * (brk[i].x + brk[j].x);
+    return breaking_weight * SHORE_EDDY * depth * sqrt(params.domain.z * depth);
+}
+
+void main() {
+    int lane = int(gl_LocalInvocationID.x);
+    int n = params.sizes.x;
+    bool valid = lane < n;
+    if (lane == 0) has_viscosity = 0u;
+    barrier();
+    uint i = 0u;
+    uint target = 0u;
+    if (valid) {
+        ivec2 p = line_cell(lane);
+        i = uint(cell_index(p));
+        target = (1u - control.flags.x) * pixel_count() + i;
+        ivec2 direction = SHORE_VISC_AXIS == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        float weight = SHORE_VISUAL_BREAKERS != 0 || params.misc.z == 0 ? 1.0 : 0.5;
+        float factor = control.clock.w * weight / (params.domain.y * params.domain.y);
+        float left = factor * face_viscosity(p, p - direction);
+        float right = factor * face_viscosity(p, p + direction);
+        if (left > 0.0 || right > 0.0) atomicOr(has_viscosity, 1u);
+        vec2 rhs = SHORE_VISC_AXIS == 0 ? water[target].yz : brk[i].yz;
+        line_coeff[lane] = vec4(-left, 1.0 + left + right, -right, rhs.x);
+        line_rhs_z[lane] = rhs.y;
+    } else {
+        line_coeff[lane] = vec4(0.0, 1.0, 0.0, 0.0);
+        line_rhs_z[lane] = 0.0;
+    }
+    barrier();
+    for (int stride = 1; stride < n && has_viscosity != 0u; stride *= 2) {
+        vec4 center = line_coeff[lane];
+        float rhs_z = line_rhs_z[lane];
+        if (valid && lane >= stride) {
+            vec4 left = line_coeff[lane - stride];
+            float scale = -center.x / left.y;
+            center.y += scale * left.z;
+            center.w += scale * left.w;
+            rhs_z += scale * line_rhs_z[lane - stride];
+            center.x = scale * left.x;
+        } else center.x = 0.0;
+        if (valid && lane + stride < n) {
+            vec4 right = line_coeff[lane + stride];
+            float scale = -center.z / right.y;
+            center.y += scale * right.x;
+            center.w += scale * right.w;
+            rhs_z += scale * line_rhs_z[lane + stride];
+            center.z = scale * right.z;
+        } else center.z = 0.0;
+        barrier();
+        line_coeff[lane] = center;
+        line_rhs_z[lane] = rhs_z;
+        barrier();
+    }
+    if (valid) {
+        vec2 momentum = vec2(line_coeff[lane].w, line_rhs_z[lane]) / line_coeff[lane].y;
+        if (SHORE_VISC_AXIS == 0) brk[i].yz = momentum;
+        else {
+            vec4 result = water[target];
+            result.yz = momentum;
+            vec2 world = world_position(line_cell(lane));
+            float distance_edge = params.domain.x * 0.5 - length(world);
+            float sponge = smoothstep(0.1, 0.5, max(1.0 - distance_edge / params.physical.y, 0.0));
+            float weight = SHORE_VISUAL_BREAKERS != 0 || params.misc.z == 0 ? 1.0 : 0.5;
+            float blend = params.boundary.x > 0.5 ? min(weight * 12.0 * sqrt(params.domain.z * params.tiles.w)
+                / params.physical.y * sponge * control.clock.w, 1.0) : 0.0;
+            float before_sponge = result.x;
+            if (blend > 0.0) {
+                vec3 incoming = offshore(world);
+                float depth = max(incoming.x - bed[i], 0.0);
+                result.xyz = mix(result.xyz, vec3(depth, depth * incoming.yz), blend);
+                foam[target].xy *= result.x / max(before_sponge, 1.0e-8);
+            }
+            float budget_weight = params.misc.z == 0 ? 0.5 : 1.0;
+            balance[i].y += budget_weight * (result.x - before_sponge) * params.domain.y * params.domain.y;
+            water[target] = result;
+            if (params.misc.z != 0 && control.counts.z != 0u) {
+                completed[pixel_count() + i] = result;
+                completed_foam[pixel_count() + i] = foam[target];
+            }
+        }
+    }
+}

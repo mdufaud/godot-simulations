@@ -13,4 +13,9 @@ void main() {
     completed_foam[i] = vec4(0.0);
     completed_foam[pixel_count() + i] = vec4(0.0);
     balance[i] = vec4(0.0);
+    brk[i] = vec4(0.0);
+    accel[i] = vec4(0.0);
+    contact[i] = vec4(0.0);
+    completed_contact[i] = vec4(0.0);
+    completed_contact[pixel_count() + i] = vec4(0.0);
 }

@@ -2,6 +2,7 @@ class_name OceanCapture extends RefCounted
 
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const CaptureMetrics := preload("res://scripts/ocean/ocean_capture_metrics.gd")
+const ShoreSolver := preload("res://scripts/ocean/ocean_shore_solver.gd")
 const READBACK_TIMEOUT_MS := 15000
 
 class Metadata extends RefCounted:
@@ -209,6 +210,9 @@ func metadata_async(path: String, provider: Callable) -> String:
 	if not _current(generation):
 		return "CAPTURE FAIL capture cancelled"
 	var waves := await _wave_metrics(generation)
+	if not _current(generation):
+		return "CAPTURE FAIL capture cancelled"
+	var coast := await _coast_metrics(generation)
 	if not _current(generation) or not _metadata_provider.is_valid():
 		return "CAPTURE FAIL capture cancelled"
 	var context: Metadata = _metadata_provider.call()
@@ -216,8 +220,10 @@ func metadata_async(path: String, provider: Callable) -> String:
 	print("CAPTURE FOAM_FIELDS %s" % JSON.stringify(fields))
 	print("CAPTURE FOAM_PIXELS %s" % JSON.stringify(rings))
 	print("CAPTURE WAVES %s" % JSON.stringify(waves))
-	return "%s state_time=%.6f state_step=%d seed=1000,31337 measure_version=%d" % [
-		metadata(path, context), state.time, state.step, OceanConfig.MEASURE_VERSION]
+	print("CAPTURE COAST %s" % JSON.stringify(coast))
+	return "%s state_time=%.6f state_step=%d seed=1000,31337 measure_version=%d render_scale=%.3f screen_aa=%d msaa=%d" % [
+		metadata(path, context), state.time, state.step, OceanConfig.MEASURE_VERSION,
+		_viewport.scaling_3d_scale, _viewport.screen_space_aa, _viewport.msaa_3d]
 
 
 func _wave_metrics(generation: int) -> Dictionary:
@@ -245,6 +251,181 @@ func _wave_metrics(generation: int) -> Dictionary:
 	if metrics.has("error"):
 		_fail(metrics.error, generation)
 	return metrics
+
+
+## Shore-patch state metrics, separate from CAPTURE WAVES (which only
+## measures the offshore FFT torus). Reports unavailable outside island mode.
+func _coast_metrics(generation: int) -> Dictionary:
+	if not _solver.shore_enabled:
+		return {"enabled": false}
+	var config := _solver.shore_solver.config
+	var grid: int = _solver.shore_solver.grid_size
+	var surface := await _read_layer(_solver.get_shore_texture_rid(), 0, generation)
+	var foam := await _read_layer(_solver.get_shore_foam_texture_rid(), 0, generation)
+	if not _current(generation):
+		return {}
+	if surface.size() != grid * grid * 16 or foam.size() != grid * grid * 16:
+		_fail("incomplete shore field readback", generation)
+		return {}
+	var surface_image := Image.create_from_data(grid, grid, false, Image.FORMAT_RGBAF, surface)
+	var foam_image := Image.create_from_data(grid, grid, false, Image.FORMAT_RGBAF, foam)
+	var surface_values := surface_image.get_data().to_float32_array()
+	var foam_values := foam_image.get_data().to_float32_array()
+	var wet := 0
+	var eta_square_sum := 0.0
+	var foam_sum := 0.0
+	var max_speed := 0.0
+	var max_depth := 0.0
+	var max_eta := -INF
+	var max_eta_cell := Vector2i.ZERO
+	var max_height_jump := 0.0
+	var max_height_jump_cell := Vector2i.ZERO
+	var dry := 0
+	var finite := true
+	for i in grid * grid:
+		var depth := surface_values[i * 4 + 3]
+		var coverage := maxf(foam_values[i * 4], foam_values[i * 4 + 1])
+		var speed := Vector2(surface_values[i * 4 + 1], surface_values[i * 4 + 2]).length()
+		if not is_finite(depth) or not is_finite(surface_values[i * 4]) \
+				or not is_finite(coverage) or not is_finite(speed):
+			finite = false
+		if depth <= config.dry_depth_m:
+			dry += 1
+			continue
+		wet += 1
+		max_speed = maxf(max_speed, speed)
+		max_depth = maxf(max_depth, depth)
+		var cell := Vector2i(i % grid, i / grid)
+		var eta := surface_values[i * 4]
+		if eta > max_eta:
+			max_eta = eta
+			max_eta_cell = cell
+		for neighbor in [i + 1 if cell.x + 1 < grid else i, i + grid if cell.y + 1 < grid else i]:
+			var jump := absf(eta - surface_values[neighbor * 4])
+			if jump > max_height_jump:
+				max_height_jump = jump
+				max_height_jump_cell = cell
+		eta_square_sum += surface_values[i * 4] * surface_values[i * 4]
+		foam_sum += clampf(coverage, 0.0, 1.0)
+	if not finite:
+		_fail("non-finite shore field", generation)
+		return {}
+	var progress := {"control": PackedByteArray(), "disp_diagnostic": PackedByteArray()}
+	RenderingServer.call_on_render_thread(func():
+		if _current(generation) and _solver.shore_solver.enabled:
+			var shore: OceanShoreSolver = _solver.shore_solver
+			progress.control = shore._rd.buffer_get_data(shore._buffers.control, 0, 96)
+			progress.disp_diagnostic = shore._rd.buffer_get_data(shore._buffers.disp_diagnostic)
+	)
+	await RenderingServer.frame_post_draw
+	if not _current(generation):
+		return {}
+	var control: PackedByteArray = progress.control
+	var diagnostic: PackedFloat32Array = progress.disp_diagnostic.to_float32_array()
+	if diagnostic.size() != grid * grid * 4:
+		_fail("incomplete shore dispersion diagnostic readback", generation)
+		return {}
+	var max_dominance_ratio := 0.0
+	var dominance_ratio_rows := 0
+	var worst_residual := -INF
+	var worst_residual_cell := {}
+	for cell_z in grid:
+		var row_exceeds_ratio := false
+		for cell_x in grid:
+			var i := cell_z * grid + cell_x
+			var offset := i * 4
+			var error := diagnostic[offset]
+			var dominance_ratio := diagnostic[offset + 3]
+			row_exceeds_ratio = row_exceeds_ratio or dominance_ratio >= 1.0
+			max_dominance_ratio = maxf(max_dominance_ratio, dominance_ratio)
+			if error > worst_residual:
+				worst_residual = error
+				worst_residual_cell = {"world_x_m": (float(cell_x) + 0.5) * config.domain_m / grid - config.domain_m * 0.5,
+					"world_z_m": (float(cell_z) + 0.5) * config.domain_m / grid - config.domain_m * 0.5,
+					"error": error, "coefficient_depth_m": diagnostic[offset + 1],
+					"physical_bed_gradient": diagnostic[offset + 2], "dominance_ratio": dominance_ratio}
+		if row_exceeds_ratio:
+			dominance_ratio_rows += 1
+	var visual_fields := {}
+	if config.visual_breakers_enabled:
+		for field in ["breaker", "contact"]:
+			var rid: RID = _solver.get_shore_breaker_texture_rid() if field == "breaker" \
+				else _solver.get_shore_contact_texture_rid()
+			var bytes := await _read_layer(rid, 0, generation)
+			if not _current(generation):
+				return {}
+			if bytes.size() != grid * grid * 8:
+				_fail("incomplete coastal visual field readback", generation)
+				return {}
+			var image := Image.create_from_data(grid, grid, false, Image.FORMAT_RGBAH, bytes)
+			image.convert(Image.FORMAT_RGBAF)
+			var values := image.get_data().to_float32_array()
+			var maxima := PackedFloat32Array([0.0, 0.0, 0.0, 0.0])
+			var active := 0
+			for index in range(0, values.size(), 4):
+				for channel in 4:
+					if not is_finite(values[index + channel]):
+						_fail("non-finite coastal visual field", generation)
+						return {}
+					maxima[channel] = maxf(maxima[channel], values[index + channel])
+				if values[index + (3 if field == "breaker" else 2)] > 0.01:
+					active += 1
+			visual_fields[field] = {"max_channels": Array(maxima), "active_cells": active}
+	return {"enabled": true, "grid": grid,
+		"propagation_method": "shallow_water" if config.visual_breakers_enabled else "dispersive_boussinesq",
+		"crest_method": "fft_surface" if config.visual_breakers_enabled else "heightfield",
+		"foam_transport_method": "fft_velocity_semi_lagrangian" if config.visual_breakers_enabled else "shallow_water_tracer",
+		"sand_drying_time_constant_s": ShoreSolver.SAND_DRYING_S if config.visual_breakers_enabled else null,
+		"visual_fields": visual_fields,
+		"contact_retention_s": config.contact_retention_s,
+		"cell_m": config.domain_m / float(grid),
+		"surface_blend_width_m": config.surface_blend_width_m(),
+		"surface_depth_blend_m": [config.surface_depth_blend_m().x, config.surface_depth_blend_m().y],
+		"surface_parameterization": "fft_lateral" if config.visual_breakers_enabled else "tapered_fft",
+		"fft_foam_texture_size_px": _solver.foam_near_size,
+		"breaker_max_radius_m": config.breaker_max_radius_m,
+		"breaker_min_profile_width_m": config.BREAKER_MIN_PROFILE_CELLS * config.domain_m / grid,
+		"requested_height_gain": _solver.height_gain,
+		"applied_height_gain": _solver.effective_height_gain(),
+		"animated_crest_gpu_ms": null,
+		"breaking_dissipation": {"enabled": config.eddy_coefficient > 0.0,
+			"eddy_coefficient": config.eddy_coefficient,
+			"splitting": "after_rk2" if config.visual_breakers_enabled else "rk_stages",
+			"gpu_ms": _solver.get_timings().get("coast_viscosity", null)},
+		"surface_query_method": "fft_surface" if config.visual_breakers_enabled else "underlying_heightfield",
+		"physical_time_s": control.decode_float(0) if control.size() == 96 else null,
+		"revision": control.decode_u32(24) if control.size() == 96 else null,
+		"backlog_s": control.decode_float(4) + control.decode_float(8) if control.size() == 96 else null,
+		"signal_m_s": control.decode_float(52) if control.size() == 96 else null,
+		"dispersion": {"enabled": false, "residual": null} if config.visual_breakers_enabled else {"enabled": true, "maximum_iterations": config.dispersive_iterations,
+			"last_substep_total_iterations": (control.decode_u32(28) >> 8) if control.size() == 96 else null,
+			"last_substep_residual": control.decode_float(92) if control.size() == 96 else null,
+			"converged": control.decode_float(92) <= config.dispersive_tolerance if control.size() == 96 else null,
+			"residual_tolerance": config.dispersive_tolerance,
+			"relative_depth_transition": config.dispersive_relative_depth,
+			"boundary_max_kh": TAU * config.boundary_depth_m / config.minimum_wavelength_m,
+			"boundary_within_reference_range": TAU * config.boundary_depth_m / config.minimum_wavelength_m <= config.DISPERSIVE_VALID_KH_MAX,
+			"reference_kh_limit": config.DISPERSIVE_VALID_KH_MAX,
+			"worst_residual_cell": worst_residual_cell,
+			"max_dominance_ratio": max_dominance_ratio,
+			"dominance_ratio_ge_1_rows": dominance_ratio_rows},
+		"max_flow_speed_m_s": max_speed, "max_depth_m": max_depth,
+		"max_eta_m": max_eta if wet > 0 else null,
+		"max_eta_depth_m": surface_values[(max_eta_cell.y * grid + max_eta_cell.x) * 4 + 3] if wet > 0 else null,
+		"max_eta_world_m": [((max_eta_cell.x + 0.5) / grid - 0.5) * config.domain_m,
+			((max_eta_cell.y + 0.5) / grid - 0.5) * config.domain_m],
+		"max_height_jump_m": max_height_jump,
+		"max_height_jump_world_m": [((max_height_jump_cell.x + 0.5) / grid - 0.5) * config.domain_m,
+			((max_height_jump_cell.y + 0.5) / grid - 0.5) * config.domain_m],
+		"vram_bytes": _solver.shore_solver.estimate_vram_bytes(),
+		"gpu_ms": _solver.get_timings().get("coast", null),
+		"coupling_gpu_ms": _solver.get_timings().coast_boundary + _solver.get_timings().coast_output
+			if _solver.get_timings().has("coast_boundary") and _solver.get_timings().has("coast_output") else null,
+		"volume_3d": {"enabled": false, "gpu_ms": null},
+		"wet_fraction": float(wet) / float(grid * grid),
+		"dry_fraction": float(dry) / float(grid * grid),
+		"eta_rms_m": sqrt(eta_square_sum / maxf(wet, 1)),
+		"foam_coverage_mean": foam_sum / maxf(wet, 1)}
 
 
 func foam_rings() -> Array[Dictionary]:

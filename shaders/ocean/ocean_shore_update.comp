@@ -20,24 +20,15 @@ void main() {
     vec3 next = q.xyz - dt / params.domain.y * (east.flow - west.flow + north.flow - south.flow);
     float clipping = max(-next.x, 0.0) * params.domain.y * params.domain.y;
     next.x = max(next.x, 0.0);
+    accel[i].xy = (next.yz - q.yz) / dt;
     vec2 tracer = max(f.xy - dt / params.domain.y * (east.tracer - west.tracer + north.tracer - south.tracer), vec2(0.0));
     vec2 world = world_position(p);
-    float distance_edge = params.domain.x * 0.5 - max(abs(world.x), abs(world.y));
-    float sponge = pow(max(1.0 - distance_edge / params.physical.y, 0.0), 2.0);
-    float blend = min(4.0 * sqrt(params.domain.z * params.tiles.w) / params.physical.y * sponge * dt, 1.0);
-    float before_sponge = next.x;
-    if (blend > 0.0) {
-        vec3 incoming = offshore(world);
-        float h = max(incoming.x - bed[i], 0.0);
-        next = mix(next, vec3(h, h * incoming.yz), blend);
-        tracer *= 1.0 - blend;
-    }
     float boundary_volume = 0.0;
     if (p.x == 0) boundary_volume += dt * params.domain.y * west.flow.x;
     if (p.x == params.sizes.x - 1) boundary_volume -= dt * params.domain.y * east.flow.x;
     if (p.y == 0) boundary_volume += dt * params.domain.y * south.flow.x;
     if (p.y == params.sizes.x - 1) boundary_volume -= dt * params.domain.y * north.flow.x;
-    balance[i] += 0.5 * vec4(boundary_volume, (next.x - before_sponge) * params.domain.y * params.domain.y, clipping, 0.0);
+    balance[i] += 0.5 * vec4(boundary_volume, 0.0, clipping, 0.0);
     if (params.misc.z == 0) {
         water[target] = vec4(next, 0.0);
         foam[target] = vec4(tracer, f.zw);
@@ -66,6 +57,12 @@ void main() {
         next.yz /= 1.0 + dt * drag;
     } else next.yz = vec2(0.0);
     vec2 v = next.x > params.domain.w ? next.yz / next.x : vec2(0.0);
+#if SHORE_VISUAL_BREAKERS
+    float froude2 = dot(v, v) / max(params.domain.z * next.x, 1.0e-8);
+    brk[i].x = froude2 > (brk[i].x > 0.5
+        ? SHORE_BREAK_FR_END * SHORE_BREAK_FR_END
+        : SHORE_BREAK_FR_START * SHORE_BREAK_FR_START) ? 1.0 : 0.0;
+#endif
     vec4 qe = read_water(p + ivec2(1, 0));
     vec4 qw = read_water(p - ivec2(1, 0));
     vec4 qn = read_water(p + ivec2(0, 1));
@@ -83,26 +80,55 @@ void main() {
     float front = advancing * (1.0 - smoothstep(0.02, 0.35, next.x))
         * incoming_mass / max(next.x * params.domain.y, 0.01);
     float shallow = 1.0 - smoothstep(0.4, 2.0, next.x);
-    float source = min((compression * max(shallow, dry_neighbor ? 1.0 : 0.0) + front)
-        * moving, 10.0) * params.step.z;
-    float fresh = tracer.x / max(next.x, 1.0e-8);
-    float generated = (1.0 - exp(-source * dt)) * max(1.0 - fresh, 0.0) * next.x;
-    tracer.x += generated;
-    float released = tracer.x * (1.0 - exp(-params.step.w / 0.167 * dt));
-    tracer.x -= released;
-    tracer.y = tracer.y * exp(-params.step.w * dt) + released * 0.75;
+    float steepness = length(vec2(slopes[i].x, slopes[int(pixel_count()) + i].x)) / params.domain.y;
+    float shear_squared = (dot(ve - vw, ve - vw) + dot(vn - vs, vn - vs))
+        / (4.0 * params.domain.y * params.domain.y);
+    float dissipation = brk[i].x * SHORE_EDDY * sqrt(next.x / params.domain.z) * shear_squared;
+    float steep_activity = 1.0;
+#if SHORE_VISUAL_BREAKERS
+    steep_activity = moving;
+#endif
+    float local_source = min((compression * max(shallow, dry_neighbor ? 1.0 : 0.0) + front
+        + dissipation) * moving, 10.0)
+        + 0.4 * smoothstep(0.30, 0.55, steepness) * steep_activity;
+    float source = max(brk[i].w, local_source) * params.step.z * 7.5;
+#if SHORE_VISUAL_BREAKERS
+    float coastal_activity = max(shallow, dry_neighbor ? 1.0 : 0.0);
+    source = min(local_source, 3.0) * coastal_activity * params.step.z * 0.75;
+#endif
+    vec2 previous = foam_density(tracer / max(next.x, 1.0e-8));
+    float active_rate = max(params.step.w * 2.0, 1.15 * max(0.5, 10.0 - params.step.z));
+    float equilibrium = source / active_rate;
+    float active_duration = dt;
+    if (equilibrium > 1.0) {
+        active_duration = clamp(-log(max((equilibrium - 1.0) / max(equilibrium - previous.x, 1e-8), 1e-8))
+            / active_rate, 0.0, dt);
+    }
+    float fresh = clamp(previous.x * exp(-active_rate * dt)
+        + equilibrium * (1.0 - exp(-active_rate * dt)), 0.0, 1.0);
+    float residual_decay = exp(-params.step.w * active_duration);
+    float difference = active_rate - params.step.w;
+    float transfer = abs(difference) < 1e-5
+        ? residual_decay * active_duration
+        : (residual_decay - exp(-active_rate * active_duration)) / difference;
+    float persistent = previous.y * residual_decay
+        + 0.35 * equilibrium * (1.0 - residual_decay)
+        + params.step.w * 0.35 * (previous.x - equilibrium) * transfer;
+    float capped_decay = exp(-params.step.w * (dt - active_duration));
+    persistent = persistent * capped_decay + 0.35 * (1.0 - capped_decay);
+    tracer = next.x * foam_coverage(vec2(fresh, persistent));
     tracer = clamp(tracer, vec2(0.0), vec2(next.x));
     float slope = length(vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
         read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1)))) / (2.0 * params.domain.y);
     float sand = bed[i] >= -0.4 && slope < 0.75 ? 1.0 : 0.0;
-    float retention = exp(-dt / params.physical.z);
+    float retention = exp(-dt / SHORE_FOAM_RETENTION_S);
     float deposit = f.z * retention;
     float wetness = f.w * retention;
     if (sand > 0.0) {
         if (next.x > params.domain.w) wetness = 1.0;
         float receding = max(q.x - next.x, 0.0) / max(q.x, params.domain.w);
         float coverage = max(f.x, f.y) / max(q.x, params.domain.w);
-        deposit = max(deposit, clamp(coverage * receding * 2.0, 0.0, 1.0));
+        deposit += (1.0 - deposit) * clamp(coverage * receding, 0.0, 1.0);
         if (next.x <= params.domain.w && q.x > params.domain.w) deposit = max(deposit, min(coverage, 1.0));
     }
     if (next.x <= params.domain.w) {
@@ -111,6 +137,35 @@ void main() {
     }
     vec4 result = vec4(next, 0.0);
     vec4 foam_result = vec4(tracer, deposit, wetness);
+#if SHORE_VISUAL_BREAKERS
+    vec4 history = contact[i];
+    history.y *= exp(-dt / SHORE_CONTACT_RETENTION_S);
+    history.z *= exp(-dt / 0.35);
+    history.w *= exp(-dt / 1.2);
+    vec2 bed_gradient = vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+        read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1))) / (2.0 * params.domain.y);
+    float bed_slope = length(bed_gradient);
+    vec2 normal = bed_gradient / max(bed_slope, 1e-6);
+    float eta = next.x + bed[i];
+    ivec2 ahead = p + ivec2(round(normal * 2.0));
+    float solid = smoothstep(0.25, 0.8, bed_slope)
+        * smoothstep(eta - 0.25, eta + 0.1, read_bed(ahead));
+    float arrival = smoothstep(0.01, 0.35, max((next.x - q.x) / dt, 0.0));
+    float impact = next.x > params.domain.w ? solid * arrival
+        * smoothstep(0.3, 2.5, max(dot(v, normal), 0.0)) : 0.0;
+    if (impact > 0.01) {
+        float contact_height = eta;
+#if SHORE_FFT_SURFACE
+        contact_height = spectral_height(world);
+#endif
+        history.x = history.y > 0.01 ? max(history.x, contact_height) : contact_height;
+        history.y = max(history.y, smoothstep(0.01, 0.2, impact));
+        history.z = max(history.z, impact);
+        history.w = max(history.w, fresh * impact);
+    }
+    if (history.y < 0.001) history = vec4(0.0);
+    contact[i] = history;
+#endif
     water[target] = result;
     foam[target] = foam_result;
     if (control.counts.z != 0u) {
@@ -118,5 +173,7 @@ void main() {
         completed[pixel_count() + i] = result;
         completed_foam[i] = completed_foam[pixel_count() + i];
         completed_foam[pixel_count() + i] = foam_result;
+        completed_contact[i] = completed_contact[pixel_count() + i];
+        completed_contact[pixel_count() + i] = contact[i];
     }
 }

@@ -1,0 +1,22 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= num_cells()) { return; }
+	ivec3 c = cell_coord(i);
+	vec3 p = params.grid_origin_dx.xyz + (vec3(c) + vec3(0.5)) * params.grid_origin_dx.w;
+	uint previous_type = cell_types.data[i];
+	bool solid = params.surface.y > 0.5 ? cell_open_fraction(i) <= 0.0
+		: (any(lessThan(p, scene.domain_min.xyz)) || any(greaterThanEqual(p, scene.domain_max.xyz)) || cell_inside_solid(p));
+	if (solid) {
+		cell_types.data[i] = CELL_SOLID;
+	} else {
+		bool liquid = params.surface.y > 0.5 ? open_cell_contains_liquid(c) : cell_phi.data[i] < 0.0;
+		cell_types.data[i] = params.surface.x > 0.5
+			? (liquid ? CELL_FLUID : CELL_AIR)
+			: (cell_count.data[i] > 0u ? CELL_FLUID : CELL_AIR);
+	}
+	if (cell_types.data[i] != CELL_FLUID) { pressure.data[i] = 0.0; }
+	else if (previous_type != CELL_FLUID) {
+		pressure.data[i] = params.surface.x > 0.5
+			? params.sim.z * max(-params.sim.y, 0.0) * max(-cell_phi.data[i], 0.0) : 0.0;
+	}
+}

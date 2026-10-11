@@ -1,0 +1,19 @@
+void main() {
+	uint invocation = gl_GlobalInvocationID.x;
+	uint faces = num_faces();
+	if (invocation >= faces * 3u) { return; }
+	int component = int(invocation / faces);
+	uint index = invocation % faces;
+	ivec3 face = face_coord(index);
+	float velocity = 0.0;
+	float mass = 0.0;
+	if (!face_solid(face, component)) {
+		uvec2 packed = face_accum.data[invocation];
+		float momentum = uintBitsToFloat(packed.x);
+		mass = uintBitsToFloat(packed.y);
+		if (mass > 0.0) { velocity = momentum / mass; }
+	}
+	if (component == 0) { face_u.data[index] = velocity; face_mass_u.data[index] = mass; }
+	else if (component == 1) { face_v.data[index] = velocity; face_mass_v.data[index] = mass; }
+	else { face_w.data[index] = velocity; face_mass_w.data[index] = mass; }
+}

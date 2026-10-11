@@ -1,0 +1,15 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/demos/ocean_breaker_scene.gd" id="1_scene"]
+
+[node name="OceanBreakerAPICSurfaceGridValidation" type="Node3D"]
+script = ExtResource("1_scene")
+candidate = "apic"
+spacing_m = 0.12
+apic_grid_cell_size_m = 0.12
+apic_free_surface_cut_cells = true
+apic_conservative_surface_reconstruction = true
+apic_geometric_surface = true
+apic_interface_distance_max_iterations = 128
+apic_pressure_iterations = 512
+apic_substeps = 1

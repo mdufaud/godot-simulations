@@ -16,7 +16,7 @@ const WG := 256
 const FOAM_UBO_SIZE := 112
 const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
-const SCENE_UBO_SIZE := 1216
+const SCENE_UBO_SIZE := 1248
 
 # Tuning defaults; _configure_solver() restores them on every material/scene
 # switch so a preset change cannot inherit the previous liquid's slider state.
@@ -332,9 +332,12 @@ func init_render() -> void:
 	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
 		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
 		| RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	_tex_rid = _rd.texture_create(fmt, RDTextureView.new(), [])
-	_rd.texture_clear(_tex_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+	var texture_seed := seed_bytes.duplicate()
+	texture_seed.resize(tex_width * tex_width * 16)
+	_rd.texture_update(_tex_rid, 0, texture_seed)
 
 	var foam_fmt := RDTextureFormat.new()
 	foam_fmt.width = foam_tex_width
@@ -549,6 +552,34 @@ func _read_timings() -> void:
 # Main thread. GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
 	return _timing_store.snapshot()
+
+
+func read_current_particle_state_render() -> Dictionary:
+	if not initialized:
+		return {}
+	var count := live_count()
+	var snapshot := {"positions_m": PackedFloat32Array(), "velocities_m_s": PackedFloat32Array(),
+		"kernel_density_m_inv3": PackedFloat32Array(), "particle_count": count,
+		"physical_time_s": _sim_time, "state_revision": _frame}
+	if count == 0:
+		return snapshot
+	var pc := _pack_push_constant(0.0, 0)
+	var particle_groups := ceili(float(live_count()) / WG)
+	var cell_groups := ceili(float(_grid_cell_count()) / WG)
+	var cl := _rd.compute_list_begin()
+	_dispatch(cl, "grid_clear", pc, cell_groups)
+	_dispatch(cl, "sph_external", pc, particle_groups)
+	_dispatch(cl, "grid_scan", pc, cell_groups)
+	_dispatch(cl, "grid_scan_blocks", pc, 1)
+	_dispatch(cl, "grid_add_back", pc, cell_groups)
+	_dispatch(cl, "grid_scatter", pc, particle_groups)
+	_dispatch(cl, "sph_density", pc, particle_groups)
+	_rd.compute_list_end()
+	var suffix := "b" if _parity == 0 else "a"
+	snapshot.positions_m = _rd.buffer_get_data(_buffers["positions_" + suffix], 0, count * 16).to_float32_array()
+	snapshot.velocities_m_s = _rd.buffer_get_data(_buffers["velocities_" + suffix], 0, count * 16).to_float32_array()
+	snapshot.kernel_density_m_inv3 = _rd.buffer_get_data(_buffers.densities, 0, count * 4).to_float32_array()
+	return snapshot
 
 
 func capture_validation_stats(result: Dictionary) -> void:
@@ -766,7 +797,7 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	# (13 affine_inverse on the cascade) reruns only when a static input does.
 	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
 		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
-		stiffness_scale, collision_inflation, scene_id])
+		stiffness_scale, collision_inflation, scene_id, config.domain_origin, config.domain_size_m])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
 		_scene_ubo_cache_hash = static_hash
@@ -796,6 +827,10 @@ func _pack_scene_ubo_static() -> PackedByteArray:
 	b.encode_float(1188, stiffness_scale)
 	b.encode_float(1192, collision_inflation)
 	b.encode_s32(1200, scene_id)
+	var upper := config.domain_origin + config.domain_size_m
+	for axis in 3:
+		b.encode_float(1216 + axis * 4, config.domain_origin[axis])
+		b.encode_float(1232 + axis * 4, upper[axis])
 	b.encode_s32(60, mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES))
 	for i in mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES):
 		var obstacle: Dictionary = scene_obstacles[i]

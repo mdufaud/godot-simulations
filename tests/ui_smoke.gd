@@ -65,6 +65,7 @@ func _run() -> void:
 		return
 	if _demo == "ocean_demo":
 		await _check_ocean_actions(menu)
+		_check_ocean_foam_textures()
 		await _check_ocean_scene_selector()
 	if _demo == "ambient_fluid_demo":
 		await _check_ambient_fluid_actions(menu)
@@ -262,6 +263,7 @@ func _viewport_state() -> Dictionary:
 		scaling_3d_mode = vp.scaling_3d_mode,
 		scaling_3d_scale = vp.scaling_3d_scale,
 		msaa_3d = vp.msaa_3d,
+		screen_space_aa = vp.screen_space_aa,
 		use_taa = vp.use_taa,
 		# No engine getter exists for render-time measurement, so ViewportGuard
 		# counts the viewports it is measuring; size_changed connections catch a
@@ -418,12 +420,43 @@ func _check_ocean_actions(menu: SimMenu) -> void:
 		_fail("ocean freeze action did not resume simulation")
 
 
+func _check_ocean_foam_textures() -> void:
+	var option: OptionButton = _demo_root._menu_builder._foam_texture_option
+	if option == null or option.item_count != 4:
+		_fail("ocean foam texture selector is missing variants")
+		return
+	if option.get_item_text(0) != "1 - Airy bubbles" \
+			or _demo_root.menu._entries["Scene/Foam texture"].default != 0:
+		_fail("ocean Airy bubbles is not the first/default foam texture")
+	var initial_index: int = _demo_root.current_foam_texture_index
+	var displacement: RID = _demo_root.solver.get_displacement_tex_rid()
+	var foam: RID = _demo_root.solver.get_foam_near_tex_rid(0)
+	var simulation_time: float = _demo_root._sim_time
+	var detail: Texture2D = _demo_root.surface_mat.get_shader_parameter("foam_detail")
+	for index in option.item_count:
+		option.select(index)
+		option.item_selected.emit(index)
+		var pattern: Texture2D = _demo_root.surface_mat.get_shader_parameter("foam_pattern")
+		if pattern == null or pattern.resource_path != _demo_root.FOAM_TEXTURES[index].path \
+				or not pattern.get_image().has_mipmaps():
+			_fail("ocean foam texture %d did not reach the material with mipmaps" % index)
+		if not _demo_root.solver.initialized or not _demo_root.texture_bound \
+				or _demo_root.solver.get_displacement_tex_rid() != displacement \
+				or _demo_root.solver.get_foam_near_tex_rid(0) != foam \
+				or _demo_root._sim_time != simulation_time \
+				or _demo_root.surface_mat.get_shader_parameter("foam_detail") != detail:
+			_fail("ocean foam texture switch reset simulation or replaced breakup detail")
+	option.select(initial_index)
+	option.item_selected.emit(initial_index)
+	if _demo_root.menu._entries.has("Scene/View"):
+		_fail("ocean unused View selector is still registered")
+
+
 func _check_ocean_scene_selector() -> void:
 	var initial_scene: int = _demo_root.current_scene_index
 	var scene_option: OptionButton = _demo_root._menu_builder._scene_option
-	var view_option: OptionButton = _demo_root._menu_builder._island_view_option
-	if scene_option == null or view_option == null:
-		_fail("ocean scene/view selectors missing")
+	if scene_option == null:
+		_fail("ocean scene selector missing")
 		return
 	scene_option.select(1)
 	scene_option.item_selected.emit(1)
@@ -433,15 +466,8 @@ func _check_ocean_scene_selector() -> void:
 		if _demo_root.solver.initialized and _demo_root.texture_bound:
 			break
 	if _demo_root.current_scene_index != 1 or not _demo_root.solver.shore_enabled \
-			or not _demo_root.texture_bound or view_option.disabled:
+			or not _demo_root.texture_bound:
 		_fail("ocean Island Beach selector did not initialize the shoreline")
-	view_option.select(2)
-	view_option.item_selected.emit(2)
-	await get_tree().process_frame
-	if _demo_root.island != null:
-		var framing: Dictionary = _demo_root.island.camera_view("island_rocks")
-		if _demo_root.orbit_cam.target != framing.target:
-			_fail("ocean rocky coast view selector did not move the camera")
 	scene_option.select(initial_scene)
 	scene_option.item_selected.emit(initial_scene)
 

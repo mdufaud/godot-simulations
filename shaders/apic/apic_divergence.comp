@@ -1,0 +1,16 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= num_cells()) { return; }
+	if (cell_types.data[i] != CELL_FLUID) { divergence.data[i] = 0.0; return; }
+	ivec3 c = cell_coord(i);
+	divergence.data[i] = cell_velocity_divergence(c, false);
+	if (int(params.solve.z) == 3) {
+		float error = abs(divergence.data[i]);
+		if (isnan(error) || isinf(error)) {
+			atomicExchange(pressure_control.stats.z, 0u);
+			atomicMax(pressure_control.stats.w, 0x7f800000u);
+		} else {
+			atomicMax(pressure_control.stats.w, floatBitsToUint(error));
+		}
+	}
+}

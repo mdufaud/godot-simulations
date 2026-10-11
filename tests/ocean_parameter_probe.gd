@@ -159,7 +159,7 @@ static func _run_parameters(tree: SceneTree, demo: Node, check: Callable) -> voi
 static func _run_controls(tree: SceneTree, demo: Node, check: Callable) -> Array[Dictionary]:
 	var baseline := (load(Cases.PRESET_PATHS[1]) as OceanPreset).duplicate(true) as OceanPreset
 	demo.apply_sea_state(baseline)
-	var builder: OceanMenu = demo._menu_builder
+	var builder = demo._menu_builder
 	var menu: SimMenu = demo.menu
 	var persist_id: String = menu.persist_id
 	menu.persist_id = ""

@@ -1,0 +1,8 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/ocean_breaker_apic_surface_plunging_validation.tscn" id="1_base"]
+
+[node name="OceanBreakerAPICSurfacePlungingGridValidation" instance=ExtResource("1_base")]
+apic_grid_cell_size_m = 0.12
+apic_interface_distance_max_iterations = 128
+apic_pressure_iterations = 512

@@ -3,15 +3,16 @@ shared float speeds[64];
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
     vec4 q = read_water(p);
     vec2 v = velocity(q);
-    float signal = abs(v.x) + abs(v.y) + 4.0 * sqrt(params.domain.z * max(q.x, 0.0));
+    float signal = abs(v.x) + abs(v.y) + 2.0 * sqrt(params.domain.z * max(q.x, 0.0));
     vec2 world = world_position(p);
     float distance_edge = params.domain.x * 0.5 - max(abs(world.x), abs(world.y));
     if (distance_edge < params.physical.y) {
         vec3 incoming = offshore(world);
         float h = max(incoming.x - read_bed(p), 0.0);
-        signal = max(signal, abs(incoming.y) + abs(incoming.z) + 4.0 * sqrt(params.domain.z * h));
+        signal = max(signal, abs(incoming.y) + abs(incoming.z) + 2.0 * sqrt(params.domain.z * h));
     }
     uint lane = gl_LocalInvocationIndex;
     speeds[lane] = signal;

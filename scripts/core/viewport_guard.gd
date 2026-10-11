@@ -24,6 +24,7 @@ var _viewport: Viewport = null
 var _scaling_mode: Viewport.Scaling3DMode = Viewport.SCALING_3D_MODE_BILINEAR
 var _scaling_scale := 1.0
 var _msaa: Viewport.MSAA = Viewport.MSAA_DISABLED
+var _screen_space_aa: Viewport.ScreenSpaceAA = Viewport.SCREEN_SPACE_AA_DISABLED
 var _taa := false
 var _measure_render_time := false
 
@@ -44,6 +45,7 @@ func _ready() -> void:
 	_scaling_mode = _viewport.scaling_3d_mode
 	_scaling_scale = _viewport.scaling_3d_scale
 	_msaa = _viewport.msaa_3d
+	_screen_space_aa = _viewport.screen_space_aa
 	_taa = _viewport.use_taa
 
 
@@ -58,6 +60,7 @@ func release() -> void:
 	_viewport.scaling_3d_mode = _scaling_mode
 	_viewport.scaling_3d_scale = _scaling_scale
 	_viewport.msaa_3d = _msaa
+	_viewport.screen_space_aa = _screen_space_aa
 	_viewport.use_taa = _taa
 	set_measure_render_time(false)
 
@@ -89,6 +92,12 @@ func set_taa(enabled: bool) -> void:
 	if _viewport == null:
 		return
 	_viewport.use_taa = enabled
+
+
+func set_screen_space_aa(mode: Viewport.ScreenSpaceAA) -> void:
+	if _viewport == null:
+		return
+	_viewport.screen_space_aa = mode
 
 
 ## Current value, for asserting the demo turned measurement on when it said so.

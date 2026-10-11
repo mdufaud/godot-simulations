@@ -1,0 +1,85 @@
+shared vec4 cached_positions[APIC_WORKGROUP_SIZE];
+shared vec4 cached_velocities[APIC_WORKGROUP_SIZE];
+shared vec4 cached_c0[APIC_WORKGROUP_SIZE];
+shared vec4 cached_c1[APIC_WORKGROUP_SIZE];
+shared vec4 cached_c2[APIC_WORKGROUP_SIZE];
+
+void main() {
+	uint lane = gl_LocalInvocationID.x;
+	ivec3 tile = ivec3(gl_WorkGroupID) * APIC_TRANSFER_TILE;
+	ivec3 face = tile + ivec3(int(lane) % APIC_TRANSFER_TILE,
+		(int(lane) / APIC_TRANSFER_TILE) % APIC_TRANSFER_TILE,
+		int(lane) / (APIC_TRANSFER_TILE * APIC_TRANSFER_TILE));
+	bool valid = all(lessThan(face, params.face_dims.xyz));
+	bvec3 face_open = valid ? bvec3(!face_solid(face, 0), !face_solid(face, 1),
+		!face_solid(face, 2)) : bvec3(false);
+	vec3 fp0 = face_position(face, 0);
+	vec3 fp1 = face_position(face, 1);
+	vec3 fp2 = face_position(face, 2);
+	float dx = params.grid_origin_dx.w;
+	ivec3 lo = clamp(tile - ivec3(2), ivec3(0), params.grid_dims.xyz - ivec3(1));
+	ivec3 hi = clamp(tile + ivec3(APIC_TRANSFER_TILE), ivec3(0), params.grid_dims.xyz - ivec3(1));
+	vec3 weight_sum = vec3(0.0);
+	vec3 momentum = vec3(0.0);
+	vec3 reference_velocity = vec3(0.0);
+	for (int z = lo.z; z <= hi.z; z++) {
+		for (int y = lo.y; y <= hi.y; y++) {
+			uint first_cell = cell_index(ivec3(lo.x, y, z));
+			uint last_cell = cell_index(ivec3(hi.x, y, z));
+			uint begin = cell_start.data[first_cell];
+			uint end = cell_start.data[last_cell] + cell_count.data[last_cell];
+			bool row_active = any(face_open) && abs(y - face.y) <= 2 && abs(z - face.z) <= 2;
+			for (uint first = begin; first < end; first += APIC_WORKGROUP_SIZE) {
+				uint count = min(uint(APIC_WORKGROUP_SIZE), end - first);
+				if (lane < count) {
+					uint particle = particle_ids.data[first + lane];
+					cached_positions[lane] = positions.data[particle];
+					cached_velocities[lane] = velocities.data[particle];
+					cached_c0[lane] = affine_rows.data[particle * 3u];
+					cached_c1[lane] = affine_rows.data[particle * 3u + 1u];
+					cached_c2[lane] = affine_rows.data[particle * 3u + 2u];
+				}
+				barrier();
+				if (row_active) {
+					for (uint item = 0u; item < count; item++) {
+						vec3 p = cached_positions[item].xyz;
+						vec3 off0 = fp0 - p;
+						vec3 off1 = fp1 - p;
+						vec3 off2 = fp2 - p;
+						vec3 d0 = off0 / dx;
+						vec3 d1 = off1 / dx;
+						vec3 d2 = off2 / dx;
+						vec3 weight = vec3(
+							face_open.x ? quadratic_weight(d0.x) * quadratic_weight(d0.y) * quadratic_weight(d0.z) : 0.0,
+							face_open.y ? quadratic_weight(d1.x) * quadratic_weight(d1.y) * quadratic_weight(d1.z) : 0.0,
+							face_open.z ? quadratic_weight(d2.x) * quadratic_weight(d2.y) * quadratic_weight(d2.z) : 0.0);
+						if (all(equal(weight, vec3(0.0)))) { continue; }
+						vec3 affine_velocity = cached_velocities[item].xyz + vec3(
+							dot(cached_c0[item].xyz, off0), dot(cached_c1[item].xyz, off1),
+							dot(cached_c2[item].xyz, off2));
+						bvec3 first_sample = bvec3(weight.x > 0.0 && weight_sum.x == 0.0,
+							weight.y > 0.0 && weight_sum.y == 0.0,
+							weight.z > 0.0 && weight_sum.z == 0.0);
+						reference_velocity = vec3(first_sample.x ? affine_velocity.x : reference_velocity.x,
+							first_sample.y ? affine_velocity.y : reference_velocity.y,
+							first_sample.z ? affine_velocity.z : reference_velocity.z);
+						weight_sum += weight;
+						momentum += weight * (affine_velocity - reference_velocity);
+					}
+				}
+				barrier();
+			}
+		}
+	}
+	if (valid) {
+		uint index = face_index(face);
+		vec3 value = reference_velocity + momentum / max(weight_sum, vec3(1.0e-8));
+		vec3 mass = weight_sum * params.sim.z * pow(params.particle_spacing_m, 3.0);
+		face_u.data[index] = value.x;
+		face_v.data[index] = value.y;
+		face_w.data[index] = value.z;
+		face_mass_u.data[index] = mass.x;
+		face_mass_v.data[index] = mass.y;
+		face_mass_w.data[index] = mass.z;
+	}
+}

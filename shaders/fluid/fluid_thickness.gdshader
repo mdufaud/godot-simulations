@@ -6,13 +6,16 @@ render_mode unshaded, blend_add, depth_draw_never, depth_test_disabled, cull_dis
 uniform sampler2D position_tex : filter_nearest;
 uniform int tex_width = 256;
 uniform float particle_radius = 0.12;
+uniform vec2 clip_z_m = vec2(-1e20, 1e20);
 
 varying vec2 quad_uv;
 varying float attrib;
+varying float particle_z;
 
 void vertex() {
 	ivec2 texel = ivec2(int(INSTANCE_ID) % tex_width, int(INSTANCE_ID) / tex_width);
 	vec4 particle = texelFetch(position_tex, texel, 0);
+	particle_z = particle.z;
 	attrib = particle.w;
 	quad_uv = UV * 2.0 - 1.0;
 	vec3 center_view = (VIEW_MATRIX * vec4(particle.xyz, 1.0)).xyz;
@@ -21,6 +24,7 @@ void vertex() {
 }
 
 void fragment() {
+	if (particle_z < clip_z_m.x || particle_z > clip_z_m.y) { discard; }
 	float r2 = dot(quad_uv, quad_uv);
 	if (r2 > 1.0) {
 		discard;

@@ -1,0 +1,550 @@
+layout(local_size_x = APIC_WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) restrict buffer Positions { vec4 data[]; } positions;
+layout(std430, set = 0, binding = 1) restrict buffer Velocities { vec4 data[]; } velocities;
+layout(std430, set = 0, binding = 2) restrict buffer AffineRows { vec4 data[]; } affine_rows;
+layout(std430, set = 0, binding = 3) restrict buffer CellCount { uint data[]; } cell_count;
+layout(std430, set = 0, binding = 4) restrict buffer CellStart { uint data[]; } cell_start;
+layout(std430, set = 0, binding = 5) restrict buffer BlockSums { uint data[]; } block_sums;
+layout(std430, set = 0, binding = 6) restrict buffer ParticleIds { uint data[]; } particle_ids;
+layout(std430, set = 0, binding = 7) restrict buffer FaceU { float data[]; } face_u;
+layout(std430, set = 0, binding = 8) restrict buffer FaceV { float data[]; } face_v;
+layout(std430, set = 0, binding = 9) restrict buffer FaceW { float data[]; } face_w;
+layout(std430, set = 0, binding = 10) restrict buffer FaceMassU { float data[]; } face_mass_u;
+layout(std430, set = 0, binding = 11) restrict buffer FaceMassV { float data[]; } face_mass_v;
+layout(std430, set = 0, binding = 12) restrict buffer FaceMassW { float data[]; } face_mass_w;
+layout(std430, set = 0, binding = 13) restrict buffer CellTypes { uint data[]; } cell_types;
+layout(std430, set = 0, binding = 14) restrict buffer Pressure { float data[]; } pressure;
+layout(std430, set = 0, binding = 15) restrict buffer Divergence { float data[]; } divergence;
+layout(std430, set = 0, binding = 16) restrict buffer Residual { float data[]; } residual;
+layout(std430, set = 0, binding = 17) restrict buffer ParticleMotionFlags { float data[]; } particle_motion_flags;
+layout(rgba32f, set = 0, binding = 18) uniform image2D position_texture;
+layout(std140, set = 0, binding = 19) uniform SceneParams {
+	mat4 world_to_local[14];
+	vec4 half_extents[14];
+	ivec4 counts;
+	vec4 domain_min;
+	vec4 domain_max;
+} scene;
+layout(std430, set = 0, binding = 20) restrict buffer FaceExtensionA { vec2 data[]; } face_extension_a;
+layout(std430, set = 0, binding = 21) restrict buffer FaceExtensionB { vec2 data[]; } face_extension_b;
+layout(std430, set = 0, binding = 22) restrict buffer SolidFaces { uint data[]; } solid_faces;
+layout(std430, set = 0, binding = 23) coherent buffer PressureControl {
+	uvec4 dispatch_args;
+	uvec4 stats;
+	uvec4 history;
+} pressure_control;
+layout(std430, set = 0, binding = 24) coherent buffer FaceAccum { uvec2 data[]; } face_accum;
+layout(std430, set = 0, binding = 25) restrict buffer CellPhi { float data[]; } cell_phi;
+layout(std430, set = 0, binding = 26) restrict buffer CellPhiNext { float data[]; } cell_phi_next;
+layout(std430, set = 0, binding = 27) restrict buffer CellPhiCorrected { float data[]; } cell_phi_corrected;
+layout(std430, set = 0, binding = 28) coherent buffer ExtensionControl { uvec4 dispatch_args; uvec4 stats; uvec4 next_dispatch; } extension_control;
+layout(std430, set = 0, binding = 29) restrict buffer FaceArea { float data[]; } face_area;
+layout(std430, set = 0, binding = 30) restrict buffer CellGeometry { vec4 data[]; } cell_geometry;
+layout(std430, set = 0, binding = 31) restrict buffer CellVertexRanges { uvec4 data[]; } cell_vertex_ranges;
+layout(std430, set = 0, binding = 32) restrict buffer CutVertices { vec4 data[]; } cut_vertices;
+layout(std430, set = 0, binding = 33) coherent buffer SurfaceAmount {
+	uvec4 dispatch_args;
+	uvec4 stats;
+	uvec4 ledger;
+	uvec4 distance;
+	vec4 data[];
+} surface_amount;
+layout(rgba32f, set = 0, binding = 34) uniform image2D pre_force_velocity_texture;
+layout(push_constant, std430) uniform Params {
+	vec4 grid_origin_dx;
+	ivec3 grid_dims;
+	float particle_spacing_m;
+	vec4 sim;
+	ivec4 face_dims;
+	ivec4 misc;
+	vec4 solve;
+	vec4 surface;
+	vec4 coupling;
+} params;
+
+const uint CELL_AIR = 0u;
+const uint CELL_FLUID = 1u;
+const uint CELL_SOLID = 2u;
+
+ivec3 cell_coord(uint i);
+float cell_open_fraction(uint cell);
+
+vec2 encode_plane_normal(vec3 normal) {
+	vec2 p = normal.xy / dot(abs(normal), vec3(1.0));
+	if (normal.z < 0.0) {
+		p = (vec2(1.0) - abs(p.yx)) * vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+	}
+	return p;
+}
+
+vec3 decode_plane_normal(vec2 p) {
+	vec3 normal = vec3(p, 1.0 - abs(p.x) - abs(p.y));
+	if (normal.z < 0.0) {
+		normal.xy = (vec2(1.0) - abs(normal.yx))
+			* vec2(normal.x >= 0.0 ? 1.0 : -1.0, normal.y >= 0.0 ? 1.0 : -1.0);
+	}
+	return normalize(normal);
+}
+
+float volume_plane_surface_fraction(uint fluid_cell, uint air_cell) {
+	float fluid_capacity = cell_open_fraction(fluid_cell), air_capacity = cell_open_fraction(air_cell);
+	float fluid_amount = clamp(surface_amount.data[fluid_cell].x, 0.0, fluid_capacity);
+	float air_amount = clamp(surface_amount.data[air_cell].x, 0.0, air_capacity);
+	if (fluid_capacity <= 0.0 || air_capacity <= 0.0 || fluid_amount <= 1.0e-7 * fluid_capacity) { return -1.0; }
+	vec3 direction = vec3(cell_coord(air_cell) - cell_coord(fluid_cell));
+	float dx = params.grid_origin_dx.w;
+	if (fluid_capacity - fluid_amount > 1.0e-7 * fluid_capacity) {
+		float denominator = dot(decode_plane_normal(surface_amount.data[fluid_cell].zw), direction) * dx;
+		if (denominator <= 1.0e-8 * dx) { return -1.0; }
+		float fraction = -surface_amount.data[fluid_cell].y / denominator;
+		if (fraction <= 0.0) { return -1.0; }
+		if (fraction < 0.5 - params.coupling.y) { return fraction; }
+	}
+	if (air_amount <= 1.0e-7 * air_capacity) { return 0.5; }
+	if (air_capacity - air_amount <= 1.0e-7 * air_capacity) { return -1.0; }
+	float denominator = dot(decode_plane_normal(surface_amount.data[air_cell].zw), direction) * dx;
+	if (denominator <= 1.0e-8 * dx) { return -1.0; }
+	float fraction = 1.0 - surface_amount.data[air_cell].y / denominator;
+	return fraction >= 0.5 - params.coupling.y && fraction <= 1.0 ? max(fraction, 0.5) : -1.0;
+}
+
+float free_surface_inverse_fraction(uint fluid_cell, uint air_cell) {
+	if (params.surface.x < 0.5 || cell_types.data[air_cell] != CELL_AIR) { return 1.0; }
+	if (params.coupling.x > 0.5) {
+		float fraction = volume_plane_surface_fraction(fluid_cell, air_cell);
+		if (fraction > 0.0 && !isnan(fraction) && !isinf(fraction)) {
+			return 1.0 / clamp(fraction, params.surface.w, 1.0);
+		}
+	}
+	float fluid_phi = cell_phi.data[fluid_cell];
+	float air_phi = cell_phi.data[air_cell];
+	if (fluid_phi >= 0.0 || air_phi < 0.0 || isnan(fluid_phi) || isnan(air_phi)
+		|| isinf(fluid_phi) || isinf(air_phi)) {
+		atomicExchange(pressure_control.stats.z, 0u);
+		return 1.0;
+	}
+	float fraction = -fluid_phi / (air_phi - fluid_phi);
+	return 1.0 / clamp(fraction, params.surface.w, 1.0);
+}
+
+uint num_cells() {
+	return uint(params.grid_dims.x * params.grid_dims.y * params.grid_dims.z);
+}
+
+uint num_faces() {
+	return uint(params.face_dims.x * params.face_dims.y * params.face_dims.z);
+}
+
+uint cell_index(ivec3 p) {
+	return uint((p.z * params.grid_dims.y + p.y) * params.grid_dims.x + p.x);
+}
+
+uint face_index(ivec3 p) {
+	return uint((p.z * params.face_dims.y + p.y) * params.face_dims.x + p.x);
+}
+
+ivec3 cell_coord(uint i) {
+	ivec3 dims = params.grid_dims.xyz;
+	int x = int(i) % dims.x;
+	int y = (int(i) / dims.x) % dims.y;
+	int z = int(i) / (dims.x * dims.y);
+	return ivec3(x, y, z);
+}
+
+ivec3 face_coord(uint i) {
+	ivec3 dims = params.face_dims.xyz;
+	int x = int(i) % dims.x;
+	int y = (int(i) / dims.x) % dims.y;
+	int z = int(i) / (dims.x * dims.y);
+	return ivec3(x, y, z);
+}
+
+ivec3 particle_cell(vec3 p) {
+	return clamp(ivec3(floor((p - params.grid_origin_dx.xyz) / params.grid_origin_dx.w)),
+		ivec3(0), params.grid_dims.xyz - ivec3(1));
+}
+
+float quadratic_weight(float d) {
+	d = abs(d);
+	if (d < 0.5) { return 0.75 - d * d; }
+	if (d < 1.5) { float q = 1.5 - d; return 0.5 * q * q; }
+	return 0.0;
+}
+
+vec3 face_position(ivec3 p, int component) {
+	vec3 offset = component == 0 ? vec3(0.0, 0.5, 0.5)
+		: (component == 1 ? vec3(0.5, 0.0, 0.5) : vec3(0.5, 0.5, 0.0));
+	return params.grid_origin_dx.xyz + (vec3(p) + offset) * params.grid_origin_dx.w;
+}
+
+bool cell_inside_solid(vec3 p) {
+	for (int i = 0; i < scene.counts.x; i++) {
+		vec3 local = (scene.world_to_local[i] * vec4(p, 1.0)).xyz;
+		if (all(lessThanEqual(abs(local), scene.half_extents[i].xyz))) { return true; }
+	}
+	return false;
+}
+
+bool face_solid(ivec3 face, int component) {
+	return (solid_faces.data[uint(component) * num_faces() + face_index(face)] & 1u) != 0u;
+}
+
+bool face_pressure_blocked(ivec3 face, int component) {
+	return solid_faces.data[uint(component) * num_faces() + face_index(face)] != 0u;
+}
+
+float cell_open_fraction(uint cell) {
+	return params.surface.y > 0.5 ? cell_geometry.data[cell].w : 1.0;
+}
+
+vec3 cell_anchor(ivec3 cell) {
+	vec3 center = params.grid_origin_dx.xyz + (vec3(cell) + vec3(0.5)) * params.grid_origin_dx.w;
+	return params.surface.y > 0.5 ? center + cell_geometry.data[cell_index(cell)].xyz : center;
+}
+
+float face_open_fraction(ivec3 face, int component) {
+	if (face_pressure_blocked(face, component)) { return 0.0; }
+	return params.surface.y > 0.5 ? face_area.data[uint(component) * num_faces() + face_index(face)] : 1.0;
+}
+
+uint nearby_phi_obstacles(vec3 origin, float radius) {
+	uint mask = 0u;
+	for (int obstacle = 0; obstacle < scene.counts.x; obstacle++) {
+		mat4 inverse = scene.world_to_local[obstacle];
+		vec3 local = (inverse * vec4(origin, 1.0)).xyz;
+		vec3 reach = (abs(inverse[0].xyz) + abs(inverse[1].xyz) + abs(inverse[2].xyz)) * radius;
+		if (all(lessThanEqual(abs(local), scene.half_extents[obstacle].xyz + reach))) {
+			mask |= 1u << uint(obstacle);
+		}
+	}
+	return mask;
+}
+
+bool phi_segment_blocked(vec3 origin, vec3 destination, uint mask) {
+	for (int obstacle = 0; obstacle < scene.counts.x; obstacle++) {
+		if ((mask & (1u << uint(obstacle))) == 0u) { continue; }
+		mat4 inverse = scene.world_to_local[obstacle];
+		vec3 from = (inverse * vec4(origin, 1.0)).xyz;
+		vec3 delta = (inverse * vec4(destination, 1.0)).xyz - from;
+		vec3 half_size = scene.half_extents[obstacle].xyz;
+		float enter = 0.0;
+		float leave = 1.0;
+		bool hit = true;
+		for (int axis = 0; axis < 3; axis++) {
+			if (abs(delta[axis]) < 1.0e-8) {
+				if (abs(from[axis]) > half_size[axis]) { hit = false; }
+			} else {
+				float near_t = (-half_size[axis] - from[axis]) / delta[axis];
+				float far_t = (half_size[axis] - from[axis]) / delta[axis];
+				enter = max(enter, min(near_t, far_t));
+				leave = min(leave, max(near_t, far_t));
+			}
+		}
+		if (hit && enter <= leave) { return true; }
+	}
+	return false;
+}
+
+float geometry_phi_value(uint index, bool predicted) {
+	return predicted ? cell_phi_next.data[index] : cell_phi.data[index];
+}
+
+float phi_minmod(float a, float b) {
+	return a * b > 0.0 ? sign(a) * min(abs(a), abs(b)) : 0.0;
+}
+
+vec3 geometry_phi_gradient(ivec3 cell, bool predicted, bool limited, out bvec3 available) {
+	uint index = cell_index(cell);
+	vec3 anchor = cell_anchor(cell);
+	uint obstacle_mask = nearby_phi_obstacles(anchor, 3.0 * params.grid_origin_dx.w);
+	vec3 gradient = vec3(0.0);
+	available = bvec3(false);
+	for (int axis = 0; axis < 3; axis++) {
+		ivec3 left = cell;
+		ivec3 right = cell;
+		left[axis]--;
+		right[axis]++;
+		bool has_left = left[axis] >= 0;
+		bool has_right = right[axis] < params.grid_dims[axis];
+		if (has_left) {
+			has_left = cell_open_fraction(cell_index(left)) > 0.0
+				&& face_area.data[uint(axis) * num_faces() + face_index(cell)] > 0.0;
+			if (has_left && obstacle_mask != 0u) { has_left = !phi_segment_blocked(anchor, cell_anchor(left), obstacle_mask); }
+		}
+		if (has_right) {
+			has_right = cell_open_fraction(cell_index(right)) > 0.0
+				&& face_area.data[uint(axis) * num_faces() + face_index(right)] > 0.0;
+			if (has_right && obstacle_mask != 0u) { has_right = !phi_segment_blocked(anchor, cell_anchor(right), obstacle_mask); }
+		}
+		available[axis] = has_left || has_right;
+		float phi = geometry_phi_value(index, predicted);
+		if (has_left && has_right) {
+			float dl = phi - geometry_phi_value(cell_index(left), predicted);
+			float dr = geometry_phi_value(cell_index(right), predicted) - phi;
+			float centered = 0.5 * (dl + dr);
+			gradient[axis] = limited ? phi_minmod(centered, phi_minmod(2.0 * dl, 2.0 * dr)) : centered;
+		} else if (has_left || has_right) {
+			ivec3 near_cell = has_left ? left : right;
+			int side = has_left ? -1 : 1;
+			float near_phi = geometry_phi_value(cell_index(near_cell), predicted);
+			gradient[axis] = float(side) * (near_phi - phi);
+			if (limited) {
+				ivec3 far_cell = near_cell;
+				far_cell[axis] += side;
+				bool has_far = far_cell[axis] >= 0 && far_cell[axis] < params.grid_dims[axis];
+				if (has_far) {
+					ivec3 face = side > 0 ? far_cell : near_cell;
+					has_far = cell_open_fraction(cell_index(far_cell)) > 0.0
+						&& face_area.data[uint(axis) * num_faces() + face_index(face)] > 0.0;
+					if (has_far && obstacle_mask != 0u) { has_far = !phi_segment_blocked(cell_anchor(near_cell), cell_anchor(far_cell), obstacle_mask); }
+				}
+				if (has_far) {
+					float far_slope = float(side) * (geometry_phi_value(cell_index(far_cell), predicted) - near_phi);
+					gradient[axis] = phi_minmod(gradient[axis], 2.0 * far_slope);
+				}
+			}
+		}
+	}
+	return gradient / params.grid_origin_dx.w;
+}
+
+vec3 geometry_phi_gradient(ivec3 cell) {
+	bvec3 available;
+	return geometry_phi_gradient(cell, false, false, available);
+}
+
+bool open_cell_contains_liquid(ivec3 cell) {
+	uint index = cell_index(cell);
+	if (cell_phi.data[index] >= 0.0) { return false; }
+	uvec2 range = cell_vertex_ranges.data[index].xy;
+	if (range.y == 0u) { return true; }
+	vec3 gradient = geometry_phi_gradient(cell);
+	for (uint vertex = 0u; vertex < range.y; vertex++) {
+		float phi = cell_phi.data[index] + dot(gradient, cut_vertices.data[range.x + vertex].xyz);
+		if (phi < 0.0) { return true; }
+	}
+	return false;
+}
+
+bool visible_phi_cell(vec3 origin, ivec3 cell, uint obstacle_mask) {
+	if (any(lessThan(cell, ivec3(0))) || any(greaterThanEqual(cell, params.grid_dims.xyz))) { return false; }
+	if (cell_types.data[cell_index(cell)] == CELL_SOLID) { return false; }
+	vec3 center = cell_anchor(cell);
+	return obstacle_mask == 0u || !phi_segment_blocked(origin, center, obstacle_mask);
+}
+
+bool particle_phi(vec3 p, out float value) {
+	float dx = params.grid_origin_dx.w;
+	ivec3 owner = particle_cell(p);
+	ivec3 nearest = owner;
+	uint obstacle_mask = nearby_phi_obstacles(p, 4.0 * dx);
+	if (!visible_phi_cell(p, nearest, obstacle_mask)) {
+		float nearest_distance = 3.402823466e+38;
+		bool found = false;
+		for (int z = -1; z <= 1; z++) {
+			for (int y = -1; y <= 1; y++) {
+				for (int x = -1; x <= 1; x++) {
+					ivec3 candidate = owner + ivec3(x, y, z);
+					if (!visible_phi_cell(p, candidate, obstacle_mask)) { continue; }
+					vec3 center = params.grid_origin_dx.xyz + (vec3(candidate) + vec3(0.5)) * dx;
+					float distance = dot(center - p, center - p);
+					if (distance < nearest_distance) {
+						nearest = candidate;
+						nearest_distance = distance;
+						found = true;
+					}
+				}
+			}
+		}
+		if (!found) { return false; }
+	}
+	vec3 center = params.grid_origin_dx.xyz + (vec3(nearest) + vec3(0.5)) * dx;
+	vec3 anchor = cell_anchor(nearest);
+	vec3 displacement = (p - center) / dx;
+	float phi = cell_phi.data[cell_index(nearest)];
+	vec3 span = vec3(0.0);
+	for (int axis = 0; axis < 3; axis++) {
+		ivec3 left = nearest;
+		ivec3 right = nearest;
+		left[axis]--;
+		right[axis]++;
+		bool has_left = visible_phi_cell(p, left, obstacle_mask) && visible_phi_cell(anchor, left, obstacle_mask);
+		bool has_right = visible_phi_cell(p, right, obstacle_mask) && visible_phi_cell(anchor, right, obstacle_mask);
+		if (has_left && has_right) { span[axis] = 0.5 * (cell_phi.data[cell_index(right)] - cell_phi.data[cell_index(left)]); }
+		else if (has_left) { span[axis] = phi - cell_phi.data[cell_index(left)]; }
+		else if (has_right) { span[axis] = cell_phi.data[cell_index(right)] - phi; }
+		else if (displacement[axis] != 0.0) { return false; }
+	}
+	value = phi + dot(span, displacement);
+	return !isnan(value) && !isinf(value);
+}
+
+bool fluid_face(ivec3 face, int component) {
+	if (face_pressure_blocked(face, component)) { return false; }
+	ivec3 left = face;
+	left[component]--;
+	return cell_types.data[cell_index(left)] == CELL_FLUID
+		|| cell_types.data[cell_index(face)] == CELL_FLUID;
+}
+
+float face_velocity(ivec3 face, int component) {
+	uint index = face_index(face);
+	return component == 0 ? face_u.data[index] : component == 1 ? face_v.data[index] : face_w.data[index];
+}
+
+float projected_face_velocity(ivec3 face, int component) {
+	if (face_solid(face, component)) { return 0.0; }
+	float value = face_velocity(face, component);
+	if (face_pressure_blocked(face, component)) { return value; }
+	uint index = face_index(face);
+	float mass = component == 0 ? face_mass_u.data[index]
+		: component == 1 ? face_mass_v.data[index] : face_mass_w.data[index];
+	if (mass <= 0.0 && (params.surface.x < 0.5 || !fluid_face(face, component))) { return value; }
+	ivec3 left = face;
+	left[component]--;
+	ivec3 right = face;
+	bool has_left = all(greaterThanEqual(left, ivec3(0))) && all(lessThan(left, params.grid_dims.xyz));
+	bool has_right = all(greaterThanEqual(right, ivec3(0))) && all(lessThan(right, params.grid_dims.xyz));
+	float pl = has_left && cell_types.data[cell_index(left)] == CELL_FLUID ? pressure.data[cell_index(left)] : 0.0;
+	float pr = has_right && cell_types.data[cell_index(right)] == CELL_FLUID ? pressure.data[cell_index(right)] : 0.0;
+	float inverse_fraction = 1.0;
+	if (has_left && has_right) {
+		uint li = cell_index(left), ri = cell_index(right);
+		if (cell_types.data[li] == CELL_FLUID && cell_types.data[ri] == CELL_AIR) {
+			inverse_fraction = free_surface_inverse_fraction(li, ri);
+		} else if (cell_types.data[ri] == CELL_FLUID && cell_types.data[li] == CELL_AIR) {
+			inverse_fraction = free_surface_inverse_fraction(ri, li);
+		}
+	}
+	precise float correction = params.sim.x * (pr - pl) * inverse_fraction / (params.sim.z * params.grid_origin_dx.w);
+	precise float projected = value - correction;
+	return projected;
+}
+
+float cell_velocity_divergence(ivec3 cell, bool projected) {
+	ivec3 cx = cell + ivec3(1, 0, 0), cy = cell + ivec3(0, 1, 0), cz = cell + ivec3(0, 0, 1);
+	precise float u0 = projected ? projected_face_velocity(cell, 0) : face_velocity(cell, 0);
+	precise float u1 = projected ? projected_face_velocity(cx, 0) : face_velocity(cx, 0);
+	precise float v0 = projected ? projected_face_velocity(cell, 1) : face_velocity(cell, 1);
+	precise float v1 = projected ? projected_face_velocity(cy, 1) : face_velocity(cy, 1);
+	precise float w0 = projected ? projected_face_velocity(cell, 2) : face_velocity(cell, 2);
+	precise float w1 = projected ? projected_face_velocity(cz, 2) : face_velocity(cz, 2);
+	precise float divergence = (face_open_fraction(cx, 0) * u1 - face_open_fraction(cell, 0) * u0
+		+ face_open_fraction(cy, 1) * v1 - face_open_fraction(cell, 1) * v0
+		+ face_open_fraction(cz, 2) * w1 - face_open_fraction(cell, 2) * w0)
+		/ (params.grid_origin_dx.w * max(cell_open_fraction(cell_index(cell)), 1.0e-12));
+	return divergence;
+}
+
+void gather_component(vec3 p, int component, bool classify_support, out float value, out vec3 affine, out bool pressure_supported, out float velocity_change) {
+	pressure_supported = false;
+	float value_sum = 0.0;
+	float weight_sum = 0.0;
+	float reference_value = 0.0;
+	float change_sum = 0.0;
+	vec3 affine_sum = vec3(0.0);
+	vec3 position_moment = vec3(0.0);
+	float dx = params.grid_origin_dx.w;
+	vec3 local = (p - params.grid_origin_dx.xyz) / dx;
+	vec3 offset = vec3(0.5);
+	offset[component] = 0.0;
+	ivec3 base = ivec3(floor(local - offset - vec3(0.5)));
+	for (int z = 0; z < 3; z++) {
+		for (int y = 0; y < 3; y++) {
+			for (int x = 0; x < 3; x++) {
+				ivec3 f = base + ivec3(x, y, z);
+				vec3 fp = face_position(f, component);
+				vec3 d = (fp - p) / dx;
+				float w = quadratic_weight(d.x) * quadratic_weight(d.y) * quadratic_weight(d.z);
+				if (w <= 0.0) { continue; }
+				ivec3 sample_face = f;
+				float sign_value = 1.0;
+				for (int axis = 0; axis < 3; axis++) {
+					int count = params.grid_dims[axis];
+					if (axis == component) {
+						if (sample_face[axis] < 0) { sample_face[axis] = -sample_face[axis]; sign_value = -sign_value; }
+						if (sample_face[axis] > count) { sample_face[axis] = 2 * count - sample_face[axis]; sign_value = -sign_value; }
+					} else {
+						if (sample_face[axis] < 0) { sample_face[axis] = -sample_face[axis] - 1; }
+						if (sample_face[axis] >= count) { sample_face[axis] = 2 * count - sample_face[axis] - 1; }
+					}
+				}
+				uint fi = face_index(sample_face);
+				if (classify_support && fluid_face(sample_face, component)) { pressure_supported = true; }
+				float fv = face_extension_a.data[uint(component) * num_faces() + fi].x;
+				fv *= sign_value;
+				if (params.coupling.z > 0.0) {
+					uint width = uint(imageSize(pre_force_velocity_texture).x);
+					vec3 previous = imageLoad(pre_force_velocity_texture, ivec2(int(fi % width), int(fi / width))).xyz;
+					change_sum += w * (fv - previous[component] * sign_value);
+				}
+				if (weight_sum == 0.0) { reference_value = fv; }
+				value_sum += w * (fv - reference_value);
+				weight_sum += w;
+				affine_sum += w * (fv - reference_value) * (fp - p);
+				position_moment += w * (fp - p);
+			}
+		}
+	}
+	value = reference_value + value_sum / max(weight_sum, 1.0e-8);
+	velocity_change = change_sum / max(weight_sum, 1.0e-8);
+	affine = (affine_sum - (value - reference_value) * position_moment) * (4.0 / (dx * dx * max(weight_sum, 1.0e-8)));
+}
+
+void resolve_obstacles(inout vec3 p, inout vec3 v, vec3 from) {
+	float contact_slop = APIC_CONTACT_SLOP_DX * params.grid_origin_dx.w;
+	for (int i = 0; i < scene.counts.x; i++) {
+		mat4 world_to_local = scene.world_to_local[i];
+		vec3 half_size = scene.half_extents[i].xyz + vec3(params.sim.w);
+		vec3 local_from = (world_to_local * vec4(from, 1.0)).xyz;
+		vec3 local_p = (world_to_local * vec4(p, 1.0)).xyz;
+		vec3 delta = local_p - local_from;
+		float enter = 0.0;
+		float leave = 1.0;
+	vec3 local_n = vec3(0.0);
+		bool hit = true;
+		for (int axis = 0; axis < 3; axis++) {
+			if (abs(delta[axis]) < 1.0e-6) {
+				if (abs(local_from[axis]) > half_size[axis]) { hit = false; }
+				continue;
+			}
+			float near_t = (-half_size[axis] - local_from[axis]) / delta[axis];
+			float far_t = (half_size[axis] - local_from[axis]) / delta[axis];
+			float side = -1.0;
+			if (near_t > far_t) {
+				float swap_t = near_t;
+				near_t = far_t;
+				far_t = swap_t;
+				side = 1.0;
+			}
+			if (near_t > enter) {
+				enter = near_t;
+				local_n = vec3(0.0);
+				local_n[axis] = side;
+			}
+			leave = min(leave, far_t);
+		}
+		if (hit && enter <= leave && enter <= 1.0 && dot(local_n, local_n) > 0.0) {
+			vec3 world_n = normalize(transpose(mat3(world_to_local)) * local_n);
+			p = mix(from, p, enter) + world_n * contact_slop;
+			if (dot(v, world_n) < 0.0) {
+				v -= world_n * dot(v, world_n);
+				v *= scene.half_extents[i].w;
+			}
+			continue;
+		}
+		vec3 inside = half_size - abs(local_p);
+		if (any(lessThanEqual(inside, vec3(1.0e-6)))) { continue; }
+		int axis = inside.y < inside.x ? 1 : 0;
+		axis = inside.z < inside[axis] ? 2 : axis;
+		vec3 local_normal = vec3(0.0);
+		local_normal[axis] = local_p[axis] < 0.0 ? -1.0 : 1.0;
+		vec3 world_normal = normalize(transpose(mat3(world_to_local)) * local_normal);
+		p += world_normal * (inside[axis] + contact_slop);
+		if (dot(v, world_normal) < 0.0) {
+			v -= world_normal * dot(v, world_normal);
+			v *= scene.half_extents[i].w;
+		}
+	}
+}

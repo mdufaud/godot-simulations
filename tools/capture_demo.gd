@@ -22,6 +22,8 @@ var _scene_path := ""
 var _demo: Node = null
 var _preset := -1
 var _height_gain := -1.0
+var _height_after_frame := -1
+var _height_after_gain := 0.0
 var _look := -1
 var _mood := -1.0
 var _profile := false
@@ -95,6 +97,14 @@ func _initialize() -> void:
 			"out": _out = value
 			"preset": _preset = int(value)
 			"height": _height_gain = float(value)
+			"height_after":
+				var change := value.split(":", true, 1)
+				if change.size() != 2:
+					push_error("CAPTURE FAIL: height_after must be frame:gain")
+					quit(1)
+					return
+				_height_after_frame = int(change[0])
+				_height_after_gain = float(change[1])
 			"look": _look = int(value)
 			"mood": _mood = float(value)
 			"profile": _profile = value == "1" or value.to_lower() == "true"
@@ -335,6 +345,13 @@ func _run() -> void:
 	var waited := 0
 	var toss_frame := maxi(1, int(_frames / 3))
 	while waited < _frames:
+		if waited == _height_after_frame:
+			if not _demo.has_method("set_capture_height_gain"):
+				push_error("CAPTURE FAIL: target does not support a wave-height change")
+				quit(1)
+				return
+			_demo.set_capture_height_gain(_height_after_gain)
+			print("CAPTURE HEIGHT_CHANGE frame=%d gain=%.4f" % [waited, _height_after_gain])
 		if _camera_speed != 0.0 and _demo.has_method("move_capture_camera"):
 			_demo.move_capture_camera(Vector3(_camera_speed * maxf(_fixed_delta, 1.0 / 60.0), 0.0, 0.0))
 		if _interaction and _demo.has_method("throw_crate") and waited == toss_frame:

@@ -23,15 +23,19 @@ render_mode unshaded, cull_disabled;
 uniform sampler2D position_tex : filter_nearest;
 uniform int tex_width = 256;
 uniform float particle_radius = 0.12;
+uniform vec2 clip_z_m = vec2(-1e20, 1e20);
+uniform bool diagnostic_color_enabled = false;
 
 varying vec2 quad_uv;
 varying vec3 center_view;
 varying float attrib;
+varying float particle_z;
 
 void vertex() {
 	ivec2 texel = ivec2(int(INSTANCE_ID) % tex_width, int(INSTANCE_ID) / tex_width);
 	vec4 particle = texelFetch(position_tex, texel, 0);
 	vec3 particle_pos = particle.xyz;
+	particle_z = particle_pos.z;
 	attrib = particle.w;
 	quad_uv = UV * 2.0 - 1.0;
 	center_view = (VIEW_MATRIX * vec4(particle_pos, 1.0)).xyz;
@@ -40,6 +44,7 @@ void vertex() {
 }
 
 void fragment() {
+	if (particle_z < clip_z_m.x || particle_z > clip_z_m.y) { discard; }
 	float r2 = dot(quad_uv, quad_uv);
 	if (r2 > 1.0) {
 		discard;
@@ -53,5 +58,6 @@ void fragment() {
 	float eye_depth = -sphere_view.z;
 	float depth_pack = min(eye_depth, 2046.0);
 	// B = front-surface attribute (lava temperature) — depth test keeps nearest.
-	ALBEDO = vec3(floor(depth_pack), depth_pack - floor(depth_pack), attrib);
+	ALBEDO = diagnostic_color_enabled ? vec3(0.04, 0.72, 0.87)
+		: vec3(floor(depth_pack), depth_pack - floor(depth_pack), attrib);
 }

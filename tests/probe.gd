@@ -10,6 +10,8 @@ extends "res://tests/test_case.gd"
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const GRASS_HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 const OceanParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
+const OceanCoastalProbe := preload("res://tests/ocean_coastal_probe.gd")
+const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -1621,6 +1623,422 @@ func _run_fluid_scene_retention() -> void:
 	demo.queue_free()
 	await process_frame
 	_finish("fluid_scene_retention")
+
+
+func _run_ocean_island_spectrum() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "island_spectrum")
+	_finish("ocean_island_spectrum")
+
+
+func _run_ocean_seam() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "seam")
+	_finish("ocean_seam")
+
+
+func _run_ocean_shore_dispersion() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "dispersion")
+	_finish("ocean_shore_dispersion")
+
+
+func _run_ocean_shore_dispersion_2d() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "dispersion_2d")
+	_finish("ocean_shore_dispersion_2d")
+
+
+func _run_ocean_shore_convergence() -> void:
+	await _boot_frames(2)
+	var anderson_depth := 3 if _extra.has("anderson_depth=3") else 0
+	await OceanCoastalProbe.run_dispersive_convergence(self, _check, anderson_depth)
+	_finish("ocean_shore_convergence")
+
+
+func _run_ocean_shore_volume() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "volume")
+	_finish("ocean_shore_volume")
+
+
+func _run_ocean_shore_foam() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "foam")
+	_finish("ocean_shore_foam")
+
+
+func _run_ocean_boundary_phase() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "boundary_phase")
+	_finish("ocean_boundary_phase")
+
+
+func _run_ocean_breaking_diffusion() -> void:
+	await _boot_frames(2)
+	await OceanCoastalProbe.run(self, _check, "breaking_diffusion")
+	_finish("ocean_breaking_diffusion")
+
+
+func _run_ocean_sph_breaker() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run(self, _check)
+	print("BREAKER ACCEPTANCE candidate=sph scope=numerical_particle_state physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_sph_breaker")
+
+
+func _run_ocean_sph_stiffness() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe._run_resolution(self, _check, 0.12, "sph", 0, 0.0, 400.0)
+	print("BREAKER ACCEPTANCE candidate=sph scope=pressure_stiffness physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_sph_stiffness")
+
+
+func _run_ocean_sph_pressure_conservation() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_sph_pressure_conservation(self, _check)
+	_finish("ocean_sph_pressure_conservation")
+
+
+func _run_ocean_breaker_boot() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_boot(self, _check)
+	_finish("ocean_breaker_boot")
+
+
+func _run_ocean_apic_breaker() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run(self, _check, "apic")
+	print("BREAKER ACCEPTANCE candidate=apic scope=numerical_particle_state physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_apic_breaker")
+
+
+func _run_ocean_apic_rest() -> void:
+	await _boot_frames(2)
+	for spacing in [0.24, 0.18]:
+		await OceanBreakerProbe._run_apic_rest(self, _check, spacing)
+	_finish("ocean_apic_rest")
+
+
+func _run_ocean_apic_surface_projection() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_surface_projection(self, _check)
+	_finish("ocean_apic_surface_projection")
+
+
+func _run_ocean_apic_surface_transport() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_surface_transport(self, _check)
+	_finish("ocean_apic_surface_transport")
+
+
+func _run_ocean_apic_surface_strain() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_surface_strain(self, _check)
+	_finish("ocean_apic_surface_strain")
+
+
+func _run_ocean_apic_geometric_flux_cache() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_geometric_flux_cache(self, _check)
+	_finish("ocean_apic_geometric_flux_cache")
+
+
+func _run_ocean_apic_linear_wave() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_linear_wave(self, _check, not _extra.has("uncoupled=1"), _extra.has("geometric=1"), _extra.has("pressure_planes=1"), 1 if _extra.has("substeps=1") else 3, 1.0 if _extra.has("flip=1") else (0.95 if _extra.has("flip=0.95") else 0.0), _extra.has("geometric_split=1"))
+	_finish("ocean_apic_linear_wave")
+
+
+func _run_ocean_apic_cube_fraction() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_cube_fraction(self, _check)
+	_finish("ocean_apic_cube_fraction")
+
+
+func _run_ocean_apic_amount_transport() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_amount_transport(self, _check, 2 if _extra.has("amount_order=2") else 1)
+	_finish("ocean_apic_amount_transport")
+
+
+func _run_ocean_apic_amount_reconstruction() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_amount_reconstruction(self, _check)
+	_finish("ocean_apic_amount_reconstruction")
+
+
+func _run_ocean_apic_amount_consistency() -> void:
+	await _boot_frames(2)
+	var ticks := 0 if _extra.has("boot=1") else (30 if _extra.has("ticks=30") else 1)
+	await OceanBreakerProbe.run_apic_amount_consistency(self, _check, _extra.has("still_water=1"), ticks,
+		_extra.has("advection_only=1"), _extra.has("first_substep=1"))
+	_finish("ocean_apic_amount_consistency")
+
+
+func _run_ocean_apic_surface_wall_barrier() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_surface_wall_barrier(self, _check)
+	_finish("ocean_apic_surface_wall_barrier")
+
+
+func _run_ocean_apic_surface_boot() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_surface_boot(self, _check, _extra.has("amount_surface=1") or _extra.has("geometric=1"), _extra.has("geometric=1"), _extra.has("geometric=1") and _extra.has("grid=0.12"), not _extra.has("rock=0"), 1.0 / 15.0 if _extra.has("slope=15") else 1.0 / 8.0)
+	_finish("ocean_apic_surface_boot")
+
+
+func _run_ocean_island_visual() -> void:
+	await _boot_frames(2)
+	var old_screen_space_aa := root.screen_space_aa
+	var manager := root.get_node("GameManager")
+	var old_scene: int = manager.get_setting("ocean_scene_mode", 0)
+	var old_quality: int = manager.get_setting("ocean_quality_profile", 2)
+	manager.set_setting("ocean_scene_mode", 1)
+	manager.set_setting("ocean_quality_profile", 1)
+	var demo = load("res://scenes/ocean_demo.tscn").instantiate()
+	root.add_child(demo)
+	for frame in 360:
+		await process_frame
+		if demo.solver.initialized and demo.texture_bound:
+			break
+	_check(demo.solver.initialized and demo.texture_bound, "island visual: runtime boot failed")
+	if demo.solver.initialized and demo.texture_bound:
+		_check(demo.current_scene_index == 1 and demo.solver.shore_solver.config.visual_breakers_enabled,
+			"island visual: restored boot did not select the hybrid coast")
+		_check(demo.surface_mat.get_shader_parameter("shore_visual_breakers_enabled") == true,
+			"island visual: renderer was not wired at normal boot")
+		_check(root.screen_space_aa == Viewport.SCREEN_SPACE_AA_FXAA,
+			"island visual: shoreline antialiasing was not enabled at normal boot")
+		_check(demo.solver.foam_near_size == 512, "island visual: Medium foam budget was not applied at boot")
+		_check(demo.solver.shore_solver.get_breaker_texture_rid().is_valid()
+			and demo.solver.shore_solver.get_contact_texture_rid().is_valid(),
+			"island visual: shared crest/contact maps were not created")
+		_check(demo.shore_breaker_texture.texture_rd_rid == demo.solver.get_shore_breaker_texture_rid()
+			and demo.shore_contact_texture.texture_rd_rid == demo.solver.get_shore_contact_texture_rid()
+			and demo.surface_mat.get_shader_parameter("shore_breaker") == demo.shore_breaker_texture
+			and demo.island.rock_wet_material.get_shader_parameter("shore_contact") == demo.shore_contact_texture,
+			"island visual: runtime consumers did not share crest/contact maps")
+		_check(demo.island.rock_wet_material.get_shader_parameter("shore_breaker") == demo.shore_breaker_texture,
+			"island visual: runtime consumers did not share crest/contact maps")
+		_check(demo.island.terrain_material.get_shader_parameter("shore_breaker") == demo.shore_breaker_texture
+			and demo.solver.shore_solver._displacement_rid == demo.solver.get_displacement_tex_rid()
+			and demo.solver.shore_solver._velocity_rid == demo.solver.velocity_solver.get_texture_rid(),
+			"island visual: normal boot did not bind the shared FFT carrier to the coast and terrain")
+		_check(is_equal_approx(demo.surface_mat.get_shader_parameter("shore_blend_width_m"),
+			demo.solver.shore_solver.config.surface_blend_width_m()), "island visual: renderer and query blend widths differ")
+		_check(demo.surface_mat.get_shader_parameter("shore_depth_blend_m").is_equal_approx(
+			demo.solver.shore_solver.config.surface_depth_blend_m()), "island visual: renderer and query depth blends differ")
+		var depth: float = demo.solver.water_depth
+		demo.set_frozen(true)
+		var frozen_time: float = demo._sim_time
+		await _boot_frames(4)
+		_check(is_equal_approx(demo._sim_time, frozen_time), "island visual: freeze advanced the wave clock")
+		for index in 4:
+			demo.apply_preset(index)
+			var preset: OceanPreset = demo.PRESETS[index]
+			_check(is_equal_approx(demo.solver.wind_speed, preset.wind_speed_mps)
+				and is_equal_approx(demo.solver.height_gain, preset.height_gain), "island visual: preset amplitude or wind changed")
+		demo.set_capture_wind_direction(PI * 0.25)
+		await _boot_frames(4)
+		_check(demo.surface_mat.get_shader_parameter("wind_direction").is_equal_approx(Vector2.ONE.normalized()),
+			"island visual: direction change did not reach the animated crest")
+		demo.set_quality_profile(0)
+		for frame in 360:
+			await process_frame
+			if demo.solver.initialized and demo.texture_bound:
+				break
+		_check(demo.texture_bound and demo.solver.shore_solver.config.visual_breakers_enabled
+			and demo.solver.shore_solver.config.selected_resolution_cells == 128, "island visual: Low quality rebuild lost the hybrid coast")
+		demo.set_quality_profile(1)
+		for frame in 360:
+			await process_frame
+			if demo.solver.initialized and demo.texture_bound:
+				break
+		_check(demo.texture_bound and demo.solver.shore_solver.config.selected_resolution_cells == 160,
+			"island visual: Medium quality rebuild failed")
+		demo.set_frozen(false)
+		await _boot_frames(4)
+		_check(demo._sim_time > frozen_time and is_equal_approx(demo.time_scale, 1.0), "island visual: resume did not advance real time")
+		demo.set_frozen(true)
+		demo.set_capture_foam(false)
+		_check(demo.surface_mat.get_shader_parameter("foam_feedback_enabled") == false,
+			"island visual: foam toggle did not reach the renderer")
+		demo.set_scene_mode(0, false)
+		for frame in 360:
+			await process_frame
+			if demo.solver.initialized and demo.texture_bound:
+				break
+		_check(not demo.solver.shore_enabled and demo.island == null
+			and demo.surface_mat.get_shader_parameter("shore_visual_breakers_enabled") == false
+			and is_equal_approx(demo.solver.water_depth, depth), "island visual: ocean roundtrip changed depth or retained the fold")
+		_check(demo.solver.foam_near_size == 1024, "island visual: ocean roundtrip retained the island foam budget")
+		_check(not demo.solver.shore_solver.get_texture_rid().is_valid()
+			and not demo.solver.shore_solver.get_foam_texture_rid().is_valid()
+			and not demo.solver.shore_solver.get_breaker_texture_rid().is_valid()
+			and not demo.solver.shore_solver.get_contact_texture_rid().is_valid()
+			and demo.solver.shore_solver.estimate_vram_bytes() == 0, "island visual: shoreline resources survived scene exit")
+		print("OCEAN ISLAND VISUAL boot=restored quality=Medium propagation=shallow_water crest=fft_surface foam_transport=fft_velocity presets=checked direction=checked quality_switch=checked freeze_resume=checked foam_toggle=checked roundtrip=checked offshore_depth_m=%.3f" % depth)
+	demo.queue_free()
+	await _boot_frames(3)
+	manager.set_setting("ocean_scene_mode", old_scene)
+	manager.set_setting("ocean_quality_profile", old_quality)
+	_check(root.screen_space_aa == old_screen_space_aa,
+		"island visual: shoreline antialiasing survived scene exit")
+	_finish("ocean_island_visual")
+
+
+func _run_ocean_apic_surface_rest() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_shore_rest(self, _check, "apic", 180.0, true, _extra.has("amount_surface=1"), 2 if _extra.has("amount_order=2") else 1)
+	_finish("ocean_apic_surface_rest")
+
+
+func _run_ocean_apic_surface_breaker() -> void:
+	await _boot_frames(2)
+	var grid_dx := 0.12 if _extra.has("grid=0.12") else 0.0
+	var substeps := 1 if _extra.has("substeps=1") else (3 if _extra.has("substeps=3") else 0)
+	var duration_s := 1.0 / 60.0 if _extra.has("first_tick=1") else 8.0
+	if _extra.has("duration=3"):
+		duration_s = 3.0
+	elif _extra.has("duration=6.5"):
+		duration_s = 6.5
+	var amount_tracking := _extra.has("amount=1")
+	var amount_surface := _extra.has("amount_surface=1")
+	await OceanBreakerProbe._run_resolution(self, _check, 0.12, "apic", 0, grid_dx, 180.0, true, duration_s, substeps, 1, amount_tracking or amount_surface, amount_surface, 2 if _extra.has("amount_order=2") else 1, 128 if _extra.has("distance_iterations=128") else 64, _extra.has("geometric=1"), 1.0 if _extra.has("flip=1") else (0.5 if _extra.has("flip=0.5") else 0.0), 512 if _extra.has("pressure_iterations=512") else 256, not _extra.has("rock=0"), 1.0 / 15.0 if _extra.has("slope=15") else 1.0 / 8.0, _extra.has("projection_energy=1"))
+	print("BREAKER ACCEPTANCE candidate=apic scope=free_surface_boundary physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_apic_surface_breaker")
+
+
+func _run_ocean_apic_surface_volume() -> void:
+	await _boot_frames(2)
+	var substeps := 1 if _extra.has("substeps=1") else (3 if _extra.has("substeps=3") else 0)
+	var ticks_per_draw := 8 if _extra.has("batch=8") else 1
+	var amount_surface := _extra.has("amount_surface=1")
+	await OceanBreakerProbe._run_resolution(self, _check, 0.12, "apic", 0, 0.0, 180.0, true, 30.0, substeps, ticks_per_draw, amount_surface, amount_surface, 2 if _extra.has("amount_order=2") else 1, 64, _extra.has("geometric=1"), 1.0 if _extra.has("flip=1") else 0.0, 256, true, 1.0 / 8.0, _extra.has("projection_energy=1"))
+	_finish("ocean_apic_surface_volume")
+
+
+func _run_ocean_apic_surface_timestep() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_timestep(self, _check, true)
+	_finish("ocean_apic_surface_timestep")
+
+
+func _run_ocean_apic_volume_fraction() -> void:
+	OceanBreakerProbe.run_apic_volume_fraction_values(_check)
+	_finish("ocean_apic_volume_fraction")
+
+
+func _run_ocean_apic_velocity_support() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_velocity_support(self, _check)
+	_finish("ocean_apic_velocity_support")
+
+
+func _run_ocean_apic_detached_gravity() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_detached_gravity(self, _check)
+	_finish("ocean_apic_detached_gravity")
+
+
+func _run_ocean_apic_thin_film() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_thin_film(self, _check)
+	_finish("ocean_apic_thin_film")
+
+
+func _run_ocean_apic_film_current() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_film_current(self, _check)
+	_finish("ocean_apic_film_current")
+
+
+func _run_ocean_apic_solid_geometry() -> void:
+	OceanBreakerProbe.run_apic_solid_geometry(_check)
+	_finish("ocean_apic_solid_geometry")
+
+
+func _run_ocean_apic_dry_cut_cell() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_dry_cut_cell(self, _check)
+	await OceanBreakerProbe.run_apic_dry_face_transport(self, _check)
+	_finish("ocean_apic_dry_cut_cell")
+
+
+func _run_ocean_breaker_seed() -> void:
+	OceanBreakerProbe.run_seed_geometry(_check)
+	_finish("ocean_breaker_seed")
+
+
+func _run_ocean_apic_shore_rest() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_shore_rest(self, _check)
+	_finish("ocean_apic_shore_rest")
+
+
+func _run_ocean_sph_shore_rest() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_shore_rest(self, _check, "sph", 400.0)
+	_finish("ocean_sph_shore_rest")
+
+
+func _run_ocean_apic_grid() -> void:
+	await _boot_frames(2)
+	for grid_cell_size_m in [0.18, 0.12]:
+		await OceanBreakerProbe._run_resolution(self, _check, 0.12, "apic", 0, grid_cell_size_m)
+	print("BREAKER ACCEPTANCE candidate=apic scope=grid_resolution physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_apic_grid")
+
+
+func _run_ocean_apic_dense() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe._run_resolution(self, _check, 0.06, "apic", 0, 0.12)
+	print("BREAKER ACCEPTANCE candidate=apic scope=dense_particle_sampling physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_apic_dense")
+
+
+func _run_ocean_apic_transfer() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_transfer(self, _check)
+	_finish("ocean_apic_transfer")
+
+
+func _run_ocean_apic_timestep() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_timestep(self, _check)
+	_finish("ocean_apic_timestep")
+
+
+func _run_ocean_apic_wall_slip() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_apic_wall_slip(self, _check)
+	_finish("ocean_apic_wall_slip")
+
+
+func _run_ocean_breaker_incident() -> void:
+	await _boot_frames(2)
+	OceanBreakerProbe.run_incident_cpu(_check)
+	_finish("ocean_breaker_incident")
+
+
+func _run_ocean_sph_prediction() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_sph_prediction(self, _check)
+	_finish("ocean_sph_prediction")
+
+
+func _run_ocean_sph_density_snapshot() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run_sph_density_snapshot(self, _check)
+	_finish("ocean_sph_density_snapshot")
+
+
+func _run_ocean_apic_scatter() -> void:
+	await _boot_frames(2)
+	await OceanBreakerProbe.run(self, _check, "apic", 1)
+	print("BREAKER ACCEPTANCE candidate=apic p2g_transfer=1 scope=numerical_particle_state physical_overturning=unavailable rendered_performance=unavailable branch_selected=false")
+	_finish("ocean_apic_scatter")
 
 
 func _run_planet_water() -> void:

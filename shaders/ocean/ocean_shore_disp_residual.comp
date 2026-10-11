@@ -1,0 +1,34 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    if (control.fft_args.x == 0u) return;
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    float dx = params.domain.y;
+    float d = dispersive_depth(p);
+    vec2 a = brk[i].yz;
+    vec2 east = vec2(read_acceleration(p + ivec2(1, 0), 0), read_acceleration(p + ivec2(1, 0), 1));
+    vec2 west = vec2(read_acceleration(p - ivec2(1, 0), 0), read_acceleration(p - ivec2(1, 0), 1));
+    vec2 north = vec2(read_acceleration(p + ivec2(0, 1), 0), read_acceleration(p + ivec2(0, 1), 1));
+    vec2 south = vec2(read_acceleration(p - ivec2(0, 1), 0), read_acceleration(p - ivec2(0, 1), 1));
+    vec2 mixed = vec2(0.0);
+    for (int axis = 0; axis < 2; ++axis) {
+        float value = (read_acceleration(p + ivec2(1, 1), axis) - read_acceleration(p + ivec2(-1, 1), axis)
+            - read_acceleration(p + ivec2(1, -1), axis) + read_acceleration(p + ivec2(-1, -1), axis)) / (4.0 * dx * dx);
+        if (axis == 0) mixed.x = value;
+        else mixed.y = value;
+    }
+    vec2 dg = -vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+        read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1))) / (2.0 * dx);
+    vec2 ax = (east - west) / (2.0 * dx);
+    vec2 az = (north - south) / (2.0 * dx);
+    vec2 diagonal = vec2(east.x + west.x - 2.0 * a.x, north.y + south.y - 2.0 * a.y) / (dx * dx);
+    vec2 left = a - SHORE_DISP_CD * d * d * (diagonal + mixed.yx)
+        - d / 3.0 * dg * vec2(ax.x, az.y)
+        - d / 6.0 * vec2(dg.x * az.y + dg.y * ax.y, dg.y * ax.x + dg.x * az.x);
+    float error = length(left - disp[i].zw) / max(length(disp[i].zw), params.domain.z * max(read_water(p).x, params.domain.w));
+    float cd = SHORE_DISP_CD * d * d / (dx * dx);
+    vec2 bias = d * dg / (6.0 * dx);
+    dispersion_diagnostic[i] = vec4(error, d, length(dg), max(abs(bias.x), abs(bias.y)) / (0.5 + cd));
+    atomicMax(control.cell_args.w, floatBitsToUint(error));
+}

@@ -31,7 +31,7 @@ static func read(rd: RenderingDevice, prefix: String, include_post: bool = false
 			continue
 		var segment := name.trim_prefix(prefix)
 		if segment == "end":
-			out["total"] = float(timestamp - start_time) / 1e6
+			out["total"] = out.get("total", 0.0) + float(timestamp - start_time) / 1e6
 			if include_post:
 				out["post"] = out.get("post", 0.0) + float(timestamp - prev_time) / 1e6
 			in_chain = false

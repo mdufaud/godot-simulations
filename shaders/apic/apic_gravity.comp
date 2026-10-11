@@ -1,0 +1,13 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	uint faces = num_faces();
+	if (i >= faces * 3u) { return; }
+	int component = int(i / faces);
+	uint index = i % faces;
+	ivec3 face = face_coord(index);
+	if (face_solid(face, component)) { return; }
+	if (component == 1 && (face_mass_v.data[index] > 0.0
+		|| (params.surface.x > 0.5 && fluid_face(face, component)))) {
+		face_v.data[index] += params.sim.y * params.sim.x;
+	}
+}

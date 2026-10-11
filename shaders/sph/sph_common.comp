@@ -154,6 +154,8 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	// tunable number comes from here.
 	vec4 fluid_material; // x = density kg/m3, y = pressure stiffness scale, z = collision inflation, w = pad
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
+	vec4 domain_min;
+	vec4 domain_max;
 }
 scene;
 
@@ -251,8 +253,8 @@ uint num_cells() {
 }
 
 vec3 clamp_domain(vec3 p) {
-	vec3 lo = params.grid_origin.xyz + vec3(0.02);
-	vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+	vec3 lo = scene.domain_min.xyz + vec3(0.02);
+	vec3 hi = scene.domain_max.xyz - vec3(0.02);
 	return clamp(p, lo, hi);
 }
 

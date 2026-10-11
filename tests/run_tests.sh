@@ -121,6 +121,7 @@ declare -a CPU_SUITES=(
 	"quality_profiles|res://tests/quality_profiles_test.gd"
 	"ocean_buoyancy|res://tests/ocean_buoyancy_test.gd"
 	"ocean_parameters|res://tests/ocean_parameter_test.gd"
+	"ocean_coastal_config|res://tests/ocean_coastal_config_test.gd"
 	"alpine_terrain|res://tests/alpine_terrain_test.gd"
 )
 for suite in "${CPU_SUITES[@]}"; do

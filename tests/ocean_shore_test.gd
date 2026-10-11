@@ -40,6 +40,7 @@ func _run() -> void:
 	await _forced_render_rate_parity()
 	await _open_water_budget()
 	await _tier_sizing()
+	await _visual_breaker_contact()
 	RenderingServer.call_on_render_thread(func():
 		_solver.free_render()
 		if _spectrum.is_valid():
@@ -68,6 +69,7 @@ func _create_render() -> void:
 	_spectrum = _rd.texture_create(format, RDTextureView.new(), [])
 	_rd.texture_clear(_spectrum, Color(0, 0, 0, 0), 0, 1, 0, 3)
 	_solver = ShoreSolver.new()
+	_solver.spectrum_depth_m = 4.0
 	_bed.resize(N * N)
 	for y in N:
 		for x in N:
@@ -97,7 +99,7 @@ func _lake_at_rest() -> void:
 
 func _mass_and_positivity() -> void:
 	var bed := _closed_bed(false)
-	await _reset_bed(bed)
+	await _reset_bed(bed, true)
 	var initial := _initial_water(bed, false)
 	await _seed(initial)
 	var before := _mass(initial)
@@ -118,6 +120,9 @@ func _mass_and_positivity() -> void:
 
 
 func _uniform_flow_foam() -> void:
+	RenderingServer.call_on_render_thread(_rd.texture_clear.bind(
+		_spectrum, Color(0, 0, 0, 0), 0, 1, 0, 3))
+	await RenderingServer.frame_post_draw
 	var bed := PackedFloat32Array()
 	bed.resize(N * N)
 	bed.fill(-0.1)
@@ -131,7 +136,7 @@ func _uniform_flow_foam() -> void:
 	for frame in 30:
 		RenderingServer.call_on_render_thread(_solver.step_render.bind(
 			1.0 / 30.0, float(frame + 1) / 30.0, Vector2(0.5, 0.0),
-			1.0, 0.5, PackedVector4Array()))
+			8.0, 0.5, PackedVector4Array()))
 		await RenderingServer.frame_post_draw
 	var foam := await _foam()
 	var maximum := 0.0
@@ -143,7 +148,7 @@ func _uniform_flow_foam() -> void:
 
 func _runup_and_rock() -> void:
 	var bed := _closed_bed(true)
-	await _reset_bed(bed)
+	await _reset_bed(bed, true)
 	await _seed(_initial_water(bed, true))
 	await _advance(3.0, 30)
 	var surface := await _surface()
@@ -197,7 +202,7 @@ func _render_rate_parity() -> void:
 	var initial := _initial_water(bed, false)
 	var outputs: Array[PackedFloat32Array] = []
 	for fps: int in [30, 60, 120]:
-		await _reset_bed(bed)
+		await _reset_bed(bed, true)
 		await _seed(initial)
 		await _advance(0.5, fps, PackedVector4Array([Vector4(-8.0, 0.0, 3000.0, 0.0)]))
 		outputs.append(await _surface())
@@ -227,11 +232,12 @@ func _boundary_velocity() -> void:
 		_solver.step_render(1.0 / 30.0, 1.0 / 30.0, Vector2.ZERO, 1.0, 0.5, PackedVector4Array())
 	)
 	await RenderingServer.frame_post_draw
-	var boundary_data: PackedByteArray = await TextureReadback.new().read_layer(_solver._boundary_rid, 0, N * N * 16)
+	var boundary_n := ShoreSolver.BOUNDARY_SIZE
+	var boundary_data: PackedByteArray = await TextureReadback.new().read_layer(_solver._boundary_rid, 0, boundary_n * boundary_n * 16)
 	var boundary := boundary_data.to_float32_array()
 	var height_max := 0.0
 	var speed_max := 0.0
-	for i in N * N:
+	for i in boundary_n * boundary_n:
 		height_max = maxf(height_max, absf(boundary[i * 4]))
 		speed_max = maxf(speed_max, absf(boundary[i * 4 + 2]))
 	var k := TAU * float(mode) / TILES[0]
@@ -306,6 +312,7 @@ func _open_water_budget() -> void:
 	bed.resize(N * N)
 	bed.fill(-4.0)
 	await _reset_bed(bed)
+	var initial_volume := _mass_surface(await _surface())
 	await _advance(1.0, 30)
 	var result := {"state": PackedByteArray(), "balance": PackedByteArray()}
 	RenderingServer.call_on_render_thread(func():
@@ -324,7 +331,6 @@ func _open_water_budget() -> void:
 		boundary_volume += balance[i * 4]
 		sponge_volume += balance[i * 4 + 1]
 		clipping_volume += balance[i * 4 + 2]
-	var initial_volume := 4.0 * DOMAIN * DOMAIN
 	var volume := _mass(state)
 	var error := absf(volume - initial_volume - boundary_volume - sponge_volume - clipping_volume)
 	_check(absf(boundary_volume) + absf(sponge_volume) > 1.0,
@@ -355,6 +361,216 @@ func _tier_sizing() -> void:
 		_check(result.ok and result.stable and result.width == size,
 			"tier %d did not produce stable %d-square shore maps" % [tier, size])
 		print("OCEAN SHORE tier=%d grid=%d stable=%s" % [tier, result.width, result.stable])
+
+
+func _visual_breaker_contact() -> void:
+	var config := _solver.config
+	var previous_visual := config.visual_breakers_enabled
+	var previous_open := config.open_boundaries_enabled
+	var bed := _closed_bed(true)
+	config.visual_breakers_enabled = true
+	var initialized := {"ok": false}
+	RenderingServer.call_on_render_thread(func():
+		initialized.ok = _solver.init_render(_spectrum, N, TILES, 0, bed)
+	)
+	await RenderingServer.frame_post_draw
+	_check(initialized.ok and _solver.grid_size == N,
+		"visual breaker branch did not initialize at Low resolution")
+	if not initialized.ok:
+		config.visual_breakers_enabled = previous_visual
+		config.open_boundaries_enabled = previous_open
+		return
+	await _uniform_flow_foam()
+	await _reset_bed(bed, true)
+	await _seed(_initial_water(bed, false))
+	await _advance(0.5, 30)
+	var still_contact := await _contact_history()
+	var still_max := 0.0
+	for i in range(0, still_contact.size(), 4):
+		still_max = maxf(still_max, still_contact[i + 1])
+	_check(still_max < 0.00001, "still water generated breaker contact history")
+	await _crest_orientation()
+	await _thin_film_geometry()
+
+	var thirty_hz := await _run_visual_breaker_pulse(bed, 30, true)
+	var crest_height: float = thirty_hz.crest_height
+	var crest_cells: int = thirty_hz.crest_cells
+	_check(crest_cells > 0 and crest_cells < N * N / 2 and crest_height <= 2.0,
+		"incoming pulse produced no localized bounded breaker (cells %d height %.4f)"
+			% [crest_cells, crest_height])
+
+	var one_twenty_hz := await _run_visual_breaker_pulse(bed, 120, false)
+	var contact_after_impact: PackedFloat32Array = one_twenty_hz.contact
+	var thirty_contact: PackedFloat32Array = thirty_hz.contact
+	var rate_difference := 0.0
+	for i in thirty_contact.size():
+		rate_difference = maxf(rate_difference, absf(thirty_contact[i] - contact_after_impact[i]))
+	_check(rate_difference < 0.0001,
+		"visual breaker contact changed at 30/120 Hz (max %.8f)" % rate_difference)
+	var contact_strength := 0.0
+	for i in range(0, contact_after_impact.size(), 4):
+		contact_strength = maxf(contact_strength, contact_after_impact[i + 1])
+	_check(contact_strength > 0.01,
+		"incoming pulse produced no positive rock-contact history")
+
+	RenderingServer.call_on_render_thread(_solver.step_render.bind(0.0, 3.0,
+		Vector2.ZERO, 1.0, 0.5, PackedVector4Array()))
+	await RenderingServer.frame_post_draw
+	var zero_time_contact := await _contact_history()
+	var zero_time_difference := 0.0
+	for i in contact_after_impact.size():
+		zero_time_difference = maxf(zero_time_difference,
+			absf(contact_after_impact[i] - zero_time_contact[i]))
+	_check(zero_time_difference < 0.000001,
+		"zero elapsed time changed breaker contact history")
+
+	var dry := PackedFloat32Array()
+	dry.resize(N * N * 4)
+	await _seed(dry)
+	await _advance(1.2, 30)
+	var decayed_contact := await _contact_history()
+	var decayed_strength := 0.0
+	for i in range(0, decayed_contact.size(), 4):
+		decayed_strength = maxf(decayed_strength, decayed_contact[i + 1])
+	_check(decayed_strength > 0.001 and decayed_strength < contact_strength,
+		"breaker contact did not persist and decay (%.5f -> %.5f)"
+			% [contact_strength, decayed_strength])
+	await _reset_bed(bed, true)
+	var reset_contact := await _contact_history()
+	var reset_max := 0.0
+	for value in reset_contact:
+		reset_max = maxf(reset_max, absf(value))
+	_check(reset_max < 0.000001, "shore reset retained breaker contact history")
+	print("OCEAN SHORE visual-breaker cells=%d crest-y=%.4f contact=%.5f decayed=%.5f zero-dt=%.8f rate-diff=%.8f reset=%.8f" % [
+		crest_cells, crest_height, contact_strength, decayed_strength,
+		zero_time_difference, rate_difference, reset_max])
+
+	config.visual_breakers_enabled = previous_visual
+	config.open_boundaries_enabled = previous_open
+	var restored := {"ok": false}
+	RenderingServer.call_on_render_thread(func():
+		restored.ok = _solver.init_render(_spectrum, N, TILES, 0, bed)
+	)
+	await RenderingServer.frame_post_draw
+	_check(restored.ok and config.visual_breakers_enabled == previous_visual,
+		"shore solver failed to restore its original breaker configuration")
+
+
+func _contact_history() -> PackedFloat32Array:
+	var result := {"data": PackedByteArray()}
+	RenderingServer.call_on_render_thread(func():
+		result.data = _rd.buffer_get_data(_solver._buffers.contact)
+	)
+	await RenderingServer.frame_post_draw
+	_check(result.data.size() == N * N * 16, "breaker contact history readback failed")
+	return result.data.to_float32_array()
+
+
+func _crest_orientation() -> void:
+	var bed := PackedFloat32Array()
+	bed.resize(N * N)
+	bed.fill(-4.0)
+	await _reset_bed(bed, true)
+	var water := PackedFloat32Array()
+	water.resize(N * N * 4)
+	for y in N:
+		for x in N:
+			var i := y * N + x
+			var height := 4.0 + 3.8 * cos(_world(x, y).x * TAU / 12.0)
+			water[i * 4] = height
+			water[i * 4 + 1] = height * 2.0
+	await _seed(water)
+	var bytes: PackedByteArray = await TextureReadback.new().read_layer(
+		_solver.get_breaker_texture_rid(), 0, N * N * 8)
+	_check(bytes.size() == N * N * 8, "crest orientation readback failed")
+	if bytes.size() != N * N * 8:
+		return
+	var minimum_determinant := INF
+	var crest_height := 0.0
+	var cell_m := DOMAIN / float(N)
+	for y in N - 1:
+		for x in N - 1:
+			var i := (y * N + x) * 8
+			var center := Vector2(bytes.decode_half(i), bytes.decode_half(i + 4))
+			var right := Vector2(bytes.decode_half(i + 8), bytes.decode_half(i + 12))
+			var front := Vector2(bytes.decode_half(i + N * 8), bytes.decode_half(i + N * 8 + 4))
+			var dx := Vector2.RIGHT + (right - center) / cell_m
+			var dy := Vector2.DOWN + (front - center) / cell_m
+			minimum_determinant = minf(minimum_determinant, dx.cross(dy))
+			crest_height = maxf(crest_height, bytes.decode_half(i + 2))
+	_check(is_finite(minimum_determinant) and minimum_determinant > 0.1,
+		"coastal crest inverted the surface mapping (determinant %.6f)" % minimum_determinant)
+	_check(crest_height > 0.1, "orientation fixture lost its breaking crest")
+	print("OCEAN SHORE crest-orientation minimum-determinant=%.6f crest-height=%.4f" % [
+		minimum_determinant, crest_height])
+
+
+func _thin_film_geometry() -> void:
+	var bed := PackedFloat32Array()
+	bed.resize(N * N)
+	bed.fill(-4.0)
+	var center := (N >> 1) * N + (N >> 1)
+	bed[center] = 6.0
+	await _reset_bed(bed, true)
+	var water := PackedFloat32Array()
+	water.resize(N * N * 4)
+	for i in N * N:
+		water[i * 4] = 4.5
+	water[center * 4] = 0.0027
+	await _seed(water)
+	var surface := await _surface()
+	var bytes: PackedByteArray = await TextureReadback.new().read_layer(
+		_solver.get_breaker_texture_rid(), 0, N * N * 8)
+	_check(bytes.size() == N * N * 8, "thin film crest readback failed")
+	if bytes.size() != N * N * 8:
+		return
+	var visible_height := bytes.decode_half(center * 8 + 2)
+	_check(absf(surface[center * 4] - 6.0027) < 0.0001,
+		"visual reconstruction changed the physical film height")
+	_check(absf(visible_height - 0.5) < 0.02,
+		"thin rock film stretched the visible water body (height %.4f)" % visible_height)
+	print("OCEAN SHORE thin-film physical-height=%.4f visible-height=%.4f" % [
+		surface[center * 4], visible_height])
+
+
+func _run_visual_breaker_pulse(bed: PackedFloat32Array, fps: int,
+		sample_breakers: bool) -> Dictionary:
+	await _reset_bed(bed, true)
+	await _seed(_initial_water(bed, true))
+	var crest_height := 0.0
+	var crest_cells := 0
+	if sample_breakers:
+		var initial_stats: Vector2 = await _breaker_stats()
+		crest_height = maxf(crest_height, initial_stats.x)
+		crest_cells = maxi(crest_cells, roundi(initial_stats.y))
+	var frames := fps * 3
+	var sample_interval := fps / 2
+	for frame in frames:
+		var dt := 1.0 / float(fps)
+		RenderingServer.call_on_render_thread(_solver.step_render.bind(dt,
+			float(frame + 1) * dt, Vector2.ZERO, 1.0, 0.5, PackedVector4Array()))
+		await RenderingServer.frame_post_draw
+		if sample_breakers and (frame + 1) % sample_interval == 0:
+			var stats: Vector2 = await _breaker_stats()
+			crest_height = maxf(crest_height, stats.x)
+			crest_cells = maxi(crest_cells, roundi(stats.y))
+	return {"contact": await _contact_history(), "crest_height": crest_height,
+		"crest_cells": crest_cells}
+
+
+func _breaker_stats() -> Vector2:
+	var bytes: PackedByteArray = await TextureReadback.new().read_layer(
+		_solver.get_breaker_texture_rid(), 0, N * N * 8)
+	var maximum := 0.0
+	var positive := 0
+	var surface := await _surface()
+	for i in range(0, bytes.size(), 8):
+		var fold := bytes.decode_half(i + 2) - surface[(i >> 3) * 4]
+		_check(is_finite(fold), "visual breaker map contained a non-finite crest")
+		maximum = maxf(maximum, fold)
+		if fold > 0.01:
+			positive += 1
+	return Vector2(maximum, float(positive))
 
 
 func _forced_render_rate_parity() -> void:
@@ -404,9 +620,10 @@ func _initial_water(bed: PackedFloat32Array, traveling: bool) -> PackedFloat32Ar
 	return data
 
 
-func _reset_bed(bed: PackedFloat32Array) -> void:
+func _reset_bed(bed: PackedFloat32Array, closed: bool = false) -> void:
 	_bed = bed.duplicate()
 	RenderingServer.call_on_render_thread(func():
+		_solver.config.open_boundaries_enabled = not closed
 		_solver.set_bathymetry(bed)
 		_solver.step_render(0.0, 0.0, Vector2.ZERO, 1.0, 0.5, PackedVector4Array())
 	)

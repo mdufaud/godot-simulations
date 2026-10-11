@@ -505,12 +505,30 @@ func _run() -> void:
 	for cascade in 3:
 		query_disp.append(_decode_rgba16f(await _read_texture(
 			demo.solver.get_displacement_tex_rid(), cascade), map_n))
+	var coast_n: int = OceanQualityProfile.COAST_SIZE[demo.solver.quality_tier]
+	var wake_n: int = OceanQualityProfile.WAKE_SIZE[demo.solver.quality_tier]
+	var coast_image := Image.create_from_data(coast_n, coast_n, false, Image.FORMAT_RGBAH,
+		await _read_texture(demo.solver.local_solver.get_coast_texture_rid(), 0))
+	var wake_image := Image.create_from_data(wake_n, wake_n, false, Image.FORMAT_RGBAH,
+		await _read_texture(demo.solver.local_solver.get_wake_texture_rid(), 0))
+	var centers: Vector4 = demo.solver.local_centers()
+	var local_height := func(point: Vector2) -> float:
+		if not demo.solver.physical_features_enabled:
+			return 0.0
+		return _query_local_height(coast_image, Vector2(centers.x, centers.y), 256.0, point) \
+			+ _query_local_height(wake_image, Vector2(centers.z, centers.w), 64.0, point)
 	var height_errors: Array[float] = []
 	var slope_errors: Array[float] = []
 	var cascade_contribution: Array[float] = [0.0, 0.0, 0.0]
 	for i in query_points.size():
 		var truth := _query_height_ground_truth(query_disp, map_n, tiles,
 			query_points[i], cascade_contribution)
+		truth.height += local_height.call(query_points[i])
+		truth.slope += Vector2(
+			local_height.call(query_points[i] + Vector2(0.25, 0.0))
+				- local_height.call(query_points[i] - Vector2(0.25, 0.0)),
+			local_height.call(query_points[i] + Vector2(0.0, 0.25))
+				- local_height.call(query_points[i] - Vector2(0.0, 0.25))) / 0.5
 		var got := query_results[i]
 		if got.w < 0.5:
 			_check(false, "query result %d marked invalid" % i)
@@ -2442,6 +2460,20 @@ func _near_shift_stats(b: PackedFloat32Array, a: PackedFloat32Array, size: int,
 		"p99_col": col_means[mini(col_means.size() - 1,
 			int(col_means.size() * 0.99))],
 	}
+
+
+func _query_local_height(image: Image, center: Vector2, domain: float, point: Vector2) -> float:
+	var uv := (point - center) / domain + Vector2.ONE * 0.5
+	if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+		return 0.0
+	var n := image.get_width()
+	var grid := uv * float(n) - Vector2.ONE * 0.5
+	var cell := Vector2i(grid.floor())
+	var fraction := grid - Vector2(cell)
+	var lo := Vector2i(clampi(cell.x, 0, n - 1), clampi(cell.y, 0, n - 1))
+	var hi := Vector2i(clampi(cell.x + 1, 0, n - 1), clampi(cell.y + 1, 0, n - 1))
+	return lerpf(lerpf(image.get_pixel(lo.x, lo.y).r, image.get_pixel(hi.x, lo.y).r, fraction.x),
+		lerpf(image.get_pixel(lo.x, hi.y).r, image.get_pixel(hi.x, hi.y).r, fraction.x), fraction.y)
 
 
 func _query_height_ground_truth(disps: Array[PackedFloat32Array], map_size: int,

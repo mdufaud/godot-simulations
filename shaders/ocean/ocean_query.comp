@@ -84,11 +84,14 @@ void sample_surface(vec2 world, out vec2 displacement, out float height,
         height_gradient += vec2(differential.w, map_value.w);
     }
     deformation.w = deformation.z;
-    if (qp.shore.x > 0.5) {
-        float weight = ocean_shore_weight(world, qp.shore.y);
-        vec2 weight_gradient = ocean_shore_weight_gradient(world, qp.shore.y);
-        mat2 jacobian = ocean_shore_jacobian(deformation.xyz, displacement, weight, weight_gradient);
-        displacement *= 1.0 - weight;
+    if (qp.shore.x > 0.5 && qp.shore.w < 0.5) {
+        float width = qp.shore.z > 0.0 ? qp.shore.z : 12.0;
+        float weight = ocean_shore_surface_weight(shore_map, world, qp.shore.y, width, qp.current.zw);
+        vec2 weight_gradient = ocean_shore_surface_weight_gradient(shore_map, world, qp.shore.y, width, qp.current.zw);
+        float lateral_weight = qp.shore.w > 0.5 ? 0.0 : weight;
+        mat2 jacobian = ocean_shore_jacobian(deformation.xyz, displacement, lateral_weight,
+            qp.shore.w > 0.5 ? vec2(0.0) : weight_gradient);
+        displacement *= 1.0 - lateral_weight;
         vec2 position = world + displacement;
         vec4 shore = ocean_local_sample(shore_map, vec2(0.0), qp.shore.y, position);
         vec2 shore_gradient = ocean_shore_gradient(shore_map, position, qp.shore.y);
@@ -213,11 +216,14 @@ void main() {
     }
     mat2 jacobian = mat2(vec2(a, c), vec2(deformation.w, b));
     vec2 gradient = ocean_shore_world_gradient(jacobian, height_gradient);
-    float shore_weight = qp.shore.x > 0.5 ? ocean_shore_weight(g, qp.shore.y) : 0.0;
+    float shore_weight = qp.shore.x > 0.5 ? ocean_shore_surface_weight(shore_map, g, qp.shore.y,
+        qp.shore.z > 0.0 ? qp.shore.z : 12.0, qp.current.zw) : 0.0;
     vec4 shore = vec4(0.0);
     if (shore_weight > 0.0) {
         shore = ocean_local_sample(shore_map, vec2(0.0), qp.shore.y, p);
-        if (shore_weight > 0.999 && shore.w <= 0.002) {
+        float bed_height = ocean_local_sample(shore_derivative_map, vec2(0.0), qp.shore.y, p).w;
+        bool dry = qp.shore.w > 0.5 ? height <= bed_height + 0.002 : shore.w <= 0.002;
+        if (shore_weight > 0.999 && dry) {
             query_results[index * 2] = vec4(0.0);
             return;
         }
@@ -241,10 +247,13 @@ void main() {
         for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
             velocity += textureLod(velocity_map, vec3(g / qp.tiles[cascade], float(cascade)), 0.0).xyz;
         }
-        vec2 shore_gradient = ocean_shore_gradient(shore_map, p, qp.shore.y);
-        float height_rate = ocean_local_sample(shore_derivative_map, vec2(0.0), qp.shore.y, p).z;
-        vec3 shore_velocity = vec3(shore.y, height_rate + dot(shore.yz, shore_gradient), shore.z);
-        query_results[index * 2 + 1] = vec4(mix(velocity, shore_velocity, shore_weight), 1.0);
+        if (qp.shore.w < 0.5) {
+            vec2 shore_gradient = ocean_shore_gradient(shore_map, p, qp.shore.y);
+            float height_rate = ocean_local_sample(shore_derivative_map, vec2(0.0), qp.shore.y, p).z;
+            vec3 shore_velocity = vec3(shore.y, height_rate + dot(shore.yz, shore_gradient), shore.z);
+            velocity = mix(velocity, shore_velocity, shore_weight);
+        }
+        query_results[index * 2 + 1] = vec4(velocity, 1.0);
     }
     if (!finite_vec2(gradient)) {
         query_results[index * 2] = vec4(0.0);

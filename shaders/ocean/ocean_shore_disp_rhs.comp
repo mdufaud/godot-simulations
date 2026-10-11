@@ -1,0 +1,22 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec4 g = disp[i];
+    float dx = params.domain.y;
+    vec2 ge = disp[uint(cell_index(clamp(p + ivec2(1, 0), ivec2(0), ivec2(params.sizes.x - 1))))].xy;
+    vec2 gw = disp[uint(cell_index(clamp(p - ivec2(1, 0), ivec2(0), ivec2(params.sizes.x - 1))))].xy;
+    vec2 gn = disp[uint(cell_index(clamp(p + ivec2(0, 1), ivec2(0), ivec2(params.sizes.x - 1))))].xy;
+    vec2 gs = disp[uint(cell_index(clamp(p - ivec2(0, 1), ivec2(0), ivec2(params.sizes.x - 1))))].xy;
+    vec2 lap = (ge + gw + gn + gs - 4.0 * g.xy) / (dx * dx);
+    float still = dispersive_depth(p);
+    vec2 depth_gradient = -vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+        read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1))) / (2.0 * dx);
+    vec2 gx = (ge - gw) / (2.0 * dx);
+    vec2 gz = (gn - gs) / (2.0 * dx);
+    vec2 slope_source = vec2(depth_gradient.x * (2.0 * gx.x + gz.y) + depth_gradient.y * gz.x,
+        depth_gradient.y * (2.0 * gz.y + gx.x) + depth_gradient.x * gx.y);
+    disp[i] = vec4(g.xy, accel[i].xy + SHORE_DISP_B * still * still * (still * lap + slope_source));
+    brk[i].yz = accel[i].zw;
+}

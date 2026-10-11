@@ -3,16 +3,22 @@ extends Node3D
 
 const TERRAIN_DOMAIN_M := 140.0
 const TERRAIN_SIZE := 281
-const OFFSHORE_DEPTH_M := 4.0
+const RAMP_START_M := 52.0
+const RAMP_END_M := 78.0
 const ISLAND_RADIUS_M := Vector2(35.0, 25.0)
+const CENTER_RISE_M := 0.65
 const ISLAND_SHADER := preload("res://shaders/ocean/ocean_island.gdshader")
+const ROCK_WET_SHADER := preload("res://shaders/ocean/ocean_rock_wet.gdshader")
 const BOULDER_ROCK := preload("res://resources/rocks/boulder_01/boulder_01_2k.gltf")
 
 var terrain_material: ShaderMaterial
+var rock_wet_material: ShaderMaterial
 var _built := false
 var _rock_heights := PackedFloat32Array()
 var _shore_surface: Texture2D
 var _shore_foam: Texture2D
+var _shore_contact: Texture2D
+var _shore_breaker: Texture2D
 var _shore_domain_m := 160.0
 var _foam_enabled := true
 var _foam_amount := 1.0
@@ -27,7 +33,10 @@ func build() -> void:
 		return
 	_built = true
 	_rock_heights.resize(TERRAIN_SIZE * TERRAIN_SIZE)
-	_rock_heights.fill(-OFFSHORE_DEPTH_M)
+	_rock_heights.fill(-1000.0)
+	rock_wet_material = ShaderMaterial.new()
+	rock_wet_material.shader = ROCK_WET_SHADER
+	rock_wet_material.set_shader_parameter("foam_detail", load("res://resources/ocean/foam_detail.png"))
 	_build_terrain()
 	_add_rock(BOULDER_ROCK, "CentralRock", Vector2(-3.5, -3.0), 25.0, 0.38, -1.2)
 	_add_rock(BOULDER_ROCK, "CentralBoulder", Vector2(9.0, -2.0), 11.0, -0.6, 0.85)
@@ -39,11 +48,11 @@ func build() -> void:
 	_sync_material()
 
 
-func sample_bed(world: Vector2) -> float:
+func sample_bed(world: Vector2, footprint_radius_m: float = 0.25) -> float:
 	if not _built:
 		build()
 	var local := world - Vector2(position.x, position.z)
-	return maxf(_terrain_height(local), _sample_rock_height(local)) + position.y
+	return maxf(_terrain_height(local), _sample_rock_height(local, footprint_radius_m)) + position.y
 
 
 func create_bathymetry(size: int, domain: float = 160.0) -> PackedFloat32Array:
@@ -51,17 +60,21 @@ func create_bathymetry(size: int, domain: float = 160.0) -> PackedFloat32Array:
 		build()
 	var heights := PackedFloat32Array()
 	heights.resize(size * size)
+	var cell_radius := domain / float(size) * 0.5
 	for z in range(size):
 		for x in range(size):
 			var world := (Vector2(x, z) + Vector2(0.5, 0.5)) * (domain / float(size))
 			world -= Vector2.ONE * domain * 0.5
-			heights[z * size + x] = sample_bed(world)
+			heights[z * size + x] = sample_bed(world, cell_radius)
 	return heights
 
 
-func bind_shore(surface: Texture2D, foam: Texture2D, domain_m: float = 160.0) -> void:
+func bind_shore(surface: Texture2D, foam: Texture2D, domain_m: float = 160.0,
+		contact: Texture2D = null, breaker: Texture2D = null) -> void:
 	_shore_surface = surface
 	_shore_foam = foam
+	_shore_contact = contact
+	_shore_breaker = breaker
 	_shore_domain_m = domain_m
 	_sync_material()
 
@@ -78,12 +91,24 @@ func set_foam_amount(amount: float) -> void:
 
 func camera_view(view: String) -> Dictionary:
 	match view:
+		"island_breaker":
+			return {"target": Vector3(-36.0, 0.8, -8.0), "distance": 28.0,
+				"pitch": -8.0, "yaw": 0.0}
 		"island_beach":
 			return {"target": Vector3(-34.0, 0.3, 4.0), "distance": 20.0,
 				"pitch": -7.0, "yaw": -78.0}
+		"island_profile":
+			return {"target": Vector3(-42.0, 0.6, 2.0), "distance": 30.0,
+				"pitch": -4.0, "yaw": -100.0}
 		"island_rocks":
 			return {"target": Vector3(-4.0, 2.5, -19.0), "distance": 45.0,
 				"pitch": -21.0, "yaw": 192.0}
+		"island_foam_close":
+			return {"target": Vector3(0.0, 1.5, -4.0), "distance": 32.0,
+				"pitch": -20.0, "yaw": 192.0}
+		"island_sky":
+			return {"target": Vector3(0.0, 0.0, 0.0), "distance": 135.0,
+				"pitch": -86.0, "yaw": 27.0}
 		_:
 			return {"target": Vector3(0.0, 2.0, 0.0), "distance": 92.0,
 				"pitch": -40.0, "yaw": 27.0}
@@ -95,13 +120,24 @@ func _terrain_height(point: Vector2) -> float:
 	var coast_radius := 1.0 + 0.035 * sin(angle * 3.0 + 0.7)
 	coast_radius += 0.018 * sin(angle * 7.0 - 1.1)
 	var inward_m := (coast_radius - ellipse.length()) * 29.0
-	var beach_height := clampf(inward_m * 0.16, -OFFSHORE_DEPTH_M, 1.8)
-	var rocky_height := clampf(inward_m * 0.72, -OFFSHORE_DEPTH_M, 3.0)
+	var beach_height := clampf(inward_m * 0.16, -OceanShoreSolver.RING_DEPTH_M, 1.8)
+	var rocky_height := clampf(inward_m * 0.72, -OceanShoreSolver.RING_DEPTH_M, 3.0)
 	var height := lerpf(beach_height, rocky_height, _rocky_weight(point))
 	var dry_blend := smoothstep(0.4, 4.0, inward_m)
 	height += dry_blend * (0.065 * sin(point.x * 0.38 + point.y * 0.17)
 		+ 0.04 * sin(point.y * 0.72 - point.x * 0.16))
-	return height
+	return _shelf_ramp(point.length(), height + _center_elevation(point))
+
+
+func _center_elevation(point: Vector2) -> float:
+	return CENTER_RISE_M * (1.0 - smoothstep(0.15, 0.65, (point / ISLAND_RADIUS_M).length()))
+
+
+func _shelf_ramp(distance_m: float, height: float) -> float:
+	if distance_m <= RAMP_START_M:
+		return height
+	var t := smoothstep(RAMP_START_M, RAMP_END_M, distance_m)
+	return lerpf(height, -OceanShoreSolver.RING_DEPTH_M, t)
 
 
 func _rocky_weight(point: Vector2) -> float:
@@ -172,10 +208,11 @@ func _add_rock(scene: PackedScene, rock_name: String, point: Vector2,
 	var center := bounds.get_center()
 	var basis := Basis(Vector3.UP, yaw).scaled(Vector3.ONE * scale_factor)
 	var offset := basis * Vector3(center.x, bounds.position.y, center.z)
-	rock.transform = Transform3D(basis, Vector3(point.x, base_m, point.y) - offset)
+	rock.transform = Transform3D(basis, Vector3(point.x, base_m + _center_elevation(point), point.y) - offset)
 	add_child(rock)
 	for entry in meshes:
 		var mesh_instance: MeshInstance3D = entry.node
+		mesh_instance.material_overlay = rock_wet_material
 		mesh_instance.create_trimesh_collision()
 		var mesh_transform: Transform3D = rock.transform * entry.transform
 		var faces: PackedVector3Array = entry.mesh.get_faces()
@@ -216,16 +253,20 @@ func _rasterize_triangle(a: Vector3, b: Vector3, c: Vector3) -> void:
 				_rock_heights[index] = maxf(_rock_heights[index], height)
 
 
-func _sample_rock_height(point: Vector2) -> float:
+func _sample_rock_height(point: Vector2, footprint_radius_m: float = 0.25) -> float:
 	var uv := (point / TERRAIN_DOMAIN_M + Vector2.ONE * 0.5) * (TERRAIN_SIZE - 1)
-	if uv.x < 0.0 or uv.y < 0.0 or uv.x >= TERRAIN_SIZE - 1 or uv.y >= TERRAIN_SIZE - 1:
-		return -OFFSHORE_DEPTH_M
-	var x := int(floor(uv.x))
-	var z := int(floor(uv.y))
-	var fraction := uv - Vector2(x, z)
-	var index := z * TERRAIN_SIZE + x
-	return lerpf(lerpf(_rock_heights[index], _rock_heights[index + 1], fraction.x),
-		lerpf(_rock_heights[index + TERRAIN_SIZE], _rock_heights[index + TERRAIN_SIZE + 1], fraction.x), fraction.y)
+	var radius := footprint_radius_m * (TERRAIN_SIZE - 1) / TERRAIN_DOMAIN_M
+	var min_x := maxi(int(ceil(uv.x - radius)), 0)
+	var max_x := mini(int(floor(uv.x + radius)), TERRAIN_SIZE - 1)
+	var min_z := maxi(int(ceil(uv.y - radius)), 0)
+	var max_z := mini(int(floor(uv.y + radius)), TERRAIN_SIZE - 1)
+	var height := -1000.0
+	for z in range(min_z, max_z + 1):
+		for x in range(min_x, max_x + 1):
+			var sample := _rock_heights[z * TERRAIN_SIZE + x]
+			if sample > -999.0:
+				height = maxf(height, sample)
+	return height
 
 
 func _sync_material() -> void:
@@ -233,6 +274,16 @@ func _sync_material() -> void:
 		return
 	terrain_material.set_shader_parameter("shore_surface", _shore_surface)
 	terrain_material.set_shader_parameter("shore_foam", _shore_foam)
+	terrain_material.set_shader_parameter("shore_breaker", _shore_breaker)
+	terrain_material.set_shader_parameter("shore_contact", _shore_contact)
 	terrain_material.set_shader_parameter("shore_domain_m", _shore_domain_m)
 	terrain_material.set_shader_parameter("shore_enabled", _shore_surface != null and _shore_foam != null)
 	terrain_material.set_shader_parameter("foam_amount", _foam_amount if _foam_enabled else 0.0)
+	if rock_wet_material != null:
+		rock_wet_material.set_shader_parameter("shore_surface", _shore_surface)
+		rock_wet_material.set_shader_parameter("shore_foam", _shore_foam)
+		rock_wet_material.set_shader_parameter("shore_contact", _shore_contact)
+		rock_wet_material.set_shader_parameter("shore_breaker", _shore_breaker)
+		rock_wet_material.set_shader_parameter("shore_domain_m", _shore_domain_m)
+		rock_wet_material.set_shader_parameter("shore_enabled", _shore_surface != null and _shore_foam != null)
+		rock_wet_material.set_shader_parameter("foam_amount", _foam_amount if _foam_enabled else 0.0)

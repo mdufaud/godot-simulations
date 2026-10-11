@@ -109,7 +109,9 @@ func init_render(displacements: RID, derivatives: RID, foam_a: RID, foam_b: RID,
 		velocity_fields: RID, map_size: int, tile_lengths: PackedFloat32Array,
 		capacity: int, coast_field: RID = RID(), wake_field: RID = RID(),
 		shore_surface: RID = RID(), shore_foam: RID = RID(),
-		shore_derivative: RID = RID(), breaking_settings: RID = RID()) -> void:
+		shore_derivative: RID = RID(), breaking_settings: RID = RID(),
+		shore_config: OceanCoastalConfig = null, shore_breaker: RID = RID(),
+		shore_contact: RID = RID()) -> void:
 	free_render()
 	_rd = GpuPreflight.device("OceanSpray")
 	if _rd == null or capacity <= 0 or capacity > COUNT \
@@ -131,7 +133,9 @@ func init_render(displacements: RID, derivatives: RID, foam_a: RID, foam_b: RID,
 		free_render()
 		return
 	var source_body := source.substr(version_end + 1)
-	var shader_source := "#version 450\n" \
+	var depth_blend := shore_config.surface_depth_blend_m() if shore_config != null else Vector2.ZERO
+	var shader_source := "#version 450\n#define SHORE_BLEND_WIDTH_M %.6f\n#define SHORE_DEPTH_BLEND_M vec2(%.6f, %.6f)\n" % [
+		shore_config.surface_blend_width_m() if shore_config != null else 12.0, depth_blend.x, depth_blend.y] \
 		+ FileAccess.get_file_as_string(DEFORMATION_PATH) + "\n" + source_body
 	var spirv := ShaderCache.compile(_rd, "ocean_spray_update", shader_source)
 	if spirv == null or not spirv.compile_error_compute.is_empty():
@@ -168,6 +172,10 @@ func init_render(displacements: RID, derivatives: RID, foam_a: RID, foam_b: RID,
 	breaking_uniform.binding = 11
 	breaking_uniform.add_id(breaking_settings)
 	uniforms.append(breaking_uniform)
+	uniforms.append(_sampled_texture_uniform(12, _clamp_sampler_rid,
+		shore_breaker if shore_breaker.is_valid() else coast_field))
+	uniforms.append(_sampled_texture_uniform(13, _clamp_sampler_rid,
+		shore_contact if shore_contact.is_valid() else coast_field))
 	_update_uniform_set_rid = _rd.uniform_set_create(uniforms, _update_shader_rid, 0)
 	if not _update_uniform_set_rid.is_valid():
 		free_render()
@@ -182,7 +190,8 @@ func init_render(displacements: RID, derivatives: RID, foam_a: RID, foam_b: RID,
 func step_render(elapsed: float, simulation_time: float, center: Vector2,
 		wind_velocity: Vector2, current_velocity: Vector2, foam_center: Vector2,
 		foam_domains: Vector3, foam_index: int, breaking_threshold: float,
-		local_centers: Vector4, shore_enabled: bool = false) -> void:
+		local_centers: Vector4, shore_enabled: bool = false, shore_domain_m: float = OceanShoreSolver.DOMAIN_M,
+		visual_breakers_enabled: bool = false) -> void:
 	if not _physical_ready or not _physical_enabled or elapsed <= 0.0:
 		return
 	_simulation_accumulator += elapsed
@@ -200,7 +209,7 @@ func step_render(elapsed: float, simulation_time: float, center: Vector2,
 	pc.encode_float(16, center.x)
 	pc.encode_float(20, center.y)
 	pc.encode_float(24, SPRAY_WIDTH_M)
-	pc.encode_float(28, OceanShoreSolver.DOMAIN_M)
+	pc.encode_float(28, shore_domain_m)
 	pc.encode_float(32, wind_velocity.x)
 	pc.encode_float(36, wind_velocity.y)
 	pc.encode_float(40, current_velocity.x)
@@ -223,7 +232,7 @@ func step_render(elapsed: float, simulation_time: float, center: Vector2,
 	pc.encode_float(108, WIND_DRAG_S)
 	pc.encode_s32(112, _particle_capacity)
 	pc.encode_s32(116, step_count)
-	pc.encode_s32(120, 1 if shore_enabled and _shore_fields_ready else 0)
+	pc.encode_s32(120, (3 if visual_breakers_enabled else 1) if shore_enabled and _shore_fields_ready else 0)
 	pc.encode_s32(124, _simulation_tick)
 	_simulation_tick += step_count
 	var cl := _rd.compute_list_begin()

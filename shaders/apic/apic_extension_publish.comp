@@ -1,0 +1,21 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	uint count = num_faces();
+	if (params.misc.w >= 2) {
+		if (i >= count) { return; }
+		uint width = uint(imageSize(pre_force_velocity_texture).x);
+		uint archived = i + uint(params.misc.w - 2) * count;
+		imageStore(pre_force_velocity_texture, ivec2(int(archived % width), int(archived / width)),
+			vec4(face_u.data[i], face_v.data[i], face_w.data[i], 0.0));
+		return;
+	}
+	if (i >= count * 3u) { return; }
+	int component = int(i / count);
+	uint fi = i % count;
+	float value = int(params.solve.z) == 5 && extension_control.stats.z == 1u
+		? face_extension_b.data[i].x : face_extension_a.data[i].x;
+	if (face_solid(face_coord(fi), component)) { value = 0.0; }
+	if (component == 0) { face_u.data[fi] = value; }
+	else if (component == 1) { face_v.data[fi] = value; }
+	else { face_w.data[fi] = value; }
+}

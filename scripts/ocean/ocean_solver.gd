@@ -250,6 +250,14 @@ func get_shore_derivative_texture_rid() -> RID:
 	return shore_solver.get_derivative_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
 
 
+func get_shore_breaker_texture_rid() -> RID:
+	return shore_solver.get_breaker_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
+func get_shore_contact_texture_rid() -> RID:
+	return shore_solver.get_contact_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
 ## Queue world-space query points for the next step. Results land one frame
 ## later; read them with latest_results(). At most MAX_QUERY_POINTS are kept.
 func submit_queries(points: PackedVector2Array) -> int:
@@ -307,7 +315,7 @@ func set_foam_distance(distance: float) -> void:
 ## dispatch per cascade; phases stay stable thanks to the fixed seeds).
 func mark_spectrum_dirty() -> void:
 	local_solver.request_reset()
-	shore_solver.reset()
+	shore_solver.reset(false)
 	_spectral_mutex.lock()
 	_spectral_references = SpectrumMetrics.compute(self)
 	_update_breaking_settings()
@@ -413,9 +421,11 @@ func init_render() -> void:
 		free_render()
 		return
 	if shore_enabled:
-		shore_solver.source_depth_m = water_depth
+		shore_solver.source_depth_m = OceanShoreSolver.RING_DEPTH_M
+		shore_solver.spectrum_depth_m = water_depth
 		if not shore_solver.init_render(_spectrum_tex, map_size, tile_lengths,
-				quality_tier, shore_bathymetry):
+				quality_tier, shore_bathymetry, _derivative_tex, _displacement_tex,
+				velocity_solver.get_texture_rid()):
 			free_render()
 			return
 
@@ -587,7 +597,12 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 		_wake_impulses.clear()
 		_wake_mutex.unlock()
 		if shore_enabled:
-			shore_solver.source_depth_m = water_depth
+			shore_solver.source_depth_m = OceanShoreSolver.RING_DEPTH_M
+			shore_solver.spectrum_depth_m = water_depth
+			shore_solver.whitecap_threshold = whitecap
+			shore_solver.profiling = profiling
+			var incident_angle := swell_direction_rad if _breaking_settings.w > 0.5 else wind_direction
+			shore_solver.incident_direction = Vector2(cos(incident_angle), sin(incident_angle))
 			shore_solver.step_render(delta, _render_time, current_velocity_m_s,
 				foam_amount if foam_feedback_enabled else 0.0,
 				0.693 / maxf(foam_persistence, 0.05),
@@ -596,7 +611,7 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 			local_solver.step_render(delta, _render_time, _render_center,
 				current_velocity_m_s, impulses, pressures)
 		if profiling:
-			_rd.capture_timestamp("ocean/local")
+			_rd.capture_timestamp("ocean/coast" if shore_enabled else "ocean/local")
 	cl = _rd.compute_list_begin()
 	# Near-field feedback once per (stride) frames, on the accumulated dt.
 	_foam_near_dt += delta
@@ -670,8 +685,13 @@ func _dispatch_pending_queries() -> void:
 	pc.encode_float(52, 64.0)
 	pc.encode_float(64, current_velocity_m_s.x)
 	pc.encode_float(68, current_velocity_m_s.y)
+	var shore_depth_blend := shore_solver.config.surface_depth_blend_m()
+	pc.encode_float(72, shore_depth_blend.x)
+	pc.encode_float(76, shore_depth_blend.y)
 	pc.encode_float(80, 1.0 if shore_enabled else 0.0)
-	pc.encode_float(84, OceanShoreSolver.DOMAIN_M)
+	pc.encode_float(84, shore_solver.config.domain_m)
+	pc.encode_float(88, shore_solver.config.surface_blend_width_m())
+	pc.encode_float(92, 1.0 if shore_solver.config.visual_breakers_enabled else 0.0)
 	var cl := _rd.compute_list_begin()
 	_dispatch(cl, "query", pc, 1, 1, 1)
 	_rd.compute_list_end()
@@ -736,7 +756,7 @@ func query_render() -> void:
 
 
 func local_centers() -> Vector4:
-	return foam_state().get("local_centers", Vector4(90.0, 35.0, 0.0, 0.0))
+	return foam_state().get("local_centers", Vector4(OceanLocalSolver.COAST_CENTER.x, OceanLocalSolver.COAST_CENTER.y, 0.0, 0.0))
 
 
 func add_wake_impulse(body_id: int, position: Vector2, impulse: Vector2) -> void:
@@ -1128,6 +1148,10 @@ func _read_timings() -> void:
 	if out.is_empty():
 		return
 	var spray_timings := GpuTimings.read(_rd, "ocean_spray/")
+	var coast_timings := GpuTimings.read(_rd, "shore/")
+	for stage: String in coast_timings:
+		if stage != "total":
+			out["coast_" + stage] = coast_timings[stage]
 	out["spray"] = spray_timings.get("total", 0.0)
 	out["total"] += out.spray
 	out["frame"] = _rd.get_captured_timestamps_frame()

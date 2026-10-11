@@ -75,5 +75,5 @@ if (( status != 0 )); then
 	exit "$status"
 fi
 
-grep -E '^CAPTURE (CONFIG|COVERAGE|META|IMAGE|SHOT|FOAM_FIELDS|FOAM_PIXELS|WAVES) ' "$LOG_DIR/capture.stdout.log" \
+grep -E '^CAPTURE (CONFIG|COVERAGE|META|IMAGE|SHOT|FOAM_FIELDS|FOAM_PIXELS|WAVES|COAST) ' "$LOG_DIR/capture.stdout.log" \
 	| sed -e 's/^CAPTURE SHOT /wrote /'

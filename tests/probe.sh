@@ -64,6 +64,56 @@ PROBE_TABLE=(
 	"ocean_capture|240|^TEST PASS ocean_capture$|OCEAN CAPTURE "
 	"ocean_ultra|180|^TEST PASS ocean_ultra$|OCEAN ULTRA "
 	"ocean_single_wave|120|^TEST PASS ocean_single_wave$|OCEAN WAVE "
+	"ocean_island_spectrum|300|^TEST PASS ocean_island_spectrum$|OCEAN ISLAND SPEC "
+	"ocean_island_visual|180|^TEST PASS ocean_island_visual$|OCEAN ISLAND VISUAL "
+	"ocean_seam|600|^TEST PASS ocean_seam$|OCEAN SEAM "
+	"ocean_shore_dispersion|600|^TEST PASS ocean_shore_dispersion$|OCEAN DISP "
+	"ocean_shore_dispersion_2d|180|^TEST PASS ocean_shore_dispersion_2d$|OCEAN DISP "
+	"ocean_shore_convergence|240|^TEST PASS ocean_shore_convergence$|OCEAN DISP "
+	"ocean_shore_volume|600|^TEST PASS ocean_shore_volume$|OCEAN VOL "
+	"ocean_shore_foam|180|^TEST PASS ocean_shore_foam$|OCEAN FOAM "
+	"ocean_boundary_phase|120|^TEST PASS ocean_boundary_phase$|OCEAN PHASE "
+	"ocean_breaking_diffusion|120|^TEST PASS ocean_breaking_diffusion$|OCEAN BREAK "
+	"ocean_sph_breaker|300|^TEST PASS ocean_sph_breaker$|BREAKER "
+	"ocean_sph_stiffness|180|^TEST PASS ocean_sph_stiffness$|BREAKER "
+	"ocean_sph_pressure_conservation|120|^TEST PASS ocean_sph_pressure_conservation$|BREAKER SPH PRESSURE CONSERVATION "
+	"ocean_breaker_boot|120|^TEST PASS ocean_breaker_boot$|BREAKER "
+	"ocean_apic_breaker|300|^TEST PASS ocean_apic_breaker$|BREAKER "
+	"ocean_apic_rest|180|^TEST PASS ocean_apic_rest$|BREAKER "
+	"ocean_apic_surface_projection|120|^TEST PASS ocean_apic_surface_projection$|BREAKER APIC SURFACE PROJECTION "
+	"ocean_apic_surface_transport|120|^TEST PASS ocean_apic_surface_transport$|BREAKER APIC SURFACE TRANSPORT "
+	"ocean_apic_amount_transport|180|^TEST PASS ocean_apic_amount_transport$|BREAKER APIC AMOUNT "
+	"ocean_apic_cube_fraction|180|^TEST PASS ocean_apic_cube_fraction$|BREAKER APIC CUBE FRACTION "
+	"ocean_apic_linear_wave|180|^TEST PASS ocean_apic_linear_wave$|BREAKER APIC LINEAR WAVE "
+	"ocean_apic_geometric_flux_cache|180|^TEST PASS ocean_apic_geometric_flux_cache$|BREAKER APIC GEOMETRIC CACHE "
+	"ocean_apic_amount_reconstruction|180|^TEST PASS ocean_apic_amount_reconstruction$|BREAKER APIC AMOUNT RECONSTRUCTION "
+	"ocean_apic_amount_consistency|180|^TEST PASS ocean_apic_amount_consistency$|BREAKER APIC AMOUNT CONSISTENCY "
+	"ocean_apic_surface_strain|120|^TEST PASS ocean_apic_surface_strain$|BREAKER APIC SURFACE STRAIN "
+	"ocean_apic_surface_wall_barrier|120|^TEST PASS ocean_apic_surface_wall_barrier$|BREAKER APIC SURFACE WALL BARRIER "
+	"ocean_apic_surface_boot|180|^TEST PASS ocean_apic_surface_boot$|BREAKER APIC SURFACE BOOT "
+	"ocean_apic_surface_rest|180|^TEST PASS ocean_apic_surface_rest$|BREAKER SHORE REST "
+	"ocean_apic_surface_breaker|180|^TEST PASS ocean_apic_surface_breaker$|BREAKER "
+	"ocean_apic_surface_volume|300|^TEST PASS ocean_apic_surface_volume$|BREAKER "
+	"ocean_apic_surface_timestep|360|^TEST PASS ocean_apic_surface_timestep$|BREAKER TIMESTEP "
+	"ocean_apic_volume_fraction|60|^TEST PASS ocean_apic_volume_fraction$|BREAKER APIC VOLUME FRACTION "
+	"ocean_apic_velocity_support|120|^TEST PASS ocean_apic_velocity_support$|BREAKER APIC VELOCITY SUPPORT "
+	"ocean_apic_detached_gravity|180|^TEST PASS ocean_apic_detached_gravity$|BREAKER APIC DETACHED "
+	"ocean_apic_thin_film|120|^TEST PASS ocean_apic_thin_film$|BREAKER APIC THIN FILM "
+	"ocean_apic_film_current|120|^TEST PASS ocean_apic_film_current$|BREAKER APIC FILM CURRENT "
+	"ocean_apic_solid_geometry|120|^TEST PASS ocean_apic_solid_geometry$|BREAKER APIC SOLID GEOMETRY "
+	"ocean_apic_dry_cut_cell|120|^TEST PASS ocean_apic_dry_cut_cell$|BREAKER APIC DRY (CUT CELL|FACE TRANSPORT) "
+	"ocean_breaker_seed|60|^TEST PASS ocean_breaker_seed$|BREAKER SEED "
+	"ocean_apic_shore_rest|180|^TEST PASS ocean_apic_shore_rest$|BREAKER SHORE REST "
+	"ocean_sph_shore_rest|180|^TEST PASS ocean_sph_shore_rest$|BREAKER SHORE REST "
+	"ocean_apic_grid|360|^TEST PASS ocean_apic_grid$|BREAKER "
+	"ocean_apic_dense|600|^TEST PASS ocean_apic_dense$|BREAKER "
+	"ocean_apic_scatter|300|^TEST PASS ocean_apic_scatter$|BREAKER "
+	"ocean_apic_transfer|180|^TEST PASS ocean_apic_transfer$|BREAKER P2G "
+	"ocean_apic_timestep|360|^TEST PASS ocean_apic_timestep$|BREAKER TIMESTEP "
+	"ocean_apic_wall_slip|180|^TEST PASS ocean_apic_wall_slip$|BREAKER WALL SLIP "
+	"ocean_breaker_incident|60|^TEST PASS ocean_breaker_incident$|BREAKER INCIDENT CPU "
+	"ocean_sph_prediction|180|^TEST PASS ocean_sph_prediction$|BREAKER SPH PREDICTION "
+	"ocean_sph_density_snapshot|180|^TEST PASS ocean_sph_density_snapshot$|BREAKER SPH DENSITY SNAPSHOT "
 )
 
 usage() {
@@ -157,7 +207,7 @@ run_probe() {
 			--log-file "$godot_log" \
 			-s res://tests/probe.gd -- "$name" "$@" || status=$?
 
-	if grep -q 'SCRIPT ERROR:' "$stdout_log" 2>/dev/null; then
+	if rg -q '^(SCRIPT ERROR:|ERROR:)' "$stdout_log" 2>/dev/null; then
 		status=1
 	elif (( status == 0 )) && ! grep -q -- "$PROBE_SENTINEL" "$stdout_log" 2>/dev/null; then
 		status=1

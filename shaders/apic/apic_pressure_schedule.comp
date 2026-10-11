@@ -1,0 +1,42 @@
+void main() {
+	if (gl_GlobalInvocationID.x != 0u) { return; }
+	int mode = int(params.solve.z);
+	if (mode == 0) {
+		uint groups = (num_cells() + 255u) / 256u;
+		pressure_control.dispatch_args = uvec4(groups, 1u, 1u, 0u);
+		pressure_control.stats = uvec4(0u, 0u, 1u, 0u);
+		return;
+	}
+	if (mode == 3) {
+		pressure_control.stats.w = 0u;
+		return;
+	}
+	if (mode == 4) {
+		uint error_bits = pressure_control.stats.w;
+		float error = uintBitsToFloat(error_bits);
+		pressure_control.history.x = max(pressure_control.history.x, error_bits);
+		pressure_control.history.z++;
+		if (pressure_control.stats.z == 0u || isnan(error) || isinf(error) || error > params.solve.x) {
+			pressure_control.history.y++;
+			if (pressure_control.stats.x >= uint(max(params.solve.y, 0.0))) {
+				pressure_control.history.w++;
+			}
+		}
+		return;
+	}
+	if (pressure_control.dispatch_args.x == 0u) { return; }
+	if (mode == 1) {
+		pressure_control.dispatch_args.w = 0u;
+		pressure_control.stats.y = 0u;
+		return;
+	}
+	if (mode == 2) {
+		pressure_control.stats.x += uint(max(params.solve.y, 0.0));
+		uint error_bits = pressure_control.dispatch_args.w;
+		float error = uintBitsToFloat(error_bits);
+		if (pressure_control.stats.z == 0u || isnan(error) || isinf(error)
+				|| error <= params.solve.x) {
+			pressure_control.dispatch_args.x = 0u;
+		}
+	}
+}

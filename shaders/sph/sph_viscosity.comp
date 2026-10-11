@@ -70,8 +70,8 @@ void main() {
 				p.xz = inside;
 			}
 		}
-		vec3 lo = params.grid_origin.xyz + vec3(0.02);
-		vec3 hi = params.grid_origin.xyz + vec3(params.grid_dims.xyz) * params.grid_origin.w - vec3(0.02);
+		vec3 lo = scene.domain_min.xyz + vec3(0.02);
+		vec3 hi = scene.domain_max.xyz - vec3(0.02);
 		if (p.x < lo.x) { p.x = lo.x; v.x = -v.x * damp; }
 		else if (p.x > hi.x) { p.x = hi.x; v.x = -v.x * damp; }
 		if (p.y < lo.y) { p.y = lo.y; v.y = -v.y * damp; }

@@ -16,6 +16,8 @@ layout(set = 0, binding = 10) uniform sampler2D shore_derivative;
 layout(std430, set = 0, binding = 11) readonly buffer BreakingSettings {
     vec4 swell_breaking;
 } breaking_settings;
+layout(set = 0, binding = 12) uniform sampler2D shore_breaker;
+layout(set = 0, binding = 13) uniform sampler2D shore_contact;
 
 #define SHORE_DOMAIN_M sp.window.w
 
@@ -66,14 +68,16 @@ vec3 displacement_at(vec2 world) {
     return displacement;
 }
 
-float shore_weight_at(vec2 material) {
-    return sp.cfg.z != 0 ? ocean_shore_weight(material, SHORE_DOMAIN_M) : 0.0;
+float shore_weight_at(vec2 material, vec3 displacement) {
+    vec2 position = (sp.cfg.z & 2) != 0 ? material + displacement.xz : material;
+    return sp.cfg.z != 0 ? ocean_shore_surface_weight(shore_surface, position, SHORE_DOMAIN_M,
+        SHORE_BLEND_WIDTH_M, SHORE_DEPTH_BLEND_M) : 0.0;
 }
 
 vec3 surface_displacement_at(vec2 material) {
     vec3 displacement = displacement_at(material);
-    if (sp.cfg.z != 0) {
-        displacement.xz *= 1.0 - shore_weight_at(material);
+    if (sp.cfg.z != 0 && (sp.cfg.z & 2) == 0) {
+        displacement.xz *= 1.0 - shore_weight_at(material, displacement);
     }
     return displacement;
 }
@@ -90,40 +94,52 @@ vec4 local_surface_at(vec2 material, vec3 displacement) {
     return vec4(coast.xyz + wake.xyz, max(coast.w, wake.w));
 }
 
+vec4 visual_roll_at(vec2 world) {
+    if ((sp.cfg.z & 2) == 0) { return vec4(0.0); }
+    return ocean_shore_roll(shore_breaker, world, SHORE_DOMAIN_M);
+}
+
+vec2 visible_offset_at(vec2 material) {
+    return surface_displacement_at(material).xz;
+}
+
 float breaking_at(vec2 world) {
     float spectral_breaking = ocean_breaking_source(derivative_fields, sp.tiles.xyz,
         world, sp.physical.y, 7);
     vec3 displacement = surface_displacement_at(world);
     float breaking = max(spectral_breaking, local_surface_at(world, displacement).w);
-    float weight = shore_weight_at(world);
+    float weight = shore_weight_at(world, displacement);
     if (weight > 0.0) {
         vec2 position = world + displacement.xz;
         vec4 shore = ocean_local_sample(shore_surface, vec2(0.0), SHORE_DOMAIN_M, position);
-        if (weight > 0.999 && shore.w <= 0.002) {
+        float bed = ocean_local_sample(shore_derivative, vec2(0.0), SHORE_DOMAIN_M, position).w;
+        bool dry = (sp.cfg.z & 2) != 0 ? displacement.y <= bed + 0.02 : shore.w <= 0.002;
+        if (weight > 0.999 && dry) {
             return 0.0;
         }
         float fresh = ocean_local_sample(shore_foam, vec2(0.0), SHORE_DOMAIN_M, position).x;
-        breaking = mix(breaking, smoothstep(0.035, 0.32, fresh), weight);
+        breaking = mix(breaking, max(smoothstep(0.035, 0.32, fresh), visual_roll_at(position).w), weight);
     }
     return breaking;
 }
 
 bool water_height_at(vec2 world, out float height) {
     vec2 material = world;
-    vec3 displacement = surface_displacement_at(material);
-    material = world - displacement.xz;
-    displacement = surface_displacement_at(material);
-    material = world - displacement.xz;
-    displacement = surface_displacement_at(material);
-    if (length(material + displacement.xz - world) > 0.05) {
+    material = world - visible_offset_at(material);
+    material = world - visible_offset_at(material);
+    material = world - visible_offset_at(material);
+    if (length(material + visible_offset_at(material) - world) > 0.05) {
         return false;
     }
+    vec3 displacement = surface_displacement_at(material);
     height = displacement.y + local_surface_at(material, displacement).x;
-    float weight = shore_weight_at(material);
+    float weight = shore_weight_at(material, displacement);
     if (weight > 0.0) {
-        vec4 shore = ocean_local_sample(shore_surface, vec2(0.0), SHORE_DOMAIN_M, world);
-        height = mix(height, shore.x, weight);
-        if (weight > 0.999 && shore.w <= 0.002) {
+        vec2 position = material + displacement.xz;
+        vec4 shore = ocean_local_sample(shore_surface, vec2(0.0), SHORE_DOMAIN_M, position);
+        float shore_height = (sp.cfg.z & 2) != 0 ? height : shore.x;
+        height = mix(height, shore_height, weight);
+        if (weight > 0.999 && ((sp.cfg.z & 2) != 0 || shore.w <= 0.002)) {
             float bed = ocean_local_sample(shore_derivative, vec2(0.0),
                 SHORE_DOMAIN_M, world).w;
             height = max(height, bed);
@@ -168,8 +184,11 @@ void main() {
             position_age.w += fixed_dt;
             float water_height = 0.0;
             bool surface_valid = water_height_at(position_age.xz, water_height);
+            float bed = sp.cfg.z != 0 ? ocean_local_sample(shore_derivative, vec2(0.0),
+                SHORE_DOMAIN_M, position_age.xz).w : -1.0e6;
             if (position_age.w >= velocity_lifetime.w
-                    || (surface_valid && position_age.y <= water_height)) {
+                    || (surface_valid && position_age.y <= water_height)
+                    || (sp.cfg.z != 0 && position_age.y <= bed + 0.02)) {
                 position_age.w = velocity_lifetime.w + 1.0;
             }
         } else {
@@ -180,23 +199,34 @@ void main() {
                 float x = random_value(seed);
                 float z = random_value(seed);
                 vec2 cell_world = sp.window.xy + (vec2(x, z) - 0.5) * sp.window.z;
+                if ((sp.cfg.z & 2) != 0 && (particle & 1u) == 0u) {
+                    cell_world = (vec2(x, z) - 0.5) * SHORE_DOMAIN_M * 0.65;
+                }
                 vec3 displacement = surface_displacement_at(cell_world);
                 vec2 surface_world = cell_world + displacement.xz;
-                float shore_weight = shore_weight_at(cell_world);
+                float shore_weight = shore_weight_at(cell_world, displacement);
                 vec4 shore = vec4(0.0);
                 if (shore_weight > 0.0) {
                     shore = ocean_local_sample(shore_surface, vec2(0.0),
                         SHORE_DOMAIN_M, surface_world);
-                    if (shore_weight > 0.999 && shore.w <= 0.002) {
+                    float bed = ocean_local_sample(shore_derivative, vec2(0.0), SHORE_DOMAIN_M, surface_world).w;
+                    bool dry = (sp.cfg.z & 2) != 0 ? displacement.y <= bed + 0.02 : shore.w <= 0.002;
+                    if (shore_weight > 0.999 && dry) {
                         continue;
                     }
                 }
                 float breaking = breaking_at(cell_world);
                 float foam = foam_fresh_at(cell_world);
+                float impact = 0.0;
                 if (shore_weight > 0.0) {
                     float fresh = ocean_local_sample(shore_foam, vec2(0.0),
                         SHORE_DOMAIN_M, surface_world).x;
                     foam = mix(foam, fresh, shore_weight);
+                    if ((sp.cfg.z & 2) != 0) {
+                        impact = ocean_local_sample(shore_contact, vec2(0.0), SHORE_DOMAIN_M, surface_world).z;
+                        breaking = max(breaking, impact);
+                        foam = max(foam, impact);
+                    }
                 }
                 float gate = breaking * smoothstep(0.015, 0.10, foam);
                 float probability = 1.0 - exp(-sp.physical.z
@@ -207,28 +237,51 @@ void main() {
                     float size_noise = random_value(seed);
                     vec4 local_surface = local_surface_at(cell_world, displacement);
                     vec3 orbital = orbital_velocity_at(cell_world);
+                    vec4 roll = visual_roll_at(surface_world);
+                    vec2 shore_flow = (sp.cfg.z & 2) != 0 ? roll.xz : shore.yz;
                     float surface_height = displacement.y + local_surface.x;
                     vec3 surface_velocity = vec3(orbital.x + local_surface.y + sp.motion.z,
                         orbital.y, orbital.z + local_surface.z + sp.motion.w);
                     if (shore_weight > 0.0) {
-                        surface_height = mix(surface_height, shore.x, shore_weight);
-                        vec2 gradient = ocean_shore_gradient(shore_surface,
-                            surface_world, SHORE_DOMAIN_M);
-                        float height_rate = ocean_local_sample(shore_derivative,
-                            vec2(0.0), SHORE_DOMAIN_M, surface_world).z;
-                        vec3 shore_velocity = vec3(shore.y,
-                            height_rate + dot(shore.yz, gradient), shore.z);
-                        surface_velocity = mix(surface_velocity, shore_velocity, shore_weight);
+                        float shore_height = (sp.cfg.z & 2) != 0 ? surface_height : shore.x;
+                        surface_height = mix(surface_height, shore_height, shore_weight);
+                        if ((sp.cfg.z & 2) == 0) {
+                            vec2 gradient = ocean_shore_gradient(shore_surface,
+                                surface_world, SHORE_DOMAIN_M);
+                            float height_rate = ocean_local_sample(shore_derivative,
+                                vec2(0.0), SHORE_DOMAIN_M, surface_world).z;
+                            vec3 shore_velocity = vec3(shore.y,
+                                height_rate + dot(shore.yz, gradient), shore.z);
+                            surface_velocity = mix(surface_velocity, shore_velocity, shore_weight);
+                        }
                     }
                     vec3 launch_noise = vec3(random_value(seed) - 0.5,
                         random_value(seed) * 0.5, random_value(seed) - 0.5);
-                    position_age = vec4(cell_world.x + displacement.x,
+                    vec2 origin = surface_world;
+                    float bed = sp.cfg.z != 0 ? ocean_local_sample(shore_derivative, vec2(0.0),
+                        SHORE_DOMAIN_M, origin).w : -1.0e6;
+                    if (sp.cfg.z != 0 && surface_height <= bed + 0.02) { continue; }
+                    position_age = vec4(origin.x,
                         surface_height + 0.12,
-                        cell_world.y + displacement.z, 0.0);
+                        origin.y, 0.0);
                     velocity_lifetime = vec4(surface_velocity.x + launch_noise.x,
                         1.0 + 2.0 * breaking + surface_velocity.y + launch_noise.y,
                         surface_velocity.z + launch_noise.z,
                         mix(0.45, 1.65, lifetime_noise));
+                    velocity_lifetime.y += impact * min(length(shore_flow), 5.0);
+                    velocity_lifetime.xz *= 1.0 - impact * 0.6;
+                    if (impact > 0.01) {
+                        vec2 obstacle_gradient = vec2(ocean_local_sample(shore_derivative, vec2(0.0),
+                            SHORE_DOMAIN_M, origin + vec2(1.0, 0.0)).w
+                            - ocean_local_sample(shore_derivative, vec2(0.0),
+                            SHORE_DOMAIN_M, origin - vec2(1.0, 0.0)).w,
+                            ocean_local_sample(shore_derivative, vec2(0.0),
+                            SHORE_DOMAIN_M, origin + vec2(0.0, 1.0)).w
+                            - ocean_local_sample(shore_derivative, vec2(0.0),
+                            SHORE_DOMAIN_M, origin - vec2(0.0, 1.0)).w);
+                        vec2 outward = -obstacle_gradient / max(length(obstacle_gradient), 0.01);
+                        velocity_lifetime.xz += outward * impact * min(length(shore_flow), 3.0);
+                    }
                     vec4 swell_breaking = breaking_settings.swell_breaking;
                     float swell_weight = swell_breaking.w * (1.0 - shore_weight);
                     vec2 direction = vec2(cos(swell_breaking.x), sin(swell_breaking.x));

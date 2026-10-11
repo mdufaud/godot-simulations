@@ -85,7 +85,7 @@ transform = Transform3D(-19.785, 0, 7.035, 0, 21, 0, -7.035, 0, -19.785, 720, -2
 transform = Transform3D(21.133, 0, 26.634, 0, 34, 0, -26.634, 0, 21.133, 980, -38, -1540)
 
 [node name="NearRock" parent="Rocks" instance=ExtResource("8_boulder1")]
-transform = Transform3D(-3.268, 0, -3.784, 0, 5, 0, 3.784, 0, -3.268, 90, -3.5, 35)
+transform = Transform3D(-3.268, 0, -3.784, 0, 5, 0, 3.784, 0, -3.268, 0, -3.5, 20)
 
 [node name="UnderwaterLayer" type="CanvasLayer" parent="."]
 

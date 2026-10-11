@@ -20,7 +20,7 @@ var host: Node
 var _preset_option: OptionButton
 var _look_option: OptionButton
 var _scene_option: OptionButton
-var _island_view_option: OptionButton
+var _foam_texture_option: OptionButton
 var _wind_direction: HSlider
 var _wind_speed: HSlider
 var _fetch: HSlider
@@ -68,9 +68,17 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 	menu.add_section("Scene")
 	_scene_option = menu.add_option_button("Scene", ["Open Ocean", "Island Beach"],
 		0, host.set_scene_mode)
-	_island_view_option = menu.add_option_button("View", ["Overview", "Beach", "Rocky coast"],
-		0, host.set_island_view)
-	_island_view_option.disabled = true
+	var foam_names: Array = []
+	for texture in host.FOAM_TEXTURES:
+		foam_names.append(texture.name)
+	var settings = host.get_node("/root/UserSettings")
+	if not menu.persist_id.is_empty() \
+			and not settings.has_sim_value(menu.persist_id, "Scene/Foam texture v2"):
+		settings.set_sim_value(menu.persist_id, "Scene/Foam texture", 0)
+		settings.set_sim_value(menu.persist_id, "Scene/Foam texture v2", true)
+	_foam_texture_option = menu.add_option_button("Foam texture", foam_names,
+		host.current_foam_texture_index, host.set_foam_texture)
+	_foam_texture_option.tooltip_text = "Fine foam patterns are visible at Medium quality and above."
 	menu.add_section("Sea state")
 	_preset_option = menu.add_option_button("Preset", names, 1, host.apply_preset)
 	_wind_direction = _spectrum_slider(menu, "Wind direction", 0.0, TAU, solver.wind_direction,
@@ -305,6 +313,8 @@ func _spectrum_slider(menu: SimMenu, label: String, lo: float, hi: float, value:
 func sync_scene_mode(index: int) -> void:
 	if _scene_option != null:
 		_scene_option.select(index)
-	if _island_view_option != null:
-		_island_view_option.disabled = index == 0
-		_island_view_option.select(0)
+
+
+func sync_foam_texture(index: int) -> void:
+	if _foam_texture_option != null:
+		_foam_texture_option.select(index)

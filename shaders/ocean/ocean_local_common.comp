@@ -99,7 +99,7 @@ float bathymetry(vec2 world) {
     if (lp.grid.x < 100.0) {
         return lp.terrain.x;
     }
-    float distance_squared = dot(world - vec2(90.0, 35.0), world - vec2(90.0, 35.0));
+    float distance_squared = dot(world - lp.render.xy, world - lp.render.xy);
     return clamp(lp.terrain.x - (lp.terrain.x - lp.terrain.z)
         * exp(-distance_squared / (2.0 * lp.terrain.y * lp.terrain.y)),
         lp.terrain.z, lp.terrain.x);

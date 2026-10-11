@@ -1,0 +1,15 @@
+void main() {
+	if (gl_GlobalInvocationID.x != 0u) { return; }
+	if (int(params.solve.z) == 5) {
+		extension_control.dispatch_args.x = extension_control.next_dispatch.x;
+		extension_control.next_dispatch.x = 0u;
+		return;
+	}
+	if (int(params.solve.z) == 6) {
+		extension_control.dispatch_args.x = extension_control.stats.w;
+		return;
+	}
+	extension_control.dispatch_args = uvec4(0u, 1u, 1u, 0u);
+	extension_control.stats = uvec4(0u);
+	extension_control.next_dispatch = uvec4(0u);
+}

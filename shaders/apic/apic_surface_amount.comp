@@ -1,0 +1,782 @@
+float box_liquid_fraction(float phi, vec3 spans);
+float reconstruct_amount_phi(uint i, inout vec3 gradient);
+vec3 amount_interface_normal(ivec3 cell);
+vec3 amount_frozen_gradient(uint i);
+
+float full_cell_amount_phi(float amount, vec3 gradient) {
+	float lower = -0.5 * params.grid_origin_dx.w * dot(abs(gradient), vec3(1.0));
+	float upper = -lower;
+	for (int iteration = 0; iteration < 24; iteration++) {
+		float middle = 0.5 * (lower + upper);
+		if (box_liquid_fraction(middle, abs(gradient) * params.grid_origin_dx.w) > amount) { lower = middle; }
+		else { upper = middle; }
+	}
+	return 0.5 * (lower + upper);
+}
+
+float amount_aperture(ivec3 face, int axis) {
+	ivec3 left = face;
+	left[axis]--;
+	if (any(lessThan(left, ivec3(0))) || any(greaterThanEqual(face, params.grid_dims.xyz))) { return 0.0; }
+	if (face_solid(face, axis)) { return 0.0; }
+	return params.surface.y > 0.5 ? face_area.data[uint(axis) * num_faces() + face_index(face)] : 1.0;
+}
+
+float amount_velocity(ivec3 face, int axis) {
+	return face_extension_a.data[uint(axis) * num_faces() + face_index(face)].x;
+}
+
+float amount_flux(ivec3 face, int axis) {
+	float aperture = amount_aperture(face, axis);
+	if (aperture <= 0.0) { return 0.0; }
+	float velocity = amount_velocity(face, axis);
+	ivec3 donor = face;
+	if (velocity >= 0.0) { donor[axis]--; }
+	uint index = cell_index(donor);
+	float capacity = cell_open_fraction(index);
+	if ((int(params.solve.z) & 4) != 0 && capacity > 0.0 && aperture == 1.0
+		&& cell_vertex_ranges.data[index].w == 0u) {
+		if (surface_amount.data[index].x <= 0.0 || velocity == 0.0) { return 0.0; }
+		if (params.coupling.w > 0.5 && surface_amount.data[index].x >= 1.0) { return velocity; }
+		vec3 gradient;
+		float phi;
+		if ((int(params.solve.z) & 64) != 0) {
+			gradient = amount_frozen_gradient(index);
+			phi = divergence.data[index];
+		} else {
+			gradient = params.coupling.x > 0.5 ? amount_interface_normal(donor) : geometry_phi_gradient(donor);
+			phi = params.coupling.w > 0.5 ? full_cell_amount_phi(surface_amount.data[index].x, gradient)
+				: reconstruct_amount_phi(index, gradient);
+		}
+		float dx = params.grid_origin_dx.w;
+		float swept_depth = abs(velocity) * params.sim.x / float(surface_amount.stats.y);
+		float center = sign(velocity) * 0.5 * (dx - swept_depth);
+		vec3 widths = vec3(dx); widths[axis] = swept_depth;
+		return velocity * box_liquid_fraction(phi + gradient[axis] * center, abs(gradient) * widths);
+	}
+	if ((int(params.solve.z) & 1) != 0 && surface_amount.data[index].x > 0.0) {
+		vec3 gradient = geometry_phi_gradient(donor);
+		float dx = params.grid_origin_dx.w;
+		float swept_depth = abs(velocity) * params.sim.x / float(surface_amount.stats.y);
+		float normal_center = sign(velocity) * 0.5 * (dx - swept_depth);
+		float transverse_span = dot(abs(gradient), vec3(1.0)) - abs(gradient[axis]);
+		float minimum_phi = cell_phi.data[index] + gradient[axis] * normal_center
+			- 0.5 * abs(gradient[axis]) * swept_depth - 0.5 * dx * transverse_span;
+		if (minimum_phi >= 0.0) { return 0.0; }
+	}
+	return capacity > 0.0 ? aperture * velocity * surface_amount.data[index].x / capacity : 0.0;
+}
+
+float amount_concentration(ivec3 cell) {
+	uint i = cell_index(cell);
+	float capacity = cell_open_fraction(i);
+	return capacity > 0.0 ? surface_amount.data[i].x / capacity : 0.0;
+}
+
+vec3 amount_interface_normal(ivec3 cell) {
+	vec3 anchor = cell_anchor(cell);
+	uint obstacle_mask = nearby_phi_obstacles(anchor, 2.0 * params.grid_origin_dx.w);
+	vec3 gradient = vec3(0.0);
+	for (int axis = 0; axis < 3; axis++) {
+		for (int v = -1; v <= 1; v++) {
+			for (int u = -1; u <= 1; u++) {
+				ivec3 transverse = cell;
+				transverse[(axis + 1) % 3] += u;
+				transverse[(axis + 2) % 3] += v;
+				transverse = clamp(transverse, ivec3(0), params.grid_dims.xyz - ivec3(1));
+				if (cell_open_fraction(cell_index(transverse)) <= 0.0
+					|| !visible_phi_cell(anchor, transverse, obstacle_mask)) { continue; }
+				float center = clamp(amount_concentration(transverse), 0.0, 1.0);
+				vec2 pair = vec2(center);
+				for (int side = 0; side < 2; side++) {
+					ivec3 neighbor = transverse;
+					neighbor[axis] = clamp(neighbor[axis] + side * 2 - 1, 0, params.grid_dims[axis] - 1);
+					if (cell_open_fraction(cell_index(neighbor)) > 0.0
+						&& visible_phi_cell(anchor, neighbor, obstacle_mask)) {
+						pair[side] = clamp(amount_concentration(neighbor), 0.0, 1.0);
+					}
+				}
+				gradient[axis] += (pair.y - pair.x) * float((u == 0 ? 2 : 1) * (v == 0 ? 2 : 1));
+			}
+		}
+	}
+	float magnitude = length(gradient);
+	if (magnitude > 1.0e-6) { return -gradient / magnitude; }
+	gradient = geometry_phi_gradient(cell);
+	return length(gradient) > 1.0e-8 ? normalize(gradient) : vec3(0.0, 1.0, 0.0);
+}
+
+float amount_high_flux(ivec3 face, int axis) {
+	float low = amount_flux(face, axis);
+	if (low == 0.0) { return 0.0; }
+	float velocity = amount_velocity(face, axis);
+	ivec3 donor = face;
+	if (velocity >= 0.0) { donor[axis]--; }
+	ivec3 left = donor; left[axis]--;
+	ivec3 right = donor; right[axis]++;
+	if (amount_aperture(donor, axis) <= 0.0 || amount_aperture(right, axis) <= 0.0) { return low; }
+	float center = amount_concentration(donor);
+	float dl = center - amount_concentration(left);
+	float dr = amount_concentration(right) - center;
+	float slope = dl * dr > 0.0 ? sign(dl) * max(min(2.0 * abs(dl), abs(dr)), min(abs(dl), 2.0 * abs(dr))) : 0.0;
+	float dt = params.sim.x / float(surface_amount.stats.y);
+	float courant = abs(velocity) * dt / params.grid_origin_dx.w;
+	return low + amount_aperture(face, axis) * velocity * 0.5 * sign(velocity) * (1.0 - courant) * slope;
+}
+
+float amount_antidiffusive_flux(ivec3 face, int axis) {
+	return amount_high_flux(face, axis) - amount_flux(face, axis);
+}
+
+float amount_limited_antidiffusive_flux(ivec3 face, int axis) {
+	float flux = amount_antidiffusive_flux(face, axis);
+	if (flux == 0.0) { return 0.0; }
+	ivec3 left = face; left[axis]--;
+	uint li = cell_index(left), ri = cell_index(face);
+	float limit = flux > 0.0
+		? min(cell_phi_corrected.data[li], cell_phi_next.data[ri])
+		: min(cell_phi_next.data[li], cell_phi_corrected.data[ri]);
+	return flux * limit;
+}
+
+float amount_bounded_geometric_flux(ivec3 face, int axis) {
+	float flux = amount_flux(face, axis);
+	if (flux == 0.0) { return 0.0; }
+	ivec3 donor = face;
+	if (flux > 0.0) { donor[axis]--; }
+	return flux * surface_amount.data[cell_index(donor)].z;
+}
+
+float cube_rectangle_fraction(float t, float b) {
+	if (t <= 0.0) { return 0.0; }
+	if (t >= 1.0 + b) { return 1.0; }
+	if (t <= b) { return t * t / (2.0 * b); }
+	if (t <= 1.0) { return t - 0.5 * b; }
+	float remaining = 1.0 + b - t;
+	return 1.0 - remaining * remaining / (2.0 * b);
+}
+
+float box_liquid_fraction(float phi, vec3 spans) {
+	float a = max(spans.x, max(spans.y, spans.z));
+	if (a == 0.0) { return phi < 0.0 ? 1.0 : 0.0; }
+	float c = min(spans.x, min(spans.y, spans.z));
+	float b = max(min(spans.x, spans.y), min(max(spans.x, spans.y), spans.z)) / a;
+	c /= a;
+	float t = 0.5 * (1.0 + b + c) - abs(phi) / a;
+	float fraction = 0.0;
+	if (t > 0.0) {
+		if (b <= 1.0e-7) { fraction = clamp(t - 0.5 * (b + c), 0.0, 1.0); }
+		else if (c <= 1.0e-7) { fraction = cube_rectangle_fraction(t - 0.5 * c, b); }
+		else {
+			float r0 = clamp(1.0 - t / c, 0.0, 1.0);
+			float rb = clamp(1.0 + (b - t) / c, r0, 1.0);
+			float ra = clamp(1.0 + (1.0 - t) / c, rb, 1.0);
+			float l = t - c + c * r0, h = t - c + c * rb;
+			fraction += (rb - r0) * (h * h + h * l + l * l) / (6.0 * b);
+			l = h; h = t - c + c * ra;
+			fraction += (ra - rb) * (h + l - b) * 0.5;
+			float x = 1.0 + b - h, y = 1.0 + b - t;
+			fraction += (1.0 - ra) * (1.0 - (x * x + x * y + y * y) / (6.0 * b));
+		}
+	}
+	fraction = clamp(fraction, 0.0, 1.0);
+	return phi < 0.0 ? 1.0 - fraction : fraction;
+}
+
+float cube_liquid_fraction(float phi, vec3 gradient) {
+	return box_liquid_fraction(phi, abs(gradient) * params.grid_origin_dx.w);
+}
+
+float tetra_liquid_fraction(vec4 phi) {
+	int negative[4];
+	int positive[4];
+	int count = 0;
+	int air_count = 0;
+	for (int corner = 0; corner < 4; corner++) {
+		if (phi[corner] < 0.0) { negative[count++] = corner; }
+		else { positive[air_count++] = corner; }
+	}
+	if (count == 0) { return 0.0; }
+	if (count == 4) { return 1.0; }
+	if (count == 1) {
+		float water = -phi[negative[0]];
+		return water * water * water / ((water + phi[positive[0]])
+			* (water + phi[positive[1]]) * (water + phi[positive[2]]));
+	}
+	if (count == 3) {
+		float air = phi[positive[0]];
+		return 1.0 - air * air * air / ((air - phi[negative[0]])
+			* (air - phi[negative[1]]) * (air - phi[negative[2]]));
+	}
+	vec3 corners[4] = vec3[4](vec3(0.0), vec3(1.0, 0.0, 0.0),
+		vec3(0.0, 1.0, 0.0), vec3(0.0, 0.0, 1.0));
+	int n0 = negative[0], n1 = negative[1], p0 = positive[0], p1 = positive[1];
+	vec3 a = mix(corners[n0], corners[p0], -phi[n0] / (phi[p0] - phi[n0]));
+	vec3 b = mix(corners[n0], corners[p1], -phi[n0] / (phi[p1] - phi[n0]));
+	vec3 c = mix(corners[n1], corners[p0], -phi[n1] / (phi[p0] - phi[n1]));
+	vec3 d = mix(corners[n1], corners[p1], -phi[n1] / (phi[p1] - phi[n1]));
+	vec3 origin = corners[n1];
+	return abs(dot(corners[n1] - corners[n0], cross(a - corners[n0], b - corners[n0])))
+		+ abs(dot(a - origin, cross(b - origin, d - origin)))
+		+ abs(dot(a - origin, cross(c - origin, d - origin)));
+}
+
+float cube_tetra_liquid_fraction(float phi, vec3 gradient) {
+	float radius = 0.5 * params.grid_origin_dx.w * dot(abs(gradient), vec3(1.0));
+	if (radius == 0.0) { return phi < 0.0 ? 1.0 : 0.0; }
+	if (phi <= -radius) { return 1.0; }
+	if (phi >= radius) { return 0.0; }
+	float volume = 0.0;
+	for (int first = 0; first < 3; first++) {
+		for (int second = 0; second < 3; second++) {
+			if (first == second) { continue; }
+			vec3 a = vec3(-0.5);
+			vec3 b = a; b[first] = 0.5;
+			vec3 c = b; c[second] = 0.5;
+			vec3 d = vec3(0.5);
+			float dx = params.grid_origin_dx.w;
+			volume += tetra_liquid_fraction(vec4(phi + dot(gradient, a) * dx,
+				phi + dot(gradient, b) * dx, phi + dot(gradient, c) * dx,
+				phi + dot(gradient, d) * dx)) / 6.0;
+		}
+	}
+	return volume;
+}
+
+float amount_plane_fraction(uint i, float phi, vec3 gradient) {
+	if (cell_open_fraction(i) <= 0.0) { return 0.0; }
+	float radius = 0.5 * params.grid_origin_dx.w * dot(abs(gradient), vec3(1.0));
+	if (radius == 0.0) { return phi < 0.0 ? cell_open_fraction(i) : 0.0; }
+	if (phi <= -radius) { return cell_open_fraction(i); }
+	if (phi >= radius) { return 0.0; }
+	uvec4 range = cell_vertex_ranges.data[i];
+	if (range.w == 0u) { return cube_liquid_fraction(phi, gradient); }
+	float volume = 0.0, open_volume = 0.0;
+	for (uint tetra = 0u; tetra < range.w; tetra++) {
+		uint start = range.z + tetra * 4u;
+		vec4 values;
+		for (uint corner = 0u; corner < 4u; corner++) {
+			values[corner] = phi + dot(gradient, cut_vertices.data[start + corner].xyz);
+		}
+		float weight = cut_vertices.data[start].w;
+		open_volume += weight;
+		volume += weight * tetra_liquid_fraction(values);
+	}
+	return cell_open_fraction(i) * clamp(volume / open_volume, 0.0, 1.0);
+}
+
+float amount_geometry_target(uint i) {
+	float capacity = cell_open_fraction(i);
+	float target = clamp(surface_amount.data[i].x, 0.0, capacity);
+	if (target <= 1.0e-7 * capacity) { return 0.0; }
+	if (capacity - target <= 1.0e-7 * capacity) { return capacity; }
+	return target;
+}
+
+bool amount_inverse_is_identity(uint i) {
+	float capacity = cell_open_fraction(i);
+	if (capacity <= 0.0) { return true; }
+	float target = amount_geometry_target(i);
+	if (target > 0.0 && target <= 0.5 * capacity) { return false; }
+	float phi = cell_phi.data[i];
+	if (isnan(phi) || isinf(phi)) { return false; }
+	ivec3 cell = cell_coord(i);
+	float radius_bound = 0.0;
+	bool interface_neighbor = false;
+	for (int axis = 0; axis < 3; axis++) {
+		float span_bound = 0.0;
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = cell; neighbor[axis] += side;
+			if (neighbor[axis] < 0 || neighbor[axis] >= params.grid_dims[axis]) { continue; }
+			uint index = cell_index(neighbor);
+			float neighbor_phi = cell_phi.data[index];
+			if (isnan(neighbor_phi) || isinf(neighbor_phi)) { return false; }
+			span_bound = max(span_bound, abs(neighbor_phi - phi));
+			if (target > 0.5 * capacity && target < capacity) {
+				float open = cell_open_fraction(index);
+				ivec3 face = side > 0 ? neighbor : cell;
+				if (open > 0.0 && face_area.data[uint(axis) * num_faces() + face_index(face)] > 0.0
+					&& surface_amount.data[index].x < 0.5 * open) { interface_neighbor = true; }
+			}
+		}
+		radius_bound += 0.5 * span_bound;
+	}
+	return (target == 0.0 && phi >= radius_bound)
+		|| (target == capacity && phi <= -radius_bound)
+		|| (target > 0.5 * capacity && phi <= -max(radius_bound, 0.5 * params.grid_origin_dx.w) && !interface_neighbor);
+}
+
+float reconstruct_amount_phi(uint i, inout vec3 gradient) {
+	float capacity = cell_open_fraction(i);
+	float current = cell_phi.data[i];
+	if (capacity <= 0.0) { return current; }
+	float target = amount_geometry_target(i);
+	if (any(isnan(gradient)) || any(isinf(gradient))) {
+		atomicExchange(surface_amount.stats.w, 0u);
+		return current;
+	}
+	if (length(gradient) <= 1.0e-8) {
+		if ((target == 0.0 && current >= 0.0) || (target == capacity && current < 0.0)) { return current; }
+		gradient = vec3(0.0, 1.0, 0.0);
+		atomicAdd(surface_amount.dispatch_args.w, 1u);
+	}
+	float current_fraction = amount_plane_fraction(i, current, gradient);
+	if (abs(current_fraction - target) <= 1.0e-7 * capacity) { return current; }
+	float pressure_volume_tolerance = max(1.0e-7, params.solve.x * params.sim.x) * capacity;
+	if ((current_fraction == capacity && capacity - target <= pressure_volume_tolerance)
+		|| (current_fraction == 0.0 && target <= pressure_volume_tolerance)) { return current; }
+	if (current_fraction == capacity && target > 0.5 * capacity) {
+		ivec3 cell = cell_coord(i);
+		bool interface_neighbor = false;
+		for (int axis = 0; axis < 3; axis++) {
+			for (int side = -1; side <= 1; side += 2) {
+				ivec3 neighbor = cell;
+				neighbor[axis] += side;
+				if (any(lessThan(neighbor, ivec3(0))) || any(greaterThanEqual(neighbor, params.grid_dims.xyz))) { continue; }
+				uint index = cell_index(neighbor);
+				float open = cell_open_fraction(index);
+				ivec3 face = side > 0 ? neighbor : cell;
+				if (open > 0.0 && face_area.data[uint(axis) * num_faces() + face_index(face)] > 0.0
+					&& surface_amount.data[index].x < 0.5 * open) { interface_neighbor = true; }
+			}
+		}
+		if (!interface_neighbor) { return current; }
+	}
+	float lower = -0.5 * params.grid_origin_dx.w * dot(abs(gradient), vec3(1.0));
+	float upper = -lower;
+	if (target == 0.0) { return upper; }
+	if (target == capacity) { return lower; }
+	for (int iteration = 0; iteration < 24; iteration++) {
+		float midpoint = 0.5 * (lower + upper);
+		if (amount_plane_fraction(i, midpoint, gradient) > target) { lower = midpoint; }
+		else { upper = midpoint; }
+	}
+	return 0.5 * (lower + upper);
+}
+
+vec3 amount_frozen_gradient(uint i) {
+	return vec3(cell_phi_next.data[i], cell_phi_corrected.data[i], residual.data[i]);
+}
+
+float extend_amount_phi(uint i, out bool fixed_distance) {
+	float phi = surface_amount.data[i].y;
+	float capacity = cell_open_fraction(i);
+	fixed_distance = false;
+	if (capacity <= 0.0) { return phi; }
+	float fraction = amount_plane_fraction(i, phi, amount_frozen_gradient(i));
+	float target = amount_geometry_target(i);
+	float endpoint = target;
+	if (target > 0.0 && target < capacity) {
+		if (fraction > 0.0 && fraction < capacity) { fixed_distance = true; return phi; }
+		endpoint = fraction == 0.0 ? 0.0 : capacity;
+	}
+	ivec3 cell = cell_coord(i);
+	vec3 anchor = cell_anchor(cell);
+	uint obstacle_mask = nearby_phi_obstacles(anchor, 3.0 * params.grid_origin_dx.w);
+	float closest = 3.402823466e+38;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = cell;
+			for (int step = 1; step <= 2; step++) {
+				ivec3 previous = neighbor;
+				neighbor[axis] += side;
+				ivec3 face = side > 0 ? neighbor : previous;
+				if (amount_aperture(face, axis) <= 0.0) { break; }
+				uint index = cell_index(neighbor);
+				float neighbor_capacity = cell_open_fraction(index);
+				float neighbor_target = amount_geometry_target(index);
+				if (neighbor_target <= 0.0 || neighbor_target >= neighbor_capacity) { continue; }
+				vec3 gradient = amount_frozen_gradient(index);
+				float length_gradient = length(gradient);
+				if (length_gradient <= 1.0e-8) { continue; }
+				float neighbor_phi = surface_amount.data[index].y;
+				float neighbor_fraction = amount_plane_fraction(index, neighbor_phi, gradient);
+				if (neighbor_fraction <= 0.0 || neighbor_fraction >= neighbor_capacity) { continue; }
+				if (obstacle_mask != 0u && phi_segment_blocked(anchor, cell_anchor(neighbor), obstacle_mask)) { continue; }
+				float candidate = neighbor_phi + dot(gradient, vec3(cell - neighbor) * params.grid_origin_dx.w);
+				float distance = abs(candidate) / length_gradient;
+				if (distance >= closest || abs(amount_plane_fraction(i, candidate, gradient) - endpoint) > 1.0e-7 * capacity) { continue; }
+				closest = distance;
+				phi = candidate;
+				fixed_distance = true;
+			}
+		}
+	}
+	return phi;
+}
+
+float amount_distance_update(uint i) {
+	float current = cell_phi_next.data[i];
+	if (surface_amount.data[i].z > 0.5 || cell_open_fraction(i) <= 0.0) { return current; }
+	ivec3 cell = cell_coord(i);
+	vec3 anchor = cell_anchor(cell);
+	uint obstacle_mask = nearby_phi_obstacles(anchor, 3.0 * params.grid_origin_dx.w);
+	vec3 nearest = vec3(float(num_cells()) * params.grid_origin_dx.w);
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = cell;
+			neighbor[axis] += side;
+			ivec3 face = side > 0 ? neighbor : cell;
+			if (amount_aperture(face, axis) <= 0.0) { continue; }
+			uint index = cell_index(neighbor);
+			if (surface_amount.data[index].w != surface_amount.data[i].w) { continue; }
+			if (obstacle_mask != 0u && phi_segment_blocked(anchor, cell_anchor(neighbor), obstacle_mask)) { continue; }
+			nearest[axis] = min(nearest[axis], cell_phi_next.data[index]);
+		}
+	}
+	float a = min(nearest.x, min(nearest.y, nearest.z));
+	float c = max(nearest.x, max(nearest.y, nearest.z));
+	float b = max(min(nearest.x, nearest.y), min(max(nearest.x, nearest.y), nearest.z));
+	float dx = params.grid_origin_dx.w;
+	float candidate = a + dx;
+	if (candidate > b) {
+		candidate = 0.5 * (a + b + sqrt(max(2.0 * dx * dx - (a - b) * (a - b), 0.0)));
+		if (candidate > c) {
+			candidate = (a + b + c + sqrt(max(3.0 * dx * dx
+				- (a - b) * (a - b) - (a - c) * (a - c) - (b - c) * (b - c), 0.0))) / 3.0;
+		}
+	}
+	return min(current, candidate);
+}
+
+float amount_exchange_weight(ivec3 cell, bool recipients) {
+	float weight = 0.0;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = cell;
+			neighbor[axis] += side;
+			ivec3 face = side > 0 ? neighbor : cell;
+			float aperture = amount_aperture(face, axis);
+			if (aperture <= 0.0) { continue; }
+			uint index = cell_index(neighbor);
+			float eligible = recipients ? cell_phi_next.data[index] : cell_phi_corrected.data[index];
+			if (eligible > 0.0) { weight += aperture; }
+		}
+	}
+	return weight;
+}
+
+float repair_amount_saturation(uint i) {
+	ivec3 cell = cell_coord(i);
+	float deficit = cell_phi_next.data[i];
+	float surplus = cell_phi_corrected.data[i];
+	float incoming_weight = deficit > 0.0 ? amount_exchange_weight(cell, false) : 0.0;
+	float outgoing_weight = surplus > 0.0 ? amount_exchange_weight(cell, true) : 0.0;
+	float exchange = 0.0;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = cell;
+			neighbor[axis] += side;
+			ivec3 face = side > 0 ? neighbor : cell;
+			float aperture = amount_aperture(face, axis);
+			if (aperture <= 0.0) { continue; }
+			uint index = cell_index(neighbor);
+			float donor = cell_phi_corrected.data[index];
+			float receiver = cell_phi_next.data[index];
+			if (incoming_weight > 0.0 && donor > 0.0) {
+				float donor_weight = amount_exchange_weight(neighbor, true);
+				exchange += min(deficit * aperture / incoming_weight, donor * aperture / donor_weight);
+			}
+			if (outgoing_weight > 0.0 && receiver > 0.0) {
+				float receiver_weight = amount_exchange_weight(neighbor, false);
+				exchange -= min(receiver * aperture / receiver_weight, surplus * aperture / outgoing_weight);
+			}
+		}
+	}
+	return surface_amount.data[i].x + exchange;
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	int mode = params.misc.w;
+	if (params.surface.z < 1.0) { return; }
+	if (mode == 16) {
+		if (i == 0u) {
+			surface_amount.distance = uvec4(0u, 0u, 0u, 1u);
+			uint count = params.solve.y == 1.0 ? (num_cells() + 1u) / 2u : num_cells();
+			pressure_control.dispatch_args = uvec4((count + APIC_WORKGROUP_SIZE - 1u) / APIC_WORKGROUP_SIZE, 1u, 1u, 0u);
+		}
+		return;
+	}
+	if (mode == 17) {
+		if (i == 0u && pressure_control.dispatch_args.x != 0u) { surface_amount.distance.z = 0u; }
+		return;
+	}
+	if (mode == 20) {
+		if (i != 0u || pressure_control.dispatch_args.x == 0u) { return; }
+		surface_amount.distance.y++;
+		if (uintBitsToFloat(surface_amount.distance.z) <= params.solve.z
+			|| surface_amount.distance.w == 0u || surface_amount.distance.x == 0u) {
+			pressure_control.dispatch_args.x = 0u;
+		}
+		return;
+	}
+	if ((mode == 18 || mode == 19) && params.solve.y == 1.0) {
+		i *= 2u;
+		if (i >= num_cells()) { return; }
+		ivec3 cell = cell_coord(i);
+		if (((cell.x + cell.y + cell.z) & 1) != mode - 18) { i++; }
+	}
+	if (mode == 0) {
+		if (i == 0u) {
+			surface_amount.dispatch_args = uvec4(0u, 1u, 1u, 0u);
+			surface_amount.stats = uvec4(0u, 0u, 0u, 1u);
+		}
+		return;
+	}
+	if (mode == 2) {
+		if (i != 0u) { return; }
+		float steps = ceil(params.sim.x * uintBitsToFloat(surface_amount.stats.x) / (params.coupling.w > 0.5 ? 0.5 : 0.8));
+		if (isnan(steps) || isinf(steps) || steps > params.surface.z || surface_amount.stats.w == 0u) {
+			surface_amount.stats.y = steps > params.surface.z ? uint(min(steps, 4294967040.0)) : 0u;
+			surface_amount.stats.w = 0u;
+			surface_amount.ledger.z++;
+			return;
+		}
+		surface_amount.stats.y = max(uint(steps), 1u);
+		surface_amount.dispatch_args.x = (num_cells() + APIC_WORKGROUP_SIZE - 1u) / APIC_WORKGROUP_SIZE;
+		return;
+	}
+	if (mode == 5) {
+		if (i != 0u || surface_amount.dispatch_args.x == 0u) { return; }
+		surface_amount.stats.z++;
+		if (surface_amount.stats.z == surface_amount.stats.y) {
+			surface_amount.dispatch_args.x = 0u;
+			precise float previous = uintBitsToFloat(surface_amount.ledger.x);
+			precise float increment = params.sim.x - uintBitsToFloat(surface_amount.ledger.w);
+			precise float next = previous + increment;
+			precise float compensation = (next - previous) - increment;
+			surface_amount.ledger.x = floatBitsToUint(next);
+			surface_amount.ledger.y++;
+			surface_amount.ledger.w = floatBitsToUint(compensation);
+		}
+		return;
+	}
+	if (i >= num_cells()) { return; }
+	if (mode == 34) {
+		if (cell_open_fraction(i) <= 0.0 || cell_vertex_ranges.data[i].w != 0u || surface_amount.data[i].x <= 0.0) { return; }
+		vec3 gradient = params.coupling.x > 0.5 ? amount_interface_normal(cell_coord(i)) : geometry_phi_gradient(cell_coord(i));
+		float phi = params.coupling.w > 0.5 ? full_cell_amount_phi(surface_amount.data[i].x, gradient)
+			: reconstruct_amount_phi(i, gradient);
+		cell_phi_next.data[i] = gradient.x;
+		cell_phi_corrected.data[i] = gradient.y;
+		residual.data[i] = gradient.z;
+		divergence.data[i] = phi;
+		return;
+	}
+	if (mode == 33) {
+		surface_amount.data[i].w = cell_vertex_ranges.data[i].w == 0u
+			&& surface_amount.data[i].x > 0.5 * cell_open_fraction(i) ? 1.0 : 0.0;
+		return;
+	}
+	if (mode == 32) {
+		ivec3 cell = cell_coord(i);
+		float outgoing = 0.0;
+		for (int axis = 0; axis < 3; axis++) {
+			if (params.coupling.w > 0.5 && axis != ((int(params.solve.z) >> 3) & 3) - 1) { continue; }
+			ivec3 right = cell; right[axis]++;
+			outgoing += max(amount_flux(right, axis), 0.0) + max(-amount_flux(cell, axis), 0.0);
+		}
+		float amount_out = outgoing * params.sim.x / (float(surface_amount.stats.y) * params.grid_origin_dx.w);
+		surface_amount.data[i].z = amount_out > 0.0 ? min(1.0, max(surface_amount.data[i].x, 0.0) / amount_out) : 1.0;
+		return;
+	}
+	if (mode == 24 || mode == 25) {
+		float capacity = cell_open_fraction(i);
+		if (capacity <= 0.0) {
+			if (mode == 24) { cell_phi_next.data[i] = 0.0; cell_phi_corrected.data[i] = 0.0; }
+			return;
+		}
+		ivec3 cell = cell_coord(i);
+		float incoming = 0.0, outgoing = 0.0, divergence = 0.0;
+		float dt_over_dx = params.sim.x / (float(surface_amount.stats.y) * params.grid_origin_dx.w);
+		for (int axis = 0; axis < 3; axis++) {
+			ivec3 right = cell; right[axis]++;
+			if (mode == 24) {
+				float minus = amount_antidiffusive_flux(cell, axis) * dt_over_dx;
+				float plus = amount_antidiffusive_flux(right, axis) * dt_over_dx;
+				incoming += max(minus, 0.0) + max(-plus, 0.0);
+				outgoing += max(-minus, 0.0) + max(plus, 0.0);
+			} else {
+				divergence += amount_limited_antidiffusive_flux(right, axis)
+					- amount_limited_antidiffusive_flux(cell, axis);
+			}
+		}
+		float low = surface_amount.data[i].y;
+		if (mode == 24) {
+			cell_phi_next.data[i] = incoming > 0.0 ? min(1.0, max(capacity - low, 0.0) / incoming) : 1.0;
+			cell_phi_corrected.data[i] = outgoing > 0.0 ? min(1.0, max(low, 0.0) / outgoing) : 1.0;
+		} else {
+			float next = low - dt_over_dx * divergence;
+			surface_amount.data[i].y = next;
+			if (isnan(next) || isinf(next) || next < -1.0e-6 * capacity) { atomicExchange(surface_amount.stats.w, 0u); }
+		}
+		return;
+	}
+	if (mode == 15) {
+		float distance = surface_amount.data[i].z > 0.5 ? abs(divergence.data[i])
+			: float(num_cells()) * params.grid_origin_dx.w;
+		cell_phi_next.data[i] = distance;
+		cell_phi_corrected.data[i] = distance;
+		return;
+	}
+	bool red_black = params.solve.y == 1.0;
+	if (mode == 18 || (mode == 19 && red_black)) {
+		if (red_black) {
+			ivec3 cell = cell_coord(i);
+			if (((cell.x + cell.y + cell.z) & 1) != mode - 18) { return; }
+		}
+		float next = amount_distance_update(i);
+		float change = abs(next - cell_phi_next.data[i]);
+		if (red_black) { cell_phi_next.data[i] = next; }
+		else { cell_phi_corrected.data[i] = next; }
+		if (isnan(next) || isinf(next) || isnan(change) || isinf(change)) {
+			atomicExchange(surface_amount.distance.w, 0u);
+		} else {
+			atomicMax(surface_amount.distance.z, floatBitsToUint(change));
+		}
+		return;
+	}
+	if (mode == 19) { cell_phi_next.data[i] = cell_phi_corrected.data[i]; return; }
+	if (mode == 21) {
+		bool valid = pressure_control.dispatch_args.x == 0u && surface_amount.distance.w != 0u;
+		if (i == 0u && !valid) {
+			surface_amount.distance.w = 0u;
+			surface_amount.stats.w = 0u;
+			surface_amount.ledger.z++;
+		}
+		if (valid && surface_amount.distance.x > 0u && cell_open_fraction(i) > 0.0) {
+			if (cell_phi_next.data[i] >= float(num_cells()) * params.grid_origin_dx.w) {
+				surface_amount.data[i].z = -1.0;
+				atomicAdd(pressure_control.dispatch_args.w, 1u);
+			} else {
+				cell_phi.data[i] = surface_amount.data[i].w * cell_phi_next.data[i];
+			}
+		}
+		return;
+	}
+	if (mode == 10) {
+		float capacity = cell_open_fraction(i);
+		float fraction = amount_plane_fraction(i, cell_phi.data[i], geometry_phi_gradient(cell_coord(i)));
+		float amount = surface_amount.data[i].x;
+		cell_phi_next.data[i] = fraction == capacity ? max(capacity - amount, 0.0) : 0.0;
+		cell_phi_corrected.data[i] = max(amount - fraction, 0.0);
+		return;
+	}
+	if (mode == 11) {
+		float next = repair_amount_saturation(i);
+		surface_amount.data[i].y = next;
+		if (isnan(next) || isinf(next) || next < -1.0e-6 * cell_open_fraction(i)) {
+			atomicExchange(surface_amount.stats.w, 0u);
+		}
+		return;
+	}
+	if (mode == 12) { surface_amount.data[i].x = surface_amount.data[i].y; return; }
+	if (mode == 8) {
+		vec3 gradient = geometry_phi_gradient(cell_coord(i));
+		cell_phi_next.data[i] = gradient.x;
+		cell_phi_corrected.data[i] = gradient.y;
+		residual.data[i] = gradient.z;
+		surface_amount.data[i].y = amount_plane_fraction(i, cell_phi.data[i], gradient);
+		return;
+	}
+	if (mode == 9) {
+		vec3 gradient = vec3(cell_phi_next.data[i], cell_phi_corrected.data[i], residual.data[i]);
+		surface_amount.data[i].y = amount_plane_fraction(i, cell_phi.data[i], gradient);
+		return;
+	}
+	if (mode == 28 || mode == 29) {
+		vec3 gradient = amount_frozen_gradient(i);
+		surface_amount.data[i].y = mode == 28 ? cube_tetra_liquid_fraction(cell_phi.data[i], gradient)
+			: cube_liquid_fraction(cell_phi.data[i], gradient);
+		return;
+	}
+	if (mode == 31) {
+		vec3 gradient = amount_interface_normal(cell_coord(i));
+		float amount = surface_amount.data[i].x;
+		float phi = params.coupling.w > 0.5 && cell_vertex_ranges.data[i].w == 0u && amount > 0.0 && amount < 1.0
+			? full_cell_amount_phi(amount, gradient) : reconstruct_amount_phi(i, gradient);
+		float magnitude = length(gradient);
+		vec3 normal = magnitude > 1.0e-8 ? gradient / magnitude : vec3(0.0, 1.0, 0.0);
+		surface_amount.data[i].y = magnitude > 1.0e-8 ? phi / magnitude : phi;
+		surface_amount.data[i].zw = encode_plane_normal(normal);
+		return;
+	}
+	if (mode == 6) {
+		vec3 gradient = params.coupling.x > 0.5 ? amount_interface_normal(cell_coord(i)) : geometry_phi_gradient(cell_coord(i));
+		float amount = surface_amount.data[i].x;
+		float phi = params.coupling.w > 0.5 && cell_vertex_ranges.data[i].w == 0u && amount > 0.0 && amount < 1.0
+			? full_cell_amount_phi(amount, gradient) : reconstruct_amount_phi(i, gradient);
+		float magnitude = length(gradient);
+		if (magnitude > 1.0e-8) {
+			gradient /= magnitude;
+			phi /= magnitude;
+		}
+		cell_phi_next.data[i] = gradient.x;
+		cell_phi_corrected.data[i] = gradient.y;
+		residual.data[i] = gradient.z;
+		surface_amount.data[i].y = phi;
+		return;
+	}
+	if (mode == 13) {
+		bool fixed_distance;
+		float phi = extend_amount_phi(i, fixed_distance);
+		divergence.data[i] = phi;
+		surface_amount.data[i].z = fixed_distance ? 1.0 : 0.0;
+		surface_amount.data[i].w = phi < 0.0 ? -1.0 : 1.0;
+		if (fixed_distance) { atomicAdd(surface_amount.distance.x, 1u); }
+		return;
+	}
+	if (mode == 7) { cell_phi.data[i] = divergence.data[i]; return; }
+	if (mode == 26 || mode == 30) {
+		float current = cell_phi.data[i];
+		if (mode == 26 && amount_inverse_is_identity(i)) { divergence.data[i] = current; return; }
+		vec3 gradient = geometry_phi_gradient(cell_coord(i));
+		float next = pressure_control.dispatch_args.x == 0u && surface_amount.distance.w != 0u
+			? reconstruct_amount_phi(i, gradient) : current;
+		divergence.data[i] = mix(current, next, 0.5);
+		return;
+	}
+	if (mode == 4) { surface_amount.data[i].x = surface_amount.data[i].y; return; }
+	float capacity = cell_open_fraction(i);
+	if (capacity <= 0.0) {
+		if (mode == 3) { surface_amount.data[i].y = 0.0; }
+		return;
+	}
+	ivec3 cell = cell_coord(i);
+	float outgoing = 0.0;
+	float characteristic_rate = 0.0;
+	float divergence = 0.0;
+	float velocity_divergence = 0.0;
+	for (int axis = 0; axis < 3; axis++) {
+		if (mode == 3 && params.coupling.w > 0.5 && axis != ((int(params.solve.z) >> 3) & 3) - 1) { continue; }
+		ivec3 right = cell;
+		right[axis]++;
+		if (mode == 1) {
+			float plus = amount_aperture(right, axis) * max(amount_velocity(right, axis), 0.0);
+			float minus = amount_aperture(cell, axis) * max(-amount_velocity(cell, axis), 0.0);
+			outgoing += plus + minus;
+			characteristic_rate += max(abs(amount_velocity(right, axis)), abs(amount_velocity(cell, axis))) / params.grid_origin_dx.w;
+		} else {
+			velocity_divergence += amount_aperture(right, axis) * amount_velocity(right, axis)
+				- amount_aperture(cell, axis) * amount_velocity(cell, axis);
+			divergence += (int(params.solve.z) & 4) != 0
+				? amount_bounded_geometric_flux(right, axis) - amount_bounded_geometric_flux(cell, axis)
+				: amount_flux(right, axis) - amount_flux(cell, axis);
+		}
+	}
+	if (mode == 1) {
+		float rate = outgoing / (capacity * params.grid_origin_dx.w);
+		if ((int(params.solve.z) & 2) != 0 || params.coupling.w > 0.5) { rate = max(rate, characteristic_rate); }
+		if (isnan(rate) || isinf(rate)) { atomicExchange(surface_amount.stats.w, 0u); }
+		else { atomicMax(surface_amount.stats.x, floatBitsToUint(rate)); }
+		return;
+	}
+	float dt = params.sim.x / float(surface_amount.stats.y);
+	if (params.coupling.w > 0.5) {
+		divergence -= surface_amount.data[i].w * velocity_divergence;
+	}
+	float next = surface_amount.data[i].x - dt * divergence / params.grid_origin_dx.w;
+	surface_amount.data[i].y = next;
+	if (isnan(next) || isinf(next) || next < -1.0e-6 * capacity) { atomicExchange(surface_amount.stats.w, 0u); }
+}
