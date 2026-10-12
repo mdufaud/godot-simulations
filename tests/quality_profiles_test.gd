@@ -7,6 +7,7 @@ extends "res://tests/test_case.gd"
 
 const QUALITY_KEYS := [
 	"ocean_quality_profile", "terrain_quality_profile", "nbody_quality_profile",
+	"river_quality_profile",
 	"planet_quality_profile", "fluid_quality_profile", "tornado_quality_profile",
 	"cloth_quality_profile", "destruction_quality_profile", "grass_quality_profile",
 	"mixwell_quality_profile", "fractal_quality_profile", "non_euclidean_quality_profile",
@@ -39,6 +40,9 @@ func _profile_table() -> void:
 			"ssao", "ssil", "glow"],
 		AmbientFluidQualityProfile: ["msaa"],
 		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow"],
+		RiverQualityProfile: ["water_cell_size_m", "foam_size_px", "reflection_scale", "rapids_reflection",
+			"grass_density", "grass_distance_m", "grass_detail", "grass_shadows", "msaa", "ssao",
+			"reflection_planes", "surface_detail", "foam_detail"],
 	}
 
 

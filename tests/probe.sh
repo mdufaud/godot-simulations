@@ -57,6 +57,7 @@ PROBE_TABLE=(
 	"foam_convergence|600|^FOAM CONVERGENCE DONE|FOAM "
 	"foam_histogram|300|^HISTO DONE|HISTO "
 	"ocean_freeze|120|^TEST PASS ocean_freeze$|OCEAN FREEZE "
+	"river_swe|180|^TEST PASS river_swe$|RIVER SWE "
 	"ocean_contracts|60|^TEST PASS ocean_contracts$|OCEAN CONTRACTS "
 	"ocean_parameters|600|^TEST PASS ocean_parameters_gpu$|OCEAN PARAM "
 	"ocean_swell|240|^TEST PASS ocean_swell$|OCEAN (PARAM|SWELL) "

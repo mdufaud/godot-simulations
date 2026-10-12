@@ -1410,6 +1410,91 @@ func _run_ocean_capture() -> void:
 	_finish("ocean_capture")
 
 
+func _run_river_swe() -> void:
+	await _boot_frames(2)
+	var manager := root.get_node("GameManager")
+	var saved_tier: int = manager.get_setting("river_quality_profile")
+	manager.set_setting("river_quality_profile", 1)
+	var demo: Node = load("res://scenes/river_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.capture_ready() and demo.river.swe.initialized,
+		"river_swe: player boot must initialize the live GPU patch")
+	if not demo.capture_ready():
+		demo.queue_free()
+		_finish("river_swe")
+		return
+	_check(demo.river.water_material.get_shader_parameter("swe_enabled") == true,
+		"river_swe: normal player boot must bind the live surface")
+	_check(demo.river.find_children("*", "MeshInstance3D", true, false).size() == 1,
+		"river_swe: player boot must use one continuous water surface")
+	demo.apply_preset(2)
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	await _boot_frames(900)
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	var snapshot: Dictionary = demo.river.swe.solver.snapshot()
+	var bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, 128 * 192 * 16)
+	var terrain_bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.terrain, 0, bytes.size())
+	var values := bytes.to_float32_array()
+	var terrain := terrain_bytes.to_float32_array()
+	var max_depth := 0.0
+	var max_speed := 0.0
+	var max_change := 0.0
+	var downstream := 0.0
+	var wet_count := 0
+	var finite := true
+	for i in values.size():
+		finite = finite and is_finite(values[i])
+	for cell in values.size() / 4:
+		var i := cell * 4
+		max_depth = maxf(max_depth, values[i + 3])
+		if values[i + 3] > 0.03:
+			max_speed = maxf(max_speed, Vector2(values[i], values[i + 1]).length())
+			max_change = maxf(max_change, absf(values[i + 2] - terrain[i + 1] - demo.config.water_level_m))
+			downstream += values[i + 1]
+			wet_count += 1
+	_check(finite and max_depth > 0.1 and max_depth < 4.0 and max_speed < 15.0,
+		"river_swe: depth and momentum must stay finite and bounded")
+	_check(downstream < 0.0 and max_change > 0.02,
+		"river_swe: computed current must run downstream and change the surface")
+	await _boot_frames(12)
+	var frozen_bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
+	_check(bytes == frozen_bytes and is_zero_approx(demo.river.swe._spray.speed_scale),
+		"river_swe: pause must freeze both the solver and local droplets")
+	demo._menu_builder.impulse_action.pressed.emit()
+	demo.set_frozen(false)
+	await _boot_frames(2)
+	demo.set_frozen(true)
+	await _boot_frames(2)
+	var pulsed: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
+	var pulsed_values := pulsed.to_float32_array()
+	var outward_change := 0.0
+	for cell in values.size() / 4:
+		var point := Vector2(-6.0, -7.0) + Vector2(cell % 128 + 0.5, cell / 128 + 0.5) * 0.125
+		var offset := point - Vector2(2.0, 4.0)
+		if offset.length() > 0.3 and offset.length() < 2.0 and values[cell * 4 + 3] > 0.1:
+			var change := Vector2(pulsed_values[cell * 4] - values[cell * 4], pulsed_values[cell * 4 + 1] - values[cell * 4 + 1])
+			outward_change = maxf(outward_change, change.dot(offset.normalized()))
+	_check(outward_change > 0.2, "river_swe: native impulse action must push water outward")
+	demo._menu_builder.flow_action.pressed.emit()
+	_check(not demo.river.swe.enabled and demo.river._surface.mesh == demo.river._surface_mesh
+		and demo.river.water_material.get_shader_parameter("swe_enabled") == false
+		and demo._menu_builder.impulse_action.disabled,
+		"river_swe: native comparison action must restore guided flow")
+	demo._menu_builder.flow_action.pressed.emit()
+	_check(demo.river.swe.enabled and demo.river._surface.mesh == demo.river._swe_surface_mesh,
+		"river_swe: native comparison must restore the continuous live surface")
+	print("RIVER SWE wet=%d depth_max=%.3f speed_max=%.3f height_change=%.3f mean_downstream=%.3f impulse=%.3f time=%.3f" % [
+		wet_count, max_depth, max_speed, max_change, downstream / maxf(wet_count, 1.0), outward_change, snapshot.time_s])
+	demo.queue_free()
+	await _boot_frames(3)
+	manager.set_setting("river_quality_profile", saved_tier)
+	_finish("river_swe")
+
+
 func _run_ocean_freeze() -> void:
 	await _boot_frames(2)
 	var demo: Node = load("res://scenes/ocean_demo.tscn").instantiate()

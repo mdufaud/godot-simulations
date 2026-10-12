@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="RiverConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/river/river_config.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Calm"
+speed_m_s = 0.22
+water_level_m = -0.12
+clarity = 0.97
+foam_amount = 0.12
+ripple_height_m = 0.008
+roughness = 0.045
+whitewater_strength = 0.0

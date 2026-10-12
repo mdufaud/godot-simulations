@@ -1,0 +1,142 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(rgba32f, set = 0, binding = 0) uniform image2D state_in;
+layout(rgba32f, set = 0, binding = 1) uniform image2D state_out;
+layout(rgba32f, set = 0, binding = 2) uniform readonly image2D terrain;
+layout(rgba32f, set = 0, binding = 3) uniform writeonly image2D surface_out;
+layout(rgba32f, set = 0, binding = 4) uniform writeonly image2D foam_out;
+layout(push_constant, std430) uniform Params {
+    vec4 domain;
+    vec4 grid;
+    vec4 water;
+    vec4 event;
+    vec4 control;
+} params;
+
+ivec2 bound_cell(ivec2 p) {
+    return clamp(p, ivec2(0), ivec2(params.grid.xy) - 1);
+}
+
+vec2 velocity(vec4 q) {
+    return q.x > 0.004 ? q.yz / q.x : vec2(0.0);
+}
+
+vec4 seed_state(ivec2 p) {
+    vec4 bed = imageLoad(terrain, bound_cell(p));
+    float depth = max(bed.y + params.water.x - bed.x, 0.0);
+    float pulse = params.control.y * (sin(params.water.w * 0.9) + 0.35 * sin(params.water.w * 1.73));
+    vec2 v = bed.zw * params.grid.w * (1.0 + pulse * 0.08);
+    return vec4(depth, v * depth, 0.0);
+}
+
+vec4 read_state(ivec2 p) {
+    return imageLoad(state_in, bound_cell(p));
+}
+
+vec4 face_flux(ivec2 p, ivec2 other, vec2 normal) {
+    vec4 ql = read_state(p);
+    vec4 qr = read_state(other);
+    float zl = imageLoad(terrain, bound_cell(p)).x;
+    float zr = imageLoad(terrain, bound_cell(other)).x;
+    float high_bed = max(zl, zr);
+    float hl = max(ql.x + zl - high_bed, 0.0);
+    float hr = max(qr.x + zr - high_bed, 0.0);
+    vec2 vl = velocity(ql);
+    vec2 vr = velocity(qr);
+    float nl = dot(vl, normal);
+    float nr = dot(vr, normal);
+    vec3 ul = vec3(hl, hl * vl);
+    vec3 ur = vec3(hr, hr * vr);
+    vec3 fl = vec3(hl * nl, hl * vl * nl + normal * 0.5 * params.domain.w * hl * hl);
+    vec3 fr = vec3(hr * nr, hr * vr * nr + normal * 0.5 * params.domain.w * hr * hr);
+    float cl = sqrt(params.domain.w * hl);
+    float cr = sqrt(params.domain.w * hr);
+    float sl = min(nl - cl, nr - cr);
+    float sr = max(nl + cl, nr + cr);
+    if (hl < 0.004 && hr > 0.004) sl = min(sl, nr - 2.0 * cr);
+    if (hr < 0.004 && hl > 0.004) sr = max(sr, nl + 2.0 * cl);
+    vec3 flux;
+    if (sl >= 0.0) flux = fl;
+    else if (sr <= 0.0) flux = fr;
+    else flux = (sr * fl - sl * fr + sl * sr * (ur - ul)) / max(sr - sl, 1.0e-8);
+    float concentration = flux.x >= 0.0 ? ql.w / max(ql.x, 0.004) : qr.w / max(qr.x, 0.004);
+    float foam_flux = flux.x * clamp(concentration, 0.0, 1.0);
+    flux.yz += normal * 0.5 * params.domain.w * (ql.x * ql.x - hl * hl);
+    return vec4(flux, foam_flux);
+}
+
+float agitation(ivec2 p, vec4 q) {
+    vec2 v = velocity(q);
+    vec2 east = velocity(read_state(p + ivec2(1, 0)));
+    vec2 west = velocity(read_state(p - ivec2(1, 0)));
+    vec2 north = velocity(read_state(p + ivec2(0, 1)));
+    vec2 south = velocity(read_state(p - ivec2(0, 1)));
+    float compression = max(-(east.x - west.x + north.y - south.y) / (2.0 * params.domain.z), 0.0);
+    float froude = length(v) / sqrt(max(params.domain.w * q.x, 0.01));
+    float shear = length(east - west + north - south) / (2.0 * params.domain.z);
+    return (compression * 0.12 + shear * 0.025
+        + smoothstep(0.9, 1.7, froude) * smoothstep(0.2, 1.0, compression) * 0.3)
+        * smoothstep(0.015, 0.08, q.x) * smoothstep(0.1, 0.7, length(v));
+}
+
+float surface_height(ivec2 p, vec4 q, vec4 bed) {
+    if (q.x > 0.02) return bed.x + q.x;
+    float sum = 0.0;
+    float weight = 0.0;
+    ivec2 offsets[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+    for (int i = 0; i < 4; ++i) {
+        ivec2 cell = bound_cell(p + offsets[i]);
+        vec4 neighbor = read_state(cell);
+        float wet = step(0.02, neighbor.x);
+        sum += (imageLoad(terrain, cell).x + neighbor.x) * wet;
+        weight += wet;
+    }
+    return weight > 0.0 ? sum / weight : bed.y + params.water.x;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
+    vec4 bed = imageLoad(terrain, p);
+    vec4 q = read_state(p);
+    if (params.control.x < 0.5) {
+        q = seed_state(p);
+        imageStore(state_in, p, q);
+        imageStore(state_out, p, q);
+        imageStore(surface_out, p, vec4(velocity(q), q.x > 0.02 ? bed.x + q.x : bed.y + params.water.x, q.x));
+        imageStore(foam_out, p, vec4(0.0));
+        return;
+    }
+    float activity = agitation(p, q);
+    float source = activity * params.water.y * (0.6 + params.control.y);
+    if (params.control.x > 1.5) {
+        imageStore(surface_out, p, vec4(velocity(q), surface_height(p, q, bed), q.x));
+        imageStore(foam_out, p, vec4(clamp(q.w / max(q.x, 0.004), 0.0, 1.0),
+            source / (1.0 + source), clamp(activity, 0.0, 1.0), q.x));
+        return;
+    }
+    float dt = params.grid.z;
+    vec4 flux = face_flux(p, p + ivec2(1, 0), vec2(1, 0))
+        + face_flux(p, p - ivec2(1, 0), vec2(-1, 0))
+        + face_flux(p, p + ivec2(0, 1), vec2(0, 1))
+        + face_flux(p, p - ivec2(0, 1), vec2(0, -1));
+    vec4 next = q - dt / params.domain.z * flux;
+    next.x = max(next.x, 0.0);
+    if (next.x > 0.004) {
+        vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
+        vec2 offset = world - params.event.xy;
+        float kernel = exp(-dot(offset, offset) / max(params.event.z * params.event.z, 0.01));
+        next.yz += offset * kernel * params.event.w * next.x;
+        next.yz /= 1.0 + dt * (0.06 + 0.018 * length(velocity(next)) / max(next.x, 0.05));
+        float foam = clamp(next.w / next.x, 0.0, 1.0) * exp(-dt * 0.8);
+        foam = 1.0 - (1.0 - foam) * exp(-source * dt * 2.0);
+        next.w = foam * next.x;
+    } else next.yzw = vec3(0.0);
+    float edge = min(min(float(p.x), params.grid.x - 1.0 - float(p.x)),
+        min(float(p.y), params.grid.y - 1.0 - float(p.y))) * params.domain.z;
+    float sponge = 1.0 - smoothstep(0.0, 1.5, edge);
+    float restore = edge < params.domain.z ? 1.0 : 1.0 - exp(-dt * sponge * 5.0);
+    next = mix(next, seed_state(p), restore);
+    imageStore(state_out, p, next);
+}

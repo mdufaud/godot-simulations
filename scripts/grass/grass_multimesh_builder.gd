@@ -3,7 +3,7 @@ extends RefCounted
 const LOD_DENSITY := [0.9, 0.9, 0.9, 0.8, 0.8]
 
 
-static func make_tuft_mesh(high_detail: bool) -> ArrayMesh:
+static func make_tuft_mesh(high_detail: bool, include_plumes: bool = true) -> ArrayMesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	surface.set_custom_format(0, SurfaceTool.CUSTOM_RGBA_FLOAT)
@@ -20,10 +20,11 @@ static func make_tuft_mesh(high_detail: bool) -> ArrayMesh:
 			0.043 if high_detail else 0.052,
 			blade_segments, 0)
 	var stalk_direction := Vector3(0.71, 0.0, 0.71)
-	_append_ribbon(surface, Vector3.ZERO, stalk_direction, 1.1, 0.38, 0.008,
-			2, 2)
+	if include_plumes:
+		_append_ribbon(surface, Vector3.ZERO, stalk_direction, 1.1, 0.38, 0.008,
+				2, 2)
 	var head_root := stalk_direction * 0.38 + Vector3.UP * 1.1
-	var head_cards := 3
+	var head_cards := 3 if include_plumes else 0
 	for card in head_cards:
 		var angle := TAU * float(card) / float(head_cards) + 0.16 * float(card - 1)
 		var direction := Vector3(cos(angle), 0.0, sin(angle))

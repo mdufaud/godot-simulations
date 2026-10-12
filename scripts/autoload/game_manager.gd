@@ -20,6 +20,7 @@ var settings: Dictionary = {
 	# Ocean keeps High, the configuration it shipped with; the other demos
 	# default to Medium.
 	"ocean_quality_profile": 2,
+	"river_quality_profile": 1,
 	"terrain_quality_profile": 1,
 	"nbody_quality_profile": 1,
 	"planet_quality_profile": 1,
@@ -53,6 +54,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/ssr_demo.tscn"},
 	{key = "ocean_demo",    title = "FFT Ocean",            icon = "⚓", category = "fluids",
 		scene = "res://scenes/ocean_demo.tscn"},
+	{key = "river_demo",    title = "River",                icon = "🏞️", category = "fluids",
+		scene = "res://scenes/river_demo.tscn"},
 	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles",
 		scene = "res://scenes/fire_demo.tscn"},
 	{key = "nbody_demo",    title = "N-Body Gallery",       icon = "🌌", category = "particles",

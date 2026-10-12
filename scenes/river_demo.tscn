@@ -1,0 +1,67 @@
+[gd_scene load_steps=8 format=3]
+
+[ext_resource type="Script" path="res://scripts/demos/river_controller.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="2"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3"]
+[ext_resource type="Texture2D" path="res://resources/river/river_sky_4k.hdr" id="4"]
+
+[sub_resource type="PanoramaSkyMaterial" id="SkyMaterial"]
+panorama = ExtResource("4")
+
+[sub_resource type="Sky" id="Sky"]
+sky_material = SubResource("SkyMaterial")
+radiance_size = 5
+
+[sub_resource type="Environment" id="Environment"]
+background_mode = 2
+sky = SubResource("Sky")
+sky_rotation = Vector3(0, -2.11087, 0)
+ambient_light_source = 3
+ambient_light_color = Color(0.72, 0.81, 0.86, 1)
+ambient_light_energy = 0.45
+reflected_light_source = 2
+tonemap_mode = 3
+tonemap_exposure = 0.7
+ssao_enabled = true
+ssao_radius = 1.3
+ssao_intensity = 1.1
+fog_enabled = true
+fog_light_color = Color(0.66, 0.75, 0.78, 1)
+fog_density = 0.0018
+fog_sky_affect = 0.15
+
+[node name="RiverDemo" type="Node3D"]
+script = ExtResource("1")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-48, -155, 0)
+light_color = Color(1, 0.97, 0.89, 1)
+light_energy = 1.25
+shadow_enabled = true
+shadow_bias = 0.035
+directional_shadow_mode = 2
+directional_shadow_max_distance = 120.0
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("2")
+min_distance = 8.0
+max_distance = 65.0
+min_pitch = -65.0
+max_pitch = -12.0
+move_speed = 8.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+current = true
+fov = 58.0
+near = 0.08
+far = 280.0
+cull_mask = 3
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3")]
+title = "River"
+persist_id = "river_demo"

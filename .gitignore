@@ -45,6 +45,10 @@ resources/ocean/*
 !resources/ocean/presets/*.tres
 !resources/ocean/looks/
 !resources/ocean/looks/*.tres
+!resources/river/
+resources/river/*
+!resources/river/presets/
+!resources/river/presets/*.tres
 
 .codex
 .claude

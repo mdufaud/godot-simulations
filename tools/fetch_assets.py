@@ -12,9 +12,12 @@ API_URL = "https://api.polyhaven.com/files"
 RESOLUTION = "2k"
 ROCK_ASSETS = ("boulder_01", "rock_face_02", "namaqualand_boulder_03", "namaqualand_cliff_01")
 MATERIAL_ASSETS = ("concrete_wall_001", "grey_tiles")
+RIVER_MATERIAL_ASSETS = ("clean_pebbles", "leafy_grass")
+RIVER_HDRI_ASSET = "kloofendal_48d_partly_cloudy_puresky"
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 ROCKS_DIR = PROJECT_DIR / "resources" / "rocks"
 MATERIALS_DIR = PROJECT_DIR / "resources" / "materials"
+RIVER_DIR = PROJECT_DIR / "resources" / "river"
 
 # Poly Haven's CDN answers 403 to the default Python-urllib User-Agent.
 USER_AGENT = "physics-playground-asset-fetcher"
@@ -60,6 +63,13 @@ def forest_files(asset: str) -> dict[str, str]:
     }
 
 
+def river_hdri_url(asset: str) -> str:
+    try:
+        return fetch_json(f"{API_URL}/{asset}")["hdri"]["4k"]["hdr"]["url"]
+    except KeyError:
+        raise SystemExit(f"no hdri/4k/hdr variant for {asset}")
+
+
 def download(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + ".part")
@@ -88,6 +98,8 @@ def texture_import_uid(import_path: Path) -> str:
 
 def configure_mobile_texture_import(texture: Path) -> bool:
     size_limit = mobile_texture_size(texture)
+    if texture.parent.name in RIVER_MATERIAL_ASSETS:
+        size_limit = 0
     if size_limit is None or not texture.exists():
         return False
 
@@ -147,7 +159,7 @@ def configure_mobile_texture_imports() -> int:
     textures = []
     textures.extend(
         MATERIALS_DIR / asset / f"{asset}_{kind}_{RESOLUTION}.jpg"
-        for asset in MATERIAL_ASSETS
+        for asset in MATERIAL_ASSETS + RIVER_MATERIAL_ASSETS
         for kind in ("diff", "nor_gl", "rough")
     )
     for asset in ROCK_ASSETS:
@@ -156,7 +168,8 @@ def configure_mobile_texture_imports() -> int:
 
 
 def main() -> int:
-    for asset in ROCK_ASSETS:
+    river_only = "--river-only" in sys.argv[1:]
+    for asset in (() if river_only else ROCK_ASSETS):
         print(asset)
         for relpath, url in asset_files(asset).items():
             dest = ROCKS_DIR / asset / relpath
@@ -166,7 +179,7 @@ def main() -> int:
             print(f"  get  {relpath}")
             download(url, dest)
 
-    for asset in MATERIAL_ASSETS:
+    for asset in (RIVER_MATERIAL_ASSETS if river_only else MATERIAL_ASSETS + RIVER_MATERIAL_ASSETS):
         print(asset)
         for relpath, url in material_files(asset).items():
             dest = MATERIALS_DIR / asset / relpath
@@ -175,6 +188,13 @@ def main() -> int:
                 continue
             print(f"  get  {relpath}")
             download(url, dest)
+
+    hdri_path = RIVER_DIR / "river_sky_4k.hdr"
+    if hdri_path.exists():
+        print("skip river_sky_4k.hdr")
+    else:
+        print("get  river_sky_4k.hdr")
+        download(river_hdri_url(RIVER_HDRI_ASSET), hdri_path)
 
     configured = configure_mobile_texture_imports()
     print(f"Configured {configured} mobile texture import profiles.")
