@@ -23,6 +23,7 @@ signal settings_reset
 @onready var _action_lane: ScrollContainer = $BottomRight
 @onready var _action_bar: GridContainer = $BottomRight/ActionBar
 @onready var _panel: PanelContainer = $Panel
+@onready var _header: HBoxContainer = $Panel/VBox/Header
 @onready var _title_label: Label = $Panel/VBox/Header/TitleLabel
 @onready var _close_button: Button = $Panel/VBox/Header/CloseButton
 @onready var _fps_label: Label = $FPSLabel
@@ -53,6 +54,10 @@ var _actions: Array[Button] = []
 var _action_shortcuts: Dictionary = {}
 var _action_layout_key := ""
 var _layout_check_frame := 0
+var _panel_moved := false
+var _dragging_panel := false
+var _drag_offset := Vector2.ZERO
+var _mouse_controller: Node = null
 
 const ACTION_BUTTON_SIZE := Vector2(56.0, 56.0)
 const AZERTY_ACTION_KEYS := "&é\"'(-è_ç"
@@ -89,23 +94,27 @@ func _build_styles() -> void:
 	_sb_empty = StyleBoxEmpty.new()
 
 
-## Center the card in the free area left of the icon lane, capped so it never becomes a
-## full-bleed strip on wide/landscape screens.
 func _layout_panel() -> void:
 	var vp := get_viewport_rect().size
-	var lane := 76.0        # reserved right column: back / gear / debug icons
-	var margin := 20.0
-	var avail := vp.x - lane
-	var w: float = minf(560.0, avail - margin * 2.0)
-	var left: float = margin + maxf(0.0, (avail - margin * 2.0 - w) * 0.5)
-	_panel.anchor_left = 0.0
-	_panel.anchor_right = 0.0
-	_panel.offset_left = left
-	_panel.offset_right = left + w
-	_panel.anchor_top = 0.0
-	_panel.offset_top = 20.0
-	_panel.anchor_bottom = 1.0
-	_panel.offset_bottom = -20.0
+	_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_panel.size = Vector2(minf(440.0, vp.x - 116.0), minf(600.0, vp.y - 80.0))
+	if not _panel_moved:
+		_panel.position = Vector2(20.0, 60.0)
+	_clamp_panel_position()
+
+
+func _clamp_panel_position() -> void:
+	var margin := Vector2(20.0, 20.0)
+	var limit := (get_viewport_rect().size - _panel.size - margin).max(margin)
+	_panel.position = _panel.position.clamp(margin, limit)
+
+
+func _on_header_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_dragging_panel = event.pressed
+		_drag_offset = _panel.get_global_transform().affine_inverse() \
+			* (_header.get_global_transform() * event.position)
+		_header.accept_event()
 
 
 func _layout_action_lane() -> void:
@@ -149,10 +158,11 @@ func _ready() -> void:
 	_close_button.pressed.connect(_on_close_pressed)
 	_reset_button.pressed.connect(_on_reset_pressed)
 	_back_button.pressed.connect(_on_back_pressed)
+	_header.gui_input.connect(_on_header_gui_input)
+	_panel.resized.connect(_clamp_panel_position)
 	# Fat, grabbable scrollbar for touch; drag-to-scroll still works too. Content keeps a
 	# 30px right margin (tscn) so the bar sits in its own lane, not over the sliders.
 	($Panel/VBox/Scroll as ScrollContainer).get_v_scroll_bar().custom_minimum_size.x = 22
-	# Centered, width-capped card (reserves the right icon lane); re-run on rotation/resize.
 	_layout_panel()
 	_layout_action_lane.call_deferred()
 	get_viewport().size_changed.connect(_layout_panel)
@@ -299,6 +309,24 @@ func _update_action_shortcuts() -> void:
 			label.visible = false
 
 
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		toggle_panel()
+		get_viewport().set_input_as_handled()
+		return
+	if not _dragging_panel:
+		return
+	if event is InputEventMouseMotion:
+		_panel_moved = true
+		_panel.position = get_global_transform_with_canvas().affine_inverse() \
+			* event.position - _drag_offset
+		_clamp_panel_position()
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_dragging_panel = event.pressed
+		get_viewport().set_input_as_handled()
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if not _is_pc() or not (event is InputEventKey):
 		return
@@ -344,7 +372,20 @@ func _on_close_pressed() -> void:
 
 ## Show/hide the options panel (also driven by the gear button). Emits panel_toggled.
 func toggle_panel() -> void:
+	_dragging_panel = false
 	_panel.visible = not _panel.visible
+	if _panel.visible:
+		move_to_front()
+		add_to_group("open_sim_menu")
+		_clamp_panel_position()
+		_mouse_controller = get_tree().get_first_node_in_group("captured_mouse")
+		if _mouse_controller != null:
+			_mouse_controller.release_mouse()
+	else:
+		remove_from_group("open_sim_menu")
+		if is_instance_valid(_mouse_controller):
+			_mouse_controller.capture_mouse()
+		_mouse_controller = null
 	panel_toggled.emit(_panel.visible)
 
 

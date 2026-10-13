@@ -5,6 +5,10 @@ signal settings_changed
 
 # Current demo tracking
 var current_demo: String = ""
+var _loading_layer: CanvasLayer
+var _loading_label: Label
+var _loading_spinner: Control
+var _loading_angle := 0.0
 
 # Global settings
 var settings: Dictionary = {
@@ -92,6 +96,63 @@ const DEMOS: Array[Dictionary] = [
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	apply_fps_limit()
+	_create_loading_overlay()
+	set_process(false)
+
+
+func _process(delta: float) -> void:
+	_loading_angle = fmod(_loading_angle + delta * TAU, TAU)
+	_loading_spinner.queue_redraw()
+
+
+func _create_loading_overlay() -> void:
+	_loading_layer = CanvasLayer.new()
+	_loading_layer.name = "LoadingOverlay"
+	_loading_layer.layer = 100
+	_loading_layer.hide()
+	add_child(_loading_layer)
+
+	var background := ColorRect.new()
+	background.color = Color(0.02, 0.03, 0.06, 0.98)
+	_loading_layer.add_child(background)
+	background.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+	var center := CenterContainer.new()
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	background.add_child(center)
+	center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+
+	var content := VBoxContainer.new()
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_theme_constant_override("separation", 20)
+	center.add_child(content)
+
+	var spinner_row := CenterContainer.new()
+	spinner_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_child(spinner_row)
+	_loading_spinner = Control.new()
+	_loading_spinner.custom_minimum_size = Vector2(56, 56)
+	_loading_spinner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_loading_spinner.draw.connect(_draw_loading_spinner)
+	spinner_row.add_child(_loading_spinner)
+
+	_loading_label = Label.new()
+	_loading_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_loading_label.add_theme_font_size_override("font_size", 22)
+	_loading_label.add_theme_color_override("font_color", Color(0.85, 0.9, 0.95))
+	content.add_child(_loading_label)
+
+
+func _draw_loading_spinner() -> void:
+	var center := _loading_spinner.size * 0.5
+	_loading_spinner.draw_arc(center, 24.0, 0.0, TAU, 48, Color(0.12, 0.18, 0.28), 4.0, true)
+	_loading_spinner.draw_arc(center, 24.0, _loading_angle, _loading_angle + TAU * 0.75,
+		48, Color(0.35, 0.62, 1.0), 4.0, true)
+
+
+func _finish_loading() -> void:
+	_loading_layer.hide()
+	set_process(false)
 
 
 ## Push settings["fps_limit"] into the engine. Headless runs (tests, CI) rely on
@@ -111,16 +172,56 @@ static func demo_scene(demo_name: String) -> String:
 
 
 func load_demo(demo_name: String) -> void:
+	if _loading_layer.visible:
+		return
 	var scene := demo_scene(demo_name)
 	if scene.is_empty():
 		push_error("Unknown demo: %s" % demo_name)
 		return
 
+	for demo in DEMOS:
+		if demo.key == demo_name:
+			_loading_label.text = "Loading simulation…\n%s" % demo.title
+	_loading_angle = 0.0
+	_loading_layer.show()
+	set_process(true)
+	await get_tree().process_frame
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+
+	var error := ResourceLoader.load_threaded_request(scene, "PackedScene")
+	if error != OK:
+		push_error("Could not load simulation %s: %s" % [demo_name, error_string(error)])
+		_finish_loading()
+		return
+	var status := ResourceLoader.load_threaded_get_status(scene)
+	while status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+		await get_tree().process_frame
+		status = ResourceLoader.load_threaded_get_status(scene)
+	if status != ResourceLoader.THREAD_LOAD_LOADED:
+		push_error("Could not load simulation: %s" % demo_name)
+		_finish_loading()
+		return
+
+	var packed := ResourceLoader.load_threaded_get(scene) as PackedScene
+	var previous_demo := current_demo
 	current_demo = demo_name
-	get_tree().change_scene_to_file(scene)
+	error = get_tree().change_scene_to_packed(packed)
+	if error != OK:
+		current_demo = previous_demo
+		push_error("Could not start simulation %s: %s" % [demo_name, error_string(error)])
+		_finish_loading()
+		return
+	await get_tree().scene_changed
+	await get_tree().process_frame
+	if DisplayServer.get_name() != "headless":
+		await RenderingServer.frame_post_draw
+	_finish_loading()
 
 
 func go_to_menu() -> void:
+	if _loading_layer.visible:
+		return
 	current_demo = ""
 	get_tree().change_scene_to_file(MAIN_MENU_SCENE)
 

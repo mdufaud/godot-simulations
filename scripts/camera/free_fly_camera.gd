@@ -56,13 +56,17 @@ func _find_camera() -> Camera3D:
 
 
 func capture_mouse() -> void:
+	if get_tree().has_group("open_sim_menu"):
+		return
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_captured = true
+	add_to_group("captured_mouse")
 
 
 func release_mouse() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_captured = false
+	remove_from_group("captured_mouse")
 
 
 func is_captured() -> bool:
@@ -71,13 +75,6 @@ func is_captured() -> bool:
 
 func _input(event: InputEvent) -> void:
 	if _touch_ui:
-		return
-	if event.is_action_pressed("ui_cancel"):
-		if _captured:
-			release_mouse()
-		else:
-			capture_mouse()
-		get_viewport().set_input_as_handled()
 		return
 	# Mouselook must run in _input: the GUI consumes motion events (the pinned
 	# cursor can sit over the menu panel) before _unhandled_input ever fires.
@@ -100,6 +97,13 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel") and not _touch_ui:
+		if _captured:
+			release_mouse()
+		else:
+			capture_mouse()
+		get_viewport().set_input_as_handled()
+		return
 	if _touch_ui:
 		# Any drag reaching here is a look drag: the joystick consumes its own
 		# finger through the GUI, so it never shows up as unhandled.

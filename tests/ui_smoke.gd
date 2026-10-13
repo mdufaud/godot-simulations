@@ -92,6 +92,7 @@ func _run() -> void:
 			_fail("profiler toggle did not turn on root-viewport measurement")
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), true, "gear opens panel")
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false, "gear closes panel")
+	await _check_panel_controls(menu)
 	await _check_viewport_restored()
 	_report()
 
@@ -143,6 +144,70 @@ func _wait_fluid_ready(controller: Node) -> void:
 		await get_tree().process_frame
 	if not controller.fluid.is_ready():
 		_fail("fluid initialization timed out")
+
+
+func _check_panel_controls(menu: SimMenu) -> void:
+	await _press_escape(menu)
+	if not menu.is_panel_open() or get_tree().paused:
+		_fail("Escape did not open settings while keeping the simulation running")
+	var panel := menu.get_node("Panel") as Control
+	var initial_position := panel.position
+	for destination in [Vector2(-500.0, -500.0), menu.get_viewport_rect().size * 2.0]:
+		await _drag_panel(menu, destination)
+		if not menu.get_viewport_rect().encloses(panel.get_global_rect()):
+			_fail("dragged settings escaped the viewport")
+	if panel.position == initial_position:
+		_fail("settings header drag did not move the panel")
+	var dragged_position := panel.position
+	await _press_escape(menu)
+	if menu.is_panel_open():
+		_fail("Escape did not close settings")
+	await _press_escape(menu)
+	if not menu.is_panel_open() or panel.position != dragged_position:
+		_fail("reopening settings lost the dragged position")
+	await _check_toggle(menu, menu.get_node("Panel/VBox/Header/CloseButton"), false,
+		"close button closes dragged panel")
+
+
+func _press_escape(menu: SimMenu) -> void:
+	for pressed in [true, false]:
+		var event := InputEventKey.new()
+		event.keycode = KEY_ESCAPE
+		event.physical_keycode = KEY_ESCAPE
+		event.pressed = pressed
+		menu.get_viewport().push_input(event, true)
+		await get_tree().process_frame
+
+
+func _drag_panel(menu: SimMenu, destination: Vector2) -> void:
+	var title_label := menu.get_node("Panel/VBox/Header/TitleLabel") as Control
+	var start := title_label.get_global_rect().get_center()
+	var viewport := menu.get_viewport()
+	var hover := InputEventMouseMotion.new()
+	hover.position = start
+	hover.global_position = start
+	viewport.push_input(hover, true)
+	await get_tree().process_frame
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = start
+	press.global_position = start
+	viewport.push_input(press, true)
+	await get_tree().process_frame
+	var motion := InputEventMouseMotion.new()
+	motion.position = destination
+	motion.global_position = destination
+	motion.relative = destination - start
+	motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+	viewport.push_input(motion, true)
+	await get_tree().process_frame
+	var release := InputEventMouseButton.new()
+	release.button_index = MOUSE_BUTTON_LEFT
+	release.position = destination
+	release.global_position = destination
+	viewport.push_input(release, true)
+	await get_tree().process_frame
 
 
 func _check_mixwell_periodic() -> void:

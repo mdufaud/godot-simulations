@@ -57,13 +57,6 @@ func _ready() -> void:
 func _input(event: InputEvent) -> void:
 	if _touch_ui:
 		return
-	if event.is_action_pressed("ui_cancel"):
-		if _captured:
-			release_mouse()
-		else:
-			capture_mouse()
-		get_viewport().set_input_as_handled()
-		return
 	if _captured and event is InputEventMouseMotion:
 		var motion := event as InputEventMouseMotion
 		var yaw_delta := deg_to_rad(-motion.relative.x * mouse_sensitivity)
@@ -75,6 +68,13 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel") and not _touch_ui:
+		if _captured:
+			release_mouse()
+		else:
+			capture_mouse()
+		get_viewport().set_input_as_handled()
+		return
 	if _touch_ui:
 		if event is InputEventScreenDrag:
 			var drag := event as InputEventScreenDrag
