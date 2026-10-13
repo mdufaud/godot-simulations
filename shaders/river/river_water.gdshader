@@ -31,6 +31,8 @@ uniform float surface_detail = 0.0;
 uniform vec2 domain_m = vec2(1.0);
 uniform float water_level_m = 0.06;
 uniform float flow_distance_m = 0.0;
+uniform float simulation_time_s = 0.0;
+uniform vec2 foam_reference_flow = vec2(0.0);
 uniform float speed_m_s = 0.85;
 uniform float ripple_height_m = 0.035;
 uniform float clarity = 0.82;
@@ -41,6 +43,7 @@ uniform vec3 deep_color : source_color = vec3(0.035, 0.19, 0.17);
 uniform bool reflection_enabled = true;
 uniform bool foam_enabled = true;
 uniform bool foam_detail = true;
+uniform vec4 geometry_region_m = vec4(-6.0, -7.0, 16.0, 24.0);
 
 varying vec3 world_position;
 varying vec3 surface_normal;
@@ -59,10 +62,31 @@ float moving_noise(vec2 position, vec2 flow, float scale, float mip) {
 }
 
 float ripple(vec2 position, vec2 flow, float activity) {
+	vec2 edge = min(position - geometry_region_m.xy, geometry_region_m.xy + geometry_region_m.zw - position);
+	float geometry_lod = 1.0 - smoothstep(2.0, 12.0, -min(edge.x, edge.y));
 	float large = moving_noise(position, flow, 0.035, 2.0) * 2.0 - 1.0;
 	float small = moving_noise(position + vec2(11.0, 29.0), flow, mix(0.065, 0.16, surface_detail), mix(2.0, 0.5, surface_detail)) * 2.0 - 1.0;
 	float energetic = smoothstep(0.04, 0.35, activity) * whitewater_strength;
-	return ripple_height_m * (large * 0.6 + small * (0.22 + energetic * mix(1.3, 2.4, surface_detail)));
+	return geometry_lod * ripple_height_m * (large * 0.6 + small * (0.22 + energetic * mix(1.3, 2.4, surface_detail)));
+}
+
+vec3 foam_normal(float pattern) {
+	vec3 raised_x = dFdx(world_position) + vec3(0.0, dFdx(pattern) * 0.005, 0.0);
+	vec3 raised_y = dFdy(world_position) + vec3(0.0, dFdy(pattern) * 0.005, 0.0);
+	vec3 normal = normalize(cross(raised_x, raised_y));
+	return normal * sign(normal.y);
+}
+
+float foam_selection(vec2 point, float weight) {
+	vec2 cell = floor(point * 12.5);
+	vec2 local = fract(point * 12.5);
+	vec4 selection = mix(vec4(0.05), vec4(0.95), fract(sin(vec4(
+		dot(cell, vec2(127.1, 311.7)),
+		dot(cell + vec2(1.0, 0.0), vec2(127.1, 311.7)),
+		dot(cell + vec2(0.0, 1.0), vec2(127.1, 311.7)),
+		dot(cell + vec2(1.0, 1.0), vec2(127.1, 311.7)))) * 43758.5453));
+	vec4 weights = smoothstep(selection - vec4(0.04), selection + vec4(0.04), vec4(weight));
+	return mix(mix(weights.x, weights.y, local.x), mix(weights.z, weights.w, local.x), local.y);
 }
 
 vec4 planar_sample(int index, vec3 position) {
@@ -123,6 +147,7 @@ void fragment() {
 		wet_coverage = mix(1.0, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
 		if (wet_coverage <= 0.0) { discard; }
 	}
+	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), live_weight);
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
 	field.a = mix(field.a, smoothstep(0.004, 0.04, live.w), live_weight);
@@ -140,8 +165,11 @@ void fragment() {
 		vec2 coarse_uv2 = flow_uv(p, field.rg, phase2) * 0.17;
 		vec3 coarse = mix(texture(micro_normal, coarse_uv1).rgb, texture(micro_normal, coarse_uv2).rgb,
 			abs(phase * 2.0 - 1.0)) * 2.0 - 1.0;
-		vec2 crossed_uv = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * flow_uv(p, field.rg, phase) * 0.43;
-		vec3 crossed = texture(micro_normal, crossed_uv + vec2(0.32, 0.71)).rgb * 2.0 - 1.0;
+		mat2 rotation = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8));
+		vec2 crossed_uv1 = rotation * flow_uv(p, field.rg, phase) * 0.43 + vec2(0.32, 0.71);
+		vec2 crossed_uv2 = rotation * flow_uv(p, field.rg, phase2) * 0.43 + vec2(0.32, 0.71);
+		vec3 crossed = mix(texture(micro_normal, crossed_uv1).rgb, texture(micro_normal, crossed_uv2).rgb,
+			abs(phase * 2.0 - 1.0)) * 2.0 - 1.0;
 		vec2 slopes = coarse.xy / max(coarse.z, 0.4) + crossed.xy / max(crossed.z, 0.4) * 0.45;
 		float strength = mix(0.025, 0.28, smoothstep(0.005, 0.12, ripple_height_m));
 		normal_world = normalize(normal_world + vec3(slopes.x, 0.0, slopes.y) * strength * surface_detail);
@@ -169,53 +197,61 @@ void fragment() {
 	float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 5.0);
 	vec3 reflected_point = world_position + vec3(normal_world.x, 0.0, normal_world.z)
 		* mix(0.12, 1.5, surface_detail) * smoothstep(0.0, 12.0, length(VERTEX));
-	vec4 reflection = planar_sample(0, reflected_point);
-	if (reflection_planes == 4) {
-		float terrace = texture(bed_height_texture, field_uv).g - water_level_m - p.y * surface_slope;
-		vec3 weights = clamp((vec3(terrace) - terrace_heights_m.xyz)
-			/ max(terrace_heights_m.yzw - terrace_heights_m.xyz, vec3(0.001)), vec3(0.0), vec3(1.0));
-		reflection = reflection * (1.0 - weights.x)
-			+ planar_sample(1, reflected_point) * (weights.x - weights.y)
-			+ planar_sample(2, reflected_point) * (weights.y - weights.z)
-			+ planar_sample(3, reflected_point) * weights.z;
+	vec4 reflection = vec4(0.0);
+	if (reflection_enabled) {
+		reflection = planar_sample(0, reflected_point);
+		if (reflection_planes == 4) {
+			float terrace = texture(bed_height_texture, field_uv).g - water_level_m - p.y * surface_slope;
+			vec3 weights = clamp((vec3(terrace) - terrace_heights_m.xyz)
+				/ max(terrace_heights_m.yzw - terrace_heights_m.xyz, vec3(0.001)), vec3(0.0), vec3(1.0));
+			reflection *= (1.0 - weights.x);
+			if (weights.x - weights.y > 0.001) { reflection += planar_sample(1, reflected_point) * (weights.x - weights.y); }
+			if (weights.y - weights.z > 0.001) { reflection += planar_sample(2, reflected_point) * (weights.y - weights.z); }
+			if (weights.z > 0.001) { reflection += planar_sample(3, reflected_point) * weights.z; }
+		}
 	}
-	float reflection_weight = reflection.a * float(reflection_enabled);
+	float reflection_weight = reflection.a;
 	vec3 reflected_color = reflection.rgb;
 	vec3 sky = vec3(0.27, 0.38, 0.48);
 	reflected_color = mix(sky, reflected_color, reflection_weight);
-	vec2 foam_history = texture(foam_map, field_uv).rg;
-	foam_history = mix(foam_history, texture(swe_foam, live_uv).rg, live_weight);
+	vec2 foam_history = mix(texture(foam_map, field_uv).rg, texture(swe_foam, live_uv).rg, live_weight);
 	float coverage = foam_history.r;
 	float breakup = moving_noise(p + vec2(11.0, 29.0), field.rg, 0.09, 0.0);
 	float foam = smoothstep(0.18, 0.8, coverage) * smoothstep(0.3, 0.62, breakup);
 	float turbulent = whitewater_strength * smoothstep(0.12, 0.65, field.b);
 	foam = max(foam, turbulent * smoothstep(0.4, 0.65, breakup) * 0.55 * foam_amount);
 	if (foam_detail) {
-		vec2 foam_uv1 = flow_uv(p, field.rg, phase) * vec2(0.28, 0.2);
-		vec2 foam_uv2 = flow_uv(p, field.rg, phase2) * vec2(0.28, 0.2);
-		float threads = mix(texture(foam_filaments, foam_uv1).r, texture(foam_filaments, foam_uv2).r,
-			abs(phase * 2.0 - 1.0));
-		float bubbles = mix(texture(foam_bubbles, foam_uv1 * 1.8).r, texture(foam_bubbles, foam_uv2 * 1.8).r,
-			abs(phase * 2.0 - 1.0));
+		float foam_phase = fract(simulation_time_s / 1.5);
+		float foam_phase2 = fract(foam_phase + 0.5);
+		vec2 foam_position = p - foam_reference_flow * flow_distance_m;
+		vec2 foam_relative_velocity = flow_velocity - foam_reference_flow * speed_m_s;
+		vec2 foam_uv1 = (foam_position - foam_relative_velocity * foam_phase * 1.5) * vec2(0.28, 0.2);
+		vec2 foam_uv2 = (foam_position - foam_relative_velocity * foam_phase2 * 1.5) * vec2(0.28, 0.2);
 		float fresh = foam_history.g;
-		float pattern = mix(threads, bubbles, smoothstep(0.1, 0.55, fresh));
+		float fresh_weight = smoothstep(0.1, 0.55, fresh);
+		float pattern1 = mix(texture(foam_filaments, foam_uv1).r, texture(foam_bubbles, foam_uv1 * 1.8).r, fresh_weight);
+		float pattern2 = mix(texture(foam_filaments, foam_uv2).r, texture(foam_bubbles, foam_uv2 * 1.8).r, fresh_weight);
+		vec2 selection_point = foam_position - foam_relative_velocity * foam_phase2 * 1.5;
+		float phase_weight = abs(foam_phase * 2.0 - 1.0);
+		float second_weight = foam_selection(selection_point, phase_weight);
 		float density = max(coverage, turbulent * 0.4 * foam_amount);
-		float threshold = mix(0.84, mix(0.36, 0.24, smoothstep(0.1, 0.55, fresh)), smoothstep(0.04, 0.9, density));
-		float aa = max(fwidth(pattern) * 1.1, 0.015);
-		float cellular = smoothstep(threshold - aa, threshold + aa, pattern) * smoothstep(0.025, 0.22, density);
-		foam = cellular;
-		vec3 raised_x = dFdx(world_position) + vec3(0.0, dFdx(pattern) * 0.005, 0.0);
-		vec3 raised_y = dFdy(world_position) + vec3(0.0, dFdy(pattern) * 0.005, 0.0);
-		vec3 froth_normal = normalize(cross(raised_x, raised_y));
-		froth_normal *= sign(froth_normal.y);
-		normal_world = normalize(mix(normal_world, froth_normal, foam * surface_detail * 0.65));
-		NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
+		float threshold = mix(0.84, mix(0.36, 0.24, fresh_weight), smoothstep(0.04, 0.9, density));
+		float aa1 = max(fwidth(pattern1) * 1.1, 0.015);
+		float aa2 = max(fwidth(pattern2) * 1.1, 0.015);
+		float mask1 = smoothstep(threshold - aa1, threshold + aa1, pattern1);
+		float mask2 = smoothstep(threshold - aa2, threshold + aa2, pattern2);
+		foam = min(mix(mask1, mask2, second_weight) * smoothstep(0.025, 0.22, density), 0.9);
+		if (surface_detail > 0.0) {
+			vec3 froth_normal = normalize(mix(foam_normal(pattern1), foam_normal(pattern2), second_weight));
+			normal_world = normalize(mix(normal_world, froth_normal, foam * surface_detail * 0.65));
+			NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
+		}
 	}
 	foam *= step(0.001, foam_amount) * float(foam_enabled);
 	foam = clamp(foam, 0.0, 0.9);
 	ALBEDO = vec3(0.82, 0.87, 0.83) * foam;
 	EMISSION = mix(mix(body, reflected_color, fresnel), body * (1.0 - fresnel), surface_detail) * (1.0 - foam);
-	RADIANCE = vec4(reflection.rgb, reflection_weight * surface_detail);
+	RADIANCE = vec4(reflection.rgb, reflection_weight * surface_detail * (1.0 - foam));
 	vec3 nx = dFdx(normal_world);
 	vec3 ny = dFdy(normal_world);
 	float variance = min(dot(nx, nx) + dot(ny, ny), 1.0);

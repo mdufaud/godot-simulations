@@ -2,6 +2,7 @@ extends Node3D
 
 const Scenery := preload("res://scripts/demos/river/river_scenery.gd")
 const MenuBuilder := preload("res://scripts/demos/river/river_menu.gd")
+const Interactions := preload("res://scripts/demos/river/river_interactions.gd")
 const PRESETS := [
 	preload("res://resources/river/presets/calm.tres"),
 	preload("res://resources/river/presets/natural_flow.tres"),
@@ -21,6 +22,7 @@ var quality := SimQualityState.new()
 var preset_index := 1
 var _scenery := Scenery.new()
 var _menu_builder := MenuBuilder.new()
+var interactions := Interactions.new()
 var _profile := false
 var _previous_fps_limit := 60
 var _frames := 0
@@ -40,6 +42,10 @@ func _ready() -> void:
 	config = PRESETS[1].duplicate() as RiverConfig
 	river.config = config
 	river.field = _scenery.field
+	river.micro_normal = load("res://resources/ocean/micro_normal.png")
+	river.foam_filaments = load("res://resources/ocean/foam_variant_03_flowing_filaments.png")
+	river.foam_bubbles = load("res://resources/ocean/foam_variant_01_microbubbles.png")
+	river.riverbed_albedo = load("res://resources/materials/clean_pebbles/clean_pebbles_diff_2k.jpg")
 	river.scenery_materials = _scenery.materials
 	river.compute_available = GpuPreflight.available()
 	river.camera = camera
@@ -48,6 +54,9 @@ func _ready() -> void:
 	river.render_size = get_window().size
 	add_child(river)
 	river.start()
+	interactions.river = river
+	interactions.camera = camera
+	add_child(interactions)
 	_menu_builder.build(menu, self, PRESETS)
 	apply_preset(1)
 	river.simulation_changed.connect(func(): _menu_builder.sync_flow(river.swe))
@@ -57,7 +66,7 @@ func _ready() -> void:
 func _process(delta: float) -> void:
 	orbit.target.x = clampf(orbit.target.x, -18.0, 18.0)
 	orbit.target.z = clampf(orbit.target.z, -30.0, 30.0)
-	orbit.target.y = RiverField.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
+	orbit.target.y = RiverLandscape.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
 	river.render_size = get_window().size
 	river.reflection_anchor_z_m = orbit.target.z
 	_scenery.tick(river.simulation_time_s, river.flow_distance_m)
@@ -100,7 +109,7 @@ func set_render_scale(value: float) -> void:
 func _apply_quality(values: Dictionary) -> void:
 	viewport_guard.set_msaa(values.msaa)
 	world_environment.environment.ssao_enabled = values.ssao
-	viewport_guard.set_taa(values.surface_detail == 1.0)
+	viewport_guard.set_taa(false)
 	world_environment.environment.glow_enabled = values.surface_detail == 1.0
 	world_environment.environment.glow_intensity = 0.28
 	world_environment.environment.glow_bloom = 0.0
@@ -150,6 +159,9 @@ func set_capture_params(parameters: Dictionary) -> void:
 		set_grass_enabled(bool(parameters["grass"]))
 	if parameters.has("foam"):
 		set_foam(float(parameters["foam"]))
+	if parameters.has("crates"):
+		for index in int(parameters["crates"]):
+			interactions.throw_crate()
 
 
 func set_frozen(value: bool) -> void:
@@ -159,6 +171,7 @@ func set_frozen(value: bool) -> void:
 
 
 func reset_river() -> void:
+	interactions.clear()
 	apply_preset(preset_index)
 	set_frozen(false)
 
@@ -167,6 +180,7 @@ func set_capture_time(value: float) -> void:
 	river.simulation_time_s = value
 	river.flow_distance_m = value * config.speed_m_s
 	river.water_material.set_shader_parameter("flow_distance_m", river.flow_distance_m)
+	river.water_material.set_shader_parameter("simulation_time_s", value)
 
 
 func set_capture_fixed_delta(value: float) -> void:
@@ -192,7 +206,12 @@ func set_capture_view(view: String) -> void:
 		orbit.distance = 48.0
 		orbit.pitch = -38.0
 		orbit.yaw = 32.0
-	orbit.target.y = RiverField.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
+	elif view == "rocks":
+		orbit.target = Vector3(1.5, 0.0, 8.0)
+		orbit.distance = 7.0
+		orbit.pitch = -42.0
+		orbit.yaw = -30.0
+	orbit.target.y = RiverLandscape.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
 	orbit._update_transform()
 
 
@@ -236,8 +255,9 @@ func set_capture_profiling(enabled: bool) -> void:
 
 
 func capture_metadata(_path: String) -> String:
-	return "CAPTURE META river preset=%s quality=%s swe=%s samples=%d fps=%.2f gpu_ms=%.2f solver_ms=%.2f size=%s window=%s" % [config.display_name.replace(" ", "_"), quality.label(), river.swe.enabled and river.swe.initialized, _sample_count,
-		float(_sample_count) / maxf(_frame_seconds, 0.001), (_gpu_ms + _solver_ms) / maxf(_sample_count, 1.0), _solver_ms / maxf(_sample_count, 1.0), river.render_size, get_tree().root.size]
+	return "CAPTURE META river preset=%s quality=%s swe=%s grid=%s vertices=%d samples=%d fps=%.2f gpu_ms=%.2f solver_ms=%.2f size=%s window=%s" % [config.display_name.replace(" ", "_"), quality.label(), river.swe.active, river.swe.solver.grid,
+		river._surface.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(), _sample_count, float(_sample_count) / maxf(_frame_seconds, 0.001),
+		(_gpu_ms + _solver_ms) / maxf(_sample_count, 1.0), _solver_ms / maxf(_sample_count, 1.0), river.render_size, get_tree().root.size]
 
 
 func _exit_tree() -> void:

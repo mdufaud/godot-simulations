@@ -7,6 +7,7 @@ var plane_count := 1
 var enabled := true
 var include_grass := false
 var reflection_layer := 0
+var field: RiverField
 
 var _owner: Node3D
 var _source_camera: Camera3D
@@ -65,10 +66,10 @@ func set_active(value: bool) -> void:
 func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 	if views.is_empty() or _source_camera == null:
 		return
-	var anchors := _anchors()
+	var anchors := field.reflection_anchors_m
 	for index in views.size():
 		var anchor := anchor_z_m if plane_count == 1 else anchors[index]
-		var plane := RiverField.water_plane(level_m, anchor)
+		var plane := field.reflection_plane(level_m, anchor)
 		var origin := _source_camera.global_position - 2.0 * plane.distance_to(_source_camera.global_position) * plane.normal
 		var forward := -_source_camera.global_basis.z
 		var up := _source_camera.global_basis.y
@@ -81,14 +82,27 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		camera.near = _source_camera.near
 		camera.far = _source_camera.far
 		camera.cull_mask = 1 | reflection_layer | (4 if include_grass else 0)
-		var size := Vector2i((Vector2(render_size) * scale).max(Vector2(16.0, 16.0)))
+		var rect := _crop_rect(index, render_size, level_m) if plane_count == 4 else Rect2(Vector2.ZERO, Vector2(render_size))
+		views[index].render_target_update_mode = SubViewport.UPDATE_ALWAYS if enabled and rect.has_area() else SubViewport.UPDATE_DISABLED
+		if not rect.has_area():
+			continue
+		var size := Vector2i((rect.size * scale).max(Vector2(16.0, 16.0)))
 		if views[index].size != size:
 			views[index].size = size
+		if plane_count == 4:
+			var half_height := tan(deg_to_rad(_source_camera.fov) * 0.5) * camera.near
+			if _source_camera.keep_aspect == Camera3D.KEEP_WIDTH:
+				half_height *= float(render_size.y) / render_size.x
+			var half_width := half_height * float(render_size.x) / render_size.y
+			var uv := (rect.get_center() / Vector2(render_size) - Vector2(0.5, 0.5)) * 2.0
+			camera.keep_aspect = Camera3D.KEEP_HEIGHT
+			camera.set_frustum(2.0 * half_height * rect.size.y / render_size.y,
+				Vector2(-uv.x * half_width, -uv.y * half_height), camera.near, camera.far)
+		else:
+			camera.projection = _source_camera.projection
 		_set_slot(index, "reflection_view", camera.global_transform.affine_inverse())
 		_set_slot(index, "reflection_projection", camera.get_camera_projection())
 		_set_slot(index, "reflection_texture", views[index].get_texture())
-	_sync_environment()
-	_set_material_parameters()
 
 
 func set_profiling(value: bool) -> void:
@@ -102,8 +116,28 @@ func gpu_ms() -> float:
 		return 0.0
 	var total := 0.0
 	for view in views:
-		total += RenderingServer.viewport_get_measured_render_time_gpu(view.get_viewport_rid())
+		if view.render_target_update_mode != SubViewport.UPDATE_DISABLED:
+			total += RenderingServer.viewport_get_measured_render_time_gpu(view.get_viewport_rid())
 	return total
+
+
+func _crop_rect(index: int, size: Vector2i, level_m: float) -> Rect2:
+	var rect := Rect2()
+	var first := true
+	for point in field.surface_points:
+		var terrace := point.y - point.z * field.surface_slope
+		var low := field.terrace_heights_m[maxi(index - 1, 0)]
+		var high := field.terrace_heights_m[mini(index + 1, 3)]
+		if terrace < low - 0.01 or terrace > high + 0.01:
+			continue
+		point.y += level_m
+		if _source_camera.is_position_behind(point):
+			continue
+		for offset: Vector3 in [Vector3(-2.0, -0.8, 0.0), Vector3(2.0, 0.8, 0.0)]:
+			var pixel := _source_camera.unproject_position(point + offset)
+			rect = Rect2(pixel, Vector2.ZERO) if first else rect.expand(pixel)
+			first = false
+	return rect.grow(96.0).intersection(Rect2(Vector2.ZERO, Vector2(size))) if not first else Rect2()
 
 
 func stop() -> void:
@@ -117,17 +151,6 @@ func stop() -> void:
 	_source_camera = null
 	_world = null
 	_material = null
-
-
-func _anchors() -> Vector4:
-	var centers := RiverField.DROP_CENTERS_M
-	var half_width := RiverField.DROP_HALF_WIDTH_M
-	return Vector4(
-		centers.z - half_width,
-		(centers.z + centers.y) * 0.5,
-		(centers.y + centers.x) * 0.5,
-		centers.x + half_width
-	)
 
 
 func _sync_environment() -> void:
@@ -153,10 +176,8 @@ func _set_material_parameters() -> void:
 	if _material == null:
 		return
 	_material.set_shader_parameter("reflection_planes", plane_count)
-	var heights := RiverField.DROP_HEIGHTS_M
-	_material.set_shader_parameter("terrace_heights_m", Vector4(0.0, heights.z, heights.z + heights.y,
-		heights.z + heights.y + heights.x))
-	_material.set_shader_parameter("surface_slope", RiverField.SLOPE)
+	_material.set_shader_parameter("terrace_heights_m", field.terrace_heights_m)
+	_material.set_shader_parameter("surface_slope", field.surface_slope)
 
 
 func _set_slot(index: int, base_name: String, value: Variant) -> void:

@@ -1421,78 +1421,853 @@ func _run_river_swe() -> void:
 	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 		await process_frame
 	_check(demo.capture_ready() and demo.river.swe.initialized,
-		"river_swe: player boot must initialize the live GPU patch")
+		"river_swe: normal player boot must initialize the full river simulation")
 	if not demo.capture_ready():
 		demo.queue_free()
 		_finish("river_swe")
 		return
-	_check(demo.river.water_material.get_shader_parameter("swe_enabled") == true,
-		"river_swe: normal player boot must bind the live surface")
-	_check(demo.river.find_children("*", "MeshInstance3D", true, false).size() == 1,
-		"river_swe: player boot must use one continuous water surface")
+	var flood_pixel := Vector2i((Vector2(8.431, 0.0) / demo.river.field.domain_m + Vector2.ONE * 0.5)
+		* Vector2(demo.river.field.solver_terrain_image.get_size()))
+	_check(demo.river.field.solver_terrain_image.get_pixelv(flood_pixel).a < -0.1,
+		"river_swe: generated source must retain current on banks that are dry at level zero")
+	demo.set_quality_profile(2)
 	demo.apply_preset(2)
 	demo.set_capture_fixed_delta(1.0 / 60.0)
 	await _boot_frames(900)
 	demo.set_frozen(true)
-	await _boot_frames(2)
+	await _boot_frames(3)
 	var snapshot: Dictionary = demo.river.swe.solver.snapshot()
-	var bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, 128 * 192 * 16)
+	var grid: Vector2i = demo.river.swe.solver.grid
+	var bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, grid.x * grid.y * 16)
 	var terrain_bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.terrain, 0, bytes.size())
 	var values := bytes.to_float32_array()
 	var terrain := terrain_bytes.to_float32_array()
 	var max_depth := 0.0
 	var max_speed := 0.0
 	var max_change := 0.0
+	var mean_change := 0.0
 	var downstream := 0.0
 	var wet_count := 0
 	var finite := true
-	for i in values.size():
-		finite = finite and is_finite(values[i])
+	for value in values:
+		finite = finite and is_finite(value)
 	for cell in values.size() / 4:
 		var i := cell * 4
 		max_depth = maxf(max_depth, values[i + 3])
 		if values[i + 3] > 0.03:
 			max_speed = maxf(max_speed, Vector2(values[i], values[i + 1]).length())
-			max_change = maxf(max_change, absf(values[i + 2] - terrain[i + 1] - demo.config.water_level_m))
+			var change: float = values[i + 2] - terrain[i + 1] - demo.config.water_level_m
+			max_change = maxf(max_change, absf(change))
+			mean_change += change
 			downstream += values[i + 1]
 			wet_count += 1
+	mean_change /= maxf(wet_count, 1.0)
 	_check(finite and max_depth > 0.1 and max_depth < 4.0 and max_speed < 15.0,
-		"river_swe: depth and momentum must stay finite and bounded")
-	_check(downstream < 0.0 and max_change > 0.02,
-		"river_swe: computed current must run downstream and change the surface")
+		"river_swe: depth and momentum must remain finite and bounded")
+	_check(downstream < 0.0 and max_change > 0.02 and absf(mean_change) < 0.15,
+		"river_swe: obstacle response must keep the authored mean water level")
 	await _boot_frames(12)
 	var frozen_bytes: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
 	_check(bytes == frozen_bytes and is_zero_approx(demo.river.swe._spray.speed_scale),
-		"river_swe: pause must freeze both the solver and local droplets")
-	demo._menu_builder.impulse_action.pressed.emit()
+		"river_swe: pause must freeze solver and droplets")
+	var old_region: Rect2 = demo.river.swe.region_m
+	var old_mesh: Mesh = demo.river._surface.mesh
+	var old_foam: PackedByteArray = await TextureReadback.new().read_layer(snapshot.foam, 0, bytes.size())
+	_check(old_region == Rect2(-demo.river.field.domain_m * 0.5, demo.river.field.domain_m),
+		"river_swe: the persistent solver must cover the full field")
+	demo.move_capture_camera(Vector3(4.0, 0.0, 0.0))
+	demo.orbit._update_transform()
+	await _boot_frames(4)
+	for distance: float in [8.0, 24.0, 24.5, 56.0, 60.0, 65.0, 12.0]:
+		demo.orbit.distance = distance
+		demo.orbit._update_transform()
+		await _boot_frames(3)
+		_check(demo.river.swe.active and demo.river.swe.region_m == old_region
+			and demo.river.swe.solver.grid == grid and demo.river._surface.mesh == old_mesh,
+			"river_swe: zoom and pan must preserve the solver domain, resolution and water geometry")
+	for pitch: float in [-80.0, -20.0, 5.0]:
+		demo.orbit.pitch = pitch
+		demo.orbit._update_transform()
+		await _boot_frames(3)
+	demo.set_capture_view("default")
+	await _boot_frames(3)
+	var returned: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
+	var returned_foam: PackedByteArray = await TextureReadback.new().read_layer(snapshot.foam, 0, bytes.size())
+	_check(returned == bytes and returned_foam == old_foam,
+		"river_swe: a paused camera round trip must leave the entire water surface and foam byte-identical")
+	demo.set_quality_profile(0)
+	await _boot_frames(3)
+	var low_surface: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
+	_check(low_surface == bytes and demo.river.swe.active and demo.river.swe.solver.grid == grid,
+		"river_swe: render quality must not reset, resize or replace the physics with an impostor")
+	demo.orbit.distance = 65.0
+	demo.orbit._update_transform()
+	var idle_time: float = demo.river.swe.solver.snapshot().time_s
 	demo.set_frozen(false)
-	await _boot_frames(2)
+	await _boot_frames(12)
+	_check(float(demo.river.swe.solver.snapshot().time_s) > idle_time + 0.1,
+		"river_swe: the full river must keep evolving when the camera is distant in Low quality")
+	demo.set_capture_view("default")
+	demo.set_quality_profile(1)
+	demo.apply_preset(1)
+	demo.set_capture_fixed_delta(-1.0)
+	await _boot_frames(4)
+	demo._menu_builder.crate_action.pressed.emit()
+	_check(demo.interactions.crates.size() == 1 and demo.interactions.crates[0].linear_velocity.length() > 5.0,
+		"river_swe: native action must throw a physical crate from the player camera")
+	var crate: RigidBody3D = demo.interactions.crates[0]
+	await physics_frame
+	var point := Vector2(RiverLandscape.center_x(0.0) - 2.0, 0.0)
+	crate.global_position = Vector3(point.x, RiverLandscape.water_height(point, 0.06) + 0.15, point.y)
+	crate.linear_velocity = Vector3.ZERO
+	crate.angular_velocity = Vector3.ZERO
+	var start_position := crate.global_position
+	deadline = Time.get_ticks_msec() + 6000
+	while Time.get_ticks_msec() < deadline:
+		await physics_frame
+	var drift := crate.global_position - start_position
+	print("RIVER SWE crate_position=%s velocity=%s samples=%s support=%s frozen=%s mass=%.2f" % [crate.global_position, crate.linear_velocity, crate._samples, crate.last_support_force_n, crate.freeze, crate.mass])
+	_check(drift.z < -0.8 and absf(crate.global_position.y - RiverLandscape.water_height(Vector2(crate.global_position.x, crate.global_position.z), 0.06)) < 0.7,
+		"river_swe: asynchronous GPU queries must float crates and transport them downstream")
 	demo.set_frozen(true)
+	await physics_frame
+	await physics_frame
+	var paused_position := crate.global_position
+	for frame in 20:
+		await physics_frame
+	_check(crate.global_position.is_equal_approx(paused_position), "river_swe: pause must freeze crates")
+	demo.set_frozen(false)
+	demo._menu_builder.flow_action.pressed.emit()
+	_check(not demo.river.swe.enabled and demo.river.water_material.get_shader_parameter("swe_enabled") == false,
+		"river_swe: comparison action must restore guided flow")
+	demo._menu_builder.crate_action.pressed.emit()
+	_check(demo.interactions.crates.size() == 2, "river_swe: crates must also work with guided flow")
+	var guided_start := crate.global_position
+	deadline = Time.get_ticks_msec() + 2500
+	while Time.get_ticks_msec() < deadline:
+		await physics_frame
+	_check(crate.global_position.z < guided_start.z - 0.2, "river_swe: guided fallback must also advect physical crates")
+	demo.set_capture_view("near")
 	await _boot_frames(2)
-	var pulsed: PackedByteArray = await TextureReadback.new().read_layer(snapshot.surface, 0, bytes.size())
-	var pulsed_values := pulsed.to_float32_array()
-	var outward_change := 0.0
-	for cell in values.size() / 4:
-		var point := Vector2(-6.0, -7.0) + Vector2(cell % 128 + 0.5, cell / 128 + 0.5) * 0.125
-		var offset := point - Vector2(2.0, 4.0)
-		if offset.length() > 0.3 and offset.length() < 2.0 and values[cell * 4 + 3] > 0.1:
-			var change := Vector2(pulsed_values[cell * 4] - values[cell * 4], pulsed_values[cell * 4 + 1] - values[cell * 4 + 1])
-			outward_change = maxf(outward_change, change.dot(offset.normalized()))
-	_check(outward_change > 0.2, "river_swe: native impulse action must push water outward")
+	await RenderingServer.frame_post_draw
+	root.get_texture().get_image().save_png("res://tmp/river-crates-verify.png")
+	demo.reset_river()
+	_check(demo.interactions.crates.is_empty(), "river_swe: reset must clear spawned crates")
 	demo._menu_builder.flow_action.pressed.emit()
-	_check(not demo.river.swe.enabled and demo.river._surface.mesh == demo.river._surface_mesh
-		and demo.river.water_material.get_shader_parameter("swe_enabled") == false
-		and demo._menu_builder.impulse_action.disabled,
-		"river_swe: native comparison action must restore guided flow")
-	demo._menu_builder.flow_action.pressed.emit()
-	_check(demo.river.swe.enabled and demo.river._surface.mesh == demo.river._swe_surface_mesh,
-		"river_swe: native comparison must restore the continuous live surface")
-	print("RIVER SWE wet=%d depth_max=%.3f speed_max=%.3f height_change=%.3f mean_downstream=%.3f impulse=%.3f time=%.3f" % [
-		wet_count, max_depth, max_speed, max_change, downstream / maxf(wet_count, 1.0), outward_change, snapshot.time_s])
+	_check(demo.river.swe.enabled, "river_swe: comparison must restore SWE selection")
+	print("RIVER SWE wet=%d depth_max=%.3f speed_max=%.3f height_change=%.3f mean_change=%.3f downstream=%.3f camera_roundtrip_identical=%s crate_drift=%s" % [
+		wet_count, max_depth, max_speed, max_change, mean_change, downstream / maxf(wet_count, 1.0), returned == bytes and returned_foam == old_foam, drift])
+	await _check_river_queries(demo)
 	demo.queue_free()
 	await _boot_frames(3)
+	await _check_river_flood_and_foam()
+	await _check_river_foam_render()
 	manager.set_setting("river_quality_profile", saved_tier)
 	_finish("river_swe")
+
+
+func _run_river_shutdown() -> void:
+	await _boot_frames(2)
+	var manager := root.get_node("GameManager")
+	manager.set_setting("river_quality_profile", 3)
+	var demo: Node = load("res://scenes/river_demo.tscn").instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.capture_ready() and demo.river.swe.active, "river_shutdown: live river must be ready")
+	if not demo.capture_ready():
+		quit(1)
+		return
+	if not _extra.is_empty() and _extra[0] == "active":
+		print("RIVER SHUTDOWN pending_query=false active=true")
+		manager.quit_game()
+		return
+	demo._menu_builder.crate_action.pressed.emit()
+	var solver: RefCounted = demo.river.swe.solver
+	var pending := false
+	while not pending and Time.get_ticks_msec() < deadline:
+		await process_frame
+		solver._mutex.lock()
+		pending = solver._query_busy
+		solver._mutex.unlock()
+	_check(pending and demo.interactions.crates.size() == 1,
+		"river_shutdown: player crate must have a GPU water query pending at exit")
+	if not pending:
+		quit(1)
+		return
+	print("RIVER SHUTDOWN pending_query=true active=true")
+	manager.quit_game()
+
+
+func _run_river_motion() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(906, 574)
+	root.get_node("GameManager").set_setting("river_quality_profile", 1)
+	var output_dir := "res://tmp/river-motion-probe" if _extra.is_empty() else _extra[0]
+	if output_dir.begins_with("res://"):
+		output_dir = ProjectSettings.globalize_path(output_dir)
+	elif not output_dir.begins_with("/"):
+		output_dir = ProjectSettings.globalize_path("res://" + output_dir)
+	var error := DirAccess.make_dir_recursive_absolute(output_dir)
+	if error != OK:
+		push_error("PROBE NOT DONE river_motion: cannot create output directory %s (%s)" % [output_dir, error])
+		quit(1)
+		return
+	var demo := (load("res://scenes/river_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	demo.set_capture_ui(false)
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	demo.orbit.target = Vector3(2.0, 1.0, 3.5)
+	demo.orbit.distance = 13.0
+	demo.orbit.pitch = -70.0
+	demo.orbit.yaw = 180.0
+	demo.orbit._update_transform()
+	var deadline := Time.get_ticks_msec() + 90000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if not demo.capture_ready() or not demo.river.swe.active:
+		push_error("PROBE NOT DONE river_motion: SWE-backed river did not become ready and active")
+		quit(1)
+		return
+	if not await _river_motion_capture(demo, output_dir, "natural_boot"):
+		quit(1)
+		return
+	while demo.river.simulation_time_s < 7.0 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if demo.river.simulation_time_s < 7.0 or not demo.river.swe.initialized:
+		push_error("PROBE NOT DONE river_motion: Natural Flow did not reach 7 s with SWE initialized")
+		quit(1)
+		return
+	if not await _river_motion_capture(demo, output_dir, "natural_7s"):
+		quit(1)
+		return
+	demo._menu_builder.preset_option.select(2)
+	demo._menu_builder.preset_option.item_selected.emit(2)
+	if demo.preset_index != 2 or not demo.river.swe.initialized or not demo.river.swe.active:
+		push_error("PROBE NOT DONE river_motion: Rapids preset switch reset or disabled SWE")
+		quit(1)
+		return
+	while demo.river.simulation_time_s < 7.0 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if demo.river.simulation_time_s < 7.0:
+		push_error("PROBE NOT DONE river_motion: Rapids did not reach 7 s")
+		quit(1)
+		return
+	if not await _river_motion_capture(demo, output_dir, "rapids_7s"):
+		quit(1)
+		return
+	while demo.river.simulation_time_s < 15.0 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if demo.river.simulation_time_s < 15.0:
+		push_error("PROBE NOT DONE river_motion: Rapids did not reach 15 s")
+		quit(1)
+		return
+	if not await _river_motion_capture(demo, output_dir, "rapids_15s"):
+		quit(1)
+		return
+	var quality_option: OptionButton = demo._menu_builder.quality_option
+	for tier: int in [1, 3]:
+		if demo.quality.requested != tier:
+			quality_option.select(tier)
+			quality_option.item_selected.emit(tier)
+		if demo.quality.requested != tier or demo.quality.effective != tier or not demo.river.swe.initialized or not demo.river.swe.active:
+			push_error("PROBE NOT DONE river_motion: quality %s switch changed SWE state" % demo.quality.label())
+			quit(1)
+			return
+		var quality_name := "medium" if tier == 1 else "ultra"
+		for moving: bool in [false, true]:
+			demo.orbit.distance = 13.0
+			for frame in 180:
+				demo.orbit.yaw = 180.0 + (12.0 * sin(float(frame) / 179.0 * TAU) if moving else 0.0)
+				demo.orbit._update_transform()
+				await process_frame
+				if frame % 6 == 5:
+					var view_name := "moving" if moving else "fixed"
+					if not await _river_motion_capture(demo, output_dir,
+						"%s_%s_%03d" % [quality_name, view_name, frame + 1]):
+						quit(1)
+						return
+		if not demo.river.swe.initialized or not demo.river.swe.active:
+			push_error("PROBE NOT DONE river_motion: SWE stopped during %s camera sequence" % quality_name)
+			quit(1)
+			return
+		demo.orbit.distance = 32.0
+		demo.orbit._update_transform()
+		await _boot_frames(12)
+		if not await _river_motion_capture(demo, output_dir, "%s_far32" % quality_name):
+			quit(1)
+			return
+		demo.orbit.distance = 13.0
+		demo.orbit._update_transform()
+		await _boot_frames(12)
+		if not demo.river.swe.initialized or not demo.river.swe.active:
+			push_error("PROBE NOT DONE river_motion: SWE changed after far-camera return at %s" % quality_name)
+			quit(1)
+			return
+		if not await _river_motion_capture(demo, output_dir, "%s_return13" % quality_name):
+			quit(1)
+			return
+	print("PROBE DONE river_motion dir=%s shots=natural_boot,natural_7s,rapids_7s,rapids_15s,medium,ultra" % output_dir)
+	demo.queue_free()
+	await _boot_frames(2)
+	quit(0)
+
+
+func _river_motion_capture(demo: Node, output_dir: String, name: String) -> bool:
+	await RenderingServer.frame_post_draw
+	var path := output_dir.path_join(name + ".png")
+	var error := root.get_texture().get_image().save_png(path)
+	if error != OK:
+		push_error("PROBE NOT DONE river_motion: failed to save %s (%s)" % [path, error])
+		return false
+	print("RIVER MOTION path=%s time=%.3f preset=%d SWE=%s quality=%s TAA=%s distance=%.1f" % [
+		path, demo.river.simulation_time_s, demo.preset_index, demo.river.swe.active,
+		demo.quality.label(), root.use_taa, demo.orbit.distance])
+	return true
+
+
+func _run_river_foam_render() -> void:
+	await _boot_frames(2)
+	await _check_river_foam_render()
+	_finish("river_foam_render")
+
+
+func _check_river_foam_render() -> void:
+	const SIZE := 256
+	const DOMAIN := Vector2(8.0, 8.0)
+	const TAU := 6.283185307179586
+	var view := SubViewport.new()
+	view.size = Vector2i(SIZE, SIZE)
+	view.own_world_3d = true
+	view.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	root.add_child(view)
+	var camera := Camera3D.new()
+	view.add_child(camera)
+	camera.position = Vector3(0.0, 5.0, 0.0)
+	camera.look_at(Vector3.ZERO, Vector3.BACK)
+	camera.projection = Camera3D.PROJECTION_ORTHOGONAL
+	camera.size = 1.0 / 0.28
+	camera.make_current()
+	var shader := Shader.new()
+	shader.code = FileAccess.get_file_as_string("res://shaders/river/river_water.gdshader") \
+		.replace("depth_draw_always;", "depth_draw_always, unshaded;") \
+		.replace("ALPHA = wet_coverage;", "ALBEDO = vec3(foam); EMISSION = vec3(0.0); RADIANCE = vec4(0.0); ALPHA = wet_coverage;")
+	var material := ShaderMaterial.new()
+	material.shader = shader
+	material.set_shader_parameter("domain_m", DOMAIN)
+	material.set_shader_parameter("foam_detail", true)
+	material.set_shader_parameter("reflection_enabled", false)
+	material.set_shader_parameter("ripple_height_m", 0.0)
+	material.set_shader_parameter("swe_region_m", Vector4(-20.0, -20.0, 40.0, 40.0))
+	var zero_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	zero_image.fill(Color(0.0, 0.0, 0.0, 1.0))
+	var zero_texture := ImageTexture.create_from_image(zero_image)
+	material.set_shader_parameter("bed_height_texture", zero_texture)
+	material.set_shader_parameter("turbulence_texture", zero_texture)
+	material.set_shader_parameter("swe_foam", zero_texture)
+	var terrain_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	terrain_image.fill(Color(-1.0, 0.0, 0.0, 1.0))
+	material.set_shader_parameter("swe_terrain", ImageTexture.create_from_image(terrain_image))
+	var foam_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	foam_image.fill(Color(0.45, 0.0, 0.0, 1.0))
+	var foam_texture := ImageTexture.create_from_image(foam_image)
+	material.set_shader_parameter("foam_map", foam_texture)
+	var pattern_image := Image.create(64, 64, false, Image.FORMAT_RGBAF)
+	var noise_image := Image.create(64, 64, false, Image.FORMAT_RGBAF)
+	for y in 64:
+		for x in 64:
+			var u := float(x) * TAU / 64.0
+			var v := float(y) * TAU / 64.0
+			var filament := clampf(0.5 + 0.32 * sin(3.0 * u + 2.0 * v) + 0.24 * cos(2.0 * u - 5.0 * v)
+				+ 0.18 * sin(7.0 * u + v), 0.0, 1.0)
+			var noise := clampf(0.5 + 0.22 * sin(2.0 * u + v) + 0.18 * cos(3.0 * u - 2.0 * v), 0.0, 1.0)
+			pattern_image.set_pixel(x, y, Color(filament, 0.0, 0.0, 1.0))
+			noise_image.set_pixel(x, y, Color(noise, noise, noise, 1.0))
+	pattern_image.generate_mipmaps()
+	noise_image.generate_mipmaps()
+	var pattern_texture := ImageTexture.create_from_image(pattern_image)
+	var noise_texture := ImageTexture.create_from_image(noise_image)
+	material.set_shader_parameter("foam_filaments", pattern_texture)
+	material.set_shader_parameter("foam_bubbles", pattern_texture)
+	material.set_shader_parameter("turbulence_texture", noise_texture)
+	var surface := MeshInstance3D.new()
+	var mesh := PlaneMesh.new()
+	mesh.size = DOMAIN
+	surface.mesh = mesh
+	surface.material_override = material
+	view.add_child(surface)
+	var field_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	var swe_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	swe_image.fill(Color(0.0, 2.0, 0.0, 1.0))
+	var swe_texture := ImageTexture.create_from_image(swe_image)
+	var foam_cases: Array[Dictionary] = [
+		{"name": "positive_x", "velocity": Vector2(2.0, 0.0), "guide": Vector2.RIGHT, "speed": 2.0, "live": false},
+		{"name": "negative_x", "velocity": Vector2(-2.0, 0.0), "guide": Vector2.LEFT, "speed": 2.0, "live": false},
+		{"name": "positive_z", "velocity": Vector2(0.0, 2.0), "guide": Vector2.DOWN, "speed": 2.0, "live": false},
+		{"name": "double_speed", "velocity": Vector2(4.0, 0.0), "guide": Vector2.RIGHT, "speed": 4.0, "live": false},
+		{"name": "live_swe", "velocity": Vector2(0.0, 2.0), "guide": Vector2.RIGHT, "speed": 2.0, "live": true},
+		{"name": "live_swe_zero_drive", "velocity": Vector2(0.0, 2.0), "guide": Vector2.RIGHT, "speed": 0.0, "live": true},
+	]
+	var initial_images: Array[Image] = []
+	var moved_images: Array[Image] = []
+	var offsets: Array[Vector2] = []
+	for test_case: Dictionary in foam_cases:
+		var velocity: Vector2 = test_case["velocity"]
+		var guide: Vector2 = test_case["guide"]
+		var live: bool = test_case["live"]
+		field_image.fill(Color(guide.x, guide.y, 0.0, 1.0))
+		var field_texture := ImageTexture.create_from_image(field_image)
+		material.set_shader_parameter("flow_map", field_texture)
+		material.set_shader_parameter("speed_m_s", test_case["speed"])
+		material.set_shader_parameter("foam_reference_flow", guide)
+		material.set_shader_parameter("swe_enabled", live)
+		material.set_shader_parameter("swe_surface", swe_texture if live else zero_texture)
+		material.set_shader_parameter("swe_foam", foam_texture if live else zero_texture)
+		material.set_shader_parameter("flow_distance_m", 0.0)
+		material.set_shader_parameter("simulation_time_s", 0.0)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		initial_images.append(view.get_texture().get_image())
+		var distance := float(test_case["speed"]) * 0.05
+		material.set_shader_parameter("flow_distance_m", distance)
+		material.set_shader_parameter("simulation_time_s", 0.05)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		moved_images.append(view.get_texture().get_image())
+		var origin := camera.unproject_position(Vector3.ZERO)
+		var endpoint := camera.unproject_position(Vector3(velocity.x * 0.05, 0.0, velocity.y * 0.05))
+		offsets.append(endpoint - origin)
+	for index in foam_cases.size():
+		var offset: Vector2 = offsets[index]
+		var aligned_error := 0.0
+		var still_error := 0.0
+		var samples := 0.0
+		for y in range(24, SIZE - 24):
+			for x in range(24, SIZE - 24):
+				var source := Vector2(x, y) - offset
+				var low := Vector2i(floori(source.x), floori(source.y))
+				var fraction := source - Vector2(low)
+				var a := initial_images[index].get_pixel(low.x, low.y).srgb_to_linear()
+				var b := initial_images[index].get_pixel(low.x + 1, low.y).srgb_to_linear()
+				var c := initial_images[index].get_pixel(low.x, low.y + 1).srgb_to_linear()
+				var d := initial_images[index].get_pixel(low.x + 1, low.y + 1).srgb_to_linear()
+				var expected := a.lerp(b, fraction.x).lerp(c.lerp(d, fraction.x), fraction.y).r
+				var actual := moved_images[index].get_pixel(x, y).srgb_to_linear().r
+				aligned_error += absf(expected - actual)
+				still_error += absf(initial_images[index].get_pixel(x, y).srgb_to_linear().r - actual)
+				samples += 1.0
+		aligned_error /= samples
+		still_error /= samples
+		_check(offset.length() > 5.0 and aligned_error < 0.04 and aligned_error < still_error * 0.75,
+			"river_foam_render: %s foam must translate by the projected local velocity" % foam_cases[index]["name"])
+		print("RIVER FOAM %s offset=%s aligned=%.5f stationary=%.5f" % [
+			foam_cases[index]["name"], offset, aligned_error, still_error])
+	_check(offsets[0].x * offsets[1].x < 0.0 and absf(offsets[3].x - offsets[0].x * 2.0) < 0.01,
+		"river_foam_render: reversing direction and doubling speed must reverse and double displacement")
+	var means := PackedFloat32Array()
+	var contrasts := PackedFloat32Array()
+	var cycle_images: Array[Image] = []
+	field_image.fill(Color(1.0, 0.0, 0.0, 1.0))
+	var field_texture := ImageTexture.create_from_image(field_image)
+	material.set_shader_parameter("flow_map", field_texture)
+	material.set_shader_parameter("speed_m_s", 2.0)
+	material.set_shader_parameter("foam_reference_flow", Vector2(0.25, 0.0))
+	material.set_shader_parameter("swe_enabled", false)
+	for time: float in [0.0, 0.5, 1.0, 1.5, 2.0]:
+		material.set_shader_parameter("flow_distance_m", time * 2.0)
+		material.set_shader_parameter("simulation_time_s", time)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		var image := view.get_texture().get_image()
+		cycle_images.append(image)
+		var sum := 0.0
+		var squared_sum := 0.0
+		for y in SIZE:
+			for x in SIZE:
+				var value := image.get_pixel(x, y).srgb_to_linear().r
+				sum += value
+				squared_sum += value * value
+		var count := float(SIZE * SIZE)
+		means.append(sum / count)
+		contrasts.append(sqrt(maxf(squared_sum / count - pow(sum / count, 2.0), 0.0)))
+	var baseline_mean := maxf(means[0], 0.0001)
+	var min_contrast := contrasts[0]
+	var mean_error := 0.0
+	for index in range(1, means.size()):
+		mean_error = maxf(mean_error, absf(means[index] - means[0]) / baseline_mean)
+		min_contrast = minf(min_contrast, contrasts[index])
+	_check(means[0] > 0.1 and contrasts[0] > 0.02 and mean_error < 0.05
+		and min_contrast > contrasts[0] * 0.8,
+		"river_foam_render: local foam advection must preserve coverage and contrast over two seconds")
+	var cycle_difference := 0.0
+	for y in SIZE:
+		for x in SIZE:
+			cycle_difference += absf(cycle_images[0].get_pixel(x, y).srgb_to_linear().r
+				- cycle_images[3].get_pixel(x, y).srgb_to_linear().r)
+	cycle_difference /= float(SIZE * SIZE)
+	_check(cycle_difference > 0.05, "river_foam_render: foam must keep travelling across a complete flow cycle")
+	print("RIVER FOAM full_cycle_change=%.6f" % cycle_difference)
+	var phase_edges := [[1.5 - 0.0001, 1.5 + 0.0001], [0.75 - 0.0001, 0.75 + 0.0001],
+		[0.375 - 0.003, 0.375 + 0.003], [1.125 - 0.003, 1.125 + 0.003]]
+	for edge: Array in phase_edges:
+		var edge_images: Array[Image] = []
+		for time: float in edge:
+			material.set_shader_parameter("flow_distance_m", time * 2.0)
+			material.set_shader_parameter("simulation_time_s", time)
+			await RenderingServer.frame_post_draw
+			await RenderingServer.frame_post_draw
+			edge_images.append(view.get_texture().get_image())
+		var edge_error := 0.0
+		var delta_s := float(edge[1]) - float(edge[0])
+		var offset := camera.unproject_position(Vector3(2.0 * delta_s, 0.0, 0.0)) - camera.unproject_position(Vector3.ZERO)
+		for y in range(24, SIZE - 24):
+			for x in range(24, SIZE - 24):
+				var source := Vector2(x, y) - offset
+				var low := Vector2i(floori(source.x), floori(source.y))
+				var fraction := source - Vector2(low)
+				var a := edge_images[0].get_pixel(low.x, low.y).srgb_to_linear()
+				var b := edge_images[0].get_pixel(low.x + 1, low.y).srgb_to_linear()
+				var c := edge_images[0].get_pixel(low.x, low.y + 1).srgb_to_linear()
+				var d := edge_images[0].get_pixel(low.x + 1, low.y + 1).srgb_to_linear()
+				var expected := a.lerp(b, fraction.x).lerp(c.lerp(d, fraction.x), fraction.y).r
+				edge_error += absf(expected - edge_images[1].get_pixel(x, y).srgb_to_linear().r)
+		edge_error /= float((SIZE - 48) * (SIZE - 48))
+		_check(edge_error < 0.01, "river_foam_render: foam transitions must remain continuous after accounting for physical transport")
+		print("RIVER FOAM crossing_time=%.6f aligned_change=%.6f" % [float(edge[0]), edge_error])
+	var normals_shader := Shader.new()
+	normals_shader.code = FileAccess.get_file_as_string("res://shaders/river/river_water.gdshader") \
+		.replace("depth_draw_always;", "depth_draw_always, unshaded;") \
+		.replace("ALPHA = wet_coverage;", "ALBEDO = NORMAL * 0.5 + 0.5; EMISSION = vec3(0.0); RADIANCE = vec4(0.0); ALPHA = wet_coverage;")
+	material.shader = normals_shader
+	var normal_image := Image.create(2, 1, false, Image.FORMAT_RGBAF)
+	normal_image.set_pixel(0, 0, Color(0.2, 0.5, 1.0, 1.0))
+	normal_image.set_pixel(1, 0, Color(0.8, 0.5, 1.0, 1.0))
+	material.set_shader_parameter("micro_normal", ImageTexture.create_from_image(normal_image))
+	material.set_shader_parameter("foam_detail", false)
+	material.set_shader_parameter("foam_enabled", false)
+	material.set_shader_parameter("surface_detail", 1.0)
+	material.set_shader_parameter("ripple_height_m", 0.18)
+	material.set_shader_parameter("flow_map", field_texture)
+	var normals: Array[Image] = []
+	for distance: float in [1.5 - 0.0001, 1.5 + 0.0001]:
+		material.set_shader_parameter("flow_distance_m", distance)
+		await RenderingServer.frame_post_draw
+		await RenderingServer.frame_post_draw
+		normals.append(view.get_texture().get_image())
+	var normal_jump := 0.0
+	for y in SIZE:
+		for x in SIZE:
+			normal_jump += absf(normals[0].get_pixel(x, y).srgb_to_linear().r
+				- normals[1].get_pixel(x, y).srgb_to_linear().r)
+	normal_jump /= float(SIZE * SIZE)
+	_check(normal_jump < 0.005, "river_foam_render: Ultra water normals must remain continuous when the flow phase wraps")
+	print("RIVER FOAM mean_error=%.5f min_contrast=%.5f normal_phase_jump=%.6f" % [mean_error, min_contrast, normal_jump])
+	view.queue_free()
+	await _boot_frames(2)
+
+
+func _river_query(river: RiverSystem, points: PackedVector2Array) -> Dictionary:
+	if not river.submit_queries(points):
+		_check(false, "river_swe: query submission must succeed")
+		return {}
+	var deadline := Time.get_ticks_msec() + 10000
+	while Time.get_ticks_msec() < deadline:
+		var batch := river.take_query_batch()
+		if not batch.is_empty():
+			_check(batch.points == points and batch.values.size() == points.size() * 4,
+				"river_swe: queries must preserve order and return exactly four values per point")
+			return batch
+		await process_frame
+	_check(false, "river_swe: query readback must finish before its deadline")
+	return {}
+
+
+func _check_river_queries(demo: Node) -> void:
+	var river: RiverSystem = demo.river
+	var query_deadline := Time.get_ticks_msec() + 10000
+	while demo.interactions._pending and Time.get_ticks_msec() < query_deadline:
+		await physics_frame
+	_check(not demo.interactions._pending, "river_swe: crate query ownership must drain before direct query checks")
+	demo.set_frozen(true)
+	river.swe.set_enabled(false)
+	var rock: Vector4 = river.field.obstacles[0]
+	var bank_x := RiverLandscape.center_x(0.0) + RiverLandscape.half_width(0.0)
+	var bank_end := bank_x + 8.0
+	for iteration in 28:
+		var middle := (bank_x + bank_end) * 0.5
+		var depth := river.field.sample_height(Vector2(middle, 0.0), river.config.water_level_m) - river.field.sample_bed(Vector2(middle, 0.0))
+		if depth > 0.06:
+			bank_x = middle
+		else:
+			bank_end = middle
+	var guided_points := PackedVector2Array([Vector2(bank_x, 0.0), Vector2(rock.x, rock.y),
+		Vector2(rock.x, rock.y - rock.z * 2.0), Vector2(100.0, 100.0)])
+	var batch := await _river_query(river, guided_points)
+	if batch.is_empty():
+		return
+	_check(absf(batch.values[3] - 0.06) < 0.00001 and batch.values[7] == 0.0
+		and batch.values[13] == 0.0 and batch.values[14] == 0.0 and batch.values[15] == 0.0,
+		"river_swe: initialized guided queries must preserve shallow depth, dry obstacles and domain bounds")
+	var wake_flow := river.field.sample(guided_points[2], river.config.water_level_m)
+	_check(absf(batch.values[9] - wake_flow.r * river.config.speed_m_s) < 0.00001
+		and absf(batch.values[10] - wake_flow.g * river.config.speed_m_s) < 0.00001,
+		"river_swe: guided queries must use the current-level obstacle-deflected flow")
+	river.swe.set_enabled(true)
+	for tier: int in [1, 2]:
+		demo.set_quality_profile(tier)
+		await _boot_frames(3)
+		var region := river.swe.region_m
+		var points := PackedVector2Array([region.get_center(), region.position + Vector2(1.75, 12.0),
+			Vector2(RiverLandscape.center_x(region.end.y + 1.0), region.end.y + 1.0)])
+		var status := river.swe.solver.snapshot()
+		var grid := river.swe.solver.grid
+		var bytes := await TextureReadback.new().read_layer(status.surface, 0, grid.x * grid.y * 16)
+		var published := RiverField.new()
+		published.domain_m = region.size
+		published.solver_terrain_image = Image.create_from_data(grid.x, grid.y, false, Image.FORMAT_RGBAF, bytes)
+		batch = await _river_query(river, points)
+		if batch.is_empty():
+			return
+		for index in points.size():
+			var point := points[index]
+			var surface := published._sample_data(point - region.get_center())
+			var flow := river.field.sample(point, river.config.water_level_m)
+			var height := river.field.sample_height(point, river.config.water_level_m)
+			var depth := maxf(height - river.field.sample_bed(point), 0.0) if flow.a > 0.0 else 0.0
+			var inside := Rect2(-river.field.domain_m * 0.5, river.field.domain_m).has_point(point)
+			var guided := Vector4(height, flow.r * river.config.speed_m_s if inside else 0.0,
+				flow.g * river.config.speed_m_s if inside else 0.0, depth if inside else 0.0)
+			var live := Vector4(surface.b, surface.r, surface.g, surface.a)
+			var weight := 1.0 if index == 0 else (0.5 if index == 1 else 0.0)
+			var expected := guided.lerp(live, weight)
+			for channel in 4:
+				_check(absf(batch.values[index * 4 + channel] - expected[channel]) < 0.0001,
+					"river_swe: query blend must match the published surface inside, across and outside the fixed domain")
+		if tier == 2:
+			var expected: PackedFloat32Array = batch.values
+			_check(river.submit_queries(points), "river_swe: snapshot query must be accepted")
+			_check(not river.submit_queries(points), "river_swe: pending GPU batch must reject another query")
+			var old_level := river.config.water_level_m
+			demo.move_capture_camera(Vector3(4.0, 0.0, 0.0))
+			demo.orbit._update_transform()
+			demo.set_quality_profile(0)
+			demo.set_level(old_level + 0.1)
+			await _boot_frames(3)
+			var deadline := Time.get_ticks_msec() + 10000
+			batch = river.take_query_batch()
+			while batch.is_empty() and Time.get_ticks_msec() < deadline:
+				await process_frame
+				batch = river.take_query_batch()
+			_check(not batch.is_empty(), "river_swe: camera and quality changes must not strand a GPU batch")
+			if not batch.is_empty():
+				for index in expected.size():
+					_check(absf(batch.values[index] - expected[index]) < 0.0001,
+						"river_swe: in-flight query weights and guided values must retain their submission state")
+			_check((demo._menu_builder.flow_action.find_child("ActionCaption", true, false) as Label).text == "SWE"
+				and river.swe.active, "river_swe: Low must retain the selected live solver")
+	print("RIVER SWE queries=guided_and_live snapshot=true camera_independent=true")
+
+
+func _check_river_flood_and_foam() -> void:
+	var river := RiverSystem.new()
+	river.config = RiverConfig.new()
+	river.config.water_level_m = 0.0
+	river.config.foam_amount = 0.0
+	river.field = RiverField.new()
+	river.field.domain_m = Vector2(24.07, 40.03)
+	river.field.solver_terrain_image = Image.create(2, 2, false, Image.FORMAT_RGBAF)
+	river.field.solver_terrain_image.fill(Color(0.0, 0.0, 0.0, -1.0))
+	river.camera = Camera3D.new()
+	root.add_child(river.camera)
+	river.scene_world = river.camera.get_world_3d()
+	river.compute_available = GpuPreflight.available()
+	river.solver_quality = 2
+	river.reflection_scale = 0.0
+	river.foam_size_px = Vector2i(16, 16)
+	river.frozen = true
+	river.fixed_delta_s = 1.0 / 60.0
+	root.add_child(river)
+	river.start()
+	var deadline := Time.get_ticks_msec() + 10000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(river.swe.initialized, "river_swe: isolated basin must initialize through RiverSystem.start")
+	_check(river.swe.region_m.size == Vector2(river.swe.solver.grid) * river.swe.cell_m,
+		"river_swe: custom field UV bounds must match the rounded simulation grid")
+	if not river.swe.initialized:
+		river.camera.queue_free()
+		river.queue_free()
+		return
+	for count: int in [1, 4, 32]:
+		var points := PackedVector2Array()
+		points.resize(count)
+		points.fill(Vector2.ZERO)
+		var batch := await _river_query(river, points)
+		if not batch.is_empty():
+			_check(batch.values[3] == 0.0, "river_swe: a dry basin must initially have zero depth")
+	await _check_river_foam_sources(river)
+	var start_time := float(river.swe.solver.snapshot().time_s)
+	river.config.water_level_m = 0.06
+	river.apply_config(river.config)
+	_check(not river.swe._reset, "river_swe: raising the level must preserve accumulated solver state")
+	river.frozen = false
+	deadline = Time.get_ticks_msec() + 10000
+	while float(river.swe.solver.snapshot().time_s) < start_time + 2.0 and Time.get_ticks_msec() < deadline:
+		await process_frame
+	river.frozen = true
+	var flooded := await _river_query(river, PackedVector2Array([Vector2.ZERO]))
+	if not flooded.is_empty():
+		_check(flooded.values[3] > 0.02 and flooded.values[2] < -0.01,
+			"river_swe: a level increase must wet isolated dry cells and restore their driving current without reset")
+		print("RIVER SWE flood_depth=%.6f flood_velocity_z=%.6f" % [flooded.values[3], flooded.values[2]])
+	await _check_river_foam_rates(river)
+	river.swe.set_enabled(true)
+	await _boot_frames(3)
+	_check(river.swe.active and river.submit_queries(PackedVector2Array([Vector2.ZERO]))
+		and not river._query_weights.is_empty(), "river_swe: stop regression must have an outstanding GPU query")
+	var cache_hits := ShaderCache._hits
+	var cache_misses := ShaderCache._misses
+	river.stop()
+	_check(river.take_query_batch().is_empty() and river._query_weights.is_empty() and river._query_guided.is_empty(),
+		"river_swe: stop must discard all pending query data")
+	river.start()
+	deadline = Time.get_ticks_msec() + 10000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(river.swe.initialized, "river_swe: restart after a pending GPU query must initialize")
+	_check(ShaderCache._hits > cache_hits and ShaderCache._misses == cache_misses,
+		"river_swe: restart must reuse cached bytecode without compiling the unchanged shader")
+	if river.swe.initialized:
+		var restarted := await _river_query(river, PackedVector2Array([Vector2.ZERO]))
+		if not restarted.is_empty():
+			_check(restarted.values[3] > 0.05, "river_swe: restart must deliver a new water batch without stale query data")
+	river.stop()
+	river.camera.queue_free()
+	river.queue_free()
+	await _boot_frames(3)
+
+
+func _check_river_foam_sources(river: RiverSystem) -> void:
+	var original_field := river.field
+	var original_config := river.config.duplicate() as RiverConfig
+	var source_cases := ["uniform", "transverse_shear", "grade", "convergence", "eddy", "drop"]
+	for case_name: String in source_cases:
+		river.stop()
+		river.field = _river_foam_source_field(case_name)
+		river.config.water_level_m = 0.0
+		river.config.speed_m_s = 1.0
+		river.config.foam_amount = 1.0
+		river.config.whitewater_strength = 1.0
+		river.frozen = true
+		river.start()
+		var deadline := Time.get_ticks_msec() + 10000
+		while (not river.swe.initialized or river.swe._reset) and Time.get_ticks_msec() < deadline:
+			await process_frame
+		_check(river.swe.initialized, "river_swe: %s source field must initialize" % case_name)
+		if not river.swe.initialized:
+			break
+		await RenderingServer.frame_post_draw
+		var grid := river.swe.solver.grid
+		var status: Dictionary = river.swe.solver.snapshot()
+		var bytes: PackedByteArray = await TextureReadback.new().read_layer(status.foam, 0, grid.x * grid.y * 16)
+		_check(not bytes.is_empty(), "river_swe: %s foam source readback failed" % case_name)
+		if bytes.is_empty():
+			continue
+		var values := bytes.to_float32_array()
+		var max_source := 0.0
+		var center_source := 0.0
+		var away_source := 0.0
+		for y in grid.y:
+			for x in grid.x:
+				var offset := (y * grid.x + x) * 4
+				var source: float = values[offset + 1]
+				var world_x := (float(x) + 0.5) * river.swe.cell_m - grid.x * river.swe.cell_m * 0.5
+				var world_z := (float(y) + 0.5) * river.swe.cell_m - grid.y * river.swe.cell_m * 0.5
+				max_source = maxf(max_source, source)
+				if absf(world_x) < 0.5 and absf(world_z) < 0.5:
+					center_source = maxf(center_source, source)
+				elif (absf(world_z) > 2.0 if case_name == "drop" else Vector2(world_x, world_z).length() > 2.0):
+					away_source = maxf(away_source, source)
+		if case_name in ["convergence", "eddy", "drop"]:
+			_check(center_source > 0.01 and away_source < 0.001,
+				"river_swe: %s must create localized foam source (center=%.6f away=%.6f)" % [case_name, center_source, away_source])
+		else:
+			_check(max_source < 0.001,
+				"river_swe: %s flow must not create foam source (max=%.6f)" % [case_name, max_source])
+		print("RIVER SWE foam_source case=%s max=%.6f center=%.6f away=%.6f" % [case_name, max_source, center_source, away_source])
+	river.stop()
+	river.field = original_field
+	river.config = original_config
+	river.start()
+	var deadline := Time.get_ticks_msec() + 10000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(river.swe.initialized, "river_swe: original isolated basin must restart after foam source cases")
+
+
+func _river_foam_source_field(case_name: String) -> RiverField:
+	var field := RiverField.new()
+	field.domain_m = Vector2(8.0, 8.0)
+	var size := Vector2i(64, 64)
+	var image := Image.create(size.x, size.y, false, Image.FORMAT_RGBAF)
+	for y in size.y:
+		var world_z := (float(y) + 0.5) * 0.125 - 4.0
+		for x in size.x:
+			var world_x := (float(x) + 0.5) * 0.125 - 4.0
+			var transverse := 0.0
+			var longitudinal := -1.2
+			var height := 0.8
+			if case_name == "transverse_shear":
+				transverse = 0.25 * world_z
+			elif case_name == "grade":
+				height += 0.04 * world_z
+			elif case_name == "drop":
+				height += 0.4 * smoothstep(-0.6, 0.6, world_z)
+			elif case_name in ["convergence", "eddy"]:
+				var influence := exp(-0.5 * (world_x * world_x + world_z * world_z))
+				transverse = -0.8 * (world_z if case_name == "eddy" else world_x) * influence
+				longitudinal += 0.8 * (world_x if case_name == "eddy" else -world_z) * influence
+			image.set_pixel(x, y, Color(0.0, height, transverse, longitudinal))
+	field.solver_terrain_image = image
+	return field
+
+
+func _check_river_foam_rates(river: RiverSystem) -> void:
+	river.swe.set_enabled(false)
+	river.config.speed_m_s = 1.0
+	river.config.foam_amount = 1.0
+	river.config.whitewater_strength = 0.0
+	var flow_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	flow_image.fill(Color(0.0, 0.0, 0.2, 0.5))
+	var flow_texture := ImageTexture.create_from_image(flow_image)
+	var noise_image := Image.create(1, 1, false, Image.FORMAT_RGBAF)
+	noise_image.fill(Color(0.5, 0.5, 0.5, 1.0))
+	var noise_texture := ImageTexture.create_from_image(noise_image)
+	for material in river._foam_materials:
+		material.set_shader_parameter("flow_map", flow_texture)
+		material.set_shader_parameter("turbulence_texture", noise_texture)
+	var coverages := PackedFloat32Array()
+	for rate: int in [30, 60, 120]:
+		river.fixed_delta_s = 1.0 / rate
+		river.reset()
+		river.frozen = false
+		var deadline := Time.get_ticks_msec() + 15000
+		while river._reset_frames > 0 and Time.get_ticks_msec() < deadline:
+			await process_frame
+		var target_time := river.simulation_time_s + 5.0
+		while river.simulation_time_s < target_time and Time.get_ticks_msec() < deadline:
+			await process_frame
+		_check(river.simulation_time_s >= target_time, "river_swe: foam rate trial must simulate five seconds")
+		river.frozen = true
+		await RenderingServer.frame_post_draw
+		var image := river._foam_views[1 - river._foam_index].get_texture().get_image()
+		coverages.append(image.get_pixel(8, 8).r)
+	_check(coverages[1] > 0.001, "river_swe: foam comparison must have measurable transported coverage")
+	for coverage in coverages:
+		_check(absf(coverage - coverages[1]) / maxf(coverages[1], 0.000001) < 0.05,
+			"river_swe: guided foam coverage must agree within five percent at 30, 60 and 120 FPS")
+	print("RIVER SWE foam_30=%.6f foam_60=%.6f foam_120=%.6f" % [coverages[0], coverages[1], coverages[2]])
 
 
 func _run_ocean_freeze() -> void:

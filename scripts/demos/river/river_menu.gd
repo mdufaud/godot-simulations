@@ -6,7 +6,7 @@ var pause_button: Button
 var preset_action: Button
 var quality_option: OptionButton
 var flow_action: Button
-var impulse_action: Button
+var crate_action: Button
 var _menu: SimMenu
 var _level_dragging := false
 
@@ -42,7 +42,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 	flow_action = menu.add_action("💧", "Flow", func():
 		controller.river.swe.set_enabled(not controller.river.swe.enabled)
 		sync_flow(controller.river.swe))
-	impulse_action = menu.add_action("💥", "Impulse", func(): controller.river.swe.disturb())
+	crate_action = menu.add_action("📦", "Throw crate", controller.interactions.throw_crate)
 	sync_flow(controller.river.swe)
 	menu.settings_reset.connect(func(): controller.apply_preset(1))
 
@@ -57,9 +57,8 @@ func sync(config: RiverConfig, index: int) -> void:
 
 
 func sync_flow(swe: Node3D) -> void:
-	var live: bool = swe.enabled and swe.available
+	var live: bool = swe.active
 	_menu.set_action_label(flow_action, "SWE" if live else "Guided flow")
 	flow_action.disabled = not swe.available
 	flow_action.tooltip_text = "Compare live flow around the rocks with guided flow"
-	impulse_action.disabled = not live or not swe.initialized
-	impulse_action.tooltip_text = "Create a pressure wave between the rocks"
+	crate_action.tooltip_text = "Throw a floating crate into the current"

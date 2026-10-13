@@ -21,12 +21,16 @@ void fragment() {
 	vec2 previous_uv = UV - velocity * delta_s / domain_m;
 	vec2 inside = step(vec2(0.0), previous_uv) * step(previous_uv, vec2(1.0));
 	float history = texture(previous_foam, clamp(previous_uv, vec2(0.0), vec2(1.0))).r;
-	history *= inside.x * inside.y * exp(-delta_s * 1.1);
+	history *= inside.x * inside.y;
 	float noise = texture(turbulence_texture, (position - field.rg * simulation_time_s * speed_m_s) * 0.24).r;
 	float breakup = mix(0.25, 1.0, smoothstep(0.3, 0.7, noise));
 	float source = field.b * breakup * foam_amount * sqrt(max(speed_m_s, 0.0)) * (1.0 + whitewater_strength);
-	float foam = 1.0 - (1.0 - history) * exp(-source * delta_s * 1.8);
-	foam *= field.a;
+	float wet = field.a;
+	float source_rate = source * 1.8;
+	float reference_survival = wet * exp(-(1.1 + source_rate) / 60.0);
+	float equilibrium = wet * (1.0 - exp(-source_rate / 60.0)) / max(1.0 - reference_survival, 0.000001);
+	float survival = wet > 0.0 ? pow(wet, delta_s * 60.0) * exp(-(1.1 + source_rate) * delta_s) : 0.0;
+	float foam = mix(equilibrium, history, survival);
 	vec2 result = mix(vec2(foam, source / (1.0 + source)), texture(swe_foam, river_swe_uv(position)).rg, weight);
 	COLOR = vec4(reset ? vec2(0.0) : result, 0.0, 1.0);
 }

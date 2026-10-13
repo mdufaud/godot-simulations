@@ -58,6 +58,9 @@ PROBE_TABLE=(
 	"foam_histogram|300|^HISTO DONE|HISTO "
 	"ocean_freeze|120|^TEST PASS ocean_freeze$|OCEAN FREEZE "
 	"river_swe|180|^TEST PASS river_swe$|RIVER SWE "
+	"river_shutdown|90|^TEST PASS river_shutdown$|RIVER SHUTDOWN "
+	"river_motion|240|^PROBE DONE river_motion|RIVER MOTION "
+	"river_foam_render|60|^TEST PASS river_foam_render$|RIVER FOAM "
 	"ocean_contracts|60|^TEST PASS ocean_contracts$|OCEAN CONTRACTS "
 	"ocean_parameters|600|^TEST PASS ocean_parameters_gpu$|OCEAN PARAM "
 	"ocean_swell|240|^TEST PASS ocean_swell$|OCEAN (PARAM|SWELL) "
@@ -197,18 +200,22 @@ run_probe() {
 	local stdout_log="$LOG_DIR/$name.stdout.log"
 	local godot_log="$LOG_DIR/$name.godot.log"
 	local status=0
+	local launch=("$GODOT")
+	if [[ "$name" == river_shutdown ]]; then
+		launch=(bash -c 'ulimit -c 0; "$@"; result=$?; if (( result == 0 )); then printf "TEST PASS river_shutdown\n"; fi; exit "$result"' -- "$GODOT")
+	fi
 	physics_test_run_process "$timeout_seconds" "$PROBE_SENTINEL" "$stdout_log" \
 		env -u DISPLAY \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
+		"${launch[@]}" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
 			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
 			--log-file "$godot_log" \
 			-s res://tests/probe.gd -- "$name" "$@" || status=$?
 
-	if rg -q '^(SCRIPT ERROR:|ERROR:)' "$stdout_log" 2>/dev/null; then
+	if rg -q '^(SCRIPT ERROR:|ERROR:|handle_crash:)' "$stdout_log" 2>/dev/null; then
 		status=1
 	elif (( status == 0 )) && ! grep -q -- "$PROBE_SENTINEL" "$stdout_log" 2>/dev/null; then
 		status=1

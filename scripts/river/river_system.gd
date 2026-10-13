@@ -27,6 +27,10 @@ var fixed_delta_s := -1.0
 var simulation_time_s := 0.0
 var flow_distance_m := 0.0
 var water_material: ShaderMaterial
+var micro_normal: Texture2D
+var foam_filaments: Texture2D
+var foam_bubbles: Texture2D
+var riverbed_albedo: Texture2D
 var reflection_viewport: SubViewport
 var reflection_camera: Camera3D
 var _foam_views: Array[SubViewport] = []
@@ -38,9 +42,12 @@ var _reset_frames := 2
 var _started := false
 var _reflection_requested := true
 var _surface_mesh: PlaneMesh
-var _swe_surface_mesh: Mesh
 var _surface: MeshInstance3D
 var _reflections := Reflections.new()
+var _query_in_flight := false
+var _cpu_query_batch: Dictionary = {}
+var _query_guided := PackedFloat32Array()
+var _query_weights := PackedFloat32Array()
 
 
 func start() -> void:
@@ -53,13 +60,13 @@ func start() -> void:
 		return
 	water_material = ShaderMaterial.new()
 	water_material.shader = load("res://shaders/river/river_water.gdshader")
-	water_material.set_shader_parameter("domain_m", RiverField.DOMAIN_M)
-	water_material.set_shader_parameter("micro_normal", load("res://resources/ocean/micro_normal.png"))
-	water_material.set_shader_parameter("foam_filaments", load("res://resources/ocean/foam_variant_03_flowing_filaments.png"))
-	water_material.set_shader_parameter("foam_bubbles", load("res://resources/ocean/foam_variant_01_microbubbles.png"))
+	water_material.set_shader_parameter("domain_m", field.domain_m)
+	water_material.set_shader_parameter("micro_normal", micro_normal)
+	water_material.set_shader_parameter("foam_filaments", foam_filaments)
+	water_material.set_shader_parameter("foam_bubbles", foam_bubbles)
 	water_material.set_shader_parameter("surface_detail", surface_detail)
 	water_material.set_shader_parameter("foam_detail", foam_detail)
-	water_material.set_shader_parameter("riverbed_albedo", load("res://resources/materials/clean_pebbles/clean_pebbles_diff_2k.jpg"))
+	water_material.set_shader_parameter("riverbed_albedo", riverbed_albedo)
 	var noise := FastNoiseLite.new()
 	noise.seed = 5289
 	noise.frequency = 0.04
@@ -72,7 +79,7 @@ func start() -> void:
 	_turbulence_texture.noise = noise
 	water_material.set_shader_parameter("turbulence_texture", _turbulence_texture)
 	_surface_mesh = PlaneMesh.new()
-	_surface_mesh.size = RiverField.DOMAIN_M
+	_surface_mesh.size = field.domain_m
 	set_surface_cell_size_m(surface_cell_size_m)
 	_surface = MeshInstance3D.new()
 	_surface.name = "RiverSurface"
@@ -115,6 +122,8 @@ func apply_config(value: RiverConfig) -> void:
 		_reset_frames = 2
 	water_material.set_shader_parameter("water_level_m", config.water_level_m)
 	water_material.set_shader_parameter("speed_m_s", config.speed_m_s)
+	var reference_flow := field.sample_solver(Vector2.ZERO, config.water_level_m)
+	water_material.set_shader_parameter("foam_reference_flow", Vector2(reference_flow.r, reference_flow.g))
 	water_material.set_shader_parameter("clarity", config.clarity)
 	water_material.set_shader_parameter("ripple_height_m", config.ripple_height_m)
 	water_material.set_shader_parameter("roughness", config.roughness)
@@ -164,20 +173,16 @@ func reflection_gpu_ms() -> float:
 func set_surface_cell_size_m(value: float) -> void:
 	surface_cell_size_m = value
 	if _surface_mesh != null:
-		_surface_mesh.subdivide_width = maxi(ceili(RiverField.DOMAIN_M.x / value) - 1, 0)
-		_surface_mesh.subdivide_depth = maxi(ceili(RiverField.DOMAIN_M.y / value) - 1, 0)
-		_swe_surface_mesh = null
+		_surface_mesh.subdivide_width = maxi(ceili(field.domain_m.x / value) - 1, 0)
+		_surface_mesh.subdivide_depth = maxi(ceili(field.domain_m.y / value) - 1, 0)
 		if _surface != null:
 			_sync_surface()
 
 
 func _sync_surface() -> void:
-	if swe != null and swe.enabled and swe.initialized:
-		if _swe_surface_mesh == null:
-			_swe_surface_mesh = SweSystem.surface_mesh(_surface_mesh)
-		_surface.mesh = _swe_surface_mesh
-	else:
-		_surface.mesh = _surface_mesh
+	var region := Rect2(-field.domain_m * 0.5, field.domain_m)
+	water_material.set_shader_parameter("geometry_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
+	_surface.mesh = _surface_mesh
 	simulation_changed.emit()
 
 
@@ -210,7 +215,7 @@ func _build_foam() -> void:
 		add_child(viewport)
 		var material := ShaderMaterial.new()
 		material.shader = load("res://shaders/river/river_foam.gdshader")
-		material.set_shader_parameter("domain_m", RiverField.DOMAIN_M)
+		material.set_shader_parameter("domain_m", field.domain_m)
 		material.set_shader_parameter("turbulence_texture", _turbulence_texture)
 		var rect := ColorRect.new()
 		rect.size = Vector2(viewport.size)
@@ -221,6 +226,7 @@ func _build_foam() -> void:
 
 
 func _build_reflection() -> void:
+	_reflections.field = field
 	_reflections.reflection_layer = REFLECTION_LAYER
 	_reflections.scale = reflection_scale
 	_reflections.plane_count = reflection_plane_count
@@ -246,6 +252,7 @@ func _process(delta: float) -> void:
 	simulation_time_s += step
 	flow_distance_m += config.speed_m_s * step
 	water_material.set_shader_parameter("flow_distance_m", flow_distance_m)
+	water_material.set_shader_parameter("simulation_time_s", simulation_time_s)
 	var previous := 1 - _foam_index
 	_foam_views[previous].render_target_update_mode = SubViewport.UPDATE_DISABLED
 	_foam_materials[previous].set_shader_parameter("previous_foam", null)
@@ -269,12 +276,68 @@ func reset() -> void:
 	_reset_frames = 2
 	swe.reset()
 	water_material.set_shader_parameter("flow_distance_m", 0.0)
+	water_material.set_shader_parameter("simulation_time_s", 0.0)
+
+
+func submit_queries(points: PackedVector2Array) -> bool:
+	if not _started or _query_in_flight or points.is_empty() or points.size() > SweSystem.Solver.MAX_QUERIES:
+		return false
+	points = points.duplicate()
+	_query_in_flight = true
+	var values := PackedFloat32Array()
+	var weights := PackedFloat32Array()
+	var domain := Rect2(-field.domain_m * 0.5, field.domain_m)
+	var needs_gpu := false
+	for point in points:
+		var height := field.sample_height(point, config.water_level_m)
+		var flow := field.sample(point, config.water_level_m)
+		var wet := domain.has_point(point) and flow.a > 0.0
+		values.append_array(PackedFloat32Array([height,
+			flow.r * config.speed_m_s if wet else 0.0, flow.g * config.speed_m_s if wet else 0.0,
+			maxf(height - field.sample_bed(point), 0.0) if wet else 0.0]))
+		var edge := (point - swe.region_m.position).min(swe.region_m.end - point)
+		var weight := smoothstep(1.0, 2.5, minf(edge.x, edge.y)) if swe.active and domain.has_point(point) else 0.0
+		weights.append(weight)
+		needs_gpu = needs_gpu or weight > 0.0
+	if needs_gpu:
+		_query_guided = values
+		_query_weights = weights
+		var parameters := swe.solver.parameters(config, simulation_time_s)
+		RenderingServer.call_on_render_thread(swe.solver.query_render.bind(points, parameters))
+	else:
+		_cpu_query_batch = {"points": points, "values": values}
+	return true
+
+
+func take_query_batch() -> Dictionary:
+	if not _started:
+		return {}
+	var batch := _cpu_query_batch
+	if batch.is_empty() and swe.initialized:
+		batch = swe.solver.take_query_batch()
+		if not batch.is_empty():
+			var live: PackedFloat32Array = batch.values
+			for index in _query_weights.size():
+				for channel in 4:
+					var offset := index * 4 + channel
+					live[offset] = lerpf(_query_guided[offset], live[offset], _query_weights[index])
+			batch["values"] = live
+	if not batch.is_empty():
+		_query_in_flight = false
+		_cpu_query_batch = {}
+		_query_guided = PackedFloat32Array()
+		_query_weights = PackedFloat32Array()
+	return batch
 
 
 func stop() -> void:
 	if not _started:
 		return
 	_started = false
+	_query_in_flight = false
+	_cpu_query_batch = {}
+	_query_guided = PackedFloat32Array()
+	_query_weights = PackedFloat32Array()
 	set_process(false)
 	_reflections.stop()
 	swe.stop()
@@ -293,7 +356,6 @@ func stop() -> void:
 	reflection_viewport = null
 	reflection_camera = null
 	_surface_mesh = null
-	_swe_surface_mesh = null
 	_surface = null
 
 

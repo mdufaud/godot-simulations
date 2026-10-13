@@ -6,6 +6,10 @@ signal state_changed
 
 var config: RiverConfig
 var field: RiverField
+var region_m := Rect2()
+var cell_m := Solver.CELL_M
+var active: bool:
+	get: return enabled and initialized
 var materials: Array[ShaderMaterial] = []
 var available := false
 var enabled := true
@@ -18,56 +22,19 @@ var terrain_texture := Texture2DRD.new()
 var _spray: GPUParticles3D
 var _spray_material: ShaderMaterial
 var _reset := true
-var _impulse := Vector4.ZERO
 
 
 func start() -> void:
 	if not available:
 		state_changed.emit()
 		return
+	region_m = Rect2(-field.domain_m * 0.5, field.domain_m)
+	solver.cell_m = cell_m
+	solver.grid = Vector2i((field.domain_m / cell_m).ceil())
+	region_m.size = Vector2(solver.grid) * cell_m
+	solver.region_m = region_m
 	_build_spray()
 	solver.start(field, config)
-
-
-static func surface_mesh(base: PlaneMesh) -> Mesh:
-	var steps := Vector2i(base.subdivide_width + 1, base.subdivide_depth + 1)
-	if maxf(base.size.x / steps.x, base.size.y / steps.y) <= Solver.CELL_M:
-		return base
-	var x := _surface_axis(base.size.x, steps.x, Solver.REGION_M.position.x, Solver.REGION_M.end.x)
-	var z := _surface_axis(base.size.y, steps.y, Solver.REGION_M.position.y, Solver.REGION_M.end.y)
-	var vertices := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var indices := PackedInt32Array()
-	vertices.resize(x.size() * z.size())
-	normals.resize(vertices.size())
-	normals.fill(Vector3.UP)
-	for row in z.size():
-		for column in x.size():
-			var index := row * x.size() + column
-			vertices[index] = Vector3(x[column], 0.0, z[row])
-			if row < z.size() - 1 and column < x.size() - 1:
-				indices.append_array(PackedInt32Array([index, index + x.size(), index + 1,
-					index + 1, index + x.size(), index + x.size() + 1]))
-	var arrays := []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_INDEX] = indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
-
-
-static func _surface_axis(extent_m: float, steps: int, low_m: float, high_m: float) -> PackedFloat32Array:
-	var points := PackedFloat32Array()
-	for index in steps + 1:
-		var point := -extent_m * 0.5 + index * extent_m / steps
-		if point < low_m or point > high_m:
-			points.append(point)
-	for index in roundi((high_m - low_m) / Solver.CELL_M) + 1:
-		points.append(low_m + index * Solver.CELL_M)
-	points.sort()
-	return points
 
 
 func set_enabled(value: bool) -> void:
@@ -79,13 +46,8 @@ func set_enabled(value: bool) -> void:
 
 func reset() -> void:
 	_reset = true
-	_impulse = Vector4.ZERO
 	if _spray != null:
 		_spray.restart(true)
-
-
-func disturb() -> void:
-	_impulse = Vector4(2.0, 4.0, 1.2, 1.5)
 
 
 func tick(step_s: float, frame_s: float, time_s: float) -> void:
@@ -103,15 +65,14 @@ func tick(step_s: float, frame_s: float, time_s: float) -> void:
 		return
 	_spray.speed_scale = step_s / maxf(frame_s, 0.0001)
 	_spray_material.set_shader_parameter("strength", config.whitewater_strength * config.foam_amount)
-	if enabled and (step_s > 0.0 or _reset):
+	if active and (step_s > 0.0 or _reset):
 		RenderingServer.call_on_render_thread(solver.advance_render.bind(step_s,
-			solver.parameters(config, time_s, _impulse), _reset, profiling))
+			solver.parameters(config, time_s), _reset, profiling))
 		_reset = false
-		_impulse = Vector4.ZERO
 
 
 func gpu_ms() -> float:
-	return float(solver.snapshot().get("gpu_ms", 0.0)) if enabled else 0.0
+	return float(solver.snapshot().get("gpu_ms", 0.0)) if active else 0.0
 
 
 func stop() -> void:
@@ -134,8 +95,7 @@ func stop() -> void:
 
 
 func _bind() -> void:
-	var active := enabled and initialized
-	var region := Solver.REGION_M
+	var region := region_m
 	for material in materials + [_spray_material]:
 		if material == null:
 			continue
@@ -154,7 +114,7 @@ func _build_spray() -> void:
 	var emitters: Array[Vector4] = []
 	for rock in field.obstacles:
 		var point := Vector2(rock.x, rock.y) + Vector2(0.0, rock.z * 1.08)
-		if Solver.REGION_M.grow(-2.0).has_point(point):
+		if emitters.size() < 13:
 			emitters.append(Vector4(point.x, point.y, rock.z * 0.25, 0.0))
 	_spray_material = ShaderMaterial.new()
 	_spray_material.shader = load("res://shaders/river/river_splash.gdshader")
@@ -178,7 +138,7 @@ func _build_spray() -> void:
 	_spray.use_fixed_seed = true
 	_spray.seed = 41927
 	_spray.local_coords = false
-	_spray.visibility_aabb = AABB(Vector3(-8.0, -3.0, -9.0), Vector3(20.0, 12.0, 28.0))
+	_spray.visibility_aabb = AABB(Vector3(-field.domain_m.x * 0.5, -3.0, -field.domain_m.y * 0.5), Vector3(field.domain_m.x, 12.0, field.domain_m.y))
 	_spray.process_material = _spray_material
 	_spray.draw_pass_1 = droplet
 	_spray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

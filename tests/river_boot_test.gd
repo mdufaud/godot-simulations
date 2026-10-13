@@ -6,21 +6,24 @@ func _initialize() -> void:
 
 
 func _run() -> void:
-	_check_surface_mesh()
 	root.size = Vector2i(1280, 720)
+	_check_reflection_crop()
 	var initial_msaa := root.msaa_3d
 	var initial_taa := root.use_taa
 	var initial_render_scale := root.scaling_3d_scale
 	await process_frame
 	var manager := root.get_node("GameManager")
 	manager.call("set_setting", "river_quality_profile", 1)
-	manager.call("load_demo", "river_demo")
+	await manager.call("load_demo", "river_demo")
 	await process_frame
 	await process_frame
 	var demo := current_scene as Node3D
 	_check(demo.preset_index == 1, "Player boot must select Natural Flow")
 	_check(is_equal_approx(demo.config.water_level_m, 0.06), "Player boot must apply the natural water level")
 	_check(demo.river.water_material.get_shader_parameter("flow_map") != null, "Player boot must bind the flow map")
+	var reference_flow: Color = demo.river.field.sample_solver(Vector2.ZERO, demo.config.water_level_m)
+	_check(demo.river.water_material.get_shader_parameter("foam_reference_flow") == Vector2(reference_flow.r, reference_flow.g),
+		"Player boot must bind the reference current for continuous foam transport")
 	_check(demo.river.water_material.get_shader_parameter("bed_height_texture") != null, "Player boot must bind the riverbed depth fallback")
 	_check(demo.river.water_material.get_shader_parameter("reflection_texture") != null, "Player boot must bind the planar reflection")
 	_check(demo.river.water_material.get_shader_parameter("foam_detail") == true
@@ -30,12 +33,12 @@ func _run() -> void:
 	var action: Button = demo._menu_builder.preset_action
 	_check(actions.get_child_count() == 3 and action.get_parent() == actions
 		and demo._menu_builder.flow_action.get_parent() == actions
-		and demo._menu_builder.impulse_action.get_parent() == actions,
-		"River preset, flow comparison and impulse must use native actions")
+		and demo._menu_builder.crate_action.get_parent() == actions,
+		"River preset, flow comparison and thrown crates must use native actions")
 	_check(demo.river.swe.enabled and demo.river.swe.available == GpuPreflight.available(),
 		"Player boot must request the live SWE system with an explicit GPU availability check")
 	_check((demo._menu_builder.flow_action.find_child("ActionCaption", true, false) as Label).text
-		== ("SWE" if GpuPreflight.available() else "Guided flow"), "Flow action must identify the active system")
+		== ("SWE" if demo.river.swe.active else "Guided flow"), "Flow action must identify the active system")
 	demo.river.swe.set_enabled(false)
 	demo.apply_preset(2)
 	_check(not demo.river.swe.enabled, "Water presets must preserve guided flow selection")
@@ -78,7 +81,7 @@ func _run() -> void:
 			"Quality tier must resize both foam textures")
 		_check(demo.river.water_material.get_shader_parameter("foam_detail") == (tier > 0),
 			"Medium and above must use textured foam while Low retains the simple pattern")
-		_check(demo.river._surface_mesh.subdivide_width == ceili(RiverField.DOMAIN_M.x / values.water_cell_size_m) - 1,
+		_check(demo.river._surface_mesh.subdivide_width == ceili(RiverLandscape.DOMAIN_M.x / values.water_cell_size_m) - 1,
 			"Quality tier must change the water mesh resolution")
 		_check(is_equal_approx(demo.river.reflection_scale, values.reflection_scale), "Quality tier must set reflection resolution")
 		_check(demo.river._reflections.views.size() == values.reflection_planes,
@@ -87,7 +90,7 @@ func _run() -> void:
 			"Quality tier must enable the detailed water and foam shader")
 		_check(is_equal_approx(float(demo._scenery.materials[0].get_shader_parameter("water_detail")), values.surface_detail),
 			"Quality tier must enable the underwater caustics through the runtime scenery")
-		_check(root.use_taa == (tier == 3), "Ultra must apply temporal antialiasing")
+		_check(not root.use_taa, "River quality must preserve moving foam without temporal history")
 		if tier == 3:
 			for slot in range(1, 4):
 				_check(demo.river.water_material.get_shader_parameter("reflection_texture_%d" % slot) != null,
@@ -106,13 +109,16 @@ func _run() -> void:
 	manager.call("go_to_menu")
 	await process_frame
 	await process_frame
-	manager.call("load_demo", "river_demo")
+	await manager.call("load_demo", "river_demo")
 	await process_frame
 	await process_frame
 	demo = current_scene as Node3D
 	_check(demo.quality.requested == 0 and demo._menu_builder.quality_option.selected == 0
 		and demo.river.reflection_viewport.render_target_update_mode == SubViewport.UPDATE_DISABLED,
 		"Player re-entry must restore Low quality before rendering and building controls")
+	_check((demo._menu_builder.flow_action.find_child("ActionCaption", true, false) as Label).text
+		== ("SWE" if demo.river.swe.active else "Guided flow"),
+		"Low quality must identify the active solver while retaining the SWE selection")
 	demo.set_quality_profile(1)
 	var original := load("res://resources/river/presets/natural_flow.tres") as RiverConfig
 	demo.apply_preset(1)
@@ -129,7 +135,9 @@ func _run() -> void:
 	var time_s: float = demo.river.simulation_time_s
 	await process_frame
 	await process_frame
-	_check(is_equal_approx(time_s, demo.river.simulation_time_s), "Pause must freeze water time")
+	_check(is_equal_approx(time_s, demo.river.simulation_time_s)
+		and is_equal_approx(float(demo.river.water_material.get_shader_parameter("simulation_time_s")), time_s),
+		"Pause must freeze the physical and rendered foam clocks")
 	demo.reset_river()
 	_check(not demo.river.frozen and is_equal_approx(demo.config.speed_m_s, 0.85), "Reset must restore the current preset and resume")
 	var fps_limit := Engine.max_fps
@@ -153,47 +161,105 @@ func _run() -> void:
 	_check(root.msaa_3d == initial_msaa and root.use_taa == initial_taa
 		and is_equal_approx(root.scaling_3d_scale, initial_render_scale),
 		"Leaving Ultra must restore the original root viewport antialiasing and scale")
-	manager.call("load_demo", "river_demo")
+	await manager.call("load_demo", "river_demo")
 	await process_frame
 	await process_frame
 	demo = current_scene as Node3D
 	_check(demo.quality.requested == 3 and demo.quality.effective == 3
 		and demo.river._reflections.views.size() == 4,
 		"Normal Ultra boot must restore every terrace reflection without capture setup")
-	_check(demo.preset_index == 1 and root.use_taa
+	_check(demo.preset_index == 1 and not root.use_taa
 		and is_equal_approx(float(demo.river.water_material.get_shader_parameter("surface_detail")), 1.0)
 		and is_equal_approx(float(demo._scenery.materials[0].get_shader_parameter("water_detail")), 1.0),
-		"Normal Ultra boot must apply detailed water, caustics and temporal antialiasing")
+		"Normal Ultra boot must apply detailed water and caustics without temporal foam trails")
 	manager.call("go_to_menu")
 	await process_frame
+	await process_frame
+	var portable := RiverSystem.new()
+	portable.config = RiverConfig.new()
+	portable.field = RiverField.new()
+	portable.field.domain_m = Vector2(24.0, 40.0)
+	portable.camera = Camera3D.new()
+	root.add_child(portable.camera)
+	portable.scene_world = portable.camera.get_world_3d()
+	root.add_child(portable)
+	portable.start()
+	_check(portable.water_material.get_shader_parameter("domain_m") == Vector2(24.0, 40.0),
+		"Standalone river must accept a custom field without demo assets or UI")
+	_check(portable.submit_queries(PackedVector2Array([Vector2.ZERO])), "Standalone guided water must accept point queries")
+	portable.swe.initialized = true
+	var query := portable.take_query_batch()
+	portable.swe.initialized = false
+	_check(query.values[3] > 0.6 and query.values[2] < 0.0, "Standalone queries must return depth and downstream velocity")
+	_check(portable.submit_queries(PackedVector2Array([Vector2.ZERO])),
+		"Backend initialization between submission and retrieval must not strand the CPU batch")
+	portable.take_query_batch()
+	portable.field.solver_terrain_image = Image.create(2, 2, false, Image.FORMAT_RGBAF)
+	portable.field.solver_terrain_image.fill(Color(0.0, 0.06, 1.0, -1.0))
+	portable.config.water_level_m = 0.0
+	for count: int in [1, 4, 32]:
+		var points := PackedVector2Array()
+		points.resize(count)
+		points.fill(Vector2.ZERO)
+		_check(portable.submit_queries(points), "Guided queries must accept supported batch sizes")
+		_check(not portable.submit_queries(points), "An outstanding batch must reject another submission")
+		points[0] = Vector2(100.0, 100.0)
+		query = portable.take_query_batch()
+		_check(query.values.size() == count * 4 and query.points[0] == Vector2.ZERO,
+			"Query results must preserve submitted points and contain exactly four values per point")
+		_check(absf(query.values[3] - 0.06) < 0.00001,
+			"Shallow guided queries must return geometric depth without the visual wet fade")
+	_check(portable.submit_queries(PackedVector2Array([Vector2(13.0, 0.0), Vector2(12.0, 0.0), Vector2(-12.0, 0.0)])),
+		"Guided queries must accept points at and outside the field boundary")
+	query = portable.take_query_batch()
+	_check(query.values[1] == 0.0 and query.values[2] == 0.0 and query.values[3] == 0.0
+		and query.values[7] == 0.0 and query.values[11] > 0.05,
+		"Out-of-domain queries must be dry and stationary with a half-open domain boundary")
+	portable.field.solver_terrain_image.fill(Color(0.12, 0.06, 1.0, -1.0))
+	portable.submit_queries(PackedVector2Array([Vector2.ZERO]))
+	query = portable.take_query_batch()
+	_check(query.values[1] == 0.0 and query.values[2] == 0.0 and query.values[3] == 0.0,
+		"Dry guided samples must have no depth or current")
+	portable.field.solver_terrain_image.fill(Color(0.0, 0.06, 1.0, -1.0))
+	portable.submit_queries(PackedVector2Array([Vector2.ZERO]))
+	portable.config.water_level_m = 0.1
+	query = portable.take_query_batch()
+	_check(absf(query.values[0] - 0.06) < 0.00001 and absf(query.values[3] - 0.06) < 0.00001,
+		"A submitted guided batch must retain its original water level")
+	portable.submit_queries(PackedVector2Array([Vector2.ZERO]))
+	portable.stop()
+	_check(portable.take_query_batch().is_empty() and portable._query_guided.is_empty() and portable._query_weights.is_empty(),
+		"Stopping the river must discard pending query data")
+	portable.camera.queue_free()
+	portable.queue_free()
 	await process_frame
 	_finish("river_boot")
 
 
-func _check_surface_mesh() -> void:
-	var base := PlaneMesh.new()
-	base.size = RiverField.DOMAIN_M
-	base.subdivide_width = 143
-	base.subdivide_depth = 319
-	var mesh := preload("res://scripts/river/river_swe_system.gd").surface_mesh(base) as ArrayMesh
-	var arrays := mesh.surface_get_arrays(0)
-	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
-	var area_m2 := 0.0
-	var valid := true
-	for index in range(0, indices.size(), 3):
-		var a := vertices[indices[index]]
-		var b := vertices[indices[index + 1]]
-		var c := vertices[indices[index + 2]]
-		var area := (b - a).cross(c - a).y * 0.5
-		valid = valid and area > 0.00000001
-		area_m2 += area
-	_check(valid and absf(area_m2 - RiverField.DOMAIN_M.x * RiverField.DOMAIN_M.y) < 0.1,
-		"Continuous SWE mesh must cover the river once without degenerate triangles or gaps")
-	var bounds := mesh.get_aabb()
-	_check(Vector2(bounds.size.x, bounds.size.z).is_equal_approx(RiverField.DOMAIN_M),
-		"Continuous SWE mesh must preserve the full river bounds")
-	base.subdivide_width = 599
-	base.subdivide_depth = 1333
-	_check(preload("res://scripts/river/river_swe_system.gd").surface_mesh(base) == base,
-		"Ultra must reuse its already dense surface")
+func _check_reflection_crop() -> void:
+	var host := Node3D.new()
+	root.add_child(host)
+	var camera := Camera3D.new()
+	host.add_child(camera)
+	camera.position = Vector3(0.0, 5.0, 10.0)
+	camera.look_at(Vector3.ZERO)
+	var field := RiverField.new()
+	var reflections := preload("res://scripts/river/river_reflections.gd").new()
+	reflections.field = field
+	reflections.plane_count = 4
+	var material := ShaderMaterial.new()
+	material.shader = load("res://shaders/river/river_water.gdshader")
+	reflections.build(host, camera, camera.get_world_3d(), material)
+	for aspect: int in [Camera3D.KEEP_HEIGHT, Camera3D.KEEP_WIDTH]:
+		camera.keep_aspect = aspect
+		for side: float in [-1.0, 1.0]:
+			var point := Vector3(side * 5.0, 0.0, 0.0)
+			field.surface_points = PackedVector3Array([point])
+			reflections.sync(root.size, 0.0, 0.0)
+			var reflected: Camera3D = reflections.cameras[0]
+			var local := reflected.to_local(point)
+			var clip: Vector4 = reflected.get_camera_projection() * Vector4(local.x, local.y, local.z, 1.0)
+			_check(clip.w > 0.0 and absf(clip.x / clip.w) < 1.0 and absf(clip.y / clip.w) < 1.0,
+				"Cropped reflections must retain water points on both sides of the screen")
+	reflections.stop()
+	host.free()

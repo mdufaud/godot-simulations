@@ -7,7 +7,7 @@ const ROCK_PATHS := [
 	"res://resources/rocks/rock_face_02/rock_face_02_2k.gltf",
 ]
 
-var field := RiverField.new()
+var field := RiverLandscape.new()
 var materials: Array[ShaderMaterial] = []
 var grass_material: ShaderMaterial
 var grass_enabled := true
@@ -20,6 +20,7 @@ var _grass_tiles: Array[MultiMeshInstance3D] = []
 var _grass_meshes: Array[ArrayMesh] = []
 var _host: Node3D
 var _rng := RandomNumberGenerator.new()
+var _collision_shapes: Dictionary = {}
 
 
 func build(host: Node3D) -> void:
@@ -32,12 +33,12 @@ func build(host: Node3D) -> void:
 
 
 func set_water_level(level_m: float) -> void:
-	var plane := Vector4(0.0, 1.0, -RiverField.SLOPE, -level_m)
+	var plane := Vector4(0.0, 1.0, -RiverLandscape.SLOPE, -level_m)
 	for material in materials:
 		material.set_shader_parameter("river_plane", plane)
 		material.set_shader_parameter("river_reflection_layer", RiverSystem.REFLECTION_LAYER)
 		material.set_shader_parameter("river_height_texture", field.bed_texture)
-		material.set_shader_parameter("river_domain_m", RiverField.DOMAIN_M)
+		material.set_shader_parameter("river_domain_m", RiverLandscape.DOMAIN_M)
 
 
 func set_water_detail(value: float) -> void:
@@ -96,6 +97,7 @@ func _build_ground() -> void:
 	mesh.mesh = _ground_mesh()
 	mesh.material_override = material
 	_host.add_child(mesh)
+	mesh.create_trimesh_collision()
 
 
 func _ground_mesh() -> ArrayMesh:
@@ -107,10 +109,10 @@ func _ground_mesh() -> ArrayMesh:
 	var indices := PackedInt32Array()
 	for z in size.y:
 		for x in size.x:
-			var point := (Vector2(x, z) / Vector2(size - Vector2i.ONE) - Vector2.ONE * 0.5) * RiverField.DOMAIN_M
-			var dx := (RiverField.bed_height(point + Vector2(0.05, 0.0)) - RiverField.bed_height(point - Vector2(0.05, 0.0))) / 0.1
-			var dz := (RiverField.bed_height(point + Vector2(0.0, 0.05)) - RiverField.bed_height(point - Vector2(0.0, 0.05))) / 0.1
-			vertices.append(Vector3(point.x, RiverField.bed_height(point), point.y))
+			var point := (Vector2(x, z) / Vector2(size - Vector2i.ONE) - Vector2.ONE * 0.5) * RiverLandscape.DOMAIN_M
+			var dx := (RiverLandscape.bed_height(point + Vector2(0.05, 0.0)) - RiverLandscape.bed_height(point - Vector2(0.05, 0.0))) / 0.1
+			var dz := (RiverLandscape.bed_height(point + Vector2(0.0, 0.05)) - RiverLandscape.bed_height(point - Vector2(0.0, 0.05))) / 0.1
+			vertices.append(Vector3(point.x, RiverLandscape.bed_height(point), point.y))
 			normals.append(Vector3(-dx, 1.0, -dz).normalized())
 			uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
@@ -138,13 +140,13 @@ func _build_background() -> void:
 	for z in n:
 		for x in n:
 			var point := Vector2(x, z) * (span / n) - Vector2.ONE * span * 0.5
-			if absf(point.x + 1.5) < RiverField.DOMAIN_M.x * 0.5 - 3.0 and absf(point.y + 1.5) < RiverField.DOMAIN_M.y * 0.5 - 3.0:
+			if absf(point.x + 1.5) < RiverLandscape.DOMAIN_M.x * 0.5 - 3.0 and absf(point.y + 1.5) < RiverLandscape.DOMAIN_M.y * 0.5 - 3.0:
 				continue
 			for offset: Vector2 in [Vector2.ZERO, Vector2(3.0, 0.0), Vector2(0.0, 3.0), Vector2(3.0, 0.0), Vector2(3.0, 3.0), Vector2(0.0, 3.0)]:
 				var p := point + offset
-				var outside := maxf(absf(p.x) - RiverField.DOMAIN_M.x * 0.5, absf(p.y) - RiverField.DOMAIN_M.y * 0.5)
+				var outside := maxf(absf(p.x) - RiverLandscape.DOMAIN_M.x * 0.5, absf(p.y) - RiverLandscape.DOMAIN_M.y * 0.5)
 				var ridge := (sin(p.x * 0.038 + p.y * 0.027) + sin(p.y * 0.054 - p.x * 0.016)) * 3.0 + 8.0
-				var height := RiverField.bed_height(p) + smoothstep(0.0, 40.0, outside) * ridge
+				var height := RiverLandscape.bed_height(p) + smoothstep(0.0, 40.0, outside) * ridge
 				surface.set_uv(p)
 				surface.add_vertex(Vector3(p.x, height, p.y))
 	surface.generate_normals()
@@ -167,17 +169,17 @@ func _build_rocks() -> void:
 		Vector3(1.8, 0.5, 0.7),
 	]
 	for rock: Vector3 in channel_rocks:
-		var point := Vector2(RiverField.center_x(rock.y) + rock.x, rock.y)
-		var base := RiverField.bed_height(point) - 0.22
+		var point := Vector2(RiverLandscape.center_x(rock.y) + rock.x, rock.y)
+		var base := RiverLandscape.bed_height(point) - 0.22
 		var height := rock.z * 1.35
 		_add_rock(point, rock.z, base, height)
 		field.obstacles.append(Vector4(point.x, point.y, rock.z, base + height))
 	for i in 52:
 		var z := _rng.randf_range(-76.0, 76.0)
 		var side := -1.0 if i % 2 == 0 else 1.0
-		var point := Vector2(RiverField.center_x(z) + side * (RiverField.half_width(z) + _rng.randf_range(0.2, 7.5)), z)
+		var point := Vector2(RiverLandscape.center_x(z) + side * (RiverLandscape.half_width(z) + _rng.randf_range(0.2, 7.5)), z)
 		var radius := _rng.randf_range(0.35, 1.7)
-		_add_rock(point, radius, RiverField.bed_height(point) - radius * 0.3, radius * _rng.randf_range(0.9, 1.5))
+		_add_rock(point, radius, RiverLandscape.bed_height(point) - radius * 0.3, radius * _rng.randf_range(0.9, 1.5))
 
 
 func _add_rock(point: Vector2, radius: float, base: float, height: float) -> void:
@@ -207,6 +209,14 @@ func _add_rock(point: Vector2, radius: float, base: float, height: float) -> voi
 			mesh.set_surface_override_material(surface, material)
 			materials.append(material)
 	_host.add_child(rock)
+	for mesh in meshes:
+		if not _collision_shapes.has(mesh.mesh):
+			_collision_shapes[mesh.mesh] = mesh.mesh.create_trimesh_shape()
+		var body := StaticBody3D.new()
+		var shape := CollisionShape3D.new()
+		shape.shape = _collision_shapes[mesh.mesh]
+		mesh.add_child(body)
+		body.add_child(shape)
 	field.obstacle_meshes.append_array(meshes)
 
 
@@ -237,12 +247,12 @@ func _build_grass() -> void:
 				edge_density *= 1.0 - smoothstep(62.0, 79.0, absf(point.y))
 				if _rng.randf() > edge_density:
 					continue
-				var edge := absf(point.x - RiverField.center_x(point.y)) - RiverField.half_width(point.y)
+				var edge := absf(point.x - RiverLandscape.center_x(point.y)) - RiverLandscape.half_width(point.y)
 				if edge < 2.0 or edge > 9.0 or _rng.randf() < 0.14 + 0.1 * sin(point.x * 0.7 + point.y * 0.4):
 					continue
-				if RiverField.bed_height(point) < RiverField.water_height(point, 0.65) + 0.08:
+				if RiverLandscape.bed_height(point) < RiverLandscape.water_height(point, 0.65) + 0.08:
 					continue
-				positions.append(Vector3(point.x, RiverField.bed_height(point) - 0.015, point.y))
+				positions.append(Vector3(point.x, RiverLandscape.bed_height(point) - 0.015, point.y))
 			if positions.is_empty():
 				continue
 			var multimesh := MultiMesh.new()

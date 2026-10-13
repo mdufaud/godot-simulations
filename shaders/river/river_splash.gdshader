@@ -19,13 +19,14 @@ float random_value(uint value) {
 
 void start() {
 	uint seed = NUMBER + RANDOM_SEED;
-	vec4 emitter = emitters[int(INDEX) % emitter_count];
+	vec4 emitter = emitters[int(INDEX) % max(emitter_count, 1)];
 	vec2 jitter = vec2(random_value(seed + uint(1)), random_value(seed + uint(2))) * 2.0 - 1.0;
 	vec2 point = emitter.xy + jitter * emitter.z;
 	vec2 uv = (point - swe_region_m.xy) / swe_region_m.zw;
 	vec4 surface = texture(swe_surface, uv);
 	float activity = texture(swe_foam, uv).b;
-	ACTIVE = surface.w > 0.025 && random_value(seed + uint(3)) < activity * strength * 0.65;
+	ACTIVE = emitter_count > 0 && all(greaterThan(uv, vec2(0.05))) && all(lessThan(uv, vec2(0.95)))
+		&& surface.w > 0.025 && random_value(seed + uint(3)) < activity * strength * 0.65;
 	TRANSFORM = mat4(1.0);
 	TRANSFORM[3].xyz = vec3(point.x, surface.z + 0.035, point.y);
 	VELOCITY = vec3(surface.x * 0.5 + jitter.x * 0.45,
