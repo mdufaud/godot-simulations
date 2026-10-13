@@ -1602,6 +1602,7 @@ func _run_river_shutdown() -> void:
 
 func _run_river_motion() -> void:
 	await _boot_frames(2)
+	var guided := _extra.size() > 1 and _extra[1] == "guided"
 	root.size = Vector2i(906, 574)
 	root.get_node("GameManager").set_setting("river_quality_profile", 1)
 	var output_dir := "res://tmp/river-motion-probe" if _extra.is_empty() else _extra[0]
@@ -1630,6 +1631,12 @@ func _run_river_motion() -> void:
 		push_error("PROBE NOT DONE river_motion: SWE-backed river did not become ready and active")
 		quit(1)
 		return
+	if guided:
+		demo._menu_builder.flow_action.pressed.emit()
+		if demo.river.swe.active:
+			push_error("PROBE NOT DONE river_motion: Flow action did not select guided flow")
+			quit(1)
+			return
 	if not await _river_motion_capture(demo, output_dir, "natural_boot"):
 		quit(1)
 		return
@@ -1644,8 +1651,8 @@ func _run_river_motion() -> void:
 		return
 	demo._menu_builder.preset_option.select(2)
 	demo._menu_builder.preset_option.item_selected.emit(2)
-	if demo.preset_index != 2 or not demo.river.swe.initialized or not demo.river.swe.active:
-		push_error("PROBE NOT DONE river_motion: Rapids preset switch reset or disabled SWE")
+	if demo.preset_index != 2 or not demo.river.swe.initialized or demo.river.swe.active == guided:
+		push_error("PROBE NOT DONE river_motion: Rapids preset switch changed the selected flow")
 		quit(1)
 		return
 	while demo.river.simulation_time_s < 7.0 and Time.get_ticks_msec() < deadline:
@@ -1671,8 +1678,8 @@ func _run_river_motion() -> void:
 		if demo.quality.requested != tier:
 			quality_option.select(tier)
 			quality_option.item_selected.emit(tier)
-		if demo.quality.requested != tier or demo.quality.effective != tier or not demo.river.swe.initialized or not demo.river.swe.active:
-			push_error("PROBE NOT DONE river_motion: quality %s switch changed SWE state" % demo.quality.label())
+		if demo.quality.requested != tier or demo.quality.effective != tier or not demo.river.swe.initialized or demo.river.swe.active == guided:
+			push_error("PROBE NOT DONE river_motion: quality %s switch changed the selected flow" % demo.quality.label())
 			quit(1)
 			return
 		var quality_name := "medium" if tier == 1 else "ultra"
@@ -1688,8 +1695,8 @@ func _run_river_motion() -> void:
 						"%s_%s_%03d" % [quality_name, view_name, frame + 1]):
 						quit(1)
 						return
-		if not demo.river.swe.initialized or not demo.river.swe.active:
-			push_error("PROBE NOT DONE river_motion: SWE stopped during %s camera sequence" % quality_name)
+		if not demo.river.swe.initialized or demo.river.swe.active == guided:
+			push_error("PROBE NOT DONE river_motion: selected flow changed during %s camera sequence" % quality_name)
 			quit(1)
 			return
 		demo.orbit.distance = 32.0
@@ -1701,8 +1708,8 @@ func _run_river_motion() -> void:
 		demo.orbit.distance = 13.0
 		demo.orbit._update_transform()
 		await _boot_frames(12)
-		if not demo.river.swe.initialized or not demo.river.swe.active:
-			push_error("PROBE NOT DONE river_motion: SWE changed after far-camera return at %s" % quality_name)
+		if not demo.river.swe.initialized or demo.river.swe.active == guided:
+			push_error("PROBE NOT DONE river_motion: selected flow changed after far-camera return at %s" % quality_name)
 			quit(1)
 			return
 		if not await _river_motion_capture(demo, output_dir, "%s_return13" % quality_name):
@@ -1865,6 +1872,41 @@ func _check_river_foam_render() -> void:
 			foam_cases[index]["name"], offset, aligned_error, still_error])
 	_check(offsets[0].x * offsets[1].x < 0.0 and absf(offsets[3].x - offsets[0].x * 2.0) < 0.01,
 		"river_foam_render: reversing direction and doubling speed must reverse and double displacement")
+	var circular_image := Image.create(64, 64, false, Image.FORMAT_RGBAF)
+	for y in 64:
+		for x in 64:
+			var point := (Vector2((float(x) + 0.5) / 64.0, (float(y) + 0.5) / 64.0) - Vector2(0.5, 0.5)) * DOMAIN
+			var radius := point.length()
+			var velocity := Vector2(-point.y, point.x) / maxf(radius, 0.5)
+			circular_image.set_pixel(x, y, Color(velocity.x, velocity.y, 0.0, 1.0))
+	material.set_shader_parameter("flow_map", ImageTexture.create_from_image(circular_image))
+	material.set_shader_parameter("foam_reference_flow", Vector2.RIGHT)
+	material.set_shader_parameter("speed_m_s", 2.0)
+	material.set_shader_parameter("swe_enabled", false)
+	material.set_shader_parameter("swe_surface", zero_texture)
+	material.set_shader_parameter("swe_foam", zero_texture)
+	material.set_shader_parameter("flow_distance_m", 0.0)
+	material.set_shader_parameter("simulation_time_s", 0.0)
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	var circular_render := view.get_texture().get_image()
+	var circular_error := 0.0
+	for y in range(24, SIZE - 24):
+		for x in range(24, SIZE - 24):
+			circular_error += absf(initial_images[0].get_pixel(x, y).srgb_to_linear().r
+				- circular_render.get_pixel(x, y).srgb_to_linear().r)
+	circular_error /= float((SIZE - 48) * (SIZE - 48))
+	_check(circular_error < 0.01,
+		"river_foam_render: newborn foam detail must not fold into circular arcs in a nonuniform guide field")
+	print("RIVER FOAM circular_guide_error=%.6f" % circular_error)
+	field_image.fill(Color(1.0, 0.0, 0.0, 1.0))
+	material.set_shader_parameter("flow_map", ImageTexture.create_from_image(field_image))
+	material.set_shader_parameter("foam_reference_flow", Vector2(0.25, 0.0))
+	material.set_shader_parameter("swe_enabled", false)
+	material.set_shader_parameter("swe_surface", zero_texture)
+	material.set_shader_parameter("swe_foam", zero_texture)
+	material.set_shader_parameter("flow_distance_m", 0.0)
+	material.set_shader_parameter("simulation_time_s", 0.0)
 	var means := PackedFloat32Array()
 	var contrasts := PackedFloat32Array()
 	var cycle_images: Array[Image] = []

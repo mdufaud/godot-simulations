@@ -225,13 +225,14 @@ void fragment() {
 		float foam_phase2 = fract(foam_phase + 0.5);
 		vec2 foam_position = p - foam_reference_flow * flow_distance_m;
 		vec2 foam_relative_velocity = flow_velocity - foam_reference_flow * speed_m_s;
-		vec2 foam_uv1 = (foam_position - foam_relative_velocity * foam_phase * 1.5) * vec2(0.28, 0.2);
-		vec2 foam_uv2 = (foam_position - foam_relative_velocity * foam_phase2 * 1.5) * vec2(0.28, 0.2);
+		float foam_offset = 0.5 * (1.0 - live_weight);
+		vec2 foam_uv1 = (foam_position - foam_relative_velocity * (foam_phase - foam_offset) * 1.5) * vec2(0.28, 0.2);
+		vec2 foam_uv2 = (foam_position - foam_relative_velocity * (foam_phase2 - foam_offset) * 1.5) * vec2(0.28, 0.2);
 		float fresh = foam_history.g;
 		float fresh_weight = smoothstep(0.1, 0.55, fresh);
 		float pattern1 = mix(texture(foam_filaments, foam_uv1).r, texture(foam_bubbles, foam_uv1 * 1.8).r, fresh_weight);
 		float pattern2 = mix(texture(foam_filaments, foam_uv2).r, texture(foam_bubbles, foam_uv2 * 1.8).r, fresh_weight);
-		vec2 selection_point = foam_position - foam_relative_velocity * foam_phase2 * 1.5;
+		vec2 selection_point = foam_position - foam_relative_velocity * (foam_phase2 - foam_offset) * 1.5;
 		float phase_weight = abs(foam_phase * 2.0 - 1.0);
 		float second_weight = foam_selection(selection_point, phase_weight);
 		float density = max(coverage, turbulent * 0.4 * foam_amount);
