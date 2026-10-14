@@ -254,8 +254,8 @@ func _build_rocks() -> void:
 	for rock: Vector3 in channel_rocks:
 		var point := Vector2(_center_x(rock.y) + rock.x * 0.7, rock.y)
 		var base := _bed(point) - 0.22
-		var radius := rock.z * 0.8
-		var height := radius * 1.35
+		var radius := rock.z * 0.85
+		var height := rock.z * 1.35
 		_add_rock(point, radius, base, height)
 		field.obstacles.append(Vector4(point.x, point.y, radius, base + height))
 	for i in 20:

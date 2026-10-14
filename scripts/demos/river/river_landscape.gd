@@ -115,4 +115,4 @@ func _reference_velocity(point: Vector2) -> Vector2:
 	var tangent := Vector2(-derivative, -1.0).normalized()
 	var width := half_width(point.y)
 	var lateral := absf(point.x - center_x(point.y)) / width
-	return tangent * (5.0 / width) * lerpf(1.0, 0.3, smoothstep(0.55, 1.25, lateral))
+	return tangent * (3.6 / width) * lerpf(1.0, 0.3, smoothstep(0.55, 1.25, lateral))
