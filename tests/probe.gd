@@ -12,6 +12,7 @@ const GRASS_HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 const OceanParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
 const OceanCoastalProbe := preload("res://tests/ocean_coastal_probe.gd")
 const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
+const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -1566,6 +1567,233 @@ func _run_river_swe() -> void:
 	_finish("river_swe")
 
 
+func _run_river_waterfall() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(960, 600)
+	var manager := root.get_node("GameManager")
+	manager.set_setting("river_quality_profile", 1)
+	var demo := (load("res://scenes/river_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.capture_ready(), "river_waterfall: river boot must reach its normal ready state")
+	if not demo.capture_ready():
+		demo.queue_free()
+		_finish("river_waterfall")
+		return
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	for scene: int in [1, 2]:
+		demo.set_scene(scene)
+		deadline = Time.get_ticks_msec() + 30000
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		var river: RiverSystem = demo.river
+		var angle := 50.0 if scene == 1 else 90.0
+		_check(demo.capture_ready() and river.swe.active and river.waterfall != null
+			and is_equal_approx(river.field.waterfall.angle_degrees, angle),
+			"river_waterfall: controller must boot the selected waterfall through the live SWE system")
+		if not river.swe.initialized:
+			continue
+		var field: RiverField = river.field
+		var config: RiverWaterfallConfig = field.waterfall
+		var sample_points := [Vector2.ZERO, Vector2(0.0, config.crest_z_m),
+			Vector2(config.width_m * 0.5, config.crest_z_m), Vector2(0.0, -field.domain_m.y * 0.5),
+			Vector2(0.0, field.domain_m.y * 0.5)]
+		for point: Vector2 in sample_points:
+			var sample: Color = field.sample(point, river.config.water_level_m)
+			_check(Vector4(sample.r, sample.g, sample.b, sample.a).is_finite() and is_finite(field.sample_bed(point))
+				and is_finite(field.sample_height(point, river.config.water_level_m)),
+				"river_waterfall: edge and transition field samples must stay finite")
+		await _boot_frames(150)
+		demo.set_frozen(true)
+		await _boot_frames(3)
+		var status: Dictionary = river.swe.solver.snapshot()
+		print("RIVER WATERFALL scene=%d removed=%.6f received=%.6f transport=%.6f cfl=%.5f backlog=%.5f overflow=%d time=%.3f" % [scene,
+			status.volume_removed, status.volume_received, status.transport_volume, status.cfl_max, status.backlog_s, status.overflow, status.time_s])
+		_check(status.volume_removed > 0.0 and is_finite(status.volume_removed)
+			and is_finite(status.volume_received) and is_finite(status.transport_volume)
+			and is_finite(status.level_relaxation_volume) and is_finite(status.boundary_volume)
+			and is_finite(status.backlog_s) and is_finite(status.cfl_max)
+			and int(status.overflow) == 0,
+			"river_waterfall: GPU transport diagnostics must be finite and remain within capacity")
+		var volume_error := absf(float(status.volume_removed) - float(status.volume_received)
+			- float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
+		_check(volume_error <= 0.005,
+			"river_waterfall: removed volume must equal received plus transported volume within 0.5 percent")
+		var grid: Vector2i = river.swe.solver.grid
+		var waterfall_size := Vector2i(config.lane_count,
+			config.packet_capacity if config.is_vertical() else config.film_cells)
+		var surface_before: PackedByteArray = await TextureReadback.new().read_layer(
+			status.surface, 0, grid.x * grid.y * 16)
+		var fall_before: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_surface, 0, waterfall_size.x * waterfall_size.y * 16)
+		var velocity_before: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_velocity, 0, waterfall_size.x * waterfall_size.y * 16)
+		var clock_before: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_clock, 0, 16)
+		var boundary_bytes: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_boundary, 0, config.lane_count * 16)
+		var boundaries := boundary_bytes.to_float32_array()
+		var valid_boundaries := boundaries.size() == config.lane_count * 4
+		for lane in config.lane_count:
+			var offset := lane * 4
+			valid_boundaries = valid_boundaries and Vector4(boundaries[offset], boundaries[offset + 1],
+				boundaries[offset + 2], boundaries[offset + 3]).is_finite() and boundaries[offset + 1] > 0.0
+		_check(valid_boundaries, "river_waterfall: GPU reception boundaries must publish finite source heights, lengths, receivers and pool heights")
+		if not config.is_vertical():
+			var ds := config.length_m() / config.film_cells
+			for lane in config.lane_count:
+				var bottom := Vector2((float(lane) + 0.5) / config.lane_count * config.width_m - config.width_m * 0.5,
+					config.crest_z_m - config.run_m())
+				var cell := Vector2i(((bottom - river.swe.region_m.position) / river.swe.cell_m).floor()).clamp(Vector2i.ZERO, grid - Vector2i.ONE)
+				var offset := (cell.y * grid.x + cell.x) * 16
+				var lower := surface_before.decode_float(offset + 8) if surface_before.decode_float(offset + 12) > 0.02 else river.config.water_level_m
+				var last := clampi(floori((config.height_m - 0.65 - lower) / sin(deg_to_rad(angle)) / ds), 1, config.film_cells - 1)
+				_check(absf(boundaries[lane * 4 + 1] - float(last + 1) * ds) < 0.00001,
+					"river_waterfall: film reception must follow the simulated pool height, including drawdown below Level")
+		var finite_buffers := true
+		for value in surface_before.to_float32_array() + fall_before.to_float32_array() \
+				+ velocity_before.to_float32_array() + clock_before.to_float32_array():
+			finite_buffers = finite_buffers and is_finite(value)
+		_check(finite_buffers, "river_waterfall: GPU surface and waterfall state must remain finite")
+		var sheet_state: PackedFloat32Array = fall_before.to_float32_array()
+		var clearance := INF
+		for offset in range(0, sheet_state.size(), 4):
+			if sheet_state[offset + 3] <= 0.00001:
+				continue
+			var point := Vector2(sheet_state[offset], sheet_state[offset + 2])
+			clearance = minf(clearance, sheet_state[offset + 1] - field.sample_ground_height(point))
+		_check(clearance >= 0.0099, "river_waterfall: both transports must stay above the actual collision triangles")
+		print("RIVER WATERFALL scene=%d ground_clearance=%.6f" % [scene, clearance])
+		if scene == 2:
+			var sheet: PackedFloat32Array = fall_before.to_float32_array()
+			var sheet_point := Vector3.ZERO
+			for row in config.packet_capacity:
+				var offset := (row * config.lane_count + config.lane_count / 2) * 4
+				if sheet[offset + 3] > 0.00001 and sheet[offset + 1] > 2.0 and sheet[offset + 1] < 4.0:
+					sheet_point = Vector3(sheet[offset], sheet[offset + 1], sheet[offset + 2])
+					break
+			_check(river.submit_body_queries(PackedVector3Array([sheet_point])), "river_waterfall: body query must accept a rendered sheet point")
+			var body_batch := river.take_query_batch()
+			deadline = Time.get_ticks_msec() + 5000
+			while body_batch.is_empty() and Time.get_ticks_msec() < deadline:
+				await process_frame
+				body_batch = river.take_query_batch()
+			_check(not body_batch.is_empty() and body_batch.values[7] == 3.0 and absf(body_batch.values[11]) < 0.00001,
+				"river_waterfall: free-sheet queries must describe the same finite volume as the rendered sheet")
+		_check(status.cfl_max <= 0.4001 and volume_error < 0.005,
+			"river_waterfall: CFL must remain below the configured limit")
+		var time_before := river.simulation_time_s
+		demo.set_frozen(true)
+		await _boot_frames(3)
+		status = river.swe.solver.snapshot()
+		var surface_after: PackedByteArray = await TextureReadback.new().read_layer(
+			status.surface, 0, surface_before.size())
+		var fall_after: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_surface, 0, fall_before.size())
+		var velocity_after: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_velocity, 0, velocity_before.size())
+		var clock_after: PackedByteArray = await TextureReadback.new().read_layer(
+			status.waterfall_clock, 0, clock_before.size())
+		_check(is_equal_approx(time_before, river.simulation_time_s)
+			and surface_before == surface_after and fall_before == fall_after
+			and velocity_before == velocity_after and clock_before == clock_after,
+			"river_waterfall: pause must freeze both pool and waterfall GPU state byte-for-byte")
+		demo.set_frozen(false)
+		for preset in 4:
+			demo.apply_preset(preset)
+			demo.set_speed(4.0)
+			demo.set_level(0.65 if preset % 2 == 0 else -0.2)
+			await _boot_frames(90)
+			status = river.swe.solver.snapshot()
+			volume_error = absf(float(status.volume_removed) - float(status.volume_received)
+				- float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
+			_check(is_finite(status.volume_removed) and is_finite(status.transport_volume)
+				and status.cfl_max <= 0.4001 and volume_error < 0.005 and status.overflow == 0,
+				"river_waterfall: every preset must retain stable conservative transport at control extremes")
+			print("RIVER WATERFALL extreme scene=%d preset=%d error=%.7f cfl=%.5f" % [scene, preset, volume_error, status.cfl_max])
+			var admitted: float = status.volume_removed
+			demo.set_speed(0.0)
+			await _boot_frames(180)
+			status = river.swe.solver.snapshot()
+			print("RIVER WATERFALL closed scene=%d preset=%d admitted=%.5f removed=%.5f remaining=%.7f" % [scene, preset, admitted, status.volume_removed, status.transport_volume])
+			_check(float(status.transport_volume) < 0.03,
+				"river_waterfall: closing the flow must retain and drain all transported water")
+		demo.apply_preset(1)
+		demo.reset_river()
+		_check(is_zero_approx(river.simulation_time_s), "river_waterfall: reset must restart the runtime clock")
+		var generation: int = river.query_generation
+		_check(river.submit_body_queries(PackedVector3Array([Vector3(0.0, 2.0, config.crest_z_m)])),
+			"river_waterfall: live solver must accept a body batch before scene switching")
+		demo.set_scene(2 if scene == 1 else 1)
+		_check(river.query_generation > generation and river.take_query_batch().is_empty(),
+			"river_waterfall: reset and scene switching must cancel outstanding asynchronous body queries")
+		demo.set_scene(scene)
+		deadline = Time.get_ticks_msec() + 30000
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		if demo.capture_ready():
+			var Body := preload("res://scripts/river/river_buoyant_body.gd")
+			var crate: RigidBody3D = Body.new()
+			demo.interactions.add_child(crate)
+			demo.interactions.crates.append(crate)
+			crate.global_position = Vector3(0.0, demo.config.water_level_m + 6.3, config.crest_z_m + 2.0)
+			crate.linear_velocity = Vector3(0.0, 0.0, -demo.config.speed_m_s)
+			var reached_ramp := false
+			deadline = Time.get_ticks_msec() + 18000
+			while Time.get_ticks_msec() < deadline and (crate.global_position.z > config.crest_z_m - config.run_m() - 1.0 or crate.global_position.y > demo.config.water_level_m + 0.7):
+				await physics_frame
+				reached_ramp = reached_ramp or demo.river.field.water_zone(Vector2(crate.global_position.x, crate.global_position.z)) == WaterfallField.ZONE_RAMP
+			_check((reached_ramp or scene == 2) and crate.global_position.z < config.crest_z_m - config.run_m() - 1.0
+				and crate.global_position.y < demo.config.water_level_m + 1.0,
+				"river_waterfall: floating body must descend from the upper pool down the ramp into the basin")
+			print("RIVER WATERFALL crate scene=%d position=%s velocity=%s support=%s" % [scene, crate.global_position, crate.linear_velocity, crate.last_support_force_n])
+			await _boot_frames(180)
+			_check(crate.global_position.y > demo.config.water_level_m - 0.3
+				and crate.global_position.y < demo.config.water_level_m + 0.7
+				and crate.last_support_force_n.y > 100.0,
+				"river_waterfall: the descended crate must regain buoyancy and remain afloat in the basin")
+			demo.interactions.clear()
+			await _boot_frames(2)
+	demo.apply_preset(1)
+	demo.set_scene(1)
+	for angle: float in [20.0, 35.0, 65.0, 80.0, 89.0, 89.9, 90.0]:
+		demo.set_waterfall_angle(angle)
+		deadline = Time.get_ticks_msec() + 30000
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		_check(demo.capture_ready(), "river_waterfall: changing angle must reach the runtime ready state")
+		if not demo.capture_ready():
+			continue
+		await _boot_frames(180)
+		demo.set_frozen(true)
+		await _boot_frames(3)
+		var status: Dictionary = demo.river.swe.solver.snapshot()
+		var error := absf(float(status.volume_removed) - float(status.volume_received) - float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
+		var profile: RiverWaterfallConfig = demo.river.field.waterfall
+		var rows := profile.packet_capacity if profile.is_vertical() else profile.film_cells
+		var bytes: PackedByteArray = await TextureReadback.new().read_layer(status.waterfall_surface, 0, profile.lane_count * rows * 16)
+		var values := bytes.to_float32_array()
+		var finite := true
+		var clearance := INF
+		for offset in range(0, values.size(), 4):
+			finite = finite and Vector4(values[offset], values[offset + 1], values[offset + 2], values[offset + 3]).is_finite()
+			if values[offset + 3] > 0.00001:
+				clearance = minf(clearance, values[offset + 1] - demo.river.field.sample_ground_height(Vector2(values[offset], values[offset + 2])))
+		_check(finite and clearance >= 0.0099 and error < 0.005 and status.cfl_max <= 0.4001
+			and status.overflow == 0 and status.volume_removed > 0.0,
+			"river_waterfall: every supported angle must retain finite, conservative transport above the collision mesh")
+		_check(demo.river.waterfall.material.get_shader_parameter("free_fall") == profile.is_vertical(),
+			"river_waterfall: render mode must match the actual transport at every angle")
+		print("RIVER WATERFALL angle=%.1f error=%.7f cfl=%.5f clearance=%.6f rows=%d" % [angle, error, status.cfl_max, clearance, rows])
+		demo.set_frozen(false)
+	demo.queue_free()
+	await _boot_frames(2)
+	manager.set_setting("river_quality_profile", 1)
+	_finish("river_waterfall")
+
+
 func _run_river_shutdown() -> void:
 	await _boot_frames(2)
 	var manager := root.get_node("GameManager")
@@ -2124,7 +2352,6 @@ func _check_river_flood_and_foam() -> void:
 	root.add_child(river.camera)
 	river.scene_world = river.camera.get_world_3d()
 	river.compute_available = GpuPreflight.available()
-	river.solver_quality = 2
 	river.reflection_scale = 0.0
 	river.foam_size_px = Vector2i(16, 16)
 	river.frozen = true

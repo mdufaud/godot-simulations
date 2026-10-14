@@ -1,9 +1,9 @@
 shader_type spatial;
 #include "res://shaders/river/scenery_clip.gdshaderinc"
 
-uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic;
-uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap_anisotropic;
-uniform sampler2D roughness_texture : filter_linear_mipmap;
+uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D roughness_texture : filter_linear_mipmap, repeat_enable;
 uniform vec4 albedo_tint : source_color = vec4(1.0);
 uniform bool roughness_green = false;
 
@@ -16,7 +16,7 @@ void vertex() {
 void fragment() {
 	if (river_reflection_clipped(world_position, CAMERA_VISIBLE_LAYERS)) { discard; }
 	float height = world_position.y - river_surface_height(world_position);
-	float wet = 1.0 - smoothstep(0.03, 0.3, height);
+	float wet = river_cliff_wetness(world_position, 1.0 - smoothstep(0.03, 0.3, height));
 	vec3 color = texture(albedo_texture, UV).rgb * albedo_tint.rgb;
 	float world_normal_y = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz).y;
 	float moss = smoothstep(0.35, 0.8, world_normal_y) * smoothstep(0.3, 0.75, height);

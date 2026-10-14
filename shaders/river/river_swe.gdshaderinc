@@ -3,6 +3,12 @@ uniform sampler2D swe_foam : filter_linear, repeat_disable, hint_default_black;
 uniform sampler2D swe_terrain : filter_linear, repeat_disable, hint_default_black;
 uniform vec4 swe_region_m = vec4(0.0, 0.0, 1.0, 1.0);
 uniform bool swe_enabled = false;
+uniform sampler2D waterfall_clock : filter_nearest, repeat_disable;
+uniform bool waterfall_clock_enabled = false;
+
+float river_render_time(float guided_time) {
+	return waterfall_clock_enabled ? textureLod(waterfall_clock, vec2(0.5), 0.0).r : guided_time;
+}
 
 vec2 river_swe_uv(vec2 point) {
 	return (point - swe_region_m.xy) / swe_region_m.zw;

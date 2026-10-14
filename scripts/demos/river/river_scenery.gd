@@ -7,9 +7,10 @@ const ROCK_PATHS := [
 	"res://resources/rocks/rock_face_02/rock_face_02_2k.gltf",
 ]
 
-var field := RiverLandscape.new()
+var field: RiverField = RiverLandscape.new()
 var materials: Array[ShaderMaterial] = []
 var grass_material: ShaderMaterial
+var root: Node3D
 var grass_enabled := true
 var grass_density := 0.5
 var grass_distance_m := 38.0
@@ -23,22 +24,51 @@ var _rng := RandomNumberGenerator.new()
 var _collision_shapes: Dictionary = {}
 
 
-func build(host: Node3D) -> void:
-	_host = host
+func build(host: Node3D, selected_field: RiverField = null) -> void:
+	clear()
+	if selected_field != null:
+		field = selected_field
+	else:
+		field = RiverLandscape.new()
+	root = Node3D.new()
+	root.name = "RiverScenery"
+	host.add_child(root)
+	_host = root
 	_rng.seed = 41927
 	_build_ground()
 	_build_background()
 	_build_rocks()
 	_build_grass()
+	if field.waterfall != null and field.waterfall.is_vertical():
+		_build_cliff()
+
+
+func clear() -> void:
+	if is_instance_valid(root):
+		root.free()
+	root = null
+	_host = null
+	if field != null:
+		field.obstacles.clear()
+		field.obstacle_meshes.clear()
+	materials.clear()
+	_grass_tiles.clear()
+	_grass_meshes.clear()
+	_collision_shapes.clear()
 
 
 func set_water_level(level_m: float) -> void:
-	var plane := Vector4(0.0, 1.0, -RiverLandscape.SLOPE, -level_m)
+	var plane := Vector4(0.0, 1.0, -field.surface_slope, -level_m)
 	for material in materials:
 		material.set_shader_parameter("river_plane", plane)
 		material.set_shader_parameter("river_reflection_layer", RiverSystem.REFLECTION_LAYER)
 		material.set_shader_parameter("river_height_texture", field.bed_texture)
-		material.set_shader_parameter("river_domain_m", RiverLandscape.DOMAIN_M)
+		material.set_shader_parameter("river_domain_m", field.domain_m)
+		material.set_shader_parameter("river_waterfall", field.waterfall != null)
+		if field.waterfall != null:
+			var profile := field.waterfall
+			material.set_shader_parameter("river_pool_levels_m", Vector2(level_m, level_m + profile.height_m))
+			material.set_shader_parameter("river_fall_geometry", Vector4(profile.width_m, profile.height_m, profile.crest_z_m, profile.run_m()))
 
 
 func set_water_detail(value: float) -> void:
@@ -88,6 +118,10 @@ func _build_ground() -> void:
 		material.set_shader_parameter(prefix + "_albedo", _texture(asset, "diff"))
 		material.set_shader_parameter(prefix + "_normal", _texture(asset, "nor_gl"))
 		material.set_shader_parameter(prefix + "_roughness", _texture(asset, "rough"))
+	var rock := "res://resources/rocks/namaqualand_cliff_01/textures/namaqualand_cliff_01_%s_2k.jpg"
+	material.set_shader_parameter("rock_albedo", load(rock % "diff"))
+	material.set_shader_parameter("rock_normal", load(rock % "nor_gl"))
+	material.set_shader_parameter("rock_arm", load(rock % "arm"))
 	material.set_shader_parameter("caustics_texture", load("res://resources/ocean/foam_detail.png"))
 	material.set_shader_parameter("water_normal", load("res://resources/ocean/micro_normal.png"))
 	material.set_shader_parameter("water_detail", water_detail)
@@ -101,25 +135,70 @@ func _build_ground() -> void:
 
 
 func _ground_mesh() -> ArrayMesh:
-	var size := Vector2i(145, 321)
+	var size := Vector2i(field.domain_m / 0.5) + Vector2i.ONE if field.waterfall == null else Vector2i(97, 193)
+	field.ground_rows_m.clear()
+	if field.waterfall != null:
+		var rows := PackedFloat32Array()
+		for z in size.y:
+			rows.append(-field.domain_m.y * 0.5 + float(z) / float(size.y - 1) * field.domain_m.y)
+		if not field.waterfall.is_vertical():
+			var crest := field.waterfall.crest_z_m
+			var lower_end := crest - field.waterfall.run_m()
+			var round_m := minf(0.35, field.waterfall.run_m() * 0.2)
+			for z in [lower_end, lower_end + round_m, crest - round_m, crest]:
+				rows.append(z)
+			for step in range(1, 64):
+				rows.append(lerpf(lower_end, crest, float(step) / 64.0))
+		rows.sort()
+		for z in rows:
+			if field.ground_rows_m.is_empty() or z != field.ground_rows_m[-1]:
+				field.ground_rows_m.append(z)
+		size.y = field.ground_rows_m.size()
+		field.ground_height_image = Image.create(size.x, size.y, false, Image.FORMAT_RGBAF)
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var tangents := PackedFloat32Array()
 	var indices := PackedInt32Array()
+	var cell_size := field.domain_m / Vector2(size - Vector2i.ONE)
 	for z in size.y:
 		for x in size.x:
-			var point := (Vector2(x, z) / Vector2(size - Vector2i.ONE) - Vector2.ONE * 0.5) * RiverLandscape.DOMAIN_M
-			var dx := (RiverLandscape.bed_height(point + Vector2(0.05, 0.0)) - RiverLandscape.bed_height(point - Vector2(0.05, 0.0))) / 0.1
-			var dz := (RiverLandscape.bed_height(point + Vector2(0.0, 0.05)) - RiverLandscape.bed_height(point - Vector2(0.0, 0.05))) / 0.1
-			vertices.append(Vector3(point.x, RiverLandscape.bed_height(point), point.y))
+			var world_z := field.ground_rows_m[z] if field.waterfall != null else (float(z) / float(size.y - 1) - 0.5) * field.domain_m.y
+			var point := Vector2(float(x) / float(size.x - 1) * field.domain_m.x - field.domain_m.x * 0.5, world_z)
+			var dx := (_bed(point + Vector2(0.05, 0.0)) - _bed(point - Vector2(0.05, 0.0))) / 0.1
+			var dz := (_bed(point + Vector2(0.0, 0.05)) - _bed(point - Vector2(0.0, 0.05))) / 0.1
+			if field.waterfall != null and field.waterfall.is_vertical() \
+					and absf(point.x) <= field.channel_half_width(point.y) + 0.5 \
+					and absf(point.y - field.waterfall.crest_z_m) < 0.4:
+				dz = 0.0
+			var height := _bed(point)
+			vertices.append(Vector3(point.x, height, point.y))
+			if field.ground_height_image != null:
+				field.ground_height_image.set_pixel(x, z, Color(height, world_z, 0.0, 1.0))
 			normals.append(Vector3(-dx, 1.0, -dz).normalized())
 			uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
 			tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
 			if x < size.x - 1 and z < size.y - 1:
 				var i := z * size.x + x
+				if _inside_cliff_gap(point + cell_size * 0.5):
+					continue
 				indices.append_array(PackedInt32Array([i, i + 1, i + size.x, i + 1, i + size.x + 1, i + size.x]))
+	if field.waterfall != null and field.waterfall.is_vertical():
+		var crest := field.waterfall.crest_z_m
+		for side: float in [-1.0, 1.0]:
+			for x in size.x - 1:
+				var x0 := -field.domain_m.x * 0.5 + x * cell_size.x
+				var x1 := x0 + cell_size.x
+				var z0 := crest - cell_size.y if side < 0.0 else crest
+				var z1 := crest if side < 0.0 else crest + cell_size.y
+				var base := vertices.size()
+				for point: Vector2 in [Vector2(x0, z0), Vector2(x1, z0), Vector2(x0, z1), Vector2(x1, z1)]:
+					vertices.append(Vector3(point.x, _bed(Vector2(point.x, crest + side * 0.001)), point.y))
+					normals.append(Vector3.UP)
+					uvs.append(point)
+					tangents.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 1.0]))
+				indices.append_array(PackedInt32Array([base, base + 1, base + 2, base + 1, base + 3, base + 2]))
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
@@ -140,13 +219,14 @@ func _build_background() -> void:
 	for z in n:
 		for x in n:
 			var point := Vector2(x, z) * (span / n) - Vector2.ONE * span * 0.5
-			if absf(point.x + 1.5) < RiverLandscape.DOMAIN_M.x * 0.5 - 3.0 and absf(point.y + 1.5) < RiverLandscape.DOMAIN_M.y * 0.5 - 3.0:
+			var half_domain := field.domain_m * 0.5
+			if point.x >= -half_domain.x and point.x + 3.0 <= half_domain.x and point.y >= -half_domain.y and point.y + 3.0 <= half_domain.y:
 				continue
 			for offset: Vector2 in [Vector2.ZERO, Vector2(3.0, 0.0), Vector2(0.0, 3.0), Vector2(3.0, 0.0), Vector2(3.0, 3.0), Vector2(0.0, 3.0)]:
 				var p := point + offset
-				var outside := maxf(absf(p.x) - RiverLandscape.DOMAIN_M.x * 0.5, absf(p.y) - RiverLandscape.DOMAIN_M.y * 0.5)
+				var outside := maxf(absf(p.x) - field.domain_m.x * 0.5, absf(p.y) - field.domain_m.y * 0.5)
 				var ridge := (sin(p.x * 0.038 + p.y * 0.027) + sin(p.y * 0.054 - p.x * 0.016)) * 3.0 + 8.0
-				var height := RiverLandscape.bed_height(p) + smoothstep(0.0, 40.0, outside) * ridge
+				var height := _bed(p) + smoothstep(0.0, 40.0, outside) * ridge - (0.3 if outside < 0.0 else 0.0)
 				surface.set_uv(p)
 				surface.add_vertex(Vector3(p.x, height, p.y))
 	surface.generate_normals()
@@ -159,6 +239,9 @@ func _build_background() -> void:
 
 
 func _build_rocks() -> void:
+	if field.waterfall != null:
+		_build_waterfall_bank_rocks()
+		return
 	var channel_rocks := [
 		Vector3(-2.1, 8.0, 1.45), Vector3(2.0, 5.0, 1.1),
 		Vector3(0.2, -1.0, 0.8), Vector3(-2.7, -7.0, 1.25),
@@ -169,17 +252,62 @@ func _build_rocks() -> void:
 		Vector3(1.8, 0.5, 0.7),
 	]
 	for rock: Vector3 in channel_rocks:
-		var point := Vector2(RiverLandscape.center_x(rock.y) + rock.x, rock.y)
-		var base := RiverLandscape.bed_height(point) - 0.22
-		var height := rock.z * 1.35
-		_add_rock(point, rock.z, base, height)
-		field.obstacles.append(Vector4(point.x, point.y, rock.z, base + height))
-	for i in 52:
-		var z := _rng.randf_range(-76.0, 76.0)
+		var point := Vector2(_center_x(rock.y) + rock.x * 0.7, rock.y)
+		var base := _bed(point) - 0.22
+		var radius := rock.z * 0.8
+		var height := radius * 1.35
+		_add_rock(point, radius, base, height)
+		field.obstacles.append(Vector4(point.x, point.y, radius, base + height))
+	for i in 20:
+		var z := _rng.randf_range(-field.domain_m.y * 0.5 + 2.0, field.domain_m.y * 0.5 - 2.0)
 		var side := -1.0 if i % 2 == 0 else 1.0
-		var point := Vector2(RiverLandscape.center_x(z) + side * (RiverLandscape.half_width(z) + _rng.randf_range(0.2, 7.5)), z)
+		var point := Vector2(_center_x(z) + side * (_half_width(z) + _rng.randf_range(0.2, 5.0)), z)
 		var radius := _rng.randf_range(0.35, 1.7)
-		_add_rock(point, radius, RiverLandscape.bed_height(point) - radius * 0.3, radius * _rng.randf_range(0.9, 1.5))
+		_add_rock(point, radius, _bed(point) - radius * 0.3, radius * _rng.randf_range(0.9, 1.5))
+
+
+func _build_waterfall_bank_rocks() -> void:
+	var profile := field.waterfall
+	var crest := profile.crest_z_m
+	var foot := crest - profile.run_m()
+	var half := profile.width_m * 0.5
+	for side: float in [-1.0, 1.0]:
+		for rock: Vector3 in [Vector3(half + 1.0, crest + 1.8, 1.0), Vector3(half + 0.2, foot - 3.2, 0.9), Vector3(half + 0.4, foot - 8.5, 1.1)]:
+			var point := Vector2(side * rock.x, rock.y + _rng.randf_range(-0.6, 0.6))
+			_add_rock(point, rock.z, _bed(point) - rock.z * 0.35, rock.z * _rng.randf_range(1.0, 1.4))
+	for i in 10:
+		var z := _rng.randf_range(crest + 3.0, field.domain_m.y * 0.5 - 1.5)
+		var side := -1.0 if i % 2 == 0 else 1.0
+		var radius := _rng.randf_range(0.3, 0.9)
+		var point := Vector2(side * (half + _rng.randf_range(1.5, 6.0)), z)
+		if absf(point.x) + radius < field.domain_m.x * 0.5:
+			_add_rock(point, radius, _bed(point) - radius * 0.3, radius * _rng.randf_range(0.8, 1.3))
+
+
+func _build_cliff() -> void:
+	var config: RiverWaterfallConfig = field.waterfall
+	var z := config.crest_z_m
+	var width := field.domain_m.x
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in 96:
+		var x0 := -width * 0.5 + width * i / 96.0
+		var x1 := -width * 0.5 + width * (i + 1) / 96.0
+		var a := Vector3(x0, _bed(Vector2(x0, z - 0.25)), z)
+		var b := Vector3(x1, _bed(Vector2(x1, z - 0.25)), z)
+		var c := Vector3(x0, _bed(Vector2(x0, z + 0.25)), z)
+		var d := Vector3(x1, _bed(Vector2(x1, z + 0.25)), z)
+		for point: Vector3 in [a, b, c, b, d, c]:
+			surface.set_uv(Vector2(point.x, point.z))
+			surface.set_normal(Vector3.FORWARD)
+			surface.add_vertex(point)
+	surface.generate_tangents()
+	var face := MeshInstance3D.new()
+	face.name = "WaterfallCliffFace"
+	face.mesh = surface.commit()
+	face.material_override = materials[0]
+	_host.add_child(face)
+	face.create_trimesh_collision()
 
 
 func _add_rock(point: Vector2, radius: float, base: float, height: float) -> void:
@@ -241,18 +369,27 @@ func _build_grass() -> void:
 			var positions := PackedVector3Array()
 			for i in 1040:
 				var point := Vector2(tile_x * 10.0 + _rng.randf_range(-5.0, 5.0), tile_z * 10.0 + _rng.randf_range(-5.0, 5.0))
-				if absf(point.y) > 79.0 or absf(point.x) > 35.0:
+				var domain := field.domain_m
+				var extent_x := domain.x * 0.5 - 1.0
+				var extent_z := domain.y * 0.5 - 1.0
+				if absf(point.y) > extent_z or absf(point.x) > extent_x:
 					continue
-				var edge_density := 1.0 - smoothstep(24.0, 35.0, absf(point.x))
-				edge_density *= 1.0 - smoothstep(62.0, 79.0, absf(point.y))
+				var edge_density := 1.0 - smoothstep(domain.x * 0.34, extent_x, absf(point.x))
+				edge_density *= 1.0 - smoothstep(domain.y * 0.39, extent_z, absf(point.y))
 				if _rng.randf() > edge_density:
 					continue
-				var edge := absf(point.x - RiverLandscape.center_x(point.y)) - RiverLandscape.half_width(point.y)
+				var edge := absf(point.x - _center_x(point.y)) - _half_width(point.y)
 				if edge < 2.0 or edge > 9.0 or _rng.randf() < 0.14 + 0.1 * sin(point.x * 0.7 + point.y * 0.4):
 					continue
-				if RiverLandscape.bed_height(point) < RiverLandscape.water_height(point, 0.65) + 0.08:
+				if field.waterfall != null and absf(point.y - field.waterfall.crest_z_m) < 4.0:
 					continue
-				positions.append(Vector3(point.x, RiverLandscape.bed_height(point) - 0.015, point.y))
+				if _bed(point) < field.sample_height(point, 0.65) + 0.08:
+					continue
+				var slope := Vector2(_bed(point + Vector2(0.3, 0.0)) - _bed(point - Vector2(0.3, 0.0)),
+					_bed(point + Vector2(0.0, 0.3)) - _bed(point - Vector2(0.0, 0.3))).length() / 0.6
+				if slope > 0.6:
+					continue
+				positions.append(Vector3(point.x, _bed(point) - 0.015, point.y))
 			if positions.is_empty():
 				continue
 			var multimesh := MultiMesh.new()
@@ -277,3 +414,21 @@ func _build_grass() -> void:
 			instance.visibility_range_end_margin = 8.0
 			_grass_tiles.append(instance)
 			_host.add_child(instance)
+
+
+func _bed(point: Vector2) -> float:
+	return field.sample_bed(point)
+
+
+func _center_x(z: float) -> float:
+	return RiverLandscape.center_x(z) if field is RiverLandscape else field.channel_center_x(z)
+
+
+func _half_width(z: float) -> float:
+	return RiverLandscape.half_width(z) if field is RiverLandscape else field.channel_half_width(z)
+
+
+func _inside_cliff_gap(point: Vector2) -> bool:
+	return field.waterfall != null and field.waterfall.is_vertical() \
+		and absf(point.x) <= field.domain_m.x * 0.5 \
+		and absf(point.y - field.waterfall.crest_z_m) <= 0.125

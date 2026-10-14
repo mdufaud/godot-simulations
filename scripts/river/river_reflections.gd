@@ -27,7 +27,7 @@ func build(owner: Node3D, source_camera: Camera3D, world: World3D, material: Sha
 
 
 func set_plane_count(value: int) -> void:
-	var count := 4 if value >= 4 else 1
+	var count := 4 if value >= 4 else (2 if value == 2 else 1)
 	if count == plane_count and views.size() == count:
 		return
 	_clear_bindings()
@@ -68,7 +68,7 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		return
 	var anchors := field.reflection_anchors_m
 	for index in views.size():
-		var anchor := anchor_z_m if plane_count == 1 else anchors[index]
+		var anchor := anchor_z_m if plane_count == 1 and field.waterfall == null else anchors[index]
 		var plane := field.reflection_plane(level_m, anchor)
 		var origin := _source_camera.global_position - 2.0 * plane.distance_to(_source_camera.global_position) * plane.normal
 		var forward := -_source_camera.global_basis.z
@@ -81,15 +81,15 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		camera.keep_aspect = _source_camera.keep_aspect
 		camera.near = _source_camera.near
 		camera.far = _source_camera.far
-		camera.cull_mask = 1 | reflection_layer | (4 if include_grass else 0)
-		var rect := _crop_rect(index, render_size, level_m) if plane_count == 4 else Rect2(Vector2.ZERO, Vector2(render_size))
+		camera.cull_mask = 1 | (reflection_layer << index if field.waterfall != null else reflection_layer) | (4 if include_grass else 0)
+		var rect := _crop_rect(index, render_size, level_m) if plane_count > 1 else Rect2(Vector2.ZERO, Vector2(render_size))
 		views[index].render_target_update_mode = SubViewport.UPDATE_ALWAYS if enabled and rect.has_area() else SubViewport.UPDATE_DISABLED
 		if not rect.has_area():
 			continue
 		var size := Vector2i((rect.size * scale).max(Vector2(16.0, 16.0)))
 		if views[index].size != size:
 			views[index].size = size
-		if plane_count == 4:
+		if plane_count > 1:
 			var half_height := tan(deg_to_rad(_source_camera.fov) * 0.5) * camera.near
 			if _source_camera.keep_aspect == Camera3D.KEEP_WIDTH:
 				half_height *= float(render_size.y) / render_size.x
@@ -125,11 +125,15 @@ func _crop_rect(index: int, size: Vector2i, level_m: float) -> Rect2:
 	var rect := Rect2()
 	var first := true
 	for point in field.surface_points:
-		var terrace := point.y - point.z * field.surface_slope
-		var low := field.terrace_heights_m[maxi(index - 1, 0)]
-		var high := field.terrace_heights_m[mini(index + 1, 3)]
-		if terrace < low - 0.01 or terrace > high + 0.01:
-			continue
+		if field.waterfall != null:
+			if field.water_zone(Vector2(point.x, point.z)) != index + 1:
+				continue
+		else:
+			var terrace := point.y - point.z * field.surface_slope
+			var low := field.terrace_heights_m[maxi(index - 1, 0)]
+			var high := field.terrace_heights_m[mini(index + 1, 3)]
+			if terrace < low - 0.01 or terrace > high + 0.01:
+				continue
 		point.y += level_m
 		if _source_camera.is_position_behind(point):
 			continue

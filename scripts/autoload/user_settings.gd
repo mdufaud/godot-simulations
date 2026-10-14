@@ -115,7 +115,7 @@ func _restore_window() -> void:
 			clampi(position.x, screen.position.x, screen.end.x - 160),
 			clampi(position.y, screen.position.y, screen.end.y - 80),
 	)
-	if mode != DisplayServer.WINDOW_MODE_WINDOWED:
+	if mode != DisplayServer.WINDOW_MODE_WINDOWED and mode != DisplayServer.WINDOW_MODE_MINIMIZED:
 			window.mode = mode as Window.Mode
 	_restoring_window = false
 
@@ -126,7 +126,8 @@ func _on_window_changed() -> void:
 	if _restoring_window:
 		return
 	var window := get_window()
-	_config.set_value("window", "mode", int(window.mode))
+	if window.mode != Window.MODE_MINIMIZED:
+		_config.set_value("window", "mode", int(window.mode))
 	if window.mode == Window.MODE_WINDOWED:
 		_config.set_value("window", "size", window.size)
 		_config.set_value("window", "position", window.position)

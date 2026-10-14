@@ -31,10 +31,11 @@ func _run() -> void:
 		"Normal Medium boot must enable detailed foam independently of Ultra surface effects")
 	var actions: GridContainer = demo.menu.get_node("BottomRight/ActionBar")
 	var action: Button = demo._menu_builder.preset_action
-	_check(actions.get_child_count() == 3 and action.get_parent() == actions
+	_check(actions.get_child_count() == 4 and action.get_parent() == actions
 		and demo._menu_builder.flow_action.get_parent() == actions
-		and demo._menu_builder.crate_action.get_parent() == actions,
-		"River preset, flow comparison and thrown crates must use native actions")
+		and demo._menu_builder.crate_action.get_parent() == actions
+		and demo._menu_builder.scene_action.get_parent() == actions,
+		"River presets, flow, crates and scene switching must use native actions")
 	_check(demo.river.swe.enabled and demo.river.swe.available == GpuPreflight.available(),
 		"Player boot must request the live SWE system with an explicit GPU availability check")
 	_check((demo._menu_builder.flow_action.find_child("ActionCaption", true, false) as Label).text
@@ -44,6 +45,46 @@ func _run() -> void:
 	_check(not demo.river.swe.enabled, "Water presets must preserve guided flow selection")
 	demo.river.swe.set_enabled(true)
 	demo.apply_preset(1)
+	var solver_enabled: bool = demo.river.swe.enabled
+	demo.river.swe.set_enabled(false)
+	var generation: int = demo.river.query_generation
+	_check(demo.river.submit_body_queries(PackedVector3Array([Vector3(0.0, 0.1, 0.0)])),
+		"River scene switch test must queue a CPU body-query batch")
+	demo._menu_builder.scene_action.pressed.emit()
+	_check(demo.scene_index == 1 and demo.river.field.waterfall.angle_degrees == 50.0
+		and demo.river.waterfall != null,
+		"Scene selector must install the 50-degree waterfall through the player controller")
+	_check(demo.river.query_generation > generation and demo.river.take_query_batch().is_empty(),
+		"Changing river scenes must cancel a pending body-query batch")
+	var scene_key := InputEventKey.new()
+	scene_key.physical_keycode = KEY_4
+	scene_key.pressed = true
+	demo.menu._unhandled_input(scene_key)
+	_check(demo.scene_index == 2 and demo.river.field.waterfall.angle_degrees == 90.0
+		and actions.get_child_count() == 4 and demo._menu_builder.scene_option.selected == 2,
+		"Scene selector must install the vertical waterfall and retain the native action bar")
+	var height: float = demo.config.water_level_m + 6.0
+	var age := sqrt(2.0 * (height - 3.0) / 9.81)
+	_check(demo.river.submit_body_queries(PackedVector3Array([Vector3(0.0, height, 8.0),
+		Vector3(0.0, demo.config.water_level_m, -4.0), Vector3(0.0, 3.0, 4.0 - demo.config.speed_m_s * age),
+		Vector3(0.0, 9.0, -4.0)])), "Guided waterfall must accept pool, curtain and air queries")
+	var contacts: Dictionary = demo.river.take_query_batch()
+	_check(contacts.values[7] == 1.0 and contacts.values[19] == 1.0 and contacts.values[31] == 3.0
+		and contacts.values[43] == 0.0,
+		"Guided waterfall must distinguish both pools, the detached sheet and dry air")
+	demo._menu_builder.angle_slider.value = 67.5
+	_check(is_equal_approx(demo.river.field.waterfall.angle_degrees, 67.5)
+		and demo.river.waterfall.material.get_shader_parameter("free_fall") == false
+		and demo._menu_builder.angle_slider.editable,
+		"Runtime angle control must rebuild terrain, solver and material for an intermediate incline")
+	demo._menu_builder.angle_slider.value = 90.0
+	_check(demo.river.waterfall.material.get_shader_parameter("free_fall") == true,
+		"Runtime angle control must restore ballistic transport at the vertical endpoint")
+	demo._menu_builder.scene_action.pressed.emit()
+	_check(demo.scene_index == 0 and demo.river.field is RiverLandscape
+		and demo.river.waterfall == null and actions.get_child_count() == 4 and not demo._menu_builder.angle_slider.editable,
+		"Scene action must cycle back to the river and retain all native actions")
+	demo.river.swe.set_enabled(solver_enabled)
 	_check(demo.menu.get_node_or_null("RiverPresets") == null, "Custom bottom-left preset bar must be removed")
 	_check(action.is_visible_in_tree(), "Native River action must stay visible with settings closed")
 	for index: int in [2, 3, 0, 1]:

@@ -1,6 +1,11 @@
 extends RefCounted
 
+const SCENES := ["River", "Waterfall 50°", "Waterfall 90°"]
+
 var preset_option: OptionButton
+var scene_option: OptionButton
+var scene_action: Button
+var angle_slider: HSlider
 var sliders: Array[HSlider] = []
 var pause_button: Button
 var preset_action: Button
@@ -9,11 +14,21 @@ var flow_action: Button
 var crate_action: Button
 var _menu: SimMenu
 var _level_dragging := false
+var _angle_dragging := false
 
 
 func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 	_menu = menu
 	menu.add_section("River")
+	scene_option = menu.add_option_button("Scene", SCENES, 0, controller.set_scene, false)
+	angle_slider = menu.add_slider("Angle (°)", 20.0, 90.0, 50.0, func(value: float):
+		if not _angle_dragging:
+			controller.set_waterfall_angle(value), false, 0.1)
+	angle_slider.drag_started.connect(func(): _angle_dragging = true)
+	angle_slider.drag_ended.connect(func(changed: bool):
+		_angle_dragging = false
+		if changed:
+			controller.set_waterfall_angle(angle_slider.value))
 	var names: Array[String] = []
 	for preset: RiverConfig in presets:
 		names.append(preset.display_name)
@@ -43,8 +58,14 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 		controller.river.swe.set_enabled(not controller.river.swe.enabled)
 		sync_flow(controller.river.swe))
 	crate_action = menu.add_action("📦", "Throw crate", controller.interactions.throw_crate)
+	scene_action = menu.add_action("➡", "Scene", controller.cycle_scene)
+	sync_scene(controller.scene_index, controller.waterfall_angles)
 	sync_flow(controller.river.swe)
-	menu.settings_reset.connect(func(): controller.apply_preset(1))
+	menu.settings_reset.connect(func():
+		controller.waterfall_angles = PackedFloat32Array([0.0, 50.0, 90.0])
+		controller.set_scene(0)
+		sync_scene(0, controller.waterfall_angles)
+		controller.apply_preset(1))
 
 
 func sync(config: RiverConfig, index: int) -> void:
@@ -54,6 +75,15 @@ func sync(config: RiverConfig, index: int) -> void:
 	var values := [config.speed_m_s, config.water_level_m, config.clarity, config.foam_amount]
 	for i in sliders.size():
 		sliders[i].value = values[i]
+
+
+func sync_scene(index: int, angles: PackedFloat32Array) -> void:
+	for i in range(1, SCENES.size()):
+		scene_option.set_item_text(i, "Waterfall %.1f°" % angles[i])
+	scene_option.select(index)
+	angle_slider.editable = index > 0
+	angle_slider.set_value_no_signal(angles[maxi(index, 1)])
+	scene_action.tooltip_text = "Next scene: %s · Current: %s" % [scene_option.get_item_text((index + 1) % SCENES.size()), scene_option.get_item_text(index)]
 
 
 func sync_flow(swe: Node3D) -> void:

@@ -3,6 +3,7 @@ extends Node3D
 const Scenery := preload("res://scripts/demos/river/river_scenery.gd")
 const MenuBuilder := preload("res://scripts/demos/river/river_menu.gd")
 const Interactions := preload("res://scripts/demos/river/river_interactions.gd")
+const WaterfallLandscape := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
 const PRESETS := [
 	preload("res://resources/river/presets/calm.tres"),
 	preload("res://resources/river/presets/natural_flow.tres"),
@@ -20,6 +21,9 @@ var river := RiverSystem.new()
 var config: RiverConfig
 var quality := SimQualityState.new()
 var preset_index := 1
+var scene_index := 0
+var waterfall_angles := PackedFloat32Array([0.0, 50.0, 90.0])
+var _quality_tier := 1
 var _scenery := Scenery.new()
 var _menu_builder := MenuBuilder.new()
 var interactions := Interactions.new()
@@ -30,6 +34,8 @@ var _sample_count := 0
 var _frame_seconds := 0.0
 var _gpu_ms := 0.0
 var _solver_ms := 0.0
+var _solver_cpu_ms := 0.0
+var _reflection_ms := 0.0
 
 
 func _ready() -> void:
@@ -64,9 +70,10 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	orbit.target.x = clampf(orbit.target.x, -18.0, 18.0)
-	orbit.target.z = clampf(orbit.target.z, -30.0, 30.0)
-	orbit.target.y = RiverLandscape.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
+	orbit.target.x = clampf(orbit.target.x, -18.0 if scene_index == 0 else -10.0, 18.0 if scene_index == 0 else 10.0)
+	orbit.target.z = clampf(orbit.target.z, -30.0 if scene_index == 0 else -22.0, 30.0 if scene_index == 0 else 22.0)
+	if scene_index == 0:
+		orbit.target.y = RiverLandscape.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
 	river.render_size = get_window().size
 	river.reflection_anchor_z_m = orbit.target.z
 	_scenery.tick(river.simulation_time_s, river.flow_distance_m)
@@ -76,7 +83,9 @@ func _process(delta: float) -> void:
 		_frame_seconds += delta
 		_gpu_ms += RenderingServer.viewport_get_measured_render_time_gpu(get_viewport().get_viewport_rid())
 		_gpu_ms += river.reflection_gpu_ms()
+		_reflection_ms += river.reflection_gpu_ms()
 		_solver_ms += river.swe.gpu_ms()
+		_solver_cpu_ms += river.swe.cpu_ms()
 
 
 func apply_preset(index: int) -> void:
@@ -93,6 +102,48 @@ func cycle_preset() -> void:
 	apply_preset((preset_index + 1) % PRESETS.size())
 
 
+func cycle_scene() -> void:
+	set_scene((scene_index + 1) % MenuBuilder.SCENES.size())
+
+
+func set_scene(index: int) -> void:
+	index = clampi(index, 0, 2)
+	if index == scene_index and (index == 0 or is_equal_approx(river.field.waterfall.angle_degrees, waterfall_angles[index])):
+		return
+	var live := river.swe.enabled
+	interactions.clear()
+	river.stop()
+	_scenery.clear()
+	scene_index = index
+	var selected: RiverField = RiverLandscape.new() if index == 0 else WaterfallLandscape.new(waterfall_angles[index])
+	_scenery.build(self, selected)
+	river.field = selected
+	river.scenery_materials = _scenery.materials
+	river.reflection_plane_count = RiverQualityProfile.REFLECTION_PLANES[_quality_tier] if index == 0 else (2 if _quality_tier >= 2 else 1)
+	river.start()
+	river.swe.enabled = live
+	river.swe.profiling = _profile
+	river.set_reflection_profiling(_profile)
+	river.apply_config(config)
+	river.reset()
+	_scenery.set_water_level(config.water_level_m)
+	_scenery.set_water_clarity(config.clarity)
+	_menu_builder.sync_scene(index, waterfall_angles)
+	_menu_builder.sync_flow(river.swe)
+	set_capture_view("default")
+
+
+func set_waterfall_angle(value: float) -> void:
+	if scene_index == 0 or not is_finite(value):
+		return
+	waterfall_angles[scene_index] = clampf(value, 20.0, 90.0)
+	set_scene(scene_index)
+
+
+func set_capture_scene(index: int) -> void:
+	set_scene(index)
+
+
 func set_quality_profile(tier: int) -> void:
 	quality.set_tier(tier)
 	_menu_builder.quality_option.select(quality.requested)
@@ -107,6 +158,7 @@ func set_render_scale(value: float) -> void:
 
 
 func _apply_quality(values: Dictionary) -> void:
+	_quality_tier = RiverQualityProfile.WATER_CELL_SIZE_M.find(values.water_cell_size_m)
 	viewport_guard.set_msaa(values.msaa)
 	world_environment.environment.ssao_enabled = values.ssao
 	viewport_guard.set_taa(false)
@@ -122,8 +174,9 @@ func _apply_quality(values: Dictionary) -> void:
 	river.set_foam_detail(values.foam_detail)
 	river.rapids_reflection = values.rapids_reflection
 	river.set_surface_detail(values.surface_detail)
-	river.set_reflection_plane_count(values.reflection_planes)
+	river.set_reflection_plane_count(values.reflection_planes if scene_index == 0 else (2 if _quality_tier >= 2 else 1))
 	river.set_reflection_scale(values.reflection_scale)
+	river.set_waterfall_quality(_quality_tier)
 
 
 func set_speed(value: float) -> void:
@@ -153,6 +206,12 @@ func set_grass_enabled(enabled: bool) -> void:
 
 
 func set_capture_params(parameters: Dictionary) -> void:
+	if parameters.has("angle"):
+		set_waterfall_angle(float(parameters.angle))
+	if parameters.has("speed"):
+		set_speed(float(parameters.speed))
+	if parameters.has("level"):
+		set_level(float(parameters.level))
 	if parameters.has("swe"):
 		river.swe.set_enabled(bool(parameters["swe"]))
 	if parameters.has("grass"):
@@ -192,6 +251,44 @@ func capture_image_metrics(_image: Image) -> String:
 
 
 func set_capture_view(view: String) -> void:
+	if scene_index > 0:
+		var profile := river.field.waterfall
+		var impact := profile.crest_z_m - (profile.run_m() if not profile.is_vertical() else config.speed_m_s * sqrt(2.0 * profile.height_m / 9.81))
+		orbit.target = Vector3(0.0, 3.0 + config.water_level_m, (profile.crest_z_m + impact) * 0.5)
+		orbit.distance = maxf(21.0 if view == "wide" else 16.0, Vector2(profile.run_m(), profile.height_m).length() * 1.3)
+		orbit.pitch = -16.0
+		orbit.yaw = 168.0
+		if view == "lip" or view == "near" or view == "lip_top":
+			orbit.target = Vector3(0.0, 5.4 + config.water_level_m, profile.crest_z_m - 0.6)
+			orbit.distance = 7.5
+			orbit.pitch = -18.0
+			if view == "lip_top":
+				orbit.pitch = -45.0
+		elif view == "impact":
+			orbit.target = Vector3(0.0, 0.6 + config.water_level_m, impact - 0.6)
+			orbit.distance = 8.0
+			orbit.pitch = -16.0
+		elif view == "front":
+			orbit.distance = 10.0
+			orbit.pitch = -12.0
+			orbit.yaw = 180.0
+		elif view == "side" or view == "underside":
+			orbit.target = Vector3(0.0, 4.0 + config.water_level_m, profile.crest_z_m - 0.8)
+			orbit.distance = 8.0
+			orbit.pitch = -22.0 if view == "side" else 8.0
+			orbit.yaw = 115.0
+		elif view == "top":
+			orbit.target = Vector3(0.0, 5.7 + config.water_level_m, profile.crest_z_m - 0.2)
+			orbit.distance = 8.0
+			orbit.pitch = -58.0
+			orbit.yaw = 90.0
+		elif view == "impact_top":
+			orbit.target = Vector3(0.0, config.water_level_m, impact + 0.25)
+			orbit.distance = 7.0
+			orbit.pitch = -58.0
+			orbit.yaw = 155.0
+		orbit._update_transform()
+		return
 	orbit.target = Vector3(-0.5, 0.0, 5.0)
 	orbit.distance = 12.0
 	orbit.pitch = -20.0
@@ -231,6 +328,11 @@ func set_capture_reflection(enabled: bool) -> void:
 	river.set_reflection_enabled(enabled)
 
 
+func set_capture_spray(enabled: bool) -> void:
+	if river.waterfall != null:
+		river.waterfall.set_effects_enabled(enabled)
+
+
 func set_capture_foam(enabled: bool) -> void:
 	river.water_material.set_shader_parameter("foam_enabled", enabled)
 
@@ -249,15 +351,17 @@ func set_capture_profiling(enabled: bool) -> void:
 	_frame_seconds = 0.0
 	_gpu_ms = 0.0
 	_solver_ms = 0.0
+	_solver_cpu_ms = 0.0
+	_reflection_ms = 0.0
 	viewport_guard.set_measure_render_time(enabled)
 	river.set_reflection_profiling(enabled)
 	river.swe.profiling = enabled
 
 
 func capture_metadata(_path: String) -> String:
-	return "CAPTURE META river preset=%s quality=%s swe=%s grid=%s vertices=%d samples=%d fps=%.2f gpu_ms=%.2f solver_ms=%.2f size=%s window=%s" % [config.display_name.replace(" ", "_"), quality.label(), river.swe.active, river.swe.solver.grid,
+	return "CAPTURE META river scene=%d angle_deg=%.1f preset=%s quality=%s swe=%s grid=%s vertices=%d samples=%d fps=%.2f gpu_ms=%.2f solver_ms=%.2f solver_cpu_ms=%.2f reflection_ms=%.2f backlog_s=%.5f size=%s window=%s" % [scene_index, river.field.waterfall.angle_degrees if river.field.waterfall != null else 0.0, config.display_name.replace(" ", "_"), quality.label(), river.swe.active, river.swe.solver.grid,
 		river._surface.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size(), _sample_count, float(_sample_count) / maxf(_frame_seconds, 0.001),
-		(_gpu_ms + _solver_ms) / maxf(_sample_count, 1.0), _solver_ms / maxf(_sample_count, 1.0), river.render_size, get_tree().root.size]
+		(_gpu_ms + _solver_ms) / maxf(_sample_count, 1.0), _solver_ms / maxf(_sample_count, 1.0), _solver_cpu_ms / maxf(_sample_count, 1.0), _reflection_ms / maxf(_sample_count, 1.0), float(river.swe.solver.snapshot().get("backlog_s", 0.0)), river.render_size, get_tree().root.size]
 
 
 func _exit_tree() -> void:

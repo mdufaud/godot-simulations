@@ -178,6 +178,8 @@ func _run() -> void:
 		_demo.apply_look(_look)
 	if _quality >= 0 and _demo.has_method("set_quality_profile"):
 		_demo.set_quality_profile(_quality)
+	if _scene >= 0 and _demo.has_method("set_capture_scene"):
+		await _demo.set_capture_scene(_scene)
 	if _scenario >= 0:
 		if not _demo.has_method("set_capture_scenario"):
 			push_error("CAPTURE FAIL: target does not support scenario selection")
@@ -267,8 +269,6 @@ func _run() -> void:
 		_demo.set_capture_reflection(_reflection)
 	if _demo.has_method("set_capture_debug"):
 		_demo.set_capture_debug(_debug_view if _debug_view >= 0 else 0)
-	if _scene >= 0 and _demo.has_method("set_capture_scene"):
-		_demo.set_capture_scene(_scene)
 	if _demo.has_method("set_capture_cascade"):
 		_demo.set_capture_cascade(_cascade)
 	elif _cascade >= 0:

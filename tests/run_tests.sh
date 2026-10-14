@@ -110,6 +110,7 @@ declare -a CPU_SUITES=(
 	"portal_math|res://tests/portal_math_test.gd"
 	"river_field|res://tests/river_field_test.gd"
 	"river_boot|res://tests/river_boot_test.gd"
+	"river_waterfall_curtain|res://tests/river_waterfall_curtain_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"

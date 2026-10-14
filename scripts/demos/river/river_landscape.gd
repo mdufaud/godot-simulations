@@ -1,6 +1,6 @@
 class_name RiverLandscape extends RiverField
 
-const DOMAIN_M := Vector2(72.0, 160.0)
+const DOMAIN_M := Vector2(48.0, 108.0)
 const SLOPE := 0.003
 const DROP_CENTERS_M := Vector3(14.0, 6.0, -3.0)
 const DROP_HEIGHTS_M := Vector3(0.35, 0.55, 0.35)
@@ -21,12 +21,20 @@ func sample_height(point: Vector2, level_m: float) -> float:
 	return water_height(point, level_m)
 
 
+func channel_center_x(z: float) -> float:
+	return center_x(z)
+
+
+func channel_half_width(z: float) -> float:
+	return half_width(z)
+
+
 static func center_x(z: float) -> float:
 	return 3.8 * sin(z * 0.075) + 1.1 * sin(z * 0.17 + 0.6)
 
 
 static func half_width(z: float) -> float:
-	return 4.2 + 0.85 * cos(z * 0.12) + 1.8 * exp(-pow((z + 15.0) / 11.0, 2.0))
+	return 3.0 + 0.6 * cos(z * 0.12) + 1.3 * exp(-pow((z + 15.0) / 11.0, 2.0))
 
 
 static func bed_height(point: Vector2) -> float:

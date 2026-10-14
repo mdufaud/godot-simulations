@@ -58,6 +58,7 @@ PROBE_TABLE=(
 	"foam_histogram|300|^HISTO DONE|HISTO "
 	"ocean_freeze|120|^TEST PASS ocean_freeze$|OCEAN FREEZE "
 	"river_swe|180|^TEST PASS river_swe$|RIVER SWE "
+	"river_waterfall|240|^TEST PASS river_waterfall$|RIVER WATERFALL "
 	"river_shutdown|90|^TEST PASS river_shutdown$|RIVER SHUTDOWN "
 	"river_motion|240|^PROBE DONE river_motion|RIVER MOTION "
 	"river_foam_render|60|^TEST PASS river_foam_render$|RIVER FOAM "
