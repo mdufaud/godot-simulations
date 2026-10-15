@@ -47,6 +47,8 @@ resources/ocean/*
 !resources/ocean/looks/*.tres
 !resources/river/
 resources/river/*
+!resources/river/waterfall_streaks.png
+!resources/river/waterfall_streaks.png.import
 !resources/river/presets/
 !resources/river/presets/*.tres
 

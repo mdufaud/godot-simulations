@@ -24,12 +24,10 @@ const MIN_FILM_M := 0.03
 const DRY_M := 0.005
 const MAX_FILM_M := 0.8
 const PROFILE_STEP_M := 0.02
+const CLING_FRACTION := 0.75
 const EDGE_TUCK_M := 0.2
 const FREE_EDGE_M := 0.6
 const IMPACT_DECAY_S := 0.35
-const APRON_M := 2.5
-const APRON_BACK_M := 0.3
-const APRON_ROWS := 10
 const MAX_STEPS := 4096
 const STRIDE := 10
 
@@ -91,6 +89,7 @@ func build() -> ArrayMesh:
 	var times := _row_times(traces[reference])
 	var lip_time := _lip_time(traces[reference])
 	var vertices := PackedVector3Array()
+	var films := PackedColorArray()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var details := PackedVector2Array()
@@ -117,13 +116,15 @@ func build() -> ArrayMesh:
 			var side_free := free.x if column - wet_low < wet_high - column else free.y
 			var state := states[column]
 			var thin := lerpf(1.0, smoothstep(0.0, FREE_EDGE_M, edge_m), side_free)
-			var surface := _surface_point(origins[column], state, maxf(state[5] * thin, MIN_FILM_M * state[6]))
+			var film := maxf(state[5] * thin, MIN_FILM_M * state[6])
+			var surface := _surface_point(origins[column], state, film)
 			var outside := slot - 1 < wet_low or slot == 0 or slot - 1 > wet_high or slot == stride - 1
 			var skirt: Variant = skirts[0] if slot - 1 < wet_low or slot == 0 else skirts[1]
 			var tucked := outside and skirt != null
 			if tucked:
 				surface = skirt
 			vertices.append(surface)
+			films.append(Color(film / MAX_FILM_M, 0.0, 0.0))
 			normals.append(_normal(state))
 			uvs.append(Vector2(u, times[row] - lip_time))
 			details.append(Vector2(state[8], Vector2(state[3], state[4]).length()))
@@ -131,39 +132,15 @@ func build() -> ArrayMesh:
 			if row < times.size() - 1 and slot < stride - 1:
 				var i := row * stride + slot
 				indices.append_array(PackedInt32Array([i, i + stride, i + 1, i + 1, i + stride, i + stride + 1]))
-	var apron_base := vertices.size()
-	var landings: Array[PackedFloat32Array] = []
 	for column in columns + 1:
-		landings.append(_landing_state(traces[column]))
-		if depths[column] > DRY_M and not landings[column].is_empty():
-			impact_points.append(_surface_point(origins[column], landings[column], landings[column][5]))
-	for column in columns + 1:
-		var source := clampi(column, wet_low, wet_high)
-		var landing := landings[source]
-		var wet := depths[column] > DRY_M and not landing.is_empty()
-		var start := Vector3(origins[source].x, landing_level_m, origins[source].y)
-		var drift := speed_m_s
-		var landed_at := 0.0
-		if not landing.is_empty():
-			start = _surface_point(origins[source], landing, landing[5])
-			drift = maxf(Vector2(landing[3], landing[4]).length() * 0.35, speed_m_s)
-			landed_at = landing[0] - lip_time
-		for row in APRON_ROWS + 1:
-			var distance := APRON_M * row / APRON_ROWS
-			var fade := float(row) / APRON_ROWS
-			vertices.append(Vector3(start.x, landing_level_m, start.z) + downstream * (distance - APRON_BACK_M))
-			normals.append(Vector3.UP)
-			uvs.append(Vector2(float(source) / columns, landed_at + distance / maxf(drift, 0.1)))
-			details.append(Vector2(landed_at, drift))
-			traits.append_array(PackedFloat32Array([1.0 if wet else 0.0, 0.0, 1.0 - fade * fade, 2.0]))
-			if row < APRON_ROWS and column < columns:
-				var i := apron_base + column * (APRON_ROWS + 1) + row
-				var next := i + APRON_ROWS + 1
-				indices.append_array(PackedInt32Array([i, i + 1, next, next, i + 1, next + 1]))
+		var landing := _landing_state(traces[column])
+		if depths[column] > DRY_M and not landing.is_empty():
+			impact_points.append(_surface_point(origins[column], landing, landing[5]))
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_COLOR] = films
 	arrays[Mesh.ARRAY_TEX_UV] = uvs
 	arrays[Mesh.ARRAY_TEX_UV2] = details
 	arrays[Mesh.ARRAY_CUSTOM0] = traits
@@ -211,7 +188,7 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 			var next := along + velocity.x * dt
 			var flight := bottom + velocity.y * dt - 0.5 * GRAVITY_M_S2 * dt * dt
 			var terrain := _ground(next)
-			if flight > terrain + 0.002:
+			if flight > terrain + maxf(0.002, thickness * CLING_FRACTION):
 				attached = false
 				along = next
 				bottom = flight

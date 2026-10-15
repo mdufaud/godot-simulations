@@ -17,7 +17,8 @@ float river_cliff_wetness(vec3 position, float wet) {
 			(river_fall_geometry.z - position.z) / river_fall_geometry.w);
 		float depth = waterfall_clock_enabled ? max(textureLod(waterfall_surface, uv, 0.0).w,
 			textureLod(swe_surface, river_swe_uv(position.xz), 0.0).w)
-			: max(river_fall_speed * 0.02, river_pool_levels_m.x - textureLod(river_height_texture, position.xz / river_domain_m + 0.5, 0.0).r);
+			: step(0.001, river_fall_speed) * dot(textureLod(river_height_texture,
+				vec2(position.x, river_fall_geometry.z + 0.3) / river_domain_m + 0.5, 0.0).rg, vec2(-1.0, 1.0));
 		return smoothstep(0.0001, 0.01, depth);
 	}
 	if (river_waterfall && river_fall_geometry.w == 0.0 && abs(position.z - river_fall_geometry.z) < 0.3) {

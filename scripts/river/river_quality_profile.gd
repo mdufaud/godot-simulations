@@ -14,6 +14,7 @@ const GRASS_DETAIL := [false, false, true, true]
 const GRASS_SHADOWS := [false, false, false, true]
 const MSAA := [Viewport.MSAA_DISABLED, Viewport.MSAA_2X, Viewport.MSAA_4X, Viewport.MSAA_8X]
 const SSAO := [false, true, true, true]
+const VOLUMETRIC_MIST := [false, false, true, true]
 
 
 static func values(tier: int) -> Dictionary:
@@ -31,4 +32,5 @@ static func values(tier: int) -> Dictionary:
 		grass_shadows = GRASS_SHADOWS[tier],
 		msaa = MSAA[tier],
 		ssao = SSAO[tier],
+		volumetric_mist = VOLUMETRIC_MIST[tier],
 	}

@@ -42,7 +42,7 @@ func _profile_table() -> void:
 		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow"],
 		RiverQualityProfile: ["water_cell_size_m", "foam_size_px", "reflection_scale", "rapids_reflection",
 			"grass_density", "grass_distance_m", "grass_detail", "grass_shadows", "msaa", "ssao",
-			"reflection_planes", "surface_detail", "foam_detail"],
+			"reflection_planes", "surface_detail", "foam_detail", "volumetric_mist"],
 	}
 
 

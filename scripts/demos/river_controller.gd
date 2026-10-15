@@ -166,6 +166,8 @@ func _apply_quality(values: Dictionary) -> void:
 	_quality_tier = RiverQualityProfile.WATER_CELL_SIZE_M.find(values.water_cell_size_m)
 	viewport_guard.set_msaa(values.msaa)
 	world_environment.environment.ssao_enabled = values.ssao
+	world_environment.environment.volumetric_fog_enabled = values.volumetric_mist
+	world_environment.environment.volumetric_fog_density = 0.0
 	viewport_guard.set_taa(false)
 	world_environment.environment.glow_enabled = values.surface_detail == 1.0
 	world_environment.environment.glow_intensity = 0.28
@@ -206,6 +208,11 @@ func set_foam(value: float) -> void:
 	river.apply_config(config)
 
 
+func set_mist_density(value: float) -> void:
+	config.mist_density = value
+	river.apply_config(config)
+
+
 func set_grass_enabled(enabled: bool) -> void:
 	_scenery.set_grass_enabled(enabled)
 
@@ -223,6 +230,8 @@ func set_capture_params(parameters: Dictionary) -> void:
 		set_grass_enabled(bool(parameters["grass"]))
 	if parameters.has("foam"):
 		set_foam(float(parameters["foam"]))
+	if parameters.has("mist"):
+		set_mist_density(float(parameters["mist"]))
 	if parameters.has("crates"):
 		for index in int(parameters["crates"]):
 			interactions.throw_crate()

@@ -7,6 +7,8 @@ const ROCK_PATHS := [
 	"res://resources/rocks/rock_face_02/rock_face_02_2k.gltf",
 ]
 
+const OUTER_EXTENT_M := 150.0
+
 var field: RiverField = RiverLandscape.new()
 var materials: Array[ShaderMaterial] = []
 var grass_material: ShaderMaterial
@@ -36,7 +38,6 @@ func build(host: Node3D, selected_field: RiverField = null) -> void:
 	_host = root
 	_rng.seed = 41927
 	_build_ground()
-	_build_background()
 	LoadingPump.stage("Placing rocks")
 	_build_rocks()
 	LoadingPump.stage("Planting grass")
@@ -143,10 +144,10 @@ func _build_ground() -> void:
 func _ground_mesh() -> ArrayMesh:
 	var size := Vector2i(field.domain_m / 0.5) + Vector2i.ONE if field.waterfall == null else Vector2i(97, 193)
 	field.ground_rows_m.clear()
+	var rows := PackedFloat32Array()
+	for z in size.y:
+		rows.append(-field.domain_m.y * 0.5 + float(z) / float(size.y - 1) * field.domain_m.y)
 	if field.waterfall != null:
-		var rows := PackedFloat32Array()
-		for z in size.y:
-			rows.append(-field.domain_m.y * 0.5 + float(z) / float(size.y - 1) * field.domain_m.y)
 		if not field.waterfall.is_vertical():
 			var crest := field.waterfall.crest_z_m
 			var lower_end := crest - field.waterfall.run_m()
@@ -159,37 +160,46 @@ func _ground_mesh() -> ArrayMesh:
 		for z in rows:
 			if field.ground_rows_m.is_empty() or z != field.ground_rows_m[-1]:
 				field.ground_rows_m.append(z)
-		size.y = field.ground_rows_m.size()
+		rows = field.ground_rows_m.duplicate()
+		size.y = rows.size()
 		field.ground_height_image = Image.create(size.x, size.y, false, Image.FORMAT_RGBAF)
+	var columns := PackedFloat32Array()
+	for x in size.x:
+		columns.append(-field.domain_m.x * 0.5 + float(x) / float(size.x - 1) * field.domain_m.x)
+	columns = _pad_outward(columns, field.domain_m.x / float(size.x - 1))
+	rows = _pad_outward(rows, field.domain_m.y / float(size.y - 1))
+	var count := Vector2i(columns.size(), rows.size())
+	var inner := (count - size) / 2
+	var cell_size := field.domain_m / Vector2(size - Vector2i.ONE)
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var tangents := PackedFloat32Array()
 	var indices := PackedInt32Array()
-	var cell_size := field.domain_m / Vector2(size - Vector2i.ONE)
-	for z in size.y:
-		for x in size.x:
-			var world_z := field.ground_rows_m[z] if field.waterfall != null else (float(z) / float(size.y - 1) - 0.5) * field.domain_m.y
-			var point := Vector2(float(x) / float(size.x - 1) * field.domain_m.x - field.domain_m.x * 0.5, world_z)
-			var dx := (_bed(point + Vector2(0.05, 0.0)) - _bed(point - Vector2(0.05, 0.0))) / 0.1
-			var dz := (_bed(point + Vector2(0.0, 0.05)) - _bed(point - Vector2(0.0, 0.05))) / 0.1
+	for z in count.y:
+		LoadingPump.tick()
+		for x in count.x:
+			var point := Vector2(columns[x], rows[z])
+			var dx := (_terrain(point + Vector2(0.05, 0.0)) - _terrain(point - Vector2(0.05, 0.0))) / 0.1
+			var dz := (_terrain(point + Vector2(0.0, 0.05)) - _terrain(point - Vector2(0.0, 0.05))) / 0.1
 			if field.waterfall != null and field.waterfall.is_vertical() \
 					and absf(point.x) <= field.channel_half_width(point.y) + 0.5 \
 					and absf(point.y - field.waterfall.crest_z_m) < 0.4:
 				dz = 0.0
-			var height := _bed(point)
+			var height := _terrain(point)
 			vertices.append(Vector3(point.x, height, point.y))
-			if field.ground_height_image != null:
-				field.ground_height_image.set_pixel(x, z, Color(height, world_z, 0.0, 1.0))
+			var image_cell := Vector2i(x, z) - inner
+			if field.ground_height_image != null and image_cell.x >= 0 and image_cell.y >= 0 and image_cell.x < size.x and image_cell.y < size.y:
+				field.ground_height_image.set_pixel(image_cell.x, image_cell.y, Color(height, point.y, 0.0, 1.0))
 			normals.append(Vector3(-dx, 1.0, -dz).normalized())
 			uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
 			tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
-			if x < size.x - 1 and z < size.y - 1:
-				var i := z * size.x + x
-				if _inside_cliff_gap(point + cell_size * 0.5):
+			if x < count.x - 1 and z < count.y - 1:
+				var i := z * count.x + x
+				if _inside_cliff_gap((point + Vector2(columns[x + 1], rows[z + 1])) * 0.5):
 					continue
-				indices.append_array(PackedInt32Array([i, i + 1, i + size.x, i + 1, i + size.x + 1, i + size.x]))
+				indices.append_array(PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x]))
 	if field.waterfall != null and field.waterfall.is_vertical():
 		var crest := field.waterfall.crest_z_m
 		for side: float in [-1.0, 1.0]:
@@ -217,31 +227,31 @@ func _ground_mesh() -> ArrayMesh:
 	return mesh
 
 
-func _build_background() -> void:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var n := 100
-	var span := 300.0
-	for z in n:
-		for x in n:
-			var point := Vector2(x, z) * (span / n) - Vector2.ONE * span * 0.5
-			var half_domain := field.domain_m * 0.5
-			if point.x >= -half_domain.x and point.x + 3.0 <= half_domain.x and point.y >= -half_domain.y and point.y + 3.0 <= half_domain.y:
-				continue
-			for offset: Vector2 in [Vector2.ZERO, Vector2(3.0, 0.0), Vector2(0.0, 3.0), Vector2(3.0, 0.0), Vector2(3.0, 3.0), Vector2(0.0, 3.0)]:
-				var p := point + offset
-				var outside := maxf(absf(p.x) - field.domain_m.x * 0.5, absf(p.y) - field.domain_m.y * 0.5)
-				var ridge := (sin(p.x * 0.038 + p.y * 0.027) + sin(p.y * 0.054 - p.x * 0.016)) * 3.0 + 8.0
-				var height := _bed(p) + smoothstep(0.0, 40.0, outside) * ridge - (0.3 if outside < 0.0 else 0.0)
-				surface.set_uv(p)
-				surface.add_vertex(Vector3(p.x, height, p.y))
-	surface.generate_normals()
-	surface.generate_tangents()
-	var instance := MeshInstance3D.new()
-	instance.name = "DistantBanks"
-	instance.mesh = surface.commit()
-	instance.material_override = materials[0]
-	_host.add_child(instance)
+func _pad_outward(values: PackedFloat32Array, step: float) -> PackedFloat32Array:
+	var low := PackedFloat32Array()
+	var high := PackedFloat32Array()
+	var offset := 0.0
+	while offset < OUTER_EXTENT_M:
+		step *= 1.2
+		offset += step
+		low.append(values[0] - offset)
+		high.append(values[-1] + offset)
+	low.reverse()
+	low.append_array(values)
+	low.append_array(high)
+	return low
+
+
+func _terrain(point: Vector2) -> float:
+	var outside := maxf(absf(point.x) - field.domain_m.x * 0.5, absf(point.y) - field.domain_m.y * 0.5)
+	if outside <= 0.0:
+		return _bed(point)
+	var ridge := (sin(point.x * 0.038 + point.y * 0.027) + sin(point.y * 0.054 - point.x * 0.016)) * 3.0 + 8.0
+	var center := _center_x(point.y)
+	var reach := _half_width(point.y) + 5.0
+	var banks := (_bed(Vector2(center - reach, point.y)) + _bed(Vector2(center + reach, point.y))) * 0.5
+	var bed := lerpf(_bed(point), maxf(_bed(point), banks), smoothstep(0.0, 10.0, outside))
+	return bed + smoothstep(0.0, 40.0, outside) * ridge
 
 
 func _build_rocks() -> void:

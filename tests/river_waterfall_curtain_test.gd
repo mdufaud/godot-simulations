@@ -7,6 +7,7 @@ func _initialize() -> void:
 	_check_cliff()
 	_check_rotated_cliff()
 	_check_ramp()
+	_check_fast_rounded_ramp()
 	_check_gorge()
 	_finish("river_waterfall_curtain")
 
@@ -78,13 +79,41 @@ func _check_ramp() -> void:
 	_check(entered, "Ramp water must enter the pool where the ramp meets the landing level")
 
 
+func _check_fast_rounded_ramp() -> void:
+	var slope := tan(deg_to_rad(50.0))
+	var ramp := func(point: Vector2) -> float:
+		if point.y >= 0.0:
+			return 6.0
+		if point.y > -0.35:
+			var t := -point.y / 0.35
+			return 6.0 - slope * 0.35 * (2.0 * t * t - t * t * t)
+		return maxf(6.0 + slope * point.y, 0.0)
+	var curtain := _curtain(ramp, Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0))
+	curtain.surface_height_m = 6.77
+	curtain.speed_m_s = 2.4
+	curtain.landing_level_m = 0.12
+	var arrays := curtain.build().surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var traits: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM0]
+	var slope_vertices := 0
+	var attached := 0
+	for index in vertices.size():
+		var point := vertices[index]
+		if traits[index * 4 + 3] > 1.5 or traits[index * 4 + 3] < -0.5 or point.z > 0.0 or point.y < 0.5:
+			continue
+		slope_vertices += 1
+		attached += 1 if traits[index * 4 + 3] > 0.5 else 0
+	_check(slope_vertices > 0 and attached == slope_vertices,
+		"A thick fast film must cling to a rounded 50 degree lip instead of jumping over an air pocket")
+
+
 func _check_gorge() -> void:
 	var gorge := func(point: Vector2) -> float: return (6.0 if point.y > 0.0 else 0.0) + (10.0 if absf(point.x) > 1.05 else 0.0)
 	var curtain := _curtain(gorge, Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0))
 	var vertices: PackedVector3Array = curtain.build().surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
 	var stride := curtain.columns + 3
 	var tucked := true
-	for row in (vertices.size() - (curtain.columns + 1) * (Curtain.APRON_ROWS + 1)) / stride:
+	for row in vertices.size() / stride:
 		for slot: int in [row * stride, row * stride + stride - 1]:
 			var point := vertices[slot]
 			tucked = tucked and gorge.call(Vector2(point.x, point.z)) >= point.y

@@ -6,6 +6,7 @@ var preset_option: OptionButton
 var scene_option: OptionButton
 var scene_action: Button
 var angle_slider: HSlider
+var mist_slider: HSlider
 var sliders: Array[HSlider] = []
 var pause_button: Button
 var preset_action: Button
@@ -29,6 +30,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 		_angle_dragging = false
 		if changed:
 			controller.set_waterfall_angle(angle_slider.value))
+	mist_slider = menu.add_slider("Mist density", 0.0, 1.0, 0.6, controller.set_mist_density, false, 0.01)
 	var names: Array[String] = []
 	for preset: RiverConfig in presets:
 		names.append(preset.display_name)
@@ -70,6 +72,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 
 func sync(config: RiverConfig, index: int) -> void:
 	preset_option.select(index)
+	mist_slider.value = config.mist_density
 	_menu.set_action_label(preset_action, config.display_name)
 	preset_action.tooltip_text = "Next river preset · Current: " + config.display_name
 	var values := [config.speed_m_s, config.water_level_m, config.clarity, config.foam_amount]
@@ -82,6 +85,7 @@ func sync_scene(index: int, angles: PackedFloat32Array) -> void:
 		scene_option.set_item_text(i, "Waterfall %.1f°" % angles[i])
 	scene_option.select(index)
 	angle_slider.editable = index > 0
+	mist_slider.editable = index > 0
 	angle_slider.set_value_no_signal(angles[maxi(index, 1)])
 	scene_action.tooltip_text = "Next scene: %s · Current: %s" % [scene_option.get_item_text((index + 1) % SCENES.size()), scene_option.get_item_text(index)]
 

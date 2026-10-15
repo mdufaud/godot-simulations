@@ -173,6 +173,7 @@ func _sync_environment() -> void:
 		environment.tonemap_mode = Environment.TONE_MAPPER_LINEAR
 		environment.tonemap_exposure = 1.0
 		environment.glow_enabled = false
+		environment.volumetric_fog_enabled = false
 		environment.ssao_enabled = plane_count == 4
 
 

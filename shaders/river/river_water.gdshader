@@ -62,7 +62,11 @@ float waterfall_receiver(float x) {
 }
 
 float waterfall_wet_end() {
-	return waterfall_geometry.z - max(waterfall_geometry.w * max((waterfall_geometry.y - 0.65 - water_level_m) / waterfall_geometry.y, 0.0), 0.125);
+	float clearance = 0.125;
+	if (waterfall_clock_enabled && waterfall_geometry.w == 0.0) {
+		clearance += swe_region_m.w / float(textureSize(swe_surface, 0).y);
+	}
+	return waterfall_geometry.z - max(waterfall_geometry.w * max((waterfall_geometry.y - 0.65 - water_level_m) / waterfall_geometry.y, 0.0), clearance);
 }
 
 float waterfall_pool_end(float x) {
@@ -86,7 +90,7 @@ float waterfall_impact(vec2 point) {
 		if (boundary.y > 0.0) impact_z = boundary.z;
 	}
 	float downstream = max(impact_z - point.y, 0.0);
-	float band = exp(-pow((point.y - impact_z) / 0.65, 2.0)) + 0.5 * exp(-downstream / 2.5) * step(point.y, impact_z);
+	float band = exp(-pow((point.y - impact_z) / 0.65, 2.0)) + 0.6 * exp(-downstream / (2.5 + speed_m_s * 1.5)) * step(point.y, impact_z);
 	return min(band, 1.0) * waterfall_source_active(point.x)
 		* (1.0 - smoothstep(waterfall_geometry.x * 0.5 - 0.3, waterfall_geometry.x * 0.5 + 0.2, abs(point.x)));
 }
@@ -95,9 +99,22 @@ float basin_height(vec2 point) {
 	if (waterfall_enabled) {
 		bool upper = point.y >= waterfall_geometry.z - 0.0001;
 		float end_z = waterfall_wet_end();
-		point.y = upper ? max(point.y, waterfall_geometry.z + 0.125)
+		float source_start = waterfall_geometry.z
+			+ (waterfall_geometry.w == 0.0 ? waterfall_geometry.z - end_z : 0.125);
+		point.y = upper ? max(point.y, source_start)
 			: min(point.y, end_z);
-		return river_swe_height(point, water_level_m + (upper ? waterfall_geometry.y : 0.0));
+		float level = water_level_m + (upper ? waterfall_geometry.y : 0.0);
+		float height = river_swe_height(point, level);
+		if (upper || !waterfall_clock_enabled) return height;
+		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(point.x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);
+		float near = boundary.y > 0.0 ? 1.0 - smoothstep(1.0, 2.2, abs(point.y - boundary.z)) : 0.0;
+		if (near <= 0.0) return height;
+		float total = 0.0;
+		for (int i = -2; i <= 2; i++) {
+			total += river_swe_height(vec2(point.x, min(point.y + float(i) * 0.25, end_z)), level);
+		}
+		float pool = river_swe_height(vec2(point.x, boundary.z - 2.5), level);
+		return mix(height, min(total / 5.0, pool + 0.06), near);
 	}
 	return river_swe_height(point, texture(bed_height_texture, point / domain_m + 0.5).g);
 }
@@ -239,6 +256,12 @@ void fragment() {
 		vec2 slopes = coarse.xy / max(coarse.z, 0.4) + crossed.xy / max(crossed.z, 0.4) * 0.45;
 		float strength = mix(0.025, 0.28, smoothstep(0.005, 0.12, ripple_height_m));
 		normal_world = normalize(normal_world + vec3(slopes.x, 0.0, slopes.y) * strength * surface_detail);
+	}
+	if (fall_impact > 0.0) {
+		float churn_t = simulation_time_s * 0.45;
+		vec2 churn = vec2(texture(turbulence_texture, p * 0.8 + vec2(churn_t, -churn_t * 0.6)).r,
+			texture(turbulence_texture, p * 1.5 + vec2(0.37 - churn_t * 0.7, churn_t)).r) - 0.5;
+		normal_world = normalize(normal_world + vec3(churn.x, 0.0, churn.y) * fall_impact * 1.4);
 	}
 	NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
 	vec4 behind = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, texture(depth_texture, SCREEN_UV).r, 1.0);
