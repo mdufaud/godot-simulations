@@ -114,7 +114,7 @@ func bake(level_m: float, size: Vector2i = Vector2i(384, 512)) -> ImageTexture:
 			if x % 16 == 0 and y % 8 == 0 and flow.a > 0.1:
 				points.append(Vector3(point.x, sample_height(point, 0.0), point.y))
 		rows[y] = [flows, beds, points], size.y)
-	WorkerThreadPool.wait_for_group_task_completion(task)
+	LoadingPump.wait_for_group(task)
 	var flow_data := PackedFloat32Array()
 	var bed_data := PackedFloat32Array()
 	surface_points.clear()

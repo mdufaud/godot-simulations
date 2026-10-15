@@ -3,12 +3,18 @@ extends Node
 
 signal settings_changed
 
+const LOADING_PUMP_INTERVAL_MS := 33
+
 # Current demo tracking
 var current_demo: String = ""
 var _loading_layer: CanvasLayer
 var _loading_label: Label
 var _loading_spinner: Control
 var _loading_angle := 0.0
+var _last_pump_ms := 0
+var _stage_item := RID()
+var _stage_text := ""
+var _stage_started_ms := 0
 
 # Global settings
 var settings: Dictionary = {
@@ -97,12 +103,14 @@ func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	apply_fps_limit()
 	_create_loading_overlay()
+	LoadingPump.set_hook(pump_loading)
 	set_process(false)
 
 
 func _process(delta: float) -> void:
 	_loading_angle = fmod(_loading_angle + delta * TAU, TAU)
-	_loading_spinner.queue_redraw()
+	_loading_spinner.rotation = _loading_angle
+	_draw_loading_stage()
 
 
 func _create_loading_overlay() -> void:
@@ -132,6 +140,7 @@ func _create_loading_overlay() -> void:
 	content.add_child(spinner_row)
 	_loading_spinner = Control.new()
 	_loading_spinner.custom_minimum_size = Vector2(56, 56)
+	_loading_spinner.pivot_offset = Vector2(28, 28)
 	_loading_spinner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_loading_spinner.draw.connect(_draw_loading_spinner)
 	spinner_row.add_child(_loading_spinner)
@@ -142,17 +151,68 @@ func _create_loading_overlay() -> void:
 	_loading_label.add_theme_color_override("font_color", Color(0.85, 0.9, 0.95))
 	content.add_child(_loading_label)
 
+	# Drawn straight on a canvas item: a Label's own redraw is deferred to the
+	# message queue, which never flushes while a demo's _ready blocks.
+	_stage_item = RenderingServer.canvas_item_create()
+	RenderingServer.canvas_item_set_parent(_stage_item, _loading_layer.get_canvas())
+
+
+func _draw_loading_stage() -> void:
+	RenderingServer.canvas_item_clear(_stage_item)
+	if _stage_text.is_empty():
+		return
+	var elapsed_s := float(Time.get_ticks_msec() - _stage_started_ms) * 0.001
+	var anchor := _loading_label.get_global_rect()
+	ThemeDB.fallback_font.draw_string(_stage_item,
+		Vector2(0.0, anchor.end.y + 36.0), "%s  %.1f s" % [_stage_text, elapsed_s],
+		HORIZONTAL_ALIGNMENT_CENTER, get_viewport().get_visible_rect().size.x, 18,
+		Color(0.55, 0.7, 0.9))
+
 
 func _draw_loading_spinner() -> void:
 	var center := _loading_spinner.size * 0.5
 	_loading_spinner.draw_arc(center, 24.0, 0.0, TAU, 48, Color(0.12, 0.18, 0.28), 4.0, true)
-	_loading_spinner.draw_arc(center, 24.0, _loading_angle, _loading_angle + TAU * 0.75,
-		48, Color(0.35, 0.62, 1.0), 4.0, true)
+	_loading_spinner.draw_arc(center, 24.0, 0.0, TAU * 0.75, 48, Color(0.35, 0.62, 1.0), 4.0, true)
 
 
 func _finish_loading() -> void:
+	if get_tree().node_added.is_connected(_pump_loading_on_node):
+		get_tree().node_added.disconnect(_pump_loading_on_node)
 	_loading_layer.hide()
+	_stage_text = ""
+	RenderingServer.canvas_item_clear(_stage_item)
 	set_process(false)
+
+
+func _set_loading_stage(label: String) -> void:
+	_stage_text = label
+	_stage_started_ms = Time.get_ticks_msec()
+
+
+## Redraws the overlay from inside a blocking main-thread step (a demo's
+## _ready), where no process frame can run. A non-empty [param stage] names the
+## step about to run and redraws at once; otherwise the redraw is rate-limited.
+## A no-op unless a simulation is loading, so a demo may call it freely.
+func pump_loading(stage: String = "") -> void:
+	if not _loading_layer.visible or DisplayServer.get_name() == "headless":
+		return
+	var now := Time.get_ticks_msec()
+	if not stage.is_empty():
+		_set_loading_stage(stage)
+	elif now - _last_pump_ms < LOADING_PUMP_INTERVAL_MS:
+		return
+	_last_pump_ms = now
+	_loading_angle = fmod(float(now) * 0.001 * TAU, TAU)
+	_loading_spinner.rotation = _loading_angle
+	_draw_loading_stage()
+	var root_viewport := get_viewport()
+	root_viewport.disable_3d = true
+	RenderingServer.force_draw()
+	root_viewport.disable_3d = false
+
+
+func _pump_loading_on_node(_node: Node) -> void:
+	pump_loading()
 
 
 ## Push settings["fps_limit"] into the engine. Headless runs (tests, CI) rely on
@@ -183,6 +243,7 @@ func load_demo(demo_name: String) -> void:
 		if demo.key == demo_name:
 			_loading_label.text = "Loading simulation…\n%s" % demo.title
 	_loading_angle = 0.0
+	_set_loading_stage("Loading resources")
 	_loading_layer.show()
 	set_process(true)
 	await get_tree().process_frame
@@ -206,6 +267,8 @@ func load_demo(demo_name: String) -> void:
 	var packed := ResourceLoader.load_threaded_get(scene) as PackedScene
 	var previous_demo := current_demo
 	current_demo = demo_name
+	_set_loading_stage("Building scene")
+	get_tree().node_added.connect(_pump_loading_on_node)
 	error = get_tree().change_scene_to_packed(packed)
 	if error != OK:
 		current_demo = previous_demo
@@ -213,6 +276,7 @@ func load_demo(demo_name: String) -> void:
 		_finish_loading()
 		return
 	await get_tree().scene_changed
+	_set_loading_stage("Rendering first frame")
 	await get_tree().process_frame
 	if DisplayServer.get_name() != "headless":
 		await RenderingServer.frame_post_draw

@@ -40,11 +40,13 @@ var _reflection_ms := 0.0
 
 func _ready() -> void:
 	world_environment.environment = world_environment.environment.duplicate() as Environment
+	LoadingPump.stage("Applying quality profile")
 	quality.setup(RiverQualityProfile, "river_quality_profile", _apply_quality)
 	quality.restore()
 	camera.cull_mask |= 4
 	set_capture_view("default")
 	_scenery.build(self)
+	LoadingPump.stage("Loading water textures")
 	config = PRESETS[1].duplicate() as RiverConfig
 	river.config = config
 	river.field = _scenery.field
@@ -58,12 +60,15 @@ func _ready() -> void:
 	river.reflection_anchor_z_m = orbit.target.z
 	river.scene_world = camera.get_world_3d()
 	river.render_size = get_window().size
+	LoadingPump.stage("Starting river simulation")
 	add_child(river)
 	river.start()
 	interactions.river = river
 	interactions.camera = camera
 	add_child(interactions)
+	LoadingPump.stage("Building menu")
 	_menu_builder.build(menu, self, PRESETS)
+	LoadingPump.stage("Applying river preset")
 	apply_preset(1)
 	river.simulation_changed.connect(func(): _menu_builder.sync_flow(river.swe))
 	process_priority = 30

@@ -68,9 +68,10 @@ func start(field: RiverField, config: RiverConfig) -> void:
 	_ground_image = field.ground_height_image
 	_source_domain = Rect2(-field.domain_m * 0.5, field.domain_m)
 	if field.solver_terrain_image != null:
-		RenderingServer.call_on_render_thread(_init_render.bind(field.solver_terrain_image.get_data(),
-			field.solver_terrain_image.get_size(), parameters(config, 0.0)))
+		_request_init_render(field.solver_terrain_image.get_data(),
+			field.solver_terrain_image.get_size(), config)
 		return
+	LoadingPump.stage("Sampling river terrain")
 	var size := Vector2i(field.domain_m / CELL_M)
 	var rows := []
 	rows.resize(size.y)
@@ -86,7 +87,7 @@ func start(field: RiverField, config: RiverConfig) -> void:
 			row[x * 4 + 2] = flow.r
 			row[x * 4 + 3] = flow.g
 		rows[y] = row, size.y)
-	WorkerThreadPool.wait_for_group_task_completion(task)
+	LoadingPump.wait_for_group(task)
 	var values := PackedFloat32Array()
 	for row: PackedFloat32Array in rows:
 		values.append_array(row)
@@ -94,8 +95,15 @@ func start(field: RiverField, config: RiverConfig) -> void:
 		_stamp_rock(values, instance, size)
 	var bytes := values.to_byte_array()
 	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, bytes)
-	RenderingServer.call_on_render_thread(_init_render.bind(bytes, size,
-		parameters(config, 0.0)))
+	_request_init_render(bytes, size, config)
+
+
+func _request_init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, config: RiverConfig) -> void:
+	var parameters_bytes := parameters(config, 0.0)
+	LoadingPump.stage("Compiling water solver (GPU)")
+	RenderingServer.call_on_render_thread(_init_render.bind(terrain_bytes, source_size, parameters_bytes))
+	LoadingPump.stage("Compiling waterfall pipelines (GPU)" if _waterfall != null else "Starting water solver (GPU)")
+	RenderingServer.call_on_render_thread(_init_waterfall_render.bind(parameters_bytes))
 
 
 func _stamp_rock(values: PackedFloat32Array, instance: MeshInstance3D, size: Vector2i) -> void:
@@ -275,6 +283,11 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 		uniforms.append(_uniform(12, _waterfall_clock, RenderingDevice.UNIFORM_TYPE_IMAGE))
 		uniforms.append(_uniform(13, _balance, RenderingDevice.UNIFORM_TYPE_IMAGE))
 		_sets.append(_rd.uniform_set_create(uniforms, _shader, 0))
+
+
+func _init_waterfall_render(parameters_bytes: PackedByteArray) -> void:
+	if _rd == null or _sets.is_empty():
+		return
 	if _waterfall != null:
 		var waterfall_source := ShaderCache.compile(_rd, "river_waterfall",
 			FileAccess.get_file_as_string("res://shaders/river/river_waterfall.comp"))

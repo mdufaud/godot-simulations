@@ -122,6 +122,7 @@ func _ready() -> void:
 	_preset = PRESETS[preset_idx]
 	_restore_generation_settings()
 
+	LoadingPump.stage("Applying quality profile")
 	solver.config = config
 	quality.setup(TerrainQualityProfile, "terrain_quality_profile", _apply_quality)
 	quality.restore()
@@ -136,13 +137,16 @@ func _ready() -> void:
 	orbit_cam.max_distance = 40.0
 	orbit_cam.move_speed = 2.0
 
+	LoadingPump.stage("Building terrain view")
 	view.build(self, solver.world_size, mesh_n)
+	LoadingPump.tick()
 	sun.shadow_enabled = true
 
 	profiler.lines_provider = _profiler_lines
 	profiler.enabled_changed.connect(func(on: bool): solver.profiling = on)
 	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 
+	LoadingPump.stage("Building menu")
 	_setup_ui()
 	# apply_preset seeds the field and brings the solver up; no separate init here.
 	apply_preset(preset_idx)
@@ -290,7 +294,9 @@ func restart() -> void:
 	solver.brush.clear()
 	solver.world_size = _preset.world_size_m
 	view.set_world_size(solver.world_size, mesh_n)
+	LoadingPump.stage("Generating terrain")
 	var state := _preset.build_state(solver.grid_n, solver.world_size)
+	LoadingPump.stage("Configuring terrain")
 	solver.set_seed_channels(state.sand, state.water, state.snow)
 	# Config defaults first, then the preset's negative-means-keep overrides;
 	# the solver object outlives presets, so both paths run every restart.
@@ -354,6 +360,7 @@ func restart() -> void:
 	_respawn_balls()
 	_menu_builder.sync_balls(balls_enabled)
 	_update_status()
+	LoadingPump.stage("Initializing terrain solver (GPU)")
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 

@@ -37,9 +37,12 @@ func build(host: Node3D, selected_field: RiverField = null) -> void:
 	_rng.seed = 41927
 	_build_ground()
 	_build_background()
+	LoadingPump.stage("Placing rocks")
 	_build_rocks()
+	LoadingPump.stage("Planting grass")
 	_build_grass()
 	if field.waterfall != null and field.waterfall.is_vertical():
+		LoadingPump.stage("Building cliff")
 		_build_cliff()
 
 
@@ -111,6 +114,7 @@ func _texture(asset: String, kind: String) -> Texture2D:
 
 
 func _build_ground() -> void:
+	LoadingPump.stage("Loading terrain textures")
 	var material := ShaderMaterial.new()
 	material.shader = load("res://shaders/river/river_ground.gdshader")
 	for prefix: String in ["gravel", "grass"]:
@@ -126,11 +130,13 @@ func _build_ground() -> void:
 	material.set_shader_parameter("water_normal", load("res://resources/ocean/micro_normal.png"))
 	material.set_shader_parameter("water_detail", water_detail)
 	materials.append(material)
+	LoadingPump.stage("Computing terrain mesh")
 	var mesh := MeshInstance3D.new()
 	mesh.name = "RiverBanks"
 	mesh.mesh = _ground_mesh()
 	mesh.material_override = material
 	_host.add_child(mesh)
+	LoadingPump.stage("Building terrain collision")
 	mesh.create_trimesh_collision()
 
 

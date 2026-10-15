@@ -109,6 +109,7 @@ func _ready() -> void:
 		menu.add_label("This GPU cannot run the minimum ocean quality profile.")
 		return
 
+	LoadingPump.stage("Applying quality profile")
 	solver.config = config
 	quality.setup(OceanQualityProfile, "ocean_quality_profile",
 		_apply_quality, _rebuild_quality_resources)
@@ -133,20 +134,29 @@ func _ready() -> void:
 	_viewport.set_taa(false)
 	_viewport.set_screen_space_aa(Viewport.SCREEN_SPACE_AA_FXAA)
 
+	LoadingPump.stage("Building sky")
 	_setup_sky()
+	LoadingPump.tick()
+	LoadingPump.stage("Building ocean mesh")
 	_setup_ocean_mesh()
+	LoadingPump.tick()
+	LoadingPump.stage("Building clouds")
 	cloudscape.camera = main_camera
 	cloudscape.sun = sun
 	add_child(cloudscape)
 	cloudscape.build()
+	LoadingPump.tick()
 	surface_mat.set_shader_parameter("cloud_reflection", cloudscape.reflection_texture())
 
+	LoadingPump.stage("Building storm effects")
 	storm.sun = sun
 	storm.world_env = world_env
 	storm.sky_material = sky_material
 	storm.cloudscape = cloudscape
 	storm.overlay_layer = underwater_layer
 	storm.build(self)
+	LoadingPump.tick()
+	LoadingPump.stage("Building foam and spray")
 	add_child(foam_window)
 	foam_window.build(surface_mat, main_camera, rocks)
 	foam_window.set_enabled(true)
@@ -161,10 +171,14 @@ func _ready() -> void:
 	profiler.enabled_changed.connect(_profiling.set_overlay_enabled)
 	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 
+	LoadingPump.stage("Building menu")
 	_setup_ui()
+	LoadingPump.stage("Applying look")
 	apply_look(0)
+	LoadingPump.stage("Applying sea state")
 	apply_preset(1)
 	set_scene_mode(int(GameManager.get_setting("ocean_scene_mode", 0)), false)
+	LoadingPump.stage("Initializing wave solver (GPU)")
 	RenderingServer.call_on_render_thread(solver.init_render)
 
 

@@ -64,6 +64,7 @@ func start() -> void:
 	if not error.is_empty():
 		push_error(error)
 		return
+	LoadingPump.stage("Creating water surface")
 	water_material = ShaderMaterial.new()
 	water_material.shader = load("res://shaders/river/river_water.gdshader")
 	water_material.set_shader_parameter("domain_m", field.domain_m)
@@ -103,6 +104,7 @@ func start() -> void:
 		_surface.custom_aabb = AABB(Vector3(-field.domain_m.x * 0.5, -3.0, -field.domain_m.y * 0.5),
 			Vector3(field.domain_m.x, field.waterfall.height_m + 7.0, field.domain_m.y))
 	add_child(_surface)
+	LoadingPump.stage("Building foam and reflections")
 	_build_foam()
 	_build_reflection()
 	swe = SweSystem.new()
@@ -114,6 +116,7 @@ func start() -> void:
 	swe.state_changed.connect(func():
 		cancel_queries()
 		_sync_surface())
+	LoadingPump.stage("Starting water solver")
 	swe.start()
 	if field.waterfall != null:
 		waterfall = WaterfallSystem.new()
@@ -125,9 +128,11 @@ func start() -> void:
 		waterfall.reflection_layer = REFLECTION_LAYER
 		waterfall.quality_tier = waterfall_quality
 		add_child(waterfall)
+		LoadingPump.stage("Starting waterfall")
 		waterfall.start()
 	_started = true
 	set_process(true)
+	LoadingPump.stage("Baking flow map")
 	apply_config(config)
 	_sync_surface()
 	process_priority = 20
