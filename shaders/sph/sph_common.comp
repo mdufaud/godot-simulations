@@ -136,6 +136,8 @@ const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
 const int MATERIAL_ASTRAL = 5;
+const int MATERIAL_SPECTRAL_GEL = 6;
+const int MATERIAL_FLUID_LAVA = 7;
 
 // Must match FluidSystem.Scenario.
 const int SCENE_POOL = 0;
@@ -153,7 +155,7 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	// by SphFluidSolver. The kernels branch on the material id only where the
 	// PHYSICS MODEL differs (dual-phase oil, lava heat, honey extension); every
 	// tunable number comes from here.
-	vec4 fluid_material; // x = density kg/m3, y = pressure stiffness scale, z = collision inflation, w = pad
+	vec4 fluid_material; // x = density kg/m3, y = pressure stiffness scale, z = collision inflation, w = lava freeze heat (0 = never)
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 	vec4 domain_min;
 	vec4 domain_max;
@@ -170,6 +172,11 @@ layout(std430, set = 0, binding = 22) restrict buffer VelocitiesSnap {
 	vec4 data[];
 }
 velocities_snap;
+
+layout(std430, set = 0, binding = 23) restrict buffer GelReference {
+	vec4 data[];
+}
+gel_reference;
 
 // Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
 // request, so it can read past the cap for the rest of the frame.
@@ -189,6 +196,10 @@ layout(push_constant, std430) uniform Params {
 	ivec4 misc; // x = tex_width, y = num_blocks, z = last_substep flag, w = rng seed
 }
 params;
+
+bool is_lava() {
+	return params.material == MATERIAL_LAVA || params.material == MATERIAL_FLUID_LAVA;
+}
 
 // Smoothing kernels (dst = distance, caller guarantees dst < h). SpikyPow2 for
 // density, SpikyPow3 for near-density; their gradients drive pressure; Poly6 for

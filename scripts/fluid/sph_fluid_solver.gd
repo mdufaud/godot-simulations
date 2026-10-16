@@ -13,6 +13,7 @@ const STAGES: Array[String] = [
 	"sph_emit", "foam_prepare", "foam_update", "foam_compact",
 ]
 const WG := 256
+const MATERIAL_SPECTRAL_GEL := 6
 const FOAM_UBO_SIZE := 112
 const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
@@ -46,6 +47,7 @@ var material_density_kg_m3 := 1000.0
 var stiffness_scale := 1.0
 var cohesion_kernel_scale := 1.0
 var collision_inflation := 0.14
+var freeze_heat := 0.0
 # Akinci-style cohesion multiplier. 0 disables the term entirely (no kernel
 # work in the pressure pass); see sph_cohesion_k in sph_common.comp.
 var cohesion_strength := 0.0
@@ -164,6 +166,7 @@ var _emit_fraction := 0.0
 var _target_density := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
+var _gel_cohort := 0
 var _timing_store := GpuTimingStore.new()
 
 
@@ -227,10 +230,24 @@ func respawn_range(from: int, data: PackedFloat32Array) -> void:
 	var bytes := data.to_byte_array()
 	var velocities := PackedFloat32Array()
 	velocities.resize(count * 4)
-	for i in count:
-		velocities[i * 4 + 3] = float(from + i)
-	var velocity_bytes := velocities.to_byte_array()
 	var off := from * 16
+	var previous := PackedFloat32Array()
+	var references := PackedFloat32Array()
+	if material == MATERIAL_SPECTRAL_GEL:
+		previous = _rd.buffer_get_data(parity_velocities_rid(_parity), off, count * 16).to_float32_array()
+		references = _rd.buffer_get_data(_buffers["gel_reference"]).to_float32_array()
+		_gel_cohort += 1
+	for i in count:
+		var id := int(previous[i * 4 + 3]) if not previous.is_empty() else from + i
+		velocities[i * 4 + 3] = float(id)
+		if not references.is_empty():
+			for axis in 3:
+				references[id * 4 + axis] = data[i * 4 + axis]
+			references[id * 4 + 3] = float(_gel_cohort)
+	if not references.is_empty():
+		var reference_bytes := references.to_byte_array()
+		_rd.buffer_update(_buffers["gel_reference"], 0, reference_bytes.size(), reference_bytes)
+	var velocity_bytes := velocities.to_byte_array()
 	for key in ["positions_a", "positions_b", "predicted_a", "predicted_b"]:
 		_rd.buffer_update(_buffers[key], off, bytes.size(), bytes)
 	for key in ["velocities_a", "velocities_b"]:
@@ -298,6 +315,8 @@ func init_render() -> void:
 	# Race-free neighbour reads: refreshed from `velocities` after grid_scatter
 	# each sub-step, read by sph_pressure (foam metric) and sph_viscosity (XSPH).
 	_buffers["velocities_snap"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["gel_reference"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_gel_cohort = 0
 	_buffers["cell_count"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["cell_start"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["block_sums"] = _rd.storage_buffer_create(num_blocks * 4, zero_blocks)
@@ -368,11 +387,11 @@ func _build_uniform_sets() -> void:
 		["positions_a", "velocities_a", "predicted_a", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_b", "velocities_b",
 			"", "predicted_b", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
 		["positions_b", "velocities_b", "predicted_b", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_a", "velocities_a",
 			"", "predicted_a", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
 	]
 	var field: RID = planet_field if planet_field.is_valid() else _dummy_field
 	for stage in _uniform_sets:
@@ -797,7 +816,8 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	# (13 affine_inverse on the cascade) reruns only when a static input does.
 	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
 		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
-		stiffness_scale, collision_inflation, scene_id, config.domain_origin, config.domain_size_m])
+		stiffness_scale, collision_inflation, freeze_heat, scene_id, config.domain_origin,
+		config.domain_size_m])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
 		_scene_ubo_cache_hash = static_hash
@@ -826,6 +846,7 @@ func _pack_scene_ubo_static() -> PackedByteArray:
 	b.encode_float(1184, material_density_kg_m3)
 	b.encode_float(1188, stiffness_scale)
 	b.encode_float(1192, collision_inflation)
+	b.encode_float(1196, freeze_heat)
 	b.encode_s32(1200, scene_id)
 	var upper := config.domain_origin + config.domain_size_m
 	for axis in 3:

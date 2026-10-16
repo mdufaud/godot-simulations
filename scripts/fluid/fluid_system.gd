@@ -5,7 +5,7 @@ extends Node3D
 ## The host scene owns its camera, environment and ground; this node owns the fluid.
 
 enum Scenario { POOL, CASCADE, BASIN }
-enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL }
+enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL, SPECTRAL_GEL, FLUID_LAVA }
 
 const RADIUS := 0.16
 const POUR_COOLDOWN_MS := 400
@@ -86,6 +86,10 @@ func can_pour() -> bool:
 
 func _foam_active() -> bool:
 	return foam_enabled and mode == FluidKind.WATER
+
+
+func _is_lava() -> bool:
+	return mode == FluidKind.LAVA or mode == FluidKind.FLUID_LAVA
 
 
 func start() -> void:
@@ -198,7 +202,7 @@ func add_pool_liquid() -> bool:
 		batch[i * 4] = p.x
 		batch[i * 4 + 1] = p.y
 		batch[i * 4 + 2] = p.z
-		var phase := 1.0 if mode == FluidKind.LAVA else 0.0
+		var phase := 1.0 if _is_lava() else 0.0
 		if mode == FluidKind.WATER_OIL:
 			@warning_ignore("integer_division")
 			phase = float(((from + i) / 216) % 2)
@@ -453,6 +457,7 @@ func _configure_solver() -> void:
 	sph_solver.stiffness_scale = spec.stiffness_scale
 	sph_solver.cohesion_kernel_scale = spec.cohesion_kernel_scale
 	sph_solver.collision_inflation = spec.collision_inflation
+	sph_solver.freeze_heat = spec.freeze_heat
 	sph_solver.foam_enabled = _foam_active()
 	var basin_pour := scenario == Scenario.BASIN
 	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()
@@ -466,11 +471,11 @@ func _configure_solver() -> void:
 	sph_solver.set_scene_obstacles(obstacles_for_scene(scenario))
 	if planet_mode():
 		_configure_planet_solver()
-		sph_solver.viscosity_strength = 0.14 if mode != FluidKind.LAVA else 0.3
-		if mode == FluidKind.ASTRAL:
+		sph_solver.viscosity_strength = 0.03 if _is_lava() else 0.14
+		if mode in [FluidKind.ASTRAL, FluidKind.SPECTRAL_GEL]:
 			sph_solver.viscosity_strength = spec.viscosity
 		sph_solver.cohesion_strength = 0.0
-		sph_solver.extension_strength = 0.0
+		sph_solver.extension_strength = spec.extension_strength if mode == FluidKind.SPECTRAL_GEL else 0.0
 		return
 	_radius = spec.radius
 	# Tuning sliders ride the preset: a material or scene switch yields the
@@ -657,7 +662,7 @@ func _build_cascade_seed() -> PackedFloat32Array:
 	var seed := PackedFloat32Array()
 	seed.resize(n * 4)
 	for i in n:
-		seed[i * 4 + 3] = 1.0 if mode == FluidKind.LAVA else 0.0
+		seed[i * 4 + 3] = 1.0 if _is_lava() else 0.0
 	sph_solver.active_count = 0
 	if renderer != null:
 		renderer.set_visible_count(0)
@@ -739,7 +744,7 @@ func _write_cap(seed: PackedFloat32Array, from: int, to: int, axis: Vector3,
 		seed[i * 4] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z
-		seed[i * 4 + 3] = 1.0 if mode == FluidKind.LAVA else 0.0
+		seed[i * 4 + 3] = 1.0 if _is_lava() else 0.0
 
 
 func _build_pool_seed() -> PackedFloat32Array:
@@ -759,7 +764,7 @@ func _build_pool_seed() -> PackedFloat32Array:
 		seed[i * 4] = p.x
 		seed[i * 4 + 1] = p.y
 		seed[i * 4 + 2] = p.z
-		var phase := 1.0 if mode == FluidKind.LAVA else 0.0
+		var phase := 1.0 if _is_lava() else 0.0
 		if mode == FluidKind.WATER_OIL:
 			@warning_ignore("integer_division")
 			phase = float((i / 216) % 2)

@@ -27,6 +27,9 @@ var cohesion_kernel_scale := 1.0
 ## Extra AABB collision skin in resolve_scene_collisions; mercury's meniscus
 ## rides wider than the other liquids.
 var collision_inflation := 0.14
+## Lava only: heat below which a particle stiffens into crust and stops flowing
+## (0 = never). Packed into SceneParams.fluid_material.w.
+var freeze_heat := 0.0
 
 
 static func for_kind(kind: int) -> FluidMaterial:
@@ -35,9 +38,15 @@ static func for_kind(kind: int) -> FluidMaterial:
 		FluidSystem.FluidKind.WATER:
 			spec.cohesion = 400.0
 		FluidSystem.FluidKind.LAVA:
-			spec.viscosity = 0.3
+			spec.viscosity = 1.0
 			spec.cohesion = 800.0
 			spec.collision_damping = 0.1
+			spec.freeze_heat = 0.2
+		FluidSystem.FluidKind.FLUID_LAVA:
+			spec.viscosity = 0.03
+			spec.cohesion = 800.0
+			spec.collision_damping = 0.1
+			spec.freeze_heat = 0.2
 		FluidSystem.FluidKind.MERCURY:
 			spec.viscosity = 0.2
 			spec.cohesion = 6000.0
@@ -65,4 +74,11 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 1200.0
 			spec.collision_damping = 0.05
 			spec.radius = 0.18
+		FluidSystem.FluidKind.SPECTRAL_GEL:
+			spec.viscosity = 0.45
+			spec.cohesion = 4000.0
+			spec.collision_damping = 0.28
+			spec.extension_strength = 1200.0
+			spec.radius = 0.22
+			spec.emission_cycle_seconds = 60.0
 	return spec

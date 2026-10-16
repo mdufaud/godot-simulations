@@ -36,6 +36,8 @@ const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
 const int MATERIAL_ASTRAL = 5;
+const int MATERIAL_SPECTRAL_GEL = 6;
+const int MATERIAL_FLUID_LAVA = 7;
 uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
@@ -152,7 +154,7 @@ void fragment() {
 		// from a wider footprint. Listed explicitly: a future FluidKind must not
 		// inherit the grouping by accident of its enum position.
 		bool wide_normal_footprint = mode == MATERIAL_MERCURY || mode == MATERIAL_HONEY
-			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL;
+			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL || mode == MATERIAL_SPECTRAL_GEL;
 		vec2 ts = (wide_normal_footprint ? 3.0 : 1.0) / vec2(textureSize(fluid_depth_tex, 0));
 		vec3 pc = eye_pos_from_depth(SCREEN_UV, fd, INV_PROJECTION_MATRIX);
 		float dr = fluid_depth(SCREEN_UV + vec2(ts.x, 0.0));
@@ -175,7 +177,7 @@ void fragment() {
 		vec2 thick_rg = texture(thickness_tex, SCREEN_UV).rg;
 		float thickness = thick_rg.r;
 
-		if (mode == MATERIAL_LAVA) {
+		if (mode == MATERIAL_LAVA || mode == MATERIAL_FLUID_LAVA) {
 			// --- LAVA (preserved verbatim) ---
 			vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
 			float t_surf = texture(fluid_depth_tex, SCREEN_UV).b;
@@ -205,6 +207,23 @@ void fragment() {
 			float activation = smoothstep(0.08, 0.6, stress);
 			vec3 filament = mix(vec3(0.38, 0.09, 0.85), vec3(0.65, 1.1, 2.0), activation);
 			ALBEDO = body + filament * (threads * (0.04 + 3.0 * activation) + 0.1 * activation * activation);
+			ALPHA = 1.0;
+		} else if (mode == MATERIAL_SPECTRAL_GEL) {
+			vec3 incoming = normalize(pc);
+			float fresnel = dielectric_reflectance(incoming, n, 1.0, 1.4);
+			vec2 offset = n.xy * (0.12 * clamp(thickness, 0.0, 2.0) / max(fd, 0.5));
+			vec2 uv = clamp(SCREEN_UV + offset, vec2(0.001), vec2(0.999));
+			if (scene_eye_depth(uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
+				uv = SCREEN_UV;
+			}
+			vec3 transmission = exp(-vec3(1.8, 0.5, 0.3) * thickness * 0.6);
+			vec3 body = textureLod(SCREEN_TEXTURE, uv, 0.0).rgb * transmission
+				+ vec3(0.025, 0.16, 0.22) * (1.0 - transmission);
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(incoming, n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			float core = 1.0 - exp(-max(thickness - 0.25, 0.0) * 0.9);
+			ALBEDO = mix(body, sky * vec3(0.65, 0.8, 1.0), clamp(fresnel, 0.04, 0.8))
+				+ vec3(0.12, 0.9, 1.35) * core * core * (1.0 - fresnel);
 			ALPHA = 1.0;
 		} else if (mode == MATERIAL_MERCURY) {
 			vec3 in_view = normalize(pc);
