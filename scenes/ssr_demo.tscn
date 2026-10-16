@@ -1,8 +1,13 @@
-[gd_scene load_steps=17 format=3 uid="uid://ssr_demo_scene"]
+[gd_scene load_steps=23 format=3 uid="uid://ssr_demo_scene"]
 
 [ext_resource type="Script" path="res://scripts/demos/ssr_controller.gd" id="1_controller"]
 [ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="3_orbit_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="5_sim_menu"]
+
+[ext_resource type="Texture2D" path="res://resources/materials/fluid_concrete.png" id="tex_concrete"]
+[ext_resource type="Texture2D" path="res://resources/materials/fluid_concrete_normal.png" id="tex_concrete_normal"]
+[ext_resource type="Texture2D" path="res://resources/materials/props_brushed_metal.png" id="tex_metal"]
+[ext_resource type="Texture2D" path="res://resources/materials/props_brushed_metal_normal.png" id="tex_metal_normal"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.15, 0.3, 0.7, 1)
@@ -76,6 +81,13 @@ albedo_color = Color(0.12, 0.12, 0.15, 1)
 metallic = 0.95
 roughness = 0.08
 metallic_specular = 0.6
+albedo_texture = ExtResource("tex_metal")
+normal_enabled = true
+normal_scale = 0.12
+normal_texture = ExtResource("tex_metal_normal")
+uv1_triplanar = true
+uv1_world_triplanar = true
+uv1_scale = Vector3(0.5, 0.5, 0.5)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_floor"]
 size = Vector3(30, 0.5, 30)
@@ -84,10 +96,17 @@ size = Vector3(30, 0.5, 30)
 size = Vector3(30, 0.5, 30)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_wall"]
-albedo_color = Color(0.2, 0.2, 0.25, 1)
-metallic = 0.3
-roughness = 0.4
+albedo_color = Color(0.38, 0.4, 0.44, 1)
+metallic = 0.0
+roughness = 0.82
 metallic_specular = 0.4
+albedo_texture = ExtResource("tex_concrete")
+normal_enabled = true
+normal_scale = 0.6
+normal_texture = ExtResource("tex_concrete_normal")
+uv1_triplanar = true
+uv1_world_triplanar = true
+uv1_scale = Vector3(0.5, 0.5, 0.5)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_wall_back"]
 size = Vector3(30, 8, 0.3)
@@ -106,6 +125,13 @@ albedo_color = Color(0.05, 0.05, 0.07, 1)
 metallic = 1.0
 roughness = 0.02
 metallic_specular = 0.8
+albedo_texture = ExtResource("tex_metal")
+normal_enabled = true
+normal_scale = 0.08
+normal_texture = ExtResource("tex_metal_normal")
+uv1_triplanar = true
+uv1_world_triplanar = true
+uv1_scale = Vector3(0.5, 0.5, 0.5)
 
 [sub_resource type="CylinderMesh" id="CylinderMesh_pedestal"]
 top_radius = 2.0

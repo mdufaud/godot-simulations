@@ -33,6 +33,6 @@ void main() {
 	velocities.data[i] = vec4(v, float(id));
 	uint w = uint(params.misc.x);
 	ivec2 texel = ivec2(int(i % w), int(i / w));
-	float attrib = params.material == MATERIAL_OIL || params.material == MATERIAL_LAVA ? phase : length(v);
+	float attrib = params.material == MATERIAL_OIL || params.material == MATERIAL_LAVA || params.material == MATERIAL_ASTRAL ? phase : length(v);
 	imageStore(position_tex, texel, vec4(p, attrib));
 }

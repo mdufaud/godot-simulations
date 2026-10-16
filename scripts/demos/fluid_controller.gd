@@ -23,9 +23,9 @@ var _parameter_pairs: Array = []
 
 var profiler := SimProfiler.new()
 
-const MATERIAL_NAMES := ["Water", "Lava", "Mercury", "Honey", "Water + Oil"]
-const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗"]
-const MATERIAL_BUTTON_NAMES := ["Water", "Lava", "Hg", "Honey", "Oil"]
+const MATERIAL_NAMES := ["Water", "Viscous Lava", "Mercury", "Honey", "Water + Oil", "Astral Fluid"]
+const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗", "✦"]
+const MATERIAL_BUTTON_NAMES := ["Water", "Viscous\nLava", "Hg", "Honey", "Oil", "Astral\nFluid"]
 
 
 func _ready() -> void:
@@ -141,7 +141,7 @@ func _update_title() -> void:
 
 
 func configure_fluid(next_mode: int, next_scene: int) -> void:
-	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.WATER_OIL)
+	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.ASTRAL)
 	var selected_scene := clampi(next_scene, FluidSystem.Scenario.POOL, FluidSystem.Scenario.BASIN)
 	fluid.set_configuration(selected_mode as FluidSystem.FluidKind,
 		selected_scene as FluidSystem.Scenario)
@@ -370,7 +370,8 @@ func _process(delta: float) -> void:
 
 func _apply_env() -> void:
 	if world_env.environment != null:
-		world_env.environment.glow_enabled = fluid.mode == FluidSystem.FluidKind.LAVA
+		world_env.environment.glow_enabled = fluid.mode in [FluidSystem.FluidKind.LAVA,
+			FluidSystem.FluidKind.ASTRAL]
 		# The composite shades its own water: its sun and reflected sky must
 		# match the scene's light and ProceduralSky, or the surface glints and
 		# brightens against an environment nothing else agrees with.

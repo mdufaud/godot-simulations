@@ -11,6 +11,12 @@ resources/*
 !resources/
 !resources/generated/
 !resources/generated/**
+!resources/fire/
+!resources/fire/**
+!resources/materials/
+!resources/materials/**
+!resources/parallax/
+!resources/parallax/**
 !resources/terrain/
 resources/terrain/*
 !resources/terrain/presets/

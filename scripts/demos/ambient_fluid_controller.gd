@@ -7,6 +7,8 @@ const FALLING_PLATE := preload("res://resources/ambient_fluid/presets/falling_pl
 const MAGNUS_BALL := preload("res://resources/ambient_fluid/presets/magnus_ball.tres")
 const BALLOON := preload("res://resources/ambient_fluid/presets/balloon.tres")
 const UNDERWATER_BODY := preload("res://resources/ambient_fluid/presets/underwater_body.tres")
+const CRATE_MATERIAL := preload("res://resources/materials/props_crate.tres")
+const METAL_MATERIAL := preload("res://resources/materials/props_metal.tres")
 const POOL_EFFECTS_SCRIPT := preload("res://scripts/demos/ambient_fluid/ambient_fluid_pool_effects.gd")
 const WATER_LEVEL := 0.4
 const POOL_HALF_SIZE := Vector2(6.8, 4.8)
@@ -264,12 +266,17 @@ func _spawn_body(type_index: int, density: float, spawn_position: Vector3,
 	var mesh_instance := MeshInstance3D.new()
 	mesh_instance.name = "BodyMesh"
 	mesh_instance.mesh = _mesh_for(type_index)
-	var material := StandardMaterial3D.new()
+	var material := (CRATE_MATERIAL if type_index == 1 else METAL_MATERIAL).duplicate() as StandardMaterial3D
 	material.albedo_color = _density_color(density) if color_override.a <= 0.0 else color_override
 	material.metallic = 0.14
 	material.roughness = 0.28
 	material.clearcoat_enabled = true
 	material.clearcoat = 0.35
+	if type_index == 1:
+		var size := (mesh_instance.mesh as BoxMesh).size
+		material.uv1_scale = Vector3(1.0 / size.x, 1.0 / size.y, 1.0 / size.z)
+	else:
+		material.metallic = 0.18 if density > 1500.0 else 0.02
 	material.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mesh_instance.material_override = material
 	body.add_child(mesh_instance)
@@ -760,20 +767,24 @@ func _icosahedron_vertices() -> PackedVector3Array:
 
 func _icosahedron_mesh() -> ArrayMesh:
 	var vertices := _icosahedron_vertices()
+	var normals := PackedVector3Array()
+	for vertex in vertices:
+		normals.append(vertex.normalized())
 	var indices := PackedInt32Array([
 		0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
 		1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
 		3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
 		4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
 	])
+	for triangle in range(0, indices.size(), 3):
+		var second := indices[triangle + 1]
+		indices[triangle + 1] = indices[triangle + 2]
+		indices[triangle + 2] = second
 	var arrays: Array = []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_INDEX] = indices
-	var normals := PackedVector3Array()
-	for vertex in vertices:
-		normals.append(vertex.normalized())
 	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh

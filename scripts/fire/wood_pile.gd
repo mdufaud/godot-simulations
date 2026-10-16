@@ -1,18 +1,16 @@
 class_name WoodPile extends Node3D
 
 const FUEL_INDEX_METHANE := WoodPyrolysis.FUEL_INDEX_METHANE
-const BARK_TEXTURE := preload("res://resources/generated/materials/charred_wood_tile.png")
-## Multipliers over the photo bark: fresh logs warm it toward living wood,
-## charring pulls it back to the tile's own near-black.
+const LOG_MESH := preload("res://resources/fire/fire_log.res")
+const BARK_MATERIAL := preload("res://resources/fire/fire_bark.tres")
+const END_MATERIAL := preload("res://resources/fire/fire_endgrain.tres")
 const COLOR_FRESH := Color(1.5, 0.95, 0.6)
 const COLOR_CHAR := Color(0.75, 0.7, 0.66)
-const COLOR_EMBER := Color(1.0, 0.32, 0.05)
 const STACK_SLOTS := [Vector2(-0.16, 0.0), Vector2(0.16, 0.0), Vector2(0.0, 0.16)]
 
 var emit_radius := 0.45
 var log_fuel := 8.0
 var _logs: Array[Dictionary] = []
-var _mesh: CylinderMesh
 var _stacked_log_count := 0
 var _stack_base_top_y := 0.0
 var _pyrolysis := WoodPyrolysis.new()
@@ -22,30 +20,20 @@ func add_log(pos: Vector3, yaw: float, tilt := 0.0, radius := 0.09,
 		length := 0.85) -> void:
 	if _logs.size() >= FireGpuSolver.MAX_LOGS:
 		return
-	if _mesh == null:
-		_mesh = CylinderMesh.new()
-		_mesh.radial_segments = 8
-		_mesh.rings = 1
 	var mesh_instance := MeshInstance3D.new()
-	var log_mesh: CylinderMesh = _mesh.duplicate()
-	log_mesh.top_radius = radius
-	log_mesh.bottom_radius = radius * 1.15
-	log_mesh.height = length
-	mesh_instance.mesh = log_mesh
-	var material := StandardMaterial3D.new()
-	material.albedo_color = COLOR_FRESH
-	material.albedo_texture = BARK_TEXTURE
-	material.uv1_scale = Vector3(1.0, 0.4, 1.0)
-	material.roughness = 0.92
-	material.emission_enabled = true
-	material.emission = COLOR_EMBER
-	mesh_instance.material_override = material
+	mesh_instance.mesh = LOG_MESH
+	var material := BARK_MATERIAL.duplicate() as StandardMaterial3D
+	var end_material := END_MATERIAL.duplicate() as StandardMaterial3D
+	mesh_instance.set_surface_override_material(0, material)
+	mesh_instance.set_surface_override_material(1, end_material)
 	mesh_instance.transform = Transform3D(
 		Basis(Vector3.UP, yaw) * Basis(Vector3.RIGHT, PI * 0.5 + tilt), pos)
+	mesh_instance.scale = Vector3(radius, length, radius)
 	add_child(mesh_instance)
 	var area := PI * radius * length + 2.0 * PI * radius * radius
 	_logs.append({
-		"node": mesh_instance, "mat": material, "pos": pos, "radius": radius,
+		"node": mesh_instance, "mat": material, "end_mat": end_material,
+		"pos": pos, "radius": radius,
 		"length": length, "tilt": tilt, "area": area, "t_solid": 300.0,
 		"t_char": 300.0, "m_volatile": log_fuel, "m_volatile_max": log_fuel,
 		"m_char": log_fuel * 0.25, "m_ash": 0.0, "rate": 0.0, "pilot": 0.0,
@@ -150,12 +138,13 @@ func update(delta: float, gas_temperatures: PackedFloat32Array,
 
 
 func _update_look(entry: Dictionary) -> void:
-	var material: StandardMaterial3D = entry["mat"]
 	var charred := 1.0 - float(entry["m_volatile"]) / maxf(entry["m_volatile_max"], 1e-4)
-	material.albedo_color = COLOR_FRESH.lerp(COLOR_CHAR, clampf(charred, 0.0, 1.0))
 	var glow := clampf((float(entry["t_char"]) - 700.0)
 		/ (WoodPyrolysis.T_GLOW - 700.0), 0.0, 1.0)
-	material.emission_energy_multiplier = glow * 1.4
+	charred = maxf(charred, glow * 0.8)
+	for material: StandardMaterial3D in [entry["mat"], entry["end_mat"]]:
+		material.albedo_color = COLOR_FRESH.lerp(COLOR_CHAR, clampf(charred, 0.0, 1.0))
+		material.emission_energy_multiplier = glow * 1.4
 
 
 func emitters() -> Array:

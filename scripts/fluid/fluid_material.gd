@@ -60,4 +60,9 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 250.0
 			spec.collision_damping = 0.15
 			spec.density_kg_m3 = 850.0
+		FluidSystem.FluidKind.ASTRAL:
+			spec.viscosity = 0.25
+			spec.cohesion = 1200.0
+			spec.collision_damping = 0.05
+			spec.radius = 0.18
 	return spec

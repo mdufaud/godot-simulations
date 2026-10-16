@@ -35,6 +35,7 @@ const int MATERIAL_LAVA = 1;
 const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
+const int MATERIAL_ASTRAL = 5;
 uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
@@ -104,6 +105,16 @@ vec3 sample_sky(vec3 world_dir, vec3 to_sun, vec3 up_axis) {
 	return sky + vec3(sun);
 }
 
+float astral_noise(vec2 p) {
+	vec2 cell = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	vec4 corners = vec4(dot(cell, vec2(127.1, 311.7)), dot(cell + vec2(1.0, 0.0), vec2(127.1, 311.7)),
+		dot(cell + vec2(0.0, 1.0), vec2(127.1, 311.7)), dot(cell + vec2(1.0), vec2(127.1, 311.7)));
+	corners = fract(sin(corners) * 43758.5453);
+	return mix(mix(corners.x, corners.y, f.x), mix(corners.z, corners.w, f.x), f.y);
+}
+
 void fragment() {
 	float scene_d = scene_eye_depth(SCREEN_UV, INV_PROJECTION_MATRIX, DEPTH_TEXTURE);
 	vec2 fm = texture(foam_tex, SCREEN_UV).rg;
@@ -141,7 +152,7 @@ void fragment() {
 		// from a wider footprint. Listed explicitly: a future FluidKind must not
 		// inherit the grouping by accident of its enum position.
 		bool wide_normal_footprint = mode == MATERIAL_MERCURY || mode == MATERIAL_HONEY
-			|| mode == MATERIAL_OIL;
+			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL;
 		vec2 ts = (wide_normal_footprint ? 3.0 : 1.0) / vec2(textureSize(fluid_depth_tex, 0));
 		vec3 pc = eye_pos_from_depth(SCREEN_UV, fd, INV_PROJECTION_MATRIX);
 		float dr = fluid_depth(SCREEN_UV + vec2(ts.x, 0.0));
@@ -177,6 +188,24 @@ void fragment() {
 			float glow = smoothstep(0.06, 0.32, t_surf);
 			ALBEDO = mix(crust_col, emis, glow);
 			ALPHA = clamp(thickness * 12.0, 0.0, 1.0);
+		} else if (mode == MATERIAL_ASTRAL) {
+			vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+			float stress = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+			vec2 flow = world.xz * 1.4 + world.y * vec2(0.35, 0.22);
+			vec2 warp = vec2(astral_noise(flow * 0.5 + TIME * 0.025),
+				astral_noise(flow * 0.5 + vec2(17.3, 4.1) - TIME * 0.02));
+			float field = astral_noise(flow + warp * 3.5) * 0.7
+				+ astral_noise(flow * 2.3 - warp) * 0.3;
+			float threads = 1.0 - smoothstep(0.003, 0.012, abs(field - 0.5));
+			threads *= smoothstep(0.35, 0.7, astral_noise(flow * 0.45 + 9.1));
+			float rim = pow(1.0 - max(dot(-normalize(pc), n), 0.0), 3.0);
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(normalize(pc), n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			vec3 body = vec3(0.004, 0.001, 0.009) + sky * vec3(0.14, 0.1, 0.23) * (0.2 + 0.8 * rim);
+			float activation = smoothstep(0.08, 0.6, stress);
+			vec3 filament = mix(vec3(0.38, 0.09, 0.85), vec3(0.65, 1.1, 2.0), activation);
+			ALBEDO = body + filament * (threads * (0.04 + 3.0 * activation) + 0.1 * activation * activation);
+			ALPHA = 1.0;
 		} else if (mode == MATERIAL_MERCURY) {
 			vec3 in_view = normalize(pc);
 			vec3 refl_view = reflect(in_view, n);

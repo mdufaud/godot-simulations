@@ -135,6 +135,7 @@ const int MATERIAL_LAVA = 1;
 const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
+const int MATERIAL_ASTRAL = 5;
 
 // Must match FluidSystem.Scenario.
 const int SCENE_POOL = 0;

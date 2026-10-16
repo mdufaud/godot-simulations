@@ -1,6 +1,6 @@
 ---
 name: project-architecture
-description: Physics Playground architecture — 13-demo registry, GameManager autoload, how to add a demo, reusable classes (OrbitCamera, FreeFlyCamera, SimMenu, PbfFluidSolver, NBodySolver, FireSimulationGrid), SimMenu API, camera setup, shader globals, folder structure, scene switching. Use when navigating or modifying this project.
+description: Physics Playground architecture — 13-demo registry, GameManager autoload, how to add a demo, reusable classes (OrbitCamera, FreeFlyCamera, SimMenu, SphFluidSolver, NBodySolver, FireSimulationGrid), SimMenu API, camera setup, shader globals, folder structure, scene switching. Use when navigating or modifying this project.
 ---
 
 Physics Playground project structure. Demo registry, GameManager, reusable classes, SimMenu API. How to add a demo.
@@ -19,7 +19,7 @@ const DEMOS: Array[Dictionary] = [
     {key = "nbody_demo",    title = "N-Body Galaxy",        icon = "🌌"},
     {key = "grass_demo",    title = "Grass Simulation",     icon = "🌿"},
     {key = "parallax_demo", title = "Parallax Mapping",     icon = "🪨"},
-    {key = "fluid_demo",    title = "Fluid Simulation (PBF)", icon = "💧"},
+    {key = "fluid_demo",    title = "Fluid Simulation (SPH)", icon = "💧"},
     {key = "fractal_demo",  title = "2D Fractal Explorer",  icon = "🧠"},
     {key = "fractal_3d_demo", title = "3D Fractal Explorer", icon = "🧊"},
     {key = "tornado_demo",  title = "Tornado Simulation",   icon = "🌪️"},
@@ -43,7 +43,7 @@ const DEMOS: Array[Dictionary] = [
 | `SimMenu` | `scripts/ui/sim_menu.gd` | Scrollable panel — sliders, toggles, buttons, progress bars, color pickers |
 | `OrbitCamera` | `scripts/camera/orbit_camera.gd` | Mouse orbital cam — target, distance, pitch, yaw, zoom limits |
 | `FreeFlyCamera` | `scripts/camera/free_fly_camera.gd` | WASD fly cam — DE-based adaptive speed |
-| `PbfFluidSolver` | `scripts/pbf_fluid_solver.gd` | RD compute — 65K particles, 16 stages |
+| `SphFluidSolver` | `scripts/fluid/sph_fluid_solver.gd` | RD compute — dual-density SPH and screen-space rendering |
 | (no class_name) | `scripts/sand/heightfield_sand.gd` | RD compute — heightfield sand, repose-angle relaxation |
 | `ClothSolver` | `scripts/cloth/cloth_solver.gd` | RD compute — XPBD cloth grid, no hash needed |
 | `OceanSolver` | `scripts/ocean/ocean_solver.gd` | RD compute — FFT ocean, displacement/normal+foam texture arrays via Texture2DArrayRD |
@@ -65,6 +65,16 @@ menu.add_button("Action", func(): do_thing())
 menu.add_progress_bar("Stat", 100.0)                           # Returns ProgressBar
 menu.add_color_picker("Color", Color.WHITE, func(c): tint = c)
 ```
+
+## Simulation interaction
+
+- Core simulation variants (liquid, scene, tool) must be quick to change with the keyboard, including while the settings panel is closed.
+- Register frequent operations with `SimMenu.add_action(icon, label, callback)`. Visible actions already receive `1`–`9` shortcuts and AZERTY equivalents (`&`, `é`, etc.); reuse this input path.
+- An action for a multi-choice setting must cycle every available choice and wrap around. A binary toggle is only appropriate for two choices.
+- Keep the action, simulation state, and visible title synchronized through the same callback. If an OptionButton also selects that variant, update it with `select(next)` and `item_selected.emit(next)`.
+- Preserve the selected variant across reset, scene, and solver changes. Show the current choice without requiring the settings panel.
+- Use `SimMenu.set_action_label(button, current_choice)` to show the current variant on the action itself; the panel title alone is hidden when the panel is closed.
+- Verify actual keyboard input with the panel closed and open, AZERTY input, wraparound, optional dropdown synchronization, and ignored key repeat/modifiers. Calling the callback directly does not prove keyboard access.
 
 ## Camera Setup
 ```gdscript
@@ -102,7 +112,7 @@ GameManager.settings["parallax_height"]         # → 0.08
 physics-test/
 ├── scenes/          # .tscn + ui/sim_menu.tscn
 ├── scripts/         # autoload/ + demos/ + ui/
-├── shaders/         # .gdshader + pbf|sand|cloth|nbody/*.comp
+├── shaders/         # .gdshader + sph|sand|cloth|nbody/*.comp
 ├── resources/       # .tres materials, themes, .obj models
 ├── textures/        # g_a.png, g_n.png
 ├── docs/            # fire_simulation.md (French, Fire-X deep dive)
@@ -119,7 +129,7 @@ physics-test/
 | `nbody_demo` | `nbody_controller.gd` | GPU N-body Verlet + additive sprites |
 | `grass_demo` | `grass_controller.gd` | Multimesh LOD + wind |
 | `parallax_demo` | `parallax_controller.gd` | CRPOM + self-shadow |
-| `fluid_demo` | `fluid_controller.gd` | 65K GPU PBF + screen-space |
+| `fluid_demo` | `fluid_controller.gd` | GPU dual-density SPH + screen-space |
 | `fractal_demo` | `fractal_controller.gd` | 10 fractal types + AA |
 | `fractal_3d_demo` | `fractal_3d_controller.gd` | 7 fractals + raymarching |
 | `tornado_demo` | `tornado_controller.gd` | Analytic wind field + raymarch + debris |
@@ -128,7 +138,7 @@ physics-test/
 | `destruction_demo` | `destruction_controller.gd` | Voronoi pre-fracture + Jolt sleep islands |
 
 ## Compute Solver Gotchas (verified in this repo)
-- **Sand/PBF/N-body all share the grid recipe**: clear → predict+count → scan → scatter (cell-sorted
+- **Sand/SPH/N-body all share the grid recipe**: clear → predict+count → scan → scatter (cell-sorted
   ping-pong). Cell count is capped at 262144 by the single-workgroup block scan; `SandSolver.fit_grid()`
   grows the cell size until the domain fits.
 - **Cloth needs no hash grid** — a regular mesh finds neighbours by index arithmetic.
