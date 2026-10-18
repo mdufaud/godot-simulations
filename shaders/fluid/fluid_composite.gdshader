@@ -39,6 +39,9 @@ const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
 const int MATERIAL_PRISMATIC_SLIME = 8;
+const int MATERIAL_LIQUID_NITROGEN = 10;
+// Nitrogen's white particles are cold fog, not sea froth.
+const vec3 NITROGEN_FOG = vec3(0.86, 0.91, 0.96);
 uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
@@ -126,6 +129,9 @@ void fragment() {
 	}
 	float foam = fm.r;
 	float foam_d = fm.g / max(foam, 1e-5);
+	// Additive fog sprites can stack past full coverage.
+	foam = min(foam, 1.0);
+	vec3 froth = mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG : foam_color;
 	// Foam behind opaque scene geometry is hidden by it.
 	if (foam_d > scene_d) {
 		foam = 0.0;
@@ -138,7 +144,7 @@ void fragment() {
 		if (foam <= 0.002) {
 			discard;
 		}
-		ALBEDO = foam_color;
+		ALBEDO = froth;
 		ALPHA = foam;
 	} else {
 		// Foam depth split: coverage in FRONT of the surface (foam_d < fd) is
@@ -154,8 +160,12 @@ void fragment() {
 		// The bigger-radius materials (mercury, honey) reconstruct their normals
 		// from a wider footprint. Listed explicitly: a future FluidKind must not
 		// inherit the grouping by accident of its enum position.
+		#ifdef LIGHT_PASTE
+		bool wide_normal_footprint = true;
+		#else
 		bool wide_normal_footprint = mode == MATERIAL_MERCURY || mode == MATERIAL_HONEY
 			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL || mode == MATERIAL_SPECTRAL_GEL || mode == MATERIAL_PRISMATIC_SLIME;
+		#endif
 		vec2 ts = (wide_normal_footprint ? 3.0 : 1.0) / vec2(textureSize(fluid_depth_tex, 0));
 		vec3 pc = eye_pos_from_depth(SCREEN_UV, fd, INV_PROJECTION_MATRIX);
 		float dr = fluid_depth(SCREEN_UV + vec2(ts.x, 0.0));
@@ -178,6 +188,19 @@ void fragment() {
 		vec2 thick_rg = texture(thickness_tex, SCREEN_UV).rg;
 		float thickness = thick_rg.r;
 
+		#ifdef LIGHT_PASTE
+		vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
+		vec3 view = normalize(-pc);
+		float diffuse = max(dot(n, sun_view), 0.0);
+		float rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
+		float gloss = pow(max(dot(n, normalize(sun_view + view)), 0.0), 36.0);
+		float fold = smoothstep(0.012, 0.08, length(dFdx(n)) + length(dFdy(n)));
+		float yielding = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+		vec3 cream = mix(vec3(0.22, 0.18, 0.12), vec3(0.64, 0.57, 0.42), 0.3 + 0.7 * diffuse);
+		ALBEDO = cream * (0.45 + 0.55 * diffuse) + vec3(0.8, 0.9, 1.0) * gloss * 0.4
+			+ vec3(4.0, 0.5, 0.025) * (fold * (0.06 + 0.65 * yielding) + rim * 0.06);
+		ALPHA = 1.0;
+		#else
 		if (mode == MATERIAL_LAVA || mode == MATERIAL_FLUID_LAVA) {
 			// --- LAVA (preserved verbatim) ---
 			vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
@@ -265,11 +288,15 @@ void fragment() {
 			vec3 in_view = normalize(pc); // camera -> surface, view space
 			float oil_front = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
 			float oil_fraction = clamp(thick_rg.g / max(thickness, 1e-4), 0.0, 1.0);
-			float local_ior = mode == MATERIAL_HONEY ? 1.49 : mode == MATERIAL_OIL ? mix(1.33, 1.47, oil_front) : ior;
+			bool nitrogen = mode == MATERIAL_LIQUID_NITROGEN;
+			float local_ior = mode == MATERIAL_HONEY ? 1.49 : mode == MATERIAL_OIL ? mix(1.33, 1.47, oil_front)
+				: nitrogen ? 1.2 : ior;
 			vec3 local_absorption = mode == MATERIAL_HONEY ? vec3(0.5, 1.7, 4.0) :
-				mode == MATERIAL_OIL ? mix(absorption, vec3(0.3, 1.1, 2.1), oil_fraction) : absorption;
+				mode == MATERIAL_OIL ? mix(absorption, vec3(0.3, 1.1, 2.1), oil_fraction) :
+				nitrogen ? vec3(0.22, 0.07, 0.03) : absorption;
 			vec3 local_tint = mode == MATERIAL_HONEY ? vec3(0.28, 0.085, 0.004) :
-				mode == MATERIAL_OIL ? mix(tint_color, vec3(0.16, 0.05, 0.006), oil_front) : tint_color;
+				mode == MATERIAL_OIL ? mix(tint_color, vec3(0.16, 0.05, 0.006), oil_front) :
+				nitrogen ? vec3(0.1, 0.32, 0.5) : tint_color;
 			float reflectance = dielectric_reflectance(in_view, n, 1.0, local_ior);
 			if (mode == MATERIAL_HONEY) {
 				reflectance = max(reflectance, 0.18);
@@ -301,8 +328,9 @@ void fragment() {
 			// Submerged froth is part of what the water tints and absorbs;
 			// front froth skips the water entirely and composites last.
 			vec3 scene_col = textureLod(SCREEN_TEXTURE, refr_uv, 0.0).rgb;
-			scene_col = mix(scene_col, foam_color, foam_under);
-			vec3 trans = exp(-local_absorption * thickness * (mode == MATERIAL_HONEY ? 1.2 : mode == MATERIAL_OIL ? 0.9 : absorption_scale));
+			scene_col = mix(scene_col, froth, foam_under);
+			vec3 trans = exp(-local_absorption * thickness * (mode == MATERIAL_HONEY ? 1.2 : mode == MATERIAL_OIL ? 0.9
+				: nitrogen ? 0.35 : absorption_scale));
 			vec3 refr_col = scene_col * trans + local_tint * (1.0 - trans);
 			if (mode == MATERIAL_HONEY) {
 				vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
@@ -320,11 +348,12 @@ void fragment() {
 			}
 
 			// Front froth takes over the sky reflection too (it is diffuse).
-			refl_col = mix(refl_col, foam_color, foam_front);
+			refl_col = mix(refl_col, froth, foam_front);
 
-			ALBEDO = mix(mix(refr_col, refl_col, reflectance), foam_color, foam_front);
+			ALBEDO = mix(mix(refr_col, refl_col, reflectance), froth, foam_front);
 			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam_front);
 		}
+		#endif
 	}
 
 	if (atmosphere_enabled) {

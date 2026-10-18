@@ -210,6 +210,12 @@ func stored_value(section: String, label: String, default: Variant) -> Variant:
 	return _persisted("%s/%s" % [section, label], default)
 
 
+## Persists [param value] under [param section]/[param label] with no widget behind it,
+## for scene-owned state the user should still find again on the next launch.
+func store_value(section: String, label: String, value: Variant) -> void:
+	_persist("%s/%s" % [section, label], value)
+
+
 ## Push a value into a widget, re-emitting so the callback runs (mirrors the kinds).
 func _apply_value(entry: Dictionary, value: Variant) -> void:
 	var node: Control = entry.node

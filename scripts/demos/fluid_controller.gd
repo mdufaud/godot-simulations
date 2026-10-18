@@ -14,6 +14,7 @@ var quality := SimQualityState.new()
 # the launch restore only lands config fields that start() seeds from.
 var _fluid_ready := false
 var flow_group: VBoxContainer
+var yield_group: VBoxContainer
 var flow_slider: HSlider
 var scene_action: Button
 var material_action: Button
@@ -25,9 +26,9 @@ var _parameter_pairs: Array = []
 
 var profiler := SimProfiler.new()
 
-const MATERIAL_NAMES := ["Water", "Viscous Lava", "Mercury", "Honey", "Water + Oil", "Astral Fluid", "Spectral Gel", "Fluid Lava", "Prismatic Slime"]
-const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗", "✦", "◈", "🌋", "◇"]
-const MATERIAL_BUTTON_NAMES := ["Water", "Viscous\nLava", "Hg", "Honey", "Oil", "Astral\nFluid", "Spectral\nGel", "Fluid\nLava", "Prismatic\nSlime"]
+const MATERIAL_NAMES := ["Water", "Viscous Lava", "Mercury", "Honey", "Water + Oil", "Astral Fluid", "Spectral Gel", "Fluid Lava", "Prismatic Slime", "Light Paste", "Liquid Nitrogen"]
+const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗", "✦", "◈", "🌋", "◇", "✧", "❄"]
+const MATERIAL_BUTTON_NAMES := ["Water", "Viscous\nLava", "Hg", "Honey", "Oil", "Astral\nFluid", "Spectral\nGel", "Fluid\nLava", "Prismatic\nSlime", "Light\nPaste", "Liquid\nNitrogen"]
 
 
 func _ready() -> void:
@@ -41,6 +42,10 @@ func _ready() -> void:
 	fluid = FluidSystem.new()
 	fluid.config = fluid_config
 	fluid.camera = main_cam
+	# Set before start(): the solver and renderer are built for the liquid, so the
+	# last one used comes back without a rebuild.
+	var liquid := int(menu.stored_value("Simulation", "Liquid", FluidSystem.FluidKind.WATER))
+	fluid.mode = clampi(liquid, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.LIQUID_NITROGEN) as FluidSystem.FluidKind
 	quality.setup(FluidQualityProfile, "fluid_quality_profile", _apply_quality)
 	quality.restore()
 	add_child(fluid)
@@ -95,6 +100,10 @@ func _setup_ui() -> void:
 		[menu.add_slider("Foam life", 2.0, 30.0, fluid.get_sph_foam_life(),
 			fluid.set_sph_foam_life, false, 1.0), fluid.get_sph_foam_life],
 	]
+	yield_group = menu.add_group()
+	_parameter_pairs.append([menu.add_slider("Yield threshold", 0.0, 160.0,
+		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 1.0), fluid.get_sph_yield_stress])
+	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Performance")
 	quality.attach_menu_option(menu)
@@ -148,10 +157,11 @@ func _update_title() -> void:
 
 
 func configure_fluid(next_mode: int, next_scene: int) -> void:
-	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.PRISMATIC_SLIME)
+	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.LIQUID_NITROGEN)
 	var selected_scene := clampi(next_scene, FluidSystem.Scenario.POOL, FluidSystem.Scenario.BASIN)
 	fluid.set_configuration(selected_mode as FluidSystem.FluidKind,
 		selected_scene as FluidSystem.Scenario)
+	menu.store_value("Simulation", "Liquid", selected_mode)
 	_sync_scene_ui()
 	_apply_env()
 	_resync_parameter_widgets()
@@ -162,6 +172,7 @@ func _sync_scene_ui() -> void:
 	scene_option.select(scene)
 	material_option.select(int(fluid.mode))
 	flow_group.visible = scene != FluidSystem.Scenario.POOL
+	yield_group.visible = fluid.mode == FluidSystem.FluidKind.LIGHT_PASTE
 	if flow_slider != null:
 		var honey_cascade := scene == FluidSystem.Scenario.CASCADE and \
 			fluid.mode == FluidSystem.FluidKind.HONEY
@@ -378,7 +389,7 @@ func _process(delta: float) -> void:
 func _apply_env() -> void:
 	if world_env.environment != null:
 		world_env.environment.glow_enabled = fluid.mode in [FluidSystem.FluidKind.LAVA, FluidSystem.FluidKind.FLUID_LAVA,
-			FluidSystem.FluidKind.ASTRAL, FluidSystem.FluidKind.SPECTRAL_GEL]
+			FluidSystem.FluidKind.ASTRAL, FluidSystem.FluidKind.SPECTRAL_GEL, FluidSystem.FluidKind.LIGHT_PASTE]
 		# The composite shades its own water: its sun and reflected sky must
 		# match the scene's light and ProceduralSky, or the surface glints and
 		# brightens against an environment nothing else agrees with.

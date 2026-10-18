@@ -7,7 +7,14 @@
 // analytic sphere, so a sprite sliding behind scene geometry is clipped pixel
 // by pixel instead of vanishing as a whole.
 shader_type spatial;
+// FOG (liquid nitrogen vapour): faint soft puffs that add up into a cloud
+// instead of the nearest sprite winning.
+#ifdef FOG
+render_mode unshaded, cull_disabled, blend_add, depth_draw_never;
+const float FOG_DENSITY = 0.06;
+#else
 render_mode unshaded, cull_disabled;
+#endif
 
 uniform sampler2D foam_tex : filter_nearest;
 uniform int foam_tex_width = 256;
@@ -44,7 +51,11 @@ void fragment() {
 	// 1. The wide solid core matters because the prepass is front-most-wins: a
 	// soft rim over a sparse field overwrites neighbours' interiors and reads
 	// as dotted grain instead of a merged froth sheet.
+	#ifdef FOG
+	float coverage = FOG_DENSITY * (1.0 - r * r) * (1.0 - r * r);
+	#else
 	float coverage = smoothstep(1.0, 0.78, r);
+	#endif
 	// Sphere-surface eye depth for this fragment: the quad sits at the sphere
 	// centre and the written surface is its front hemisphere, bulging toward
 	// the camera by up to the sprite radius.

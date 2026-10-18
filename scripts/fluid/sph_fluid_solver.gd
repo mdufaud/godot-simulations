@@ -14,6 +14,7 @@ const STAGES: Array[String] = [
 ]
 const WG := 256
 const MATERIAL_SPECTRAL_GEL := 6
+const MATERIAL_LIGHT_PASTE := 9
 const FOAM_UBO_SIZE := 112
 const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
@@ -41,6 +42,7 @@ var pressure_mult := DEFAULT_PRESSURE_MULT
 var near_pressure_mult := DEFAULT_NEAR_PRESSURE_MULT
 var viscosity_strength := 0.14
 var extension_strength := 0.0
+var yield_stress := 0.0
 var material_density_kg_m3 := 1000.0
 # Derived kernel constants from FluidMaterial; packed into the SceneParams
 # block (density, stiffness, inflation) and the push constant (cohesion scale).
@@ -137,6 +139,7 @@ var emitter_velocity := Vector3(0.0, -2.0, 0.0)
 var scene_obstacles: Array[Dictionary] = []
 
 var initialized := false
+var _paste_active := false
 ## Bumped on the render thread after each init_render returns — the main
 ## thread's "this queued re-init has landed" signal (see FluidSystem).
 var init_generation := 0
@@ -268,12 +271,17 @@ func init_render() -> void:
 	if _rd == null:
 		return
 	_target_density = _compute_rest_density()
+	_paste_active = material == MATERIAL_LIGHT_PASTE
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
 		var stage_dir := SHARED_GRID_DIR if GRID_STAGES.has(stage) else SHADER_DIR
 		var stage_src := FileAccess.get_file_as_string(stage_dir + stage + ".comp")
-		var spirv := ShaderCache.compile(_rd, "sph_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
+		var defines := ""
+		if _paste_active and stage == "sph_viscosity":
+			defines = "#define LIGHT_PASTE\n"
+			stage_src = FileAccess.get_file_as_string(SHADER_DIR + "sph_light_paste.comp") + "\n" + stage_src
+		var spirv := ShaderCache.compile(_rd, "sph_" + stage, "#version 450\n" + defines + "\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("SPH stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return
@@ -533,6 +541,10 @@ func step_render(dt: float) -> void:
 		cl = _mark(cl, "sph/density")
 		_dispatch(cl, "sph_pressure", pc, n_groups)
 		cl = _mark(cl, "sph/pressure")
+		# The plug compares post-pressure velocities: a stale snapshot would read
+		# this sub-step's gravity as slip and brake a falling lump.
+		if _paste_active:
+			_dispatch(cl, "sph_vel_snap", pc, n_groups)
 		_dispatch(cl, "sph_viscosity", pc, n_groups)
 		cl = _mark(cl, "sph/viscosity")
 		# White particles advance once per frame (full dt) against the grid the
@@ -658,6 +670,7 @@ func _fill_validation_stats(result: Dictionary, positions: PackedFloat32Array,
 
 func free_render() -> void:
 	initialized = false
+	_paste_active = false
 	if _rd == null:
 		return
 	for stage in _uniform_sets:
@@ -755,7 +768,7 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	# The cohesion slider value is unscaled; the mercury kernel boost lives here,
 	# so the shader reads one plain strength with no per-material re-derivation.
 	pc.encode_float(88, cohesion_strength * cohesion_kernel_scale)
-	pc.encode_float(92, extension_strength)
+	pc.encode_float(92, yield_stress if _paste_active else extension_strength)
 	pc.encode_float(96, gravity.x)
 	pc.encode_float(100, gravity.y)
 	pc.encode_float(104, gravity.z)

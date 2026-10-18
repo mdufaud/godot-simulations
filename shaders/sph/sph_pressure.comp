@@ -23,7 +23,8 @@ void main() {
 	}
 	float interface_weight = 0.0;
 	int neighbours = 0;
-	bool spawn_foam = foam.flags.x == 1 && params.material == MATERIAL_WATER;
+	bool nitrogen = params.material == MATERIAL_LIQUID_NITROGEN;
+	bool spawn_foam = foam.flags.x == 1 && (params.material == MATERIAL_WATER || nitrogen);
 	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
 	// converges with its neighbours. High only where fluid slams into itself,
 	// which is exactly where air is entrained and foam is born.
@@ -118,6 +119,12 @@ void main() {
 	}
 	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);
 	float spawn_factor = air_factor * ke_factor * params.sim.x;
+	if (nitrogen) {
+		// Boiling: the heat picked up touching a warm surface (phase) boils off,
+		// and the free surface steams a little on its own.
+		float exposed = remap01(params.sim.y * 0.9 - density, 0.0, params.sim.y * 0.2);
+		spawn_factor = foam.spawn.x * (phase + NITROGEN_SURFACE_BOIL * exposed) * params.sim.x;
+	}
 	if (spawn_factor <= 0.0) {
 		return;
 	}
@@ -127,8 +134,10 @@ void main() {
 	if (rand01(rng) < spawn_factor - float(spawn_count)) {
 		spawn_count++;
 	}
+	// Vapour rises off still liquid, so its spawn cylinder stands upright.
+	vec3 axis = nitrogen ? vec3(0.0, 1.0, 0.0) : v;
 	// A zero-length axis would produce NaN spawn positions.
-	if (spawn_count <= 0 || dot(v, v) < 1e-6) {
+	if (spawn_count <= 0 || dot(axis, axis) < 1e-6) {
 		return;
 	}
 	// Reserve a contiguous run at the end of the live pool. The counter takes the
@@ -141,8 +150,8 @@ void main() {
 	}
 	spawn_count = min(spawn_count, int(cap - base - 1u));
 	// Spawn inside a cylinder whose axis is the particle's motion this sub-step.
-	vec3 axis_a = orthonormal(v);
-	vec3 axis_b = normalize(cross(axis_a, v));
+	vec3 axis_a = orthonormal(axis);
+	vec3 axis_b = normalize(cross(axis_a, axis));
 	float radius = params.kernel.x * foam.render.y;
 	for (int k = 0; k < spawn_count; k++) {
 		uint slot = base + uint(k);
@@ -156,6 +165,7 @@ void main() {
 		// a full-size sprite popping into existence reads as a blink. Staggered
 		// lifetimes then keep the sheet's sizes spread as it dissolves.
 		float variance = mix(0.75, 1.25, rand01(rng));
-		foam_vel.data[slot] = vec4(v + base_off, (foam.motion.z + 1.0) * 0.5 * variance * 0.3);
+		vec3 spawn_v = nitrogen ? v + base_off * 4.0 + vec3(0.0, NITROGEN_PUFF_SPEED, 0.0) : v + base_off;
+		foam_vel.data[slot] = vec4(spawn_v, (foam.motion.z + 1.0) * 0.5 * variance * 0.3);
 	}
 }

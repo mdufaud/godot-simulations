@@ -139,6 +139,22 @@ const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
 const int MATERIAL_PRISMATIC_SLIME = 8;
+const int MATERIAL_LIQUID_NITROGEN = 10;
+
+// Liquid nitrogen boils where it strikes a surface: an impact faster than
+// BOIL_IMPACT (m/s) heats a particle to 1 (positions.w), which cools at COOL_RATE
+// per second and sheds vapour while hot. A hot particle in contact skitters on a
+// Leidenfrost vapour film (m/s^2). Liquid at rest only steams from its surface.
+// Vapour drifts up against a heavy drag (FOG_LIFT is a fraction of gravity) and
+// swells into soft fog as it fades.
+const float NITROGEN_BOIL_IMPACT = 0.3;
+const float NITROGEN_COOL_RATE = 1.5;
+const float NITROGEN_SURFACE_BOIL = 0.02;
+const float NITROGEN_SKITTER = 25.0;
+const float NITROGEN_PUFF_SPEED = 0.7;
+const float NITROGEN_FOG_LIFT = 0.12;
+const float NITROGEN_FOG_DRAG = 1.6;
+const float NITROGEN_FOG_SCALE = 8.0;
 
 // Must match FluidSystem.Scenario.
 const int SCENE_POOL = 0;

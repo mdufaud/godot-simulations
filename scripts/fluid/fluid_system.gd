@@ -5,7 +5,7 @@ extends Node3D
 ## The host scene owns its camera, environment and ground; this node owns the fluid.
 
 enum Scenario { POOL, CASCADE, BASIN }
-enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL, SPECTRAL_GEL, FLUID_LAVA, PRISMATIC_SLIME }
+enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL, SPECTRAL_GEL, FLUID_LAVA, PRISMATIC_SLIME, LIGHT_PASTE, LIQUID_NITROGEN }
 
 const RADIUS := 0.16
 const POUR_COOLDOWN_MS := 400
@@ -85,7 +85,7 @@ func can_pour() -> bool:
 
 
 func _foam_active() -> bool:
-	return foam_enabled and mode == FluidKind.WATER
+	return foam_enabled and mode in [FluidKind.WATER, FluidKind.LIQUID_NITROGEN]
 
 
 func _is_lava() -> bool:
@@ -143,6 +143,17 @@ func set_flow(value: float) -> void:
 		HONEY_CASCADE_FLOW_MAX if mode == FluidKind.HONEY and scenario == Scenario.CASCADE
 		else config.flow_max)
 	sph_solver.emission_rate = flow_rate
+	sph_solver.emitter_velocity = Vector3(0.0, -_launch_speed(), 0.0)
+
+
+## Paste is extruded: the nozzle speed follows the volume flux, so the rope
+## leaves at rest density instead of as a dotted line of half-filled layers.
+func _launch_speed() -> float:
+	var speed := 6.0 if scenario == Scenario.BASIN else 2.0
+	if mode != FluidKind.LIGHT_PASTE:
+		return speed
+	var per_second := float(sph_solver.particle_count) * flow_rate / sph_solver.emission_cycle_seconds
+	return minf(speed, per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width))
 
 
 func set_particle_count(n: int) -> void:
@@ -283,6 +294,14 @@ func set_sph_viscosity(value: float) -> void:
 
 func get_sph_viscosity() -> float:
 	return sph_solver.viscosity_strength
+
+
+func set_sph_yield_stress(value: float) -> void:
+	sph_solver.yield_stress = value
+
+
+func get_sph_yield_stress() -> float:
+	return sph_solver.yield_stress
 
 
 func set_sph_bounce(value: float) -> void:
@@ -458,6 +477,7 @@ func _configure_solver() -> void:
 	sph_solver.cohesion_kernel_scale = spec.cohesion_kernel_scale
 	sph_solver.collision_inflation = spec.collision_inflation
 	sph_solver.freeze_heat = spec.freeze_heat
+	sph_solver.yield_stress = spec.yield_stress
 	sph_solver.foam_enabled = _foam_active()
 	var basin_pour := scenario == Scenario.BASIN
 	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()
@@ -466,13 +486,11 @@ func _configure_solver() -> void:
 	sph_solver.emission_cycle_seconds = spec.emission_cycle_seconds
 	set_flow(flow_rate)
 	sph_solver.emitter_origin = emitter_origin_for_scene(scenario)
-	var launch_speed := 6.0 if basin_pour else 2.0
-	sph_solver.emitter_velocity = Vector3(0.0, -launch_speed, 0.0)
 	sph_solver.set_scene_obstacles(obstacles_for_scene(scenario))
 	if planet_mode():
 		_configure_planet_solver()
 		sph_solver.viscosity_strength = 0.03 if _is_lava() else 0.14
-		if mode in [FluidKind.ASTRAL, FluidKind.SPECTRAL_GEL, FluidKind.PRISMATIC_SLIME]:
+		if mode in [FluidKind.ASTRAL, FluidKind.SPECTRAL_GEL, FluidKind.PRISMATIC_SLIME, FluidKind.LIGHT_PASTE]:
 			sph_solver.viscosity_strength = spec.viscosity
 		sph_solver.cohesion_strength = 0.0
 		sph_solver.extension_strength = spec.extension_strength if mode == FluidKind.SPECTRAL_GEL else 0.0
@@ -506,6 +524,16 @@ func _configure_solver() -> void:
 	sph_solver.foam_ke_max = 9.0
 	sph_solver.foam_life_min = 5.0
 	sph_solver.foam_life_max = 15.0
+	sph_solver.foam_dissolve_time = 3.0
+	if mode == FluidKind.LIQUID_NITROGEN:
+		# The white particles are boiling: heated particles shed bubbles that
+		# rise, burst and drift off as short-lived cold fog.
+		sph_solver.foam_spawn_rate = 4.0
+		sph_solver.foam_spawn_fade_start = 0.0
+		sph_solver.foam_spawn_fade_time = 0.0
+		sph_solver.foam_life_min = 1.5
+		sph_solver.foam_life_max = 4.0
+		sph_solver.foam_dissolve_time = 1.5
 	sph_solver.extension_strength = spec.extension_strength
 	sph_solver.viscosity_strength = spec.viscosity
 	sph_solver.collision_damping = spec.collision_damping

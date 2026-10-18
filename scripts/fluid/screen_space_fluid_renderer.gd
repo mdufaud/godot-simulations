@@ -25,6 +25,8 @@ var config: FluidConfig = FluidConfig.new()
 var tex_width := 256
 var radius := 0.16
 var mode := 0 # FluidSystem.FluidKind id: selects the composite look (fluid_composite.gdshader).
+var _paste_shader: Shader
+var _fog_shader: Shader
 var render_scale := 0.5
 var domain_aabb := AABB(Vector3(-8.0, 0.0, -8.0), Vector3(16.0, 16.0, 16.0))
 ## Build the foam coverage pass. When false the composite gets a black foam
@@ -107,7 +109,27 @@ func set_radius(r: float) -> void:
 
 func set_mode(m: int) -> void:
 	mode = m
+	if mode == FluidSystem.FluidKind.LIGHT_PASTE:
+		if _paste_shader == null:
+			_paste_shader = Shader.new()
+			_paste_shader.code = "#define LIGHT_PASTE\n" + (load("res://shaders/fluid/fluid_composite.gdshader") as Shader).code
+		composite_mat.shader = _paste_shader
+	else:
+		composite_mat.shader = load("res://shaders/fluid/fluid_composite.gdshader")
 	composite_mat.set_shader_parameter("mode", mode)
+	if foam_mat == null:
+		return
+	if mode == FluidSystem.FluidKind.LIQUID_NITROGEN:
+		if _fog_shader == null:
+			_fog_shader = Shader.new()
+			_fog_shader.code = "#define FOG\n" + (load("res://shaders/foam/foam_billboard.gdshader") as Shader).code
+		foam_mat.shader = _fog_shader
+	else:
+		foam_mat.shader = load("res://shaders/foam/foam_billboard.gdshader")
+	foam_mat.set_shader_parameter("foam_tex_width", foam_tex_width)
+	foam_mat.set_shader_parameter("billboard_size", foam_billboard_size)
+	if foam_pos_texture != null:
+		foam_mat.set_shader_parameter("foam_tex", foam_pos_texture)
 
 
 func set_particle_count(n: int) -> void:

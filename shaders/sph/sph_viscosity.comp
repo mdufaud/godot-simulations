@@ -15,6 +15,16 @@ void main() {
 		return;
 	}
 	vec3 pos = predicted.data[i].xyz;
+	#ifdef LIGHT_PASTE
+	float stress = mod(positions.data[i].w, PASTE_ANCHORED);
+	bool supported;
+	vec3 v = paste_viscosity(i, pos, supported);
+	if (supported) {
+		v = paste_yield(v);
+	}
+	float freeze = 0.0;
+	float viscosity = params.sim2.x;
+	#else
 	vec3 v_live = velocities.data[i].xyz;
 	vec3 vi_snap = velocities_snap.data[i].xyz;
 	vec3 visc = vec3(0.0);
@@ -101,6 +111,7 @@ void main() {
 		v.xz *= exp(-3.0 * viscosity * contact * params.sim.x);
 	}
 	v *= 1.0 - crust * (1.0 - smoothstep(0.5 * LAVA_STICK_SPEED, LAVA_STICK_SPEED, length(v)));
+	#endif
 	vec3 p = positions.data[i].xyz + v * params.sim.x;
 	vec3 p_free = p;
 	vec3 before_collision = v;
@@ -135,7 +146,24 @@ void main() {
 	if (is_lava() && p != p_free) {
 		v *= (1.0 - freeze) * exp(-LAVA_BED_RATE * viscosity * viscosity * params.sim.x);
 	}
+	bool nitrogen_contact = params.material == MATERIAL_LIQUID_NITROGEN && p != p_free;
+	bool nitrogen_boil = nitrogen_contact && length(before_collision - v) > NITROGEN_BOIL_IMPACT;
+	if (nitrogen_contact) {
+		uint rng = pcg_hash(i * 9781u + uint(params.misc.w) * 6271u);
+		v += vec3(rand01(rng) - 0.5, rand01(rng) * 0.5, rand01(rng) - 0.5)
+			* NITROGEN_SKITTER * positions.data[i].w * params.sim.x;
+	}
+	#ifdef LIGHT_PASTE
+	if (p != p_free) {
+		v = paste_yield(v);
+	}
+	bool anchored = (supported || p != p_free) && dot(v, v) == 0.0;
+	stress = mix(anchored ? 0.0 : 1.0, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
+	#endif
 	float temp = positions.data[i].w;
+	#ifdef LIGHT_PASTE
+	temp = stress + (anchored ? PASTE_ANCHORED : 0.0);
+	#endif
 	if (params.material == MATERIAL_PRISMATIC_SLIME) {
 		temp = stress;
 	}
@@ -147,12 +175,19 @@ void main() {
 		float surf = clamp(1.0 - densities.data[i] / params.sim.y, 0.0, 1.0);
 		temp = max(temp - params.sim.x * (0.05 + 0.45 * surf), 0.0);
 	}
+	if (params.material == MATERIAL_LIQUID_NITROGEN) {
+		temp = nitrogen_boil ? 1.0 : max(temp - params.sim.x * NITROGEN_COOL_RATE, 0.0);
+	}
 	positions.data[i] = vec4(p, temp);
 	velocities.data[i] = vec4(v, velocities.data[i].w);
 	if (params.misc.z == 1) {
 		uint w = uint(params.misc.x);
 		ivec2 texel = ivec2(int(i % w), int(i / w));
+		#ifdef LIGHT_PASTE
+		float attrib = stress;
+		#else
 		float attrib = params.material == MATERIAL_OIL || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_PRISMATIC_SLIME ? temp : length(v);
+		#endif
 		imageStore(position_tex, texel, vec4(p, attrib));
 	}
 }
