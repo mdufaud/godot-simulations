@@ -69,6 +69,8 @@ func _run() -> void:
 		await _check_ocean_scene_selector()
 	if _demo == "ambient_fluid_demo":
 		await _check_ambient_fluid_actions(menu)
+	if _demo == "fluid_demo":
+		await _check_fluid_settings(menu)
 	if _demo == "mixwell_demo":
 		await _check_mixwell_periodic()
 	if _demo == "tornado_demo":
@@ -92,6 +94,55 @@ func _run() -> void:
 	await _check_toggle(menu, menu.get_node("TopRight/GearButton"), false, "gear closes panel")
 	await _check_viewport_restored()
 	_report()
+
+
+func _check_fluid_settings(menu: SimMenu) -> void:
+	var controller := _demo_root
+	var scene := controller.scene_option as OptionButton
+	var liquid := controller.material_option as OptionButton
+	if scene.item_count != 3 or liquid.item_count != controller.MATERIAL_NAMES.size():
+		_fail("fluid Simulation selectors are missing scenes or liquids")
+	for mode in liquid.item_count:
+		liquid.select(mode)
+		liquid.item_selected.emit(mode)
+		var spec := FluidMaterial.for_kind(mode)
+		if controller.fluid.mode != mode \
+				or not is_equal_approx(controller.fluid.get_sph_viscosity(), spec.viscosity) \
+				or not is_equal_approx(controller.fluid.get_sph_bounce(), spec.collision_damping):
+			_fail("fluid selector or slider sync changes material %d defaults" % mode)
+		for pair in controller._parameter_pairs:
+			var slider := pair[0] as HSlider
+			if not is_equal_approx(slider.value, float(pair[1].call())):
+				_fail("fluid slider disagrees with material %d solver" % mode)
+		await _wait_fluid_ready(controller)
+	scene.select(FluidSystem.Scenario.CASCADE)
+	scene.item_selected.emit(FluidSystem.Scenario.CASCADE)
+	await _wait_fluid_ready(controller)
+	if controller.fluid.scenario != FluidSystem.Scenario.CASCADE \
+			or not controller.flow_group.visible \
+			or not is_equal_approx(controller.flow_slider.value, controller.fluid.flow_rate):
+		_fail("fluid scene selector did not show the active Cascade flow")
+	controller._cycle_material()
+	await _wait_fluid_ready(controller)
+	if liquid.selected != controller.fluid.mode or scene.selected != controller.fluid.scenario:
+		_fail("fluid actions and panel selectors are out of sync")
+	var viscosity := controller._parameter_pairs[2][0] as HSlider
+	viscosity.value = 0.35
+	if not is_equal_approx(controller.fluid.get_sph_viscosity(), 0.35):
+		_fail("fluid viscosity slider did not reach the solver")
+	menu._do_reset()
+	await _wait_fluid_ready(controller)
+	if not is_equal_approx(controller.fluid.get_sph_viscosity(),
+			FluidMaterial.for_kind(controller.fluid.mode).viscosity):
+		_fail("fluid Reset defaults did not restore the current liquid")
+
+
+func _wait_fluid_ready(controller: Node) -> void:
+	var deadline := Time.get_ticks_msec() + 20000
+	while not controller.fluid.is_ready() and Time.get_ticks_msec() < deadline:
+		await get_tree().process_frame
+	if not controller.fluid.is_ready():
+		_fail("fluid initialization timed out")
 
 
 func _check_mixwell_periodic() -> void:

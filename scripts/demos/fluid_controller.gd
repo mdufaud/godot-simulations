@@ -18,14 +18,16 @@ var flow_slider: HSlider
 var scene_action: Button
 var material_action: Button
 var pool_add_action: Button
+var scene_option: OptionButton
+var material_option: OptionButton
 var scene_decor: Array[Node3D] = []
 var _parameter_pairs: Array = []
 
 var profiler := SimProfiler.new()
 
-const MATERIAL_NAMES := ["Water", "Viscous Lava", "Mercury", "Honey", "Water + Oil", "Astral Fluid", "Spectral Gel", "Fluid Lava"]
-const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗", "✦", "◈", "🌋"]
-const MATERIAL_BUTTON_NAMES := ["Water", "Viscous\nLava", "Hg", "Honey", "Oil", "Astral\nFluid", "Spectral\nGel", "Fluid\nLava"]
+const MATERIAL_NAMES := ["Water", "Viscous Lava", "Mercury", "Honey", "Water + Oil", "Astral Fluid", "Spectral Gel", "Fluid Lava", "Prismatic Slime"]
+const MATERIAL_ICONS := ["💧", "🌋", "Hg", "🍯", "⚗", "✦", "◈", "🌋", "◇"]
+const MATERIAL_BUTTON_NAMES := ["Water", "Viscous\nLava", "Hg", "Honey", "Oil", "Astral\nFluid", "Spectral\nGel", "Fluid\nLava", "Prismatic\nSlime"]
 
 
 func _ready() -> void:
@@ -56,6 +58,10 @@ func _ready() -> void:
 func _setup_ui() -> void:
 	_update_title()
 	menu.add_section("Simulation")
+	scene_option = menu.add_option_button("Scene", ["Pool", "Cascade", "Basin"],
+		int(fluid.scenario), func(idx): configure_fluid(int(fluid.mode), idx), false)
+	material_option = menu.add_option_button("Liquid", MATERIAL_NAMES, int(fluid.mode),
+		_on_material_selected, false)
 	scene_action = menu.add_action("🗺", "Scene", _cycle_scenario)
 	material_action = menu.add_action(MATERIAL_ICONS[int(fluid.mode)],
 		MATERIAL_BUTTON_NAMES[int(fluid.mode)], _cycle_material)
@@ -63,35 +69,36 @@ func _setup_ui() -> void:
 	menu.add_action("↺", "Reset", _reset_fluid)
 	flow_group = menu.add_group()
 	flow_slider = menu.add_slider("Flow", fluid_config.flow_min, fluid_config.flow_max,
-		fluid.flow_rate, fluid.set_flow)
+		fluid.flow_rate, fluid.set_flow, true, 0.01)
 	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Parameters")
 	_parameter_pairs = [
 		[menu.add_slider("Pressure", 50.0, 600.0, fluid.get_sph_pressure(),
-			fluid.set_sph_pressure), fluid.get_sph_pressure],
+			fluid.set_sph_pressure, false, 1.0), fluid.get_sph_pressure],
 		[menu.add_slider("Near pressure", 0.0, 80.0, fluid.get_sph_near_pressure(),
-			fluid.set_sph_near_pressure), fluid.get_sph_near_pressure],
-		[menu.add_slider("Viscosity", 0.0, 2.0, fluid.get_sph_viscosity(),
+			fluid.set_sph_near_pressure, false, 0.1), fluid.get_sph_near_pressure],
+		[menu.add_slider("Viscosity", 0.0, 3.0, fluid.get_sph_viscosity(),
 			fluid.set_sph_viscosity, false, 0.01), fluid.get_sph_viscosity],
 		[menu.add_slider("Cohesion", 0.0, 10000.0, fluid.get_sph_cohesion(),
 			fluid.set_sph_cohesion, false, 10.0), fluid.get_sph_cohesion],
 		[menu.add_slider("Bounce", 0.0, 0.95, fluid.get_sph_bounce(),
-			fluid.set_sph_bounce, false), fluid.get_sph_bounce],
+			fluid.set_sph_bounce, false, 0.01), fluid.get_sph_bounce],
 		[menu.add_slider("Sub-steps", 1.0, 6.0, float(fluid.get_sph_substeps()),
-			fluid.set_sph_substeps), fluid.get_sph_substeps],
+			fluid.set_sph_substeps, false, 1.0), fluid.get_sph_substeps],
 		# Foam tuning rides the per-material preset too: these resync on every
 		# material/scene switch because _configure_solver rewrites the values.
 		[menu.add_slider("Foam amount", 0.0, 300.0, fluid.get_sph_foam_amount(),
-			fluid.set_sph_foam_amount, false), fluid.get_sph_foam_amount],
+			fluid.set_sph_foam_amount, false, 1.0), fluid.get_sph_foam_amount],
 		[menu.add_slider("Foam threshold", 0.5, 12.0, fluid.get_sph_foam_threshold(),
-			fluid.set_sph_foam_threshold, false), fluid.get_sph_foam_threshold],
+			fluid.set_sph_foam_threshold, false, 0.1), fluid.get_sph_foam_threshold],
 		[menu.add_slider("Foam life", 2.0, 30.0, fluid.get_sph_foam_life(),
-			fluid.set_sph_foam_life, false), fluid.get_sph_foam_life],
+			fluid.set_sph_foam_life, false, 1.0), fluid.get_sph_foam_life],
 	]
 	menu.add_separator()
 	menu.add_section("Performance")
 	quality.attach_menu_option(menu)
+	menu.settings_reset.connect(_reset_fluid)
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on), false)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
@@ -141,7 +148,7 @@ func _update_title() -> void:
 
 
 func configure_fluid(next_mode: int, next_scene: int) -> void:
-	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.FLUID_LAVA)
+	var selected_mode := clampi(next_mode, FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.PRISMATIC_SLIME)
 	var selected_scene := clampi(next_scene, FluidSystem.Scenario.POOL, FluidSystem.Scenario.BASIN)
 	fluid.set_configuration(selected_mode as FluidSystem.FluidKind,
 		selected_scene as FluidSystem.Scenario)
@@ -152,14 +159,14 @@ func configure_fluid(next_mode: int, next_scene: int) -> void:
 
 func _sync_scene_ui() -> void:
 	var scene := int(fluid.scenario)
+	scene_option.select(scene)
+	material_option.select(int(fluid.mode))
 	flow_group.visible = scene != FluidSystem.Scenario.POOL
 	if flow_slider != null:
 		var honey_cascade := scene == FluidSystem.Scenario.CASCADE and \
 			fluid.mode == FluidSystem.FluidKind.HONEY
-		flow_slider.step = 0.01 if honey_cascade else \
-			(fluid_config.flow_max - fluid_config.flow_min) / 100.0
 		flow_slider.max_value = FluidSystem.HONEY_CASCADE_FLOW_MAX if honey_cascade else fluid_config.flow_max
-		flow_slider.value = fluid.flow_rate
+		menu.set_slider_value(flow_slider, fluid.flow_rate)
 	pool_add_action.visible = scene == FluidSystem.Scenario.POOL
 	_sync_material_action()
 	_sync_pool_add_action()
@@ -360,7 +367,7 @@ func apply_look(idx: int) -> void:
 func _resync_parameter_widgets() -> void:
 	for pair in _parameter_pairs:
 		var slider: HSlider = pair[0]
-		slider.set_value(float(pair[1].call()))
+		menu.set_slider_value(slider, float(pair[1].call()))
 
 
 func _process(delta: float) -> void:

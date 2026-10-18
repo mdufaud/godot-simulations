@@ -16,7 +16,7 @@ func _run() -> void:
 	if _rd == null:
 		_finish("spectral_gel")
 		return
-	var gel := await _make_solver(1200.0, 256)
+	var gel := await _make_solver(3600.0, 256)
 	await _step(gel, 1)
 	var resting := await _read_state(gel)
 	_check(_rms_error(resting, 0) < 0.001, "Spectral Gel drifted at rest")
@@ -30,7 +30,7 @@ func _run() -> void:
 		await _write_state(gel, _pose(moved, 0), moved.velocities)
 		await _step(gel, 1)
 		resting = await _read_state(gel)
-	var elastic := await _make_solver(1200.0, COUNT)
+	var elastic := await _make_solver(3600.0, COUNT)
 	var control := await _make_solver(0.0, COUNT)
 	var stretched := _pose(resting, 3)
 	await _write_state(elastic, stretched, resting.velocities)
@@ -53,15 +53,16 @@ func _run() -> void:
 	await _free_solver(gel)
 	await _free_solver(elastic)
 	await _free_solver(control)
-	var falling := await _make_solver(1200.0, 1)
+	var falling := await _make_solver(3600.0, 1)
 	falling.gravity = Vector3(0.0, -9.8, 0.0)
-	await _step(falling, 36)
+	falling.collision_damping = 0.28
 	var fall_state := await _read_state(falling)
-	var fell: bool = fall_state.positions[1] < 0.4
+	var fell := false
 	var bounced := false
-	for _i in 42:
+	for _i in 60:
 		await _step(falling, 1)
 		fall_state = await _read_state(falling)
+		fell = fell or fall_state.positions[1] < 0.4
 		if fall_state.positions[1] <= 0.12 and fall_state.velocities[1] > 0.05:
 			bounced = true
 	_check(fell and bounced and fall_state.positions[1] >= 0.019,
@@ -81,7 +82,7 @@ func _make_solver(stiffness: float, count: int) -> SphFluidSolver:
 	solver.pressure_mult = 0.0
 	solver.near_pressure_mult = 0.0
 	solver.cohesion_strength = 0.0
-	solver.viscosity_strength = 0.45
+	solver.viscosity_strength = 1.0
 	solver.extension_strength = stiffness
 	solver.substeps = 3
 	solver.foam_enabled = false

@@ -75,10 +75,16 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.collision_damping = 0.05
 			spec.radius = 0.18
 		FluidSystem.FluidKind.SPECTRAL_GEL:
-			spec.viscosity = 0.45
-			spec.cohesion = 4000.0
+			spec.viscosity = 1.0
+			spec.cohesion = 1500.0
 			spec.collision_damping = 0.28
-			spec.extension_strength = 1200.0
+			spec.extension_strength = 3600.0
 			spec.radius = 0.22
 			spec.emission_cycle_seconds = 60.0
+		FluidSystem.FluidKind.PRISMATIC_SLIME:
+			spec.viscosity = 2.6
+			spec.cohesion = 1800.0
+			spec.collision_damping = 0.06
+			spec.radius = 0.22
+			spec.emission_cycle_seconds = 48.0
 	return spec

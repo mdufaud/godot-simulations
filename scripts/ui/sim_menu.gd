@@ -488,6 +488,12 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	return slider
 
 
+func set_slider_value(slider: HSlider, value: float) -> void:
+	slider.set_value_no_signal(value)
+	var value_label := slider.get_parent().get_child(2) as Label
+	value_label.text = _slider_value_text(slider.value, slider.step)
+
+
 func _slider_value_text(value: float, step_val: float) -> String:
 	if step_val >= 1.0:
 		return "%d" % int(round(value))

@@ -38,6 +38,7 @@ const int MATERIAL_OIL = 4;
 const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
+const int MATERIAL_PRISMATIC_SLIME = 8;
 uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
@@ -154,7 +155,7 @@ void fragment() {
 		// from a wider footprint. Listed explicitly: a future FluidKind must not
 		// inherit the grouping by accident of its enum position.
 		bool wide_normal_footprint = mode == MATERIAL_MERCURY || mode == MATERIAL_HONEY
-			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL || mode == MATERIAL_SPECTRAL_GEL;
+			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL || mode == MATERIAL_SPECTRAL_GEL || mode == MATERIAL_PRISMATIC_SLIME;
 		vec2 ts = (wide_normal_footprint ? 3.0 : 1.0) / vec2(textureSize(fluid_depth_tex, 0));
 		vec3 pc = eye_pos_from_depth(SCREEN_UV, fd, INV_PROJECTION_MATRIX);
 		float dr = fluid_depth(SCREEN_UV + vec2(ts.x, 0.0));
@@ -193,9 +194,9 @@ void fragment() {
 		} else if (mode == MATERIAL_ASTRAL) {
 			vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
 			float stress = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
-			vec2 flow = world.xz * 1.4 + world.y * vec2(0.35, 0.22);
-			vec2 warp = vec2(astral_noise(flow * 0.5 + TIME * 0.025),
-				astral_noise(flow * 0.5 + vec2(17.3, 4.1) - TIME * 0.02));
+			vec2 flow = world.xz * 1.4 + (world.y + TIME * 1.8) * vec2(0.35, 0.22);
+			vec2 warp = vec2(astral_noise(flow * 0.5 + TIME * 0.24),
+				astral_noise(flow * 0.5 + vec2(17.3, 4.1) - TIME * 0.2));
 			float field = astral_noise(flow + warp * 3.5) * 0.7
 				+ astral_noise(flow * 2.3 - warp) * 0.3;
 			float threads = 1.0 - smoothstep(0.003, 0.012, abs(field - 0.5));
@@ -208,22 +209,44 @@ void fragment() {
 			vec3 filament = mix(vec3(0.38, 0.09, 0.85), vec3(0.65, 1.1, 2.0), activation);
 			ALBEDO = body + filament * (threads * (0.04 + 3.0 * activation) + 0.1 * activation * activation);
 			ALPHA = 1.0;
+		} else if (mode == MATERIAL_PRISMATIC_SLIME) {
+			vec3 incoming = normalize(pc);
+			float facing = clamp(dot(-incoming, n), 0.0, 1.0);
+			float rim = pow(1.0 - facing, 3.0);
+			float optical_depth = thickness * 0.04;
+			float fluidity = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+			vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+			float grain = astral_noise(world.xz * 0.45 + world.y * 0.2);
+			float phase = (1.0 - facing) * 9.0 + optical_depth * 1.4 + grain * 2.0;
+			vec3 film = 0.5 + 0.5 * cos(vec3(phase, phase + 2.094, phase + 4.189));
+			vec3 pearl = mix(vec3(0.55, 0.62, 0.68), 0.12 + film * 0.88, 0.65 + 0.2 * fluidity);
+			vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
+			vec3 body = pearl * (0.3 + 0.5 * max(dot(n, sun_view), 0.0));
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(incoming, n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			vec3 under = textureLod(SCREEN_TEXTURE, SCREEN_UV, 0.0).rgb;
+			ALBEDO = mix(body, under, exp(-optical_depth * 2.0) * 0.18)
+				+ sky * mix(vec3(0.75), film + 0.15, 0.6) * (0.12 + 0.55 * rim);
+			ALPHA = 1.0;
 		} else if (mode == MATERIAL_SPECTRAL_GEL) {
+			float optical_depth = thickness * 0.06;
 			vec3 incoming = normalize(pc);
 			float fresnel = dielectric_reflectance(incoming, n, 1.0, 1.4);
-			vec2 offset = n.xy * (0.12 * clamp(thickness, 0.0, 2.0) / max(fd, 0.5));
+			vec2 offset = n.xy * (0.12 * clamp(optical_depth, 0.0, 2.0) / max(fd, 0.5));
 			vec2 uv = clamp(SCREEN_UV + offset, vec2(0.001), vec2(0.999));
 			if (scene_eye_depth(uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
 				uv = SCREEN_UV;
 			}
-			vec3 transmission = exp(-vec3(1.8, 0.5, 0.3) * thickness * 0.6);
+			vec3 transmission = exp(-vec3(1.8, 0.5, 0.3) * optical_depth * 0.6);
 			vec3 body = textureLod(SCREEN_TEXTURE, uv, 0.0).rgb * transmission
-				+ vec3(0.025, 0.16, 0.22) * (1.0 - transmission);
+				+ vec3(0.05, 0.23, 0.3) * (1.0 - transmission);
 			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(incoming, n), 0.0)).xyz);
 			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
-			float core = 1.0 - exp(-max(thickness - 0.25, 0.0) * 0.9);
+			float core = 1.0 - exp(-max(optical_depth - 0.12, 0.0) * 1.3);
+			float rim = pow(1.0 - max(dot(-incoming, n), 0.0), 3.0);
 			ALBEDO = mix(body, sky * vec3(0.65, 0.8, 1.0), clamp(fresnel, 0.04, 0.8))
-				+ vec3(0.12, 0.9, 1.35) * core * core * (1.0 - fresnel);
+				+ vec3(0.12, 0.9, 1.35) * core * core * (1.0 - fresnel) * 1.15
+				+ vec3(0.08, 0.35, 0.55) * rim * 0.5;
 			ALPHA = 1.0;
 		} else if (mode == MATERIAL_MERCURY) {
 			vec3 in_view = normalize(pc);

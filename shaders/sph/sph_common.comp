@@ -138,6 +138,7 @@ const int MATERIAL_OIL = 4;
 const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
+const int MATERIAL_PRISMATIC_SLIME = 8;
 
 // Must match FluidSystem.Scenario.
 const int SCENE_POOL = 0;

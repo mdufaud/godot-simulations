@@ -5,7 +5,7 @@ extends Node3D
 ## The host scene owns its camera, environment and ground; this node owns the fluid.
 
 enum Scenario { POOL, CASCADE, BASIN }
-enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL, SPECTRAL_GEL, FLUID_LAVA }
+enum FluidKind { WATER, LAVA, MERCURY, HONEY, WATER_OIL, ASTRAL, SPECTRAL_GEL, FLUID_LAVA, PRISMATIC_SLIME }
 
 const RADIUS := 0.16
 const POUR_COOLDOWN_MS := 400
@@ -472,7 +472,7 @@ func _configure_solver() -> void:
 	if planet_mode():
 		_configure_planet_solver()
 		sph_solver.viscosity_strength = 0.03 if _is_lava() else 0.14
-		if mode in [FluidKind.ASTRAL, FluidKind.SPECTRAL_GEL]:
+		if mode in [FluidKind.ASTRAL, FluidKind.SPECTRAL_GEL, FluidKind.PRISMATIC_SLIME]:
 			sph_solver.viscosity_strength = spec.viscosity
 		sph_solver.cohesion_strength = 0.0
 		sph_solver.extension_strength = spec.extension_strength if mode == FluidKind.SPECTRAL_GEL else 0.0
