@@ -81,9 +81,17 @@ func _run() -> void:
 	_check(demo.river.waterfall.material.get_shader_parameter("free_fall") == true,
 		"Runtime angle control must restore ballistic transport at the vertical endpoint")
 	demo._menu_builder.scene_action.pressed.emit()
+	_check(demo.scene_index == demo.STEEP_SCENE and demo.river.waterfall == null
+		and demo.river.swe_window_m == Vector2.ZERO and demo.river.swe_range_m == 0.0
+		and demo.config.current_guidance_hz == demo.STEEP_GUIDANCE_HZ.x and demo.river.reflection_scale == 0.0
+		and not demo._menu_builder.grade_option.disabled and not demo._menu_builder.angle_slider.editable,
+		"Scene action must install the steep channel with its whole-domain solver, guidance and no planar reflection")
+	demo._menu_builder.scene_action.pressed.emit()
 	_check(demo.scene_index == 0 and demo.river.field is RiverLandscape
-		and demo.river.waterfall == null and actions.get_child_count() == 4 and not demo._menu_builder.angle_slider.editable,
-		"Scene action must cycle back to the river and retain all native actions")
+		and demo.river.waterfall == null and actions.get_child_count() == 4 and not demo._menu_builder.angle_slider.editable
+		and demo.river.swe_window_m == Vector2.ZERO and demo.config.current_guidance_hz == RiverConfig.new().current_guidance_hz
+		and demo.river.reflection_scale > 0.0 and demo._menu_builder.grade_option.disabled,
+		"Scene action must cycle back to the river with its whole-domain solver, default guidance and reflections")
 	demo.river.swe.set_enabled(solver_enabled)
 	_check(demo.menu.get_node_or_null("RiverPresets") == null, "Custom bottom-left preset bar must be removed")
 	_check(action.is_visible_in_tree(), "Native River action must stay visible with settings closed")

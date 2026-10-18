@@ -13,7 +13,7 @@ const OceanParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
 const OceanCoastalProbe := preload("res://tests/ocean_coastal_probe.gd")
 const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
-const SlopeChannel := preload("res://tests/river_slope_channel.gd")
+const SlopeLandscape := preload("res://scripts/demos/river/river_slope_landscape.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -6622,7 +6622,7 @@ func _run_river_slope() -> void:
 
 func _river_slope_case(scene: Node3D, camera: Camera3D, grade: float, heading: Vector2,
 		speed: float, guidance: Vector2, cell: float, window: Vector2, seconds: float, shift: Vector2, output_dir: String) -> bool:
-	var field := SlopeChannel.new(grade, heading, Vector2(40.0, 40.0))
+	var field := SlopeLandscape.new(grade, heading, Vector2(40.0, 40.0))
 	var config := RiverConfig.new()
 	config.water_level_m = 0.0
 	config.speed_m_s = speed
@@ -6776,7 +6776,7 @@ func _run_river_domain() -> void:
 	root.size = Vector2i(1280, 720)
 	var scene := _river_probe_stage()
 	var camera := scene.get_node("Camera") as Camera3D
-	var field := SlopeChannel.new(0.05, Vector2(0.0, -1.0), Vector2(40.0, 40.0))
+	var field := SlopeLandscape.new(0.05, Vector2(0.0, -1.0), Vector2(40.0, 40.0))
 	_river_prepare_images(field, Vector2.ZERO)
 	var config := RiverConfig.new()
 	config.water_level_m = 0.0

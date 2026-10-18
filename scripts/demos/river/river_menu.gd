@@ -1,12 +1,16 @@
 extends RefCounted
 
-const SCENES := ["River", "Waterfall 50°", "Waterfall 90°"]
+const SCENES := ["River", "Waterfall 50°", "Waterfall 90°", "Steep channel"]
 
 var preset_option: OptionButton
 var scene_option: OptionButton
 var scene_action: Button
 var angle_slider: HSlider
 var mist_slider: HSlider
+var grade_option: OptionButton
+var heading_option: OptionButton
+var guidance_toggle: Button
+var window_toggle: Button
 var sliders: Array[HSlider] = []
 var pause_button: Button
 var preset_action: Button
@@ -31,6 +35,10 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 		if changed:
 			controller.set_waterfall_angle(angle_slider.value))
 	mist_slider = menu.add_slider("Mist density", 0.0, 1.0, 0.6, controller.set_mist_density, false, 0.01)
+	grade_option = menu.add_option_button("Channel grade", ["5 %", "15 %", "30 %"], controller.channel_grade_index, controller.set_channel_grade, false)
+	heading_option = menu.add_option_button("Channel direction", ["Along Z", "Along X", "Diagonal"], controller.channel_heading_index, controller.set_channel_heading, false)
+	guidance_toggle = menu.add_toggle("Steep guidance (1 / 5 Hz)", controller.steep_guidance, controller.set_steep_guidance, false)
+	window_toggle = menu.add_toggle("Camera solver window", controller.steep_window, controller.set_steep_window, false)
 	var names: Array[String] = []
 	for preset: RiverConfig in presets:
 		names.append(preset.display_name)
@@ -81,12 +89,17 @@ func sync(config: RiverConfig, index: int) -> void:
 
 
 func sync_scene(index: int, angles: PackedFloat32Array) -> void:
-	for i in range(1, SCENES.size()):
+	for i in range(1, angles.size()):
 		scene_option.set_item_text(i, "Waterfall %.1f°" % angles[i])
 	scene_option.select(index)
-	angle_slider.editable = index > 0
-	mist_slider.editable = index > 0
-	angle_slider.set_value_no_signal(angles[maxi(index, 1)])
+	var steep := index == SCENES.size() - 1
+	angle_slider.editable = index > 0 and not steep
+	mist_slider.editable = index > 0 and not steep
+	grade_option.disabled = not steep
+	heading_option.disabled = not steep
+	guidance_toggle.disabled = not steep
+	window_toggle.disabled = not steep
+	angle_slider.set_value_no_signal(angles[clampi(index, 1, angles.size() - 1)])
 	scene_action.tooltip_text = "Next scene: %s · Current: %s" % [scene_option.get_item_text((index + 1) % SCENES.size()), scene_option.get_item_text(index)]
 
 

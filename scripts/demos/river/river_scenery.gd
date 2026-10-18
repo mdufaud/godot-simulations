@@ -1,12 +1,16 @@
 extends RefCounted
 
 const Tufts := preload("res://scripts/grass/grass_multimesh_builder.gd")
+const TorrentLandscape := preload("res://scripts/demos/river/river_torrent_landscape.gd")
 const ROCK_PATHS := [
 	"res://resources/rocks/boulder_01/boulder_01_2k.gltf",
 	"res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
 	"res://resources/rocks/rock_face_02/rock_face_02_2k.gltf",
 ]
-
+const BOULDER_PATHS := [
+	"res://resources/rocks/boulder_01/boulder_01_2k.gltf",
+	"res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
+]
 const OUTER_EXTENT_M := 150.0
 
 var field: RiverField = RiverLandscape.new()
@@ -142,7 +146,8 @@ func _build_ground() -> void:
 
 
 func _ground_mesh() -> ArrayMesh:
-	var size := Vector2i(field.domain_m / 0.5) + Vector2i.ONE if field.waterfall == null else Vector2i(97, 193)
+	var torrent := field is TorrentLandscape
+	var size := Vector2i(field.domain_m / (0.25 if torrent else 0.5)) + Vector2i.ONE if field.waterfall == null else Vector2i(97, 193)
 	field.ground_rows_m.clear()
 	var rows := PackedFloat32Array()
 	for z in size.y:
@@ -195,10 +200,14 @@ func _ground_mesh() -> ArrayMesh:
 			uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
 			tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
-			if x < count.x - 1 and z < count.y - 1:
-				var i := z * count.x + x
-				if _inside_cliff_gap((point + Vector2(columns[x + 1], rows[z + 1])) * 0.5):
-					continue
+	for z in count.y - 1:
+		for x in count.x - 1:
+			if _inside_cliff_gap(Vector2(columns[x] + columns[x + 1], rows[z] + rows[z + 1]) * 0.5):
+				continue
+			var i := z * count.x + x
+			if torrent and absf(vertices[i].y - vertices[i + count.x + 1].y) < absf(vertices[i + 1].y - vertices[i + count.x].y):
+				indices.append_array(PackedInt32Array([i, i + 1, i + count.x + 1, i, i + count.x + 1, i + count.x]))
+			else:
 				indices.append_array(PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x]))
 	if field.waterfall != null and field.waterfall.is_vertical():
 		var crest := field.waterfall.crest_z_m
@@ -247,16 +256,30 @@ func _terrain(point: Vector2) -> float:
 	if outside <= 0.0:
 		return _bed(point)
 	var ridge := (sin(point.x * 0.038 + point.y * 0.027) + sin(point.y * 0.054 - point.x * 0.016)) * 3.0 + 8.0
-	var center := _center_x(point.y)
-	var reach := _half_width(point.y) + 5.0
-	var banks := (_bed(Vector2(center - reach, point.y)) + _bed(Vector2(center + reach, point.y))) * 0.5
-	var bed := lerpf(_bed(point), maxf(_bed(point), banks), smoothstep(0.0, 10.0, outside))
+	var banks := 0.0
+	if field is TorrentLandscape:
+		var torrent := field as TorrentLandscape
+		var rect := field.domain_rect()
+		var border := torrent.fill_height_m(point.clamp(rect.position, rect.end))
+		var free := torrent.fill_height_m(point)
+		var blend := clampf(0.5 + 0.5 * (free - border) / 1.5, 0.0, 1.0)
+		banks = lerpf(border, free, blend) + 1.5 * blend * (1.0 - blend)
+	else:
+		var center := _center_x(point.y)
+		var reach := _half_width(point.y) + 5.0
+		banks = (_bed(Vector2(center - reach, point.y)) + _bed(Vector2(center + reach, point.y))) * 0.5
+	var bed := lerpf(_bed(point), maxf(_bed(point), banks), smoothstep(0.0, 4.0 if field is TorrentLandscape else 10.0, outside))
 	return bed + smoothstep(0.0, 40.0, outside) * ridge
 
 
 func _build_rocks() -> void:
 	if field.waterfall != null:
 		_build_waterfall_bank_rocks()
+		return
+	if field is TorrentLandscape:
+		_build_torrent_rocks()
+		return
+	if not field is RiverLandscape:
 		return
 	var channel_rocks := [
 		Vector3(-2.1, 8.0, 1.45), Vector3(2.0, 5.0, 1.1),
@@ -300,6 +323,66 @@ func _build_waterfall_bank_rocks() -> void:
 			_add_rock(point, radius, _bed(point) - radius * 0.3, radius * _rng.randf_range(0.8, 1.3))
 
 
+func _build_torrent_rocks() -> void:
+	var torrent := field as TorrentLandscape
+	var inner := field.domain_rect().grow(-1.5)
+	var along := -42.0
+	while along < 42.0:
+		along += _rng.randf_range(2.0, 3.6)
+		var half := torrent.half_width_m(along)
+		var point := torrent.point_at(along, _rng.randf_range(-0.6, 0.6) * half)
+		var radius := minf(_rng.randf_range(0.3, 0.75), half * 0.45)
+		var emergence := _rng.randf_range(-0.12, 0.5)
+		if not inner.has_point(point):
+			continue
+		_add_stream_rock(point, radius, emergence)
+	for end: float in [-1.0, 1.0]:
+		along = 0.0
+		while inner.has_point(torrent.point_at(along + end * 0.5, 0.0)):
+			along += end * 0.5
+		var half := torrent.half_width_m(along)
+		for lateral: float in [-1.3, -0.7, -0.1, 0.5, 1.1]:
+			var point := torrent.point_at(along + _rng.randf_range(-0.8, 0.8), lateral * half)
+			_add_stream_rock(point, minf(_rng.randf_range(0.8, 1.3), half * 0.6), _rng.randf_range(0.5, 1.1))
+	for i in 110:
+		var side := -1.0 if i % 2 == 0 else 1.0
+		along = _rng.randf_range(-42.0, 42.0)
+		var radius := lerpf(0.15, 1.1, pow(_rng.randf(), 2.0))
+		var point := torrent.point_at(along, side * (torrent.half_width_m(along) + _rng.randf_range(-0.1, 3.2) + radius * 0.5))
+		var height := radius * _rng.randf_range(0.7, 1.3)
+		if inner.has_point(point):
+			_add_rock(point, radius, _footprint_floor(point, radius) - radius * 0.15, height, BOULDER_PATHS)
+	var wet_meshes := field.obstacle_meshes.size()
+	for i in 28:
+		var side := -1.0 if i % 2 == 0 else 1.0
+		along = _rng.randf_range(-42.0, 42.0)
+		var radius := _rng.randf_range(0.9, 2.2)
+		var point := torrent.point_at(along, side * (torrent.half_width_m(along) + _rng.randf_range(4.5, 18.0)))
+		var height := radius * _rng.randf_range(0.8, 1.3)
+		if inner.has_point(point):
+			_add_rock(point, radius, _footprint_floor(point, radius) - radius * 0.2, height, BOULDER_PATHS, 0.3)
+	for i in 36:
+		var point := Vector2.from_angle(_rng.randf() * TAU) * _rng.randf_range(field.domain_m.x * 0.55, 95.0)
+		var radius := _rng.randf_range(1.4, 3.6)
+		_add_rock(point, radius, _footprint_floor(point, radius) - radius * 0.3, radius * _rng.randf_range(0.7, 1.2), BOULDER_PATHS, 0.3)
+	field.obstacle_meshes.resize(wet_meshes)
+
+
+func _add_stream_rock(point: Vector2, radius: float, emergence_m: float) -> void:
+	var base := _footprint_floor(point, radius) - 0.2
+	var top := field.sample_height(point, 0.06) + emergence_m
+	_add_rock(point, radius, base, top - base, BOULDER_PATHS)
+	if emergence_m > 0.0:
+		field.obstacles.append(Vector4(point.x, point.y, radius, top))
+
+
+func _footprint_floor(point: Vector2, radius: float) -> float:
+	var lowest := _terrain(point)
+	for offset: Vector2 in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
+		lowest = minf(lowest, _terrain(point + offset * radius * 0.8))
+	return lowest
+
+
 func _build_cliff() -> void:
 	var config: RiverWaterfallConfig = field.waterfall
 	var z := config.crest_z_m
@@ -326,8 +409,8 @@ func _build_cliff() -> void:
 	face.create_trimesh_collision()
 
 
-func _add_rock(point: Vector2, radius: float, base: float, height: float) -> void:
-	var scene := load(ROCK_PATHS[_rng.randi_range(0, ROCK_PATHS.size() - 1)]) as PackedScene
+func _add_rock(point: Vector2, radius: float, base: float, height: float, paths: Array = ROCK_PATHS, tilt_rad := 0.0) -> void:
+	var scene := load(paths[_rng.randi_range(0, paths.size() - 1)]) as PackedScene
 	var rock := scene.instantiate() as Node3D
 	var meshes: Array[MeshInstance3D] = []
 	_collect_meshes(rock, meshes)
@@ -338,6 +421,9 @@ func _add_rock(point: Vector2, radius: float, base: float, height: float) -> voi
 	var scale := Vector3(radius * 2.0 / maxf(bounds.size.x, 0.01), height / maxf(bounds.size.y, 0.01), radius * 2.0 / maxf(bounds.size.z, 0.01))
 	rock.scale = scale
 	rock.rotation.y = _rng.randf_range(0.0, TAU)
+	if tilt_rad > 0.0:
+		rock.rotation.x = _rng.randf_range(-tilt_rad, tilt_rad)
+		rock.rotation.z = _rng.randf_range(-tilt_rad, tilt_rad)
 	rock.position = Vector3(point.x, base - bounds.position.y * scale.y, point.y)
 	for mesh in meshes:
 		for surface in mesh.mesh.get_surface_count():
@@ -394,8 +480,10 @@ func _build_grass() -> void:
 				edge_density *= 1.0 - smoothstep(domain.y * 0.39, extent_z, absf(point.y))
 				if _rng.randf() > edge_density:
 					continue
-				var edge := absf(point.x - _center_x(point.y)) - _half_width(point.y)
-				if edge < 2.0 or edge > 9.0 or _rng.randf() < 0.14 + 0.1 * sin(point.x * 0.7 + point.y * 0.4):
+				var edge := (field as TorrentLandscape).channel_edge_m(point) if field is TorrentLandscape \
+					else absf(point.x - _center_x(point.y)) - _half_width(point.y)
+				var band := Vector2(0.6, 18.0) if field is TorrentLandscape else Vector2(2.0, 9.0)
+				if edge < band.x or edge > band.y or _rng.randf() < 0.14 + 0.1 * sin(point.x * 0.7 + point.y * 0.4):
 					continue
 				if field.waterfall != null and absf(point.y - field.waterfall.crest_z_m) < 4.0:
 					continue
@@ -428,6 +516,8 @@ func _build_grass() -> void:
 			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if grass_shadows else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 			instance.visibility_range_end = grass_distance_m
 			instance.visibility_range_end_margin = 8.0
+			if field is TorrentLandscape:
+				instance.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
 			_grass_tiles.append(instance)
 			_host.add_child(instance)
 

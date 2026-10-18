@@ -4,6 +4,19 @@ const Scenery := preload("res://scripts/demos/river/river_scenery.gd")
 const MenuBuilder := preload("res://scripts/demos/river/river_menu.gd")
 const Interactions := preload("res://scripts/demos/river/river_interactions.gd")
 const WaterfallLandscape := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
+const TorrentLandscape := preload("res://scripts/demos/river/river_torrent_landscape.gd")
+const WindowOverlay := preload("res://scripts/demos/river/river_window_overlay.gd")
+const STEEP_SCENE := 3
+const CHANNEL_GRADES := [0.05, 0.15, 0.30]
+const CHANNEL_HEADINGS := [Vector2(0.0, -1.0), Vector2(1.0, 0.0), Vector2(1.0, -1.0)]
+const STEEP_GUIDANCE_HZ := Vector2(1.0, 5.0)
+const STEEP_WINDOW_M := Vector2(16.0, 24.0)
+const STEEP_RANGE_M := 24.0
+const STEEP_EDGE_FADE_M := 2.0
+const STEEP_VIEWS := {
+	"default": Vector3(20.0, -50.0, 20.0), "near": Vector3(10.0, -30.0, 20.0), "top": Vector3(34.0, -88.0, 0.0),
+	"far": Vector3(48.0, -50.0, 20.0), "low": Vector3(12.0, -14.0, 215.0), "low_down": Vector3(14.0, -24.0, 35.0),
+}
 const PRESETS := [
 	preload("res://resources/river/presets/calm.tres"),
 	preload("res://resources/river/presets/natural_flow.tres"),
@@ -23,6 +36,12 @@ var quality := SimQualityState.new()
 var preset_index := 1
 var scene_index := 0
 var waterfall_angles := PackedFloat32Array([0.0, 50.0, 90.0])
+var channel_grade_index := 1
+var channel_heading_index := 2
+var steep_guidance := true
+var steep_window := false
+var _quality_reflection_scale := 0.5
+var window_overlay := WindowOverlay.new()
 var _quality_tier := 1
 var _scenery := Scenery.new()
 var _menu_builder := MenuBuilder.new()
@@ -67,6 +86,9 @@ func _ready() -> void:
 	interactions.river = river
 	interactions.camera = camera
 	add_child(interactions)
+	window_overlay.river = river
+	window_overlay.visible = false
+	add_child(window_overlay)
 	LoadingPump.stage("Building menu")
 	_menu_builder.build(menu, self, PRESETS)
 	LoadingPump.stage("Applying river preset")
@@ -76,10 +98,13 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	orbit.target.x = clampf(orbit.target.x, -18.0 if scene_index == 0 else -10.0, 18.0 if scene_index == 0 else 10.0)
-	orbit.target.z = clampf(orbit.target.z, -30.0 if scene_index == 0 else -22.0, 30.0 if scene_index == 0 else 22.0)
+	var bounds := Vector2(18.0, 30.0) if scene_index == 0 else (Vector2(22.0, 22.0) if scene_index == STEEP_SCENE else Vector2(10.0, 22.0))
+	orbit.target.x = clampf(orbit.target.x, -bounds.x, bounds.x)
+	orbit.target.z = clampf(orbit.target.z, -bounds.y, bounds.y)
 	if scene_index == 0:
 		orbit.target.y = RiverLandscape.water_height(Vector2(orbit.target.x, orbit.target.z), 0.65) + 0.1
+	elif scene_index == STEEP_SCENE:
+		orbit.target.y = river.field.sample_height(Vector2(orbit.target.x, orbit.target.z), config.water_level_m) + 0.1
 	river.render_size = get_window().size
 	river.reflection_anchor_z_m = orbit.target.z
 	_scenery.tick(river.simulation_time_s, river.flow_distance_m)
@@ -97,6 +122,7 @@ func _process(delta: float) -> void:
 func apply_preset(index: int) -> void:
 	preset_index = clampi(index, 0, PRESETS.size() - 1)
 	config = PRESETS[preset_index].duplicate() as RiverConfig
+	_apply_guidance()
 	river.apply_config(config)
 	_scenery.set_water_level(config.water_level_m)
 	_scenery.set_water_clarity(config.clarity)
@@ -113,25 +139,38 @@ func cycle_scene() -> void:
 
 
 func set_scene(index: int) -> void:
-	index = clampi(index, 0, 2)
-	if index == scene_index and (index == 0 or is_equal_approx(river.field.waterfall.angle_degrees, waterfall_angles[index])):
+	index = clampi(index, 0, MenuBuilder.SCENES.size() - 1)
+	if index == scene_index and (index == 0 or index == STEEP_SCENE or is_equal_approx(river.field.waterfall.angle_degrees, waterfall_angles[index])):
 		return
+	_build_scene(index)
+
+
+func _build_scene(index: int) -> void:
+	var was_steep := scene_index == STEEP_SCENE
 	var live := river.swe.enabled
 	interactions.clear()
 	river.stop()
 	_scenery.clear()
 	scene_index = index
-	var selected: RiverField = RiverLandscape.new() if index == 0 else WaterfallLandscape.new(waterfall_angles[index])
+	var selected: RiverField = RiverLandscape.new() if index == 0 else (TorrentLandscape.new(CHANNEL_GRADES[channel_grade_index],
+		CHANNEL_HEADINGS[channel_heading_index], Vector2(56.0, 56.0)) if index == STEEP_SCENE else WaterfallLandscape.new(waterfall_angles[index]))
 	_scenery.build(self, selected)
 	river.field = selected
+	river.swe_window_m = STEEP_WINDOW_M if index == STEEP_SCENE and steep_window else Vector2.ZERO
+	river.swe_range_m = STEEP_RANGE_M if index == STEEP_SCENE and steep_window else 0.0
 	river.scenery_materials = _scenery.materials
 	river.reflection_plane_count = RiverQualityProfile.REFLECTION_PLANES[_quality_tier] if index == 0 else (2 if _quality_tier >= 2 else 1)
 	river.start()
+	river.water_material.set_shader_parameter("domain_edge_fade_m", STEEP_EDGE_FADE_M if index == STEEP_SCENE else 0.0)
 	river.swe.enabled = live
 	river.swe.profiling = _profile
 	river.set_reflection_profiling(_profile)
+	if was_steep or index == STEEP_SCENE:
+		river.set_reflection_scale(0.0 if index == STEEP_SCENE else _quality_reflection_scale)
+	_apply_guidance()
 	river.apply_config(config)
 	river.reset()
+	window_overlay.visible = index == STEEP_SCENE and steep_window
 	_scenery.set_water_level(config.water_level_m)
 	_scenery.set_water_clarity(config.clarity)
 	_menu_builder.sync_scene(index, waterfall_angles)
@@ -139,8 +178,40 @@ func set_scene(index: int) -> void:
 	set_capture_view("default")
 
 
+func set_channel_grade(index: int) -> void:
+	channel_grade_index = clampi(index, 0, CHANNEL_GRADES.size() - 1)
+	if scene_index == STEEP_SCENE:
+		_build_scene(STEEP_SCENE)
+
+
+func set_channel_heading(index: int) -> void:
+	channel_heading_index = clampi(index, 0, CHANNEL_HEADINGS.size() - 1)
+	if scene_index == STEEP_SCENE:
+		_build_scene(STEEP_SCENE)
+
+
+func set_steep_guidance(enabled: bool) -> void:
+	steep_guidance = enabled
+	_apply_guidance()
+	river.apply_config(config)
+	river.reset()
+
+
+func set_steep_window(enabled: bool) -> void:
+	steep_window = enabled
+	if scene_index == STEEP_SCENE:
+		_build_scene(STEEP_SCENE)
+
+
+func _apply_guidance() -> void:
+	var base: RiverConfig = PRESETS[preset_index]
+	var steep := scene_index == STEEP_SCENE and steep_guidance
+	config.current_guidance_hz = STEEP_GUIDANCE_HZ.x if steep else base.current_guidance_hz
+	config.level_guidance_hz = STEEP_GUIDANCE_HZ.y if steep else base.level_guidance_hz
+
+
 func set_waterfall_angle(value: float) -> void:
-	if scene_index == 0 or not is_finite(value):
+	if scene_index == 0 or scene_index == STEEP_SCENE or not is_finite(value):
 		return
 	waterfall_angles[scene_index] = clampf(value, 20.0, 90.0)
 	set_scene(scene_index)
@@ -183,7 +254,8 @@ func _apply_quality(values: Dictionary) -> void:
 	river.rapids_reflection = values.rapids_reflection
 	river.set_surface_detail(values.surface_detail)
 	river.set_reflection_plane_count(values.reflection_planes if scene_index == 0 else (2 if _quality_tier >= 2 else 1))
-	river.set_reflection_scale(values.reflection_scale)
+	_quality_reflection_scale = values.reflection_scale
+	river.set_reflection_scale(0.0 if scene_index == STEEP_SCENE else values.reflection_scale)
 	river.set_waterfall_quality(_quality_tier)
 
 
@@ -233,6 +305,14 @@ func set_capture_params(parameters: Dictionary) -> void:
 		set_foam(float(parameters["foam"]))
 	if parameters.has("mist"):
 		set_mist_density(float(parameters["mist"]))
+	if parameters.has("grade"):
+		set_channel_grade(int(parameters["grade"]))
+	if parameters.has("heading"):
+		set_channel_heading(int(parameters["heading"]))
+	if parameters.has("guidance"):
+		set_steep_guidance(bool(parameters["guidance"]))
+	if parameters.has("window"):
+		set_steep_window(bool(parameters["window"]))
 	if parameters.has("crates"):
 		for index in int(parameters["crates"]):
 			interactions.throw_crate()
@@ -266,6 +346,14 @@ func capture_image_metrics(_image: Image) -> String:
 
 
 func set_capture_view(view: String) -> void:
+	if scene_index == STEEP_SCENE:
+		orbit.target = Vector3(0.0, river.field.sample_height(Vector2.ZERO, config.water_level_m), 0.0)
+		var pose: Vector3 = STEEP_VIEWS.get(view, STEEP_VIEWS["default"])
+		orbit.distance = pose.x
+		orbit.pitch = pose.y
+		orbit.yaw = pose.z
+		orbit._update_transform()
+		return
 	if scene_index > 0:
 		var profile := river.field.waterfall
 		var impact := profile.crest_z_m - (profile.run_m() if not profile.is_vertical() else config.speed_m_s * sqrt(2.0 * profile.height_m / 9.81))

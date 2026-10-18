@@ -4,6 +4,8 @@ const DEPTH_M := 0.3
 const FLOOR_HALF_WIDTH_M := 1.2
 const BANK_GRADE := 1.5
 const BANK_HEIGHT_M := 1.2
+const VALLEY_START_M := 3.0
+const VALLEY_GRADE := 0.12
 const BEND_SHIFT_M := 4.0
 const BEND_LENGTH_M := 8.0
 
@@ -19,7 +21,7 @@ func _init(channel_grade: float, flow_direction: Vector2, size_m: Vector2) -> vo
 
 func sample_bed(point: Vector2) -> float:
 	var lateral := absf(_lateral_m(point))
-	return _surface_m(point) - DEPTH_M + minf(maxf(lateral - FLOOR_HALF_WIDTH_M, 0.0) * BANK_GRADE, BANK_HEIGHT_M)
+	return _surface_m(point) - DEPTH_M + minf(maxf(lateral - FLOOR_HALF_WIDTH_M, 0.0) * BANK_GRADE, BANK_HEIGHT_M) 		+ maxf(lateral - VALLEY_START_M, 0.0) * VALLEY_GRADE
 
 
 func sample_height(point: Vector2, level_m: float) -> float:
