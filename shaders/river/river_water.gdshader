@@ -305,7 +305,7 @@ void fragment() {
 			if (weights.z > 0.001) { reflection += planar_sample(3, reflected_point) * weights.z; }
 		}
 	}
-	float reflection_weight = reflection.a;
+	float reflection_weight = reflection.a * (1.0 - smoothstep(0.0, 0.3, fall_impact));
 	vec3 reflected_color = reflection.rgb;
 	vec3 sky = vec3(0.27, 0.38, 0.48);
 	reflected_color = mix(sky, reflected_color, reflection_weight);
