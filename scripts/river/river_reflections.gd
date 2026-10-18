@@ -64,7 +64,7 @@ func set_active(value: bool) -> void:
 
 
 func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
-	if views.is_empty() or _source_camera == null:
+	if views.is_empty() or _source_camera == null or not enabled:
 		return
 	var anchors := field.reflection_anchors_m
 	for index in views.size():

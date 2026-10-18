@@ -3,6 +3,7 @@ uniform vec4 river_plane = vec4(0.0, 1.0, 0.0, 0.0);
 uniform uint river_reflection_layer = uint(0);
 uniform sampler2D river_height_texture : filter_linear, repeat_disable;
 uniform vec2 river_domain_m = vec2(1.0);
+uniform vec2 river_domain_origin_m = vec2(0.0);
 uniform bool river_waterfall = false;
 uniform vec2 river_pool_levels_m = vec2(0.0, 6.0);
 uniform vec4 river_fall_geometry = vec4(6.0, 6.0, 4.0, 0.0);
@@ -18,7 +19,7 @@ float river_cliff_wetness(vec3 position, float wet) {
 		float depth = waterfall_clock_enabled ? max(textureLod(waterfall_surface, uv, 0.0).w,
 			textureLod(swe_surface, river_swe_uv(position.xz), 0.0).w)
 			: step(0.001, river_fall_speed) * dot(textureLod(river_height_texture,
-				vec2(position.x, river_fall_geometry.z + 0.3) / river_domain_m + 0.5, 0.0).rg, vec2(-1.0, 1.0));
+				(vec2(position.x, river_fall_geometry.z + 0.3) - river_domain_origin_m) / river_domain_m + 0.5, 0.0).rg, vec2(-1.0, 1.0));
 		return smoothstep(0.0001, 0.01, depth);
 	}
 	if (river_waterfall && river_fall_geometry.w == 0.0 && abs(position.z - river_fall_geometry.z) < 0.3) {
@@ -41,7 +42,7 @@ float river_cliff_wetness(vec3 position, float wet) {
 }
 
 float river_surface_height(vec3 position) {
-	vec2 heights = texture(river_height_texture, position.xz / river_domain_m + 0.5).rg;
+	vec2 heights = texture(river_height_texture, (position.xz - river_domain_origin_m) / river_domain_m + 0.5).rg;
 	float reference = heights.g;
 	if (river_waterfall && river_fall_geometry.w > 0.0 && abs(position.x) < river_fall_geometry.x * 0.5
 		&& position.z < river_fall_geometry.z && position.z > river_fall_geometry.z - river_fall_geometry.w) {

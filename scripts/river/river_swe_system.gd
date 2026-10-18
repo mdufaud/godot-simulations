@@ -1,15 +1,25 @@
 extends Node3D
 
 const Solver := preload("res://scripts/river/river_swe_solver.gd")
+const WINDOW_SNAP_M := 4.0
+const BLEND_RATE_HZ := 1.0
+const WARMUP_S := 0.5
+const WET_PROBE_M := 2.0
 
 signal state_changed
 
 var config: RiverConfig
 var field: RiverField
+var camera: Camera3D
+var window_m := Vector2.ZERO
+var range_m := 0.0
 var region_m := Rect2()
 var cell_m := Solver.CELL_M
+var blend := 1.0
 var active: bool:
 	get: return enabled and initialized
+var live: bool:
+	get: return active and _running
 var materials: Array[ShaderMaterial] = []
 var available := false
 var enabled := true
@@ -26,19 +36,97 @@ var waterfall_boundary := Texture2DRD.new()
 var _spray: GPUParticles3D
 var _spray_material: ShaderMaterial
 var _reset := true
+var _running := true
+var _warmup_s := 0.0
+var _probe_region := Rect2()
+var _wet_points := PackedVector2Array()
+var _submitted_region := Rect2()
 
 
 func start() -> void:
 	if not available:
 		state_changed.emit()
 		return
-	region_m = Rect2(-field.domain_m * 0.5, field.domain_m)
 	solver.cell_m = cell_m
-	solver.grid = Vector2i((field.domain_m / cell_m).ceil())
-	region_m.size = Vector2(solver.grid) * cell_m
+	solver.grid = Vector2i(((window_m if _windowed() else field.domain_m) / cell_m).ceil())
+	region_m = _region()
 	solver.region_m = region_m
-	_build_spray()
+	if not field.obstacles.is_empty():
+		_build_spray()
 	solver.start(field, config)
+
+
+func move_domain() -> void:
+	if not available:
+		return
+	solver.move_source(field)
+	_probe_region = Rect2()
+
+
+func _windowed() -> bool:
+	return window_m != Vector2.ZERO and field.waterfall == null
+
+
+func _region() -> Rect2:
+	var size := Vector2(solver.grid) * cell_m
+	var domain := field.domain_rect()
+	if not _windowed():
+		return Rect2(domain.position, size)
+	var center := _focus().snapped(Vector2.ONE * WINDOW_SNAP_M)
+	var corner := (center - size * 0.5).clamp(domain.position, domain.end - size)
+	return Rect2((corner / cell_m).round() * cell_m, size)
+
+
+func _focus() -> Vector2:
+	if camera == null:
+		return field.origin_m
+	var eye := camera.global_position
+	var direction := -camera.global_basis.z
+	var height := field.sample_height(Vector2(eye.x, eye.z), config.water_level_m)
+	var reach := clampf((height - eye.y) / minf(direction.y, -0.05), 0.0, minf(window_m.x, window_m.y) * 0.25)
+	var target := eye + direction * reach
+	return Vector2(target.x, target.z)
+
+
+func _update_lod(frame_s: float) -> void:
+	var region := _region()
+	if region != region_m:
+		region_m = region
+		solver.region_m = region
+		_bind()
+	var near := range_m <= 0.0 or field.waterfall != null or _water_within_range()
+	if near and not _running:
+		_running = true
+		_reset = true
+		_warmup_s = WARMUP_S
+		_bind()
+	_warmup_s = maxf(_warmup_s - frame_s, 0.0)
+	var next := move_toward(blend, 1.0 if near and _warmup_s <= 0.0 else 0.0, frame_s * BLEND_RATE_HZ)
+	if next != blend:
+		blend = next
+		for material in materials:
+			material.set_shader_parameter("swe_blend", blend)
+	if blend <= 0.0 and not near and _running:
+		_running = false
+		_bind()
+
+
+func _water_within_range() -> bool:
+	if camera == null:
+		return true
+	if _probe_region != region_m:
+		_probe_region = region_m
+		_wet_points.clear()
+		for y in range(ceili(region_m.size.y / WET_PROBE_M)):
+			for x in range(ceili(region_m.size.x / WET_PROBE_M)):
+				var point := region_m.position + (Vector2(x, y) + Vector2.ONE * 0.5) * WET_PROBE_M
+				if field.sample(point, config.water_level_m).a > 0.5:
+					_wet_points.append(point)
+	var eye := Vector2(camera.global_position.x, camera.global_position.z)
+	for point in _wet_points:
+		if eye.distance_to(point) <= range_m:
+			return true
+	return false
 
 
 func set_enabled(value: bool) -> void:
@@ -72,12 +160,16 @@ func tick(step_s: float, frame_s: float, time_s: float) -> void:
 		state_changed.emit()
 	if not initialized:
 		return
-	_spray.speed_scale = step_s / maxf(frame_s, 0.0001)
-	_spray_material.set_shader_parameter("strength", config.whitewater_strength * config.foam_amount)
-	if active and (step_s > 0.0 or _reset):
+	if active:
+		_update_lod(frame_s)
+	if _spray != null:
+		_spray.speed_scale = step_s / maxf(frame_s, 0.0001)
+		_spray_material.set_shader_parameter("strength", config.whitewater_strength * config.foam_amount)
+	if live and (step_s > 0.0 or _reset or region_m != _submitted_region):
 		RenderingServer.call_on_render_thread(solver.advance_render.bind(step_s,
 			solver.parameters(config, time_s), _reset, profiling))
 		_reset = false
+		_submitted_region = region_m
 
 
 func gpu_ms() -> float:
@@ -129,9 +221,10 @@ func _bind() -> void:
 		material.set_shader_parameter("swe_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
 		if material != _spray_material:
 			material.set_shader_parameter("swe_enabled", active)
+			material.set_shader_parameter("swe_blend", blend)
 	if _spray != null:
-		_spray.visible = active
-		_spray.emitting = active
+		_spray.visible = live
+		_spray.emitting = live
 
 
 func _build_spray() -> void:
@@ -162,7 +255,7 @@ func _build_spray() -> void:
 	_spray.use_fixed_seed = true
 	_spray.seed = 41927
 	_spray.local_coords = false
-	_spray.visibility_aabb = AABB(Vector3(-field.domain_m.x * 0.5, -3.0, -field.domain_m.y * 0.5), Vector3(field.domain_m.x, 12.0, field.domain_m.y))
+	_spray.visibility_aabb = AABB(Vector3(field.domain_rect().position.x, -3.0, field.domain_rect().position.y), Vector3(field.domain_m.x, 12.0, field.domain_m.y))
 	_spray.process_material = _spray_material
 	_spray.draw_pass_1 = droplet
 	_spray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF

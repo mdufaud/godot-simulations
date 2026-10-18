@@ -4,6 +4,8 @@ const REFLECTION_LAYER := 1 << 17
 const Reflections := preload("res://scripts/river/river_reflections.gd")
 const SweSystem := preload("res://scripts/river/river_swe_system.gd")
 const WaterfallSystem := preload("res://scripts/river/river_waterfall_system.gd")
+const WaterShader := preload("res://shaders/river/river_water.gdshader")
+const FoamShader := preload("res://shaders/river/river_foam.gdshader")
 
 signal simulation_changed
 
@@ -15,6 +17,7 @@ var waterfall: WaterfallSystem
 var waterfall_quality := 1
 var query_generation := 0
 var field: RiverField
+var loading_stage := Callable()
 var camera: Camera3D
 var scene_world: World3D
 var render_size := Vector2i(1280, 720)
@@ -28,6 +31,9 @@ var surface_detail := 0.0
 var rapids_reflection := false
 var frozen := false
 var fixed_delta_s := -1.0
+var swe_window_m := Vector2.ZERO
+var swe_range_m := 0.0
+var swe_cell_m := SweSystem.Solver.CELL_M
 var simulation_time_s := 0.0
 var flow_distance_m := 0.0
 var water_material: ShaderMaterial
@@ -42,6 +48,7 @@ var _foam_materials: Array[ShaderMaterial] = []
 var _field_texture: ImageTexture
 var _turbulence_texture: NoiseTexture2D
 var _foam_index := 0
+var _foam_shift_uv := Vector2.ZERO
 var _reset_frames := 2
 var _started := false
 var _reflection_requested := true
@@ -64,10 +71,11 @@ func start() -> void:
 	if not error.is_empty():
 		push_error(error)
 		return
-	LoadingPump.stage("Creating water surface")
+	_report_stage("Creating water surface")
 	water_material = ShaderMaterial.new()
-	water_material.shader = load("res://shaders/river/river_water.gdshader")
+	water_material.shader = WaterShader
 	water_material.set_shader_parameter("domain_m", field.domain_m)
+	water_material.set_shader_parameter("domain_origin_m", field.origin_m)
 	water_material.set_shader_parameter("waterfall_enabled", field.waterfall != null)
 	if field.waterfall != null:
 		var profile := field.waterfall
@@ -75,7 +83,7 @@ func start() -> void:
 		water_material.set_shader_parameter("waterfall_grid", Vector3(profile.lane_count, profile.film_cells, profile.packet_capacity))
 	water_material.set_shader_parameter("micro_normal", micro_normal)
 	water_material.set_shader_parameter("foam_filaments", foam_filaments)
-	water_material.set_shader_parameter("foam_bubbles", foam_bubbles)
+	water_material.set_shader_parameter("foam_bubbles", foam_bubbles if foam_bubbles != null else foam_filaments)
 	water_material.set_shader_parameter("surface_detail", surface_detail)
 	water_material.set_shader_parameter("foam_detail", foam_detail)
 	water_material.set_shader_parameter("riverbed_albedo", riverbed_albedo)
@@ -100,11 +108,9 @@ func start() -> void:
 	_surface.layers = 2
 	_surface.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_surface.extra_cull_margin = 2.5
-	if field.waterfall != null:
-		_surface.custom_aabb = AABB(Vector3(-field.domain_m.x * 0.5, -3.0, -field.domain_m.y * 0.5),
-			Vector3(field.domain_m.x, field.waterfall.height_m + 7.0, field.domain_m.y))
+	_surface.position = Vector3(field.origin_m.x, 0.0, field.origin_m.y)
 	add_child(_surface)
-	LoadingPump.stage("Building foam and reflections")
+	_report_stage("Building foam and reflections")
 	_build_foam()
 	_build_reflection()
 	swe = SweSystem.new()
@@ -112,11 +118,16 @@ func start() -> void:
 	swe.field = field
 	swe.materials.assign([water_material] + _foam_materials + scenery_materials)
 	swe.available = compute_available
+	swe.camera = camera
+	swe.window_m = swe_window_m
+	swe.range_m = swe_range_m
+	swe.cell_m = swe_cell_m
+	swe.solver.loading_stage = loading_stage
 	add_child(swe)
 	swe.state_changed.connect(func():
 		cancel_queries()
 		_sync_surface())
-	LoadingPump.stage("Starting water solver")
+	_report_stage("Starting water solver")
 	swe.start()
 	if field.waterfall != null:
 		waterfall = WaterfallSystem.new()
@@ -128,11 +139,11 @@ func start() -> void:
 		waterfall.reflection_layer = REFLECTION_LAYER
 		waterfall.quality_tier = waterfall_quality
 		add_child(waterfall)
-		LoadingPump.stage("Starting waterfall")
+		_report_stage("Starting waterfall")
 		waterfall.start()
 	_started = true
 	set_process(true)
-	LoadingPump.stage("Baking flow map")
+	_report_stage("Baking flow map")
 	apply_config(config)
 	_sync_surface()
 	process_priority = 20
@@ -147,17 +158,13 @@ func apply_config(value: RiverConfig) -> void:
 	config = value
 	swe.config = config
 	if previous_level == null or not is_equal_approx(float(previous_level), config.water_level_m):
-		_field_texture = field.bake(config.water_level_m)
-		water_material.set_shader_parameter("flow_map", _field_texture)
-		water_material.set_shader_parameter("bed_height_texture", field.bed_texture)
-		for material in _foam_materials:
-			material.set_shader_parameter("flow_map", _field_texture)
+		_bake_field()
 		_reset_frames = 2
 		if field.waterfall != null:
 			_sync_surface()
 	water_material.set_shader_parameter("water_level_m", config.water_level_m)
 	water_material.set_shader_parameter("speed_m_s", config.speed_m_s)
-	var reference_flow := field.sample_solver(Vector2.ZERO, config.water_level_m)
+	var reference_flow := field.sample_solver(field.origin_m, config.water_level_m)
 	water_material.set_shader_parameter("foam_reference_flow", Vector2(reference_flow.r, reference_flow.g))
 	water_material.set_shader_parameter("clarity", config.clarity)
 	water_material.set_shader_parameter("ripple_height_m", config.ripple_height_m)
@@ -173,9 +180,54 @@ func apply_config(value: RiverConfig) -> void:
 	set_reflection_enabled(_reflection_requested)
 
 
+func move_domain(origin_m: Vector2) -> void:
+	if not _started:
+		field.origin_m = origin_m
+		return
+	if field.waterfall != null:
+		push_error("RiverSystem.move_domain() does not support waterfalls")
+		return
+	var was_dry := not field.has_water
+	_foam_shift_uv = (origin_m - field.origin_m) / field.domain_m
+	field.origin_m = origin_m
+	_surface.position = Vector3(origin_m.x, 0.0, origin_m.y)
+	for material: ShaderMaterial in [water_material] + _foam_materials:
+		material.set_shader_parameter("domain_origin_m", origin_m)
+	_bake_field()
+	swe.move_domain()
+	if was_dry and field.has_water:
+		swe.reset()
+		_reset_frames = 2
+	set_reflection_enabled(_reflection_requested)
+	_sync_surface()
+
+
+func _bake_field() -> void:
+	_field_texture = field.bake(config.water_level_m, Vector2i(384, 512), loading_stage)
+	_fit_surface_bounds()
+	_surface.visible = field.has_water
+	water_material.set_shader_parameter("flow_map", _field_texture)
+	water_material.set_shader_parameter("bed_height_texture", field.bed_texture)
+	for material in _foam_materials:
+		material.set_shader_parameter("flow_map", _field_texture)
+
+
+func _report_stage(label: String) -> void:
+	if loading_stage.is_valid():
+		loading_stage.call(label)
+
+
+func _fit_surface_bounds() -> void:
+	if field.height_range_m == Vector2.ZERO:
+		return
+	var low := field.height_range_m.x - 1.0
+	_surface.custom_aabb = AABB(Vector3(-field.domain_m.x * 0.5, low, -field.domain_m.y * 0.5),
+		Vector3(field.domain_m.x, field.height_range_m.y + 1.0 - low, field.domain_m.y))
+
+
 func set_reflection_enabled(enabled: bool) -> void:
 	_reflection_requested = enabled
-	var active := enabled and reflection_scale > 0.0 and (rapids_reflection or config.whitewater_strength < 0.85)
+	var active := enabled and reflection_scale > 0.0 and field.has_water and (rapids_reflection or config.whitewater_strength < 0.85)
 	water_material.set_shader_parameter("reflection_enabled", active)
 	_reflections.set_active(active)
 
@@ -220,7 +272,7 @@ func set_surface_cell_size_m(value: float) -> void:
 
 
 func _sync_surface() -> void:
-	var region := Rect2(-field.domain_m * 0.5, field.domain_m)
+	var region := field.domain_rect()
 	water_material.set_shader_parameter("geometry_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
 	_surface.mesh = _pool_mesh() if field.waterfall != null else _surface_mesh
 	simulation_changed.emit()
@@ -234,7 +286,7 @@ func _pool_mesh() -> ArrayMesh:
 	var profile := field.waterfall
 	var cut_low := profile.crest_z_m - 0.05
 	var cut_high := profile.crest_z_m
-	var rows: Array[float] = [-field.domain_m.y * 0.5, cut_low, cut_high, field.domain_m.y * 0.5]
+	var rows: Array[float] = [-field.domain_m.y * 0.5, cut_low - field.origin_m.y, cut_high - field.origin_m.y, field.domain_m.y * 0.5]
 	for band in [0, 2]:
 		var start_z := rows[band]
 		var end_z := rows[band + 1]
@@ -285,8 +337,9 @@ func _build_foam() -> void:
 		viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		add_child(viewport)
 		var material := ShaderMaterial.new()
-		material.shader = load("res://shaders/river/river_foam.gdshader")
+		material.shader = FoamShader
 		material.set_shader_parameter("domain_m", field.domain_m)
+		material.set_shader_parameter("domain_origin_m", field.origin_m)
 		material.set_shader_parameter("turbulence_texture", _turbulence_texture)
 		var rect := ColorRect.new()
 		rect.size = Vector2(viewport.size)
@@ -315,12 +368,13 @@ func _sync_reflection() -> void:
 func _process(delta: float) -> void:
 	if not _started:
 		return
-	_sync_reflection()
-	var step := (fixed_delta_s if fixed_delta_s > 0.0 else delta) if not frozen else 0.0
+	if field.has_water:
+		_sync_reflection()
+	var step := (fixed_delta_s if fixed_delta_s > 0.0 else delta) if not frozen and field.has_water else 0.0
 	swe.tick(step, delta, simulation_time_s)
 	if waterfall != null:
 		waterfall.tick(simulation_time_s, frozen)
-	if frozen and _reset_frames == 0:
+	if not field.has_water or (frozen and _reset_frames == 0):
 		return
 	simulation_time_s += step
 	flow_distance_m += config.speed_m_s * step
@@ -337,6 +391,8 @@ func _process(delta: float) -> void:
 	material.set_shader_parameter("simulation_time_s", simulation_time_s)
 	material.set_shader_parameter("whitewater_strength", config.whitewater_strength)
 	material.set_shader_parameter("reset", _reset_frames > 0)
+	material.set_shader_parameter("history_shift_uv", _foam_shift_uv)
+	_foam_shift_uv = Vector2.ZERO
 	_foam_views[_foam_index].render_target_update_mode = SubViewport.UPDATE_ONCE
 	water_material.set_shader_parameter("foam_map", _foam_views[_foam_index].get_texture())
 	_foam_index = previous
@@ -362,7 +418,7 @@ func submit_queries(points: PackedVector2Array) -> bool:
 	_query_in_flight = true
 	var values := PackedFloat32Array()
 	var weights := PackedFloat32Array()
-	var domain := Rect2(-field.domain_m * 0.5, field.domain_m)
+	var domain := field.domain_rect()
 	var needs_gpu := false
 	for point in points:
 		var height := field.sample_height(point, config.water_level_m)
@@ -372,7 +428,7 @@ func submit_queries(points: PackedVector2Array) -> bool:
 			flow.r * config.speed_m_s if wet else 0.0, flow.g * config.speed_m_s if wet else 0.0,
 			maxf(height - field.sample_bed(point), 0.0) if wet else 0.0]))
 		var edge := (point - swe.region_m.position).min(swe.region_m.end - point)
-		var weight := smoothstep(1.0, 2.5, minf(edge.x, edge.y)) if swe.active and domain.has_point(point) else 0.0
+		var weight := smoothstep(1.0, 2.5, minf(edge.x, edge.y)) * swe.blend if swe.live and domain.has_point(point) else 0.0
 		weights.append(weight)
 		needs_gpu = needs_gpu or weight > 0.0
 	if needs_gpu:
@@ -412,7 +468,7 @@ func submit_body_queries(points: PackedVector3Array) -> bool:
 		return false
 	_query_in_flight = true
 	points = points.duplicate()
-	if swe.active:
+	if swe.live and swe.blend > 0.0:
 		RenderingServer.call_on_render_thread(swe.solver.query_body_render.bind(points, swe.solver.parameters(config, simulation_time_s), swe.solver.query_serial()))
 	else:
 		var values := PackedFloat32Array()
@@ -427,7 +483,7 @@ func submit_body_queries(points: PackedVector3Array) -> bool:
 			if contact.is_empty() and zone != 0 and (zone != 3 or lower_overlap):
 				var height := config.water_level_m if lower_overlap else field.sample_height(p, config.water_level_m)
 				var flow := field.sample(p, config.water_level_m)
-				var wet := Rect2(-field.domain_m * 0.5, field.domain_m).has_point(p) and flow.a > 0.0 \
+				var wet := field.domain_rect().has_point(p) and flow.a > 0.0 \
 					and point.y < height + 0.8 and point.y > field.sample_bed(p) - 0.8
 				contact.assign([Vector4(point.x, height, point.z, maxf(height - field.sample_bed(p), 0.0) if wet else 0.0),
 					Vector4(flow.r * config.speed_m_s, 0.0, flow.g * config.speed_m_s, 1.0 if wet else 0.0), Vector4(0.0, 1.0, 0.0, point.y - height)])

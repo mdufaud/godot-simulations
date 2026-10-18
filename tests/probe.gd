@@ -13,6 +13,7 @@ const OceanParameterProbe := preload("res://tests/ocean_parameter_probe.gd")
 const OceanCoastalProbe := preload("res://tests/ocean_coastal_probe.gd")
 const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
+const SlopeChannel := preload("res://tests/river_slope_channel.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -6570,3 +6571,383 @@ func _run_foam_histogram() -> void:
 	await process_frame
 	print("HISTO DONE")
 	quit(0)
+
+
+func _run_river_slope() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var speed := 0.85
+	var cell := 0.125
+	var output_dir := ProjectSettings.globalize_path("res://tmp/river-slope-probe")
+	var grades: Array[float] = [0.05, 0.15, 0.30]
+	var headings: Array[Vector2] = [Vector2(0.0, -1.0), Vector2(1.0, 0.0), Vector2(1.0, -1.0)]
+	var window := Vector2(16.0, 24.0)
+	var seconds := 10.0
+	var shift := Vector2.ZERO
+	var guidance := Vector2(1.0, 5.0)
+	for arg in _extra:
+		var pair := arg.split("=", true, 1)
+		if pair[0] == "speed":
+			speed = float(pair[1])
+		elif pair[0] == "grades":
+			grades.assign(Array(pair[1].split(",")).map(func(value: String) -> float: return float(value)))
+		elif pair[0] == "headings":
+			var names := {"z": Vector2(0.0, -1.0), "x": Vector2(1.0, 0.0), "diagonal": Vector2(1.0, -1.0)}
+			headings.assign(Array(pair[1].split(",")).map(func(value: String) -> Vector2: return names[value]))
+		elif pair[0] == "current_hz":
+			guidance.x = float(pair[1])
+		elif pair[0] == "level_hz":
+			guidance.y = float(pair[1])
+		elif pair[0] == "shift":
+			shift = Vector2(float(pair[1].get_slice(",", 0)), float(pair[1].get_slice(",", 1)))
+		elif pair[0] == "seconds":
+			seconds = float(pair[1])
+		elif pair[0] == "window":
+			window = Vector2.ZERO if pair[1] == "0" else Vector2(16.0, 24.0)
+		elif pair[0] == "cell":
+			cell = float(pair[1])
+		elif pair[0] == "out":
+			output_dir = pair[1] if pair[1].begins_with("/") else ProjectSettings.globalize_path("res://" + pair[1])
+	DirAccess.make_dir_recursive_absolute(output_dir)
+	var scene := _river_probe_stage()
+	var camera := scene.get_node("Camera") as Camera3D
+	var all_pass := true
+	for grade in grades:
+		for heading in headings:
+			all_pass = await _river_slope_case(scene, camera, grade, heading, speed, guidance, cell, window, seconds, shift, output_dir) and all_pass
+	_check(all_pass, "river_slope: every channel must keep its water, depth, banks and foam within the criteria")
+	scene.queue_free()
+	_finish("river_slope")
+
+
+func _river_slope_case(scene: Node3D, camera: Camera3D, grade: float, heading: Vector2,
+		speed: float, guidance: Vector2, cell: float, window: Vector2, seconds: float, shift: Vector2, output_dir: String) -> bool:
+	var field := SlopeChannel.new(grade, heading, Vector2(40.0, 40.0))
+	var config := RiverConfig.new()
+	config.water_level_m = 0.0
+	config.speed_m_s = speed
+	config.current_guidance_hz = guidance.x
+	config.level_guidance_hz = guidance.y
+	var river := _river_probe_system(field, config, camera)
+	river.swe_window_m = window
+	river.swe_cell_m = cell
+	river.fixed_delta_s = 1.0 / 60.0
+	camera.global_transform = Transform3D(Basis.from_euler(Vector3(-PI * 0.5, 0.0, 0.0)), Vector3(shift.x, 30.0, shift.y))
+	var ground := MeshInstance3D.new()
+	ground.mesh = _river_slope_ground(field)
+	scene.add_child(ground)
+	scene.add_child(river)
+	river.start()
+	var deadline := Time.get_ticks_msec() + 30000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	var name := "grade%02d_%s" % [roundi(grade * 100.0), "z" if heading.x == 0.0 else ("x" if heading.y == 0.0 else "diagonal")]
+	if not river.swe.initialized:
+		print("RIVER SLOPE %s FAIL: solver did not initialize" % name)
+		river.queue_free()
+		ground.queue_free()
+		return false
+	river.swe.profiling = true
+	var gpu_ms := 0.0
+	var frames := roundi(seconds * 60.0)
+	for frame in frames:
+		await process_frame
+		if frame >= frames / 2:
+			gpu_ms += river.swe.gpu_ms() / float(frames - frames / 2)
+	river.frozen = true
+	await _boot_frames(3)
+	await RenderingServer.frame_post_draw
+	root.get_texture().get_image().save_png("%s/%s.png" % [output_dir, name])
+	var snapshot: Dictionary = river.swe.solver.snapshot()
+	var grid: Vector2i = river.swe.solver.grid
+	var size := grid.x * grid.y * 16
+	var surface := (await TextureReadback.new().read_layer(snapshot.surface, 0, size)).to_float32_array()
+	var terrain := (await TextureReadback.new().read_layer(snapshot.terrain, 0, size)).to_float32_array()
+	var foam := (await TextureReadback.new().read_layer(snapshot.foam, 0, size)).to_float32_array()
+	var region: Rect2 = river.swe.region_m
+	var wet := 0
+	var kept := 0
+	var core := 0
+	var off_depth := 0
+	var overtopped := 0
+	var overtop_max := 0.0
+	var foamy := 0
+	var ratios := PackedFloat32Array()
+	var depth_map := Image.create(grid.x, grid.y, false, Image.FORMAT_RGB8)
+	for y in grid.y:
+		for x in grid.x:
+			var point := region.position + (Vector2(x, y) + Vector2.ONE * 0.5) * river.swe.cell_m
+			var i := (y * grid.x + x) * 4
+			var reference := maxf(terrain[i + 1] - terrain[i], 0.0)
+			var depth := surface[i + 3]
+			depth_map.set_pixel(x, y, Color(clampf(depth - reference, 0.0, 0.5) * 2.0, clampf(reference, 0.0, 0.3) / 0.3, clampf(reference - depth, 0.0, 0.3) / 0.3))
+			if minf(minf(point.x - region.position.x, region.end.x - point.x),
+					minf(point.y - region.position.y, region.end.y - point.y)) < 2.5:
+				continue
+			if reference <= 0.015:
+				if depth > 0.05:
+					overtopped += 1
+				overtop_max = maxf(overtop_max, depth)
+				continue
+			wet += 1
+			kept += int(depth > 0.015)
+			foamy += int(foam[i] > 0.5)
+			if reference >= 0.2:
+				core += 1
+				var ratio := depth / reference
+				ratios.append(ratio)
+				off_depth += int(ratio < 0.8 or ratio > 1.2)
+	ratios.sort()
+	depth_map.save_png("%s/%s_depth.png" % [output_dir, name])
+	var kept_pct := 100.0 * kept / maxf(wet, 1.0)
+	var off_pct := 100.0 * off_depth / maxf(core, 1.0)
+	var foam_pct := 100.0 * foamy / maxf(wet, 1.0)
+	var passed := wet > 0 and kept_pct >= 99.0 and off_pct <= 1.0 and overtopped == 0 and foam_pct <= 0.5
+	print("RIVER SLOPE %s speed=%.2f guidance_hz=%.2f/%.2f cell=%.3f wet_cells=%d kept=%.2f%% depth_p01=%.3f depth_p50=%.3f depth_p99=%.3f outside_80_120=%.2f%% overtop_cells=%d overtop_max_m=%.3f foam=%.2f%% gpu_ms=%.3f %s" % [
+		name, speed, guidance.x, guidance.y, river.swe.cell_m, wet, kept_pct,
+		ratios[int(ratios.size() * 0.01)] if not ratios.is_empty() else 0.0,
+		ratios[int(ratios.size() * 0.5)] if not ratios.is_empty() else 0.0,
+		ratios[mini(int(ratios.size() * 0.99), ratios.size() - 1)] if not ratios.is_empty() else 0.0,
+		off_pct, overtopped, overtop_max, foam_pct, gpu_ms, "PASS" if passed else "FAIL"])
+	river.queue_free()
+	ground.queue_free()
+	await _boot_frames(2)
+	return passed
+
+
+func _river_probe_stage() -> Node3D:
+	var scene := Node3D.new()
+	root.add_child(scene)
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_COLOR
+	environment.background_color = Color(0.45, 0.55, 0.65)
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.ambient_light_color = Color(0.5, 0.55, 0.6)
+	var world_environment := WorldEnvironment.new()
+	world_environment.environment = environment
+	scene.add_child(world_environment)
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-55.0, 30.0, 0.0)
+	scene.add_child(sun)
+	var camera := Camera3D.new()
+	camera.name = "Camera"
+	scene.add_child(camera)
+	camera.current = true
+	return scene
+
+
+func _river_probe_system(field: RiverField, config: RiverConfig, camera: Camera3D) -> RiverSystem:
+	var river := RiverSystem.new()
+	river.config = config
+	river.field = field
+	river.camera = camera
+	river.scene_world = camera.get_world_3d()
+	river.compute_available = RenderingServer.get_rendering_device() != null
+	river.micro_normal = load("res://resources/ocean/micro_normal.png")
+	river.foam_filaments = load("res://resources/ocean/foam_variant_03_flowing_filaments.png")
+	river.foam_bubbles = load("res://resources/ocean/foam_variant_01_microbubbles.png")
+	river.reflection_scale = 0.0
+	return river
+
+
+func _river_slope_ground(field: RiverField) -> ArrayMesh:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var steps := Vector2i(field.domain_m / 0.5)
+	var origin := field.domain_rect().position
+	for y in steps.y:
+		for x in steps.x:
+			var corners: Array[Vector2] = [origin + Vector2(x, y) * 0.5, origin + Vector2(x + 1, y) * 0.5,
+				origin + Vector2(x, y + 1) * 0.5, origin + Vector2(x + 1, y + 1) * 0.5]
+			for index in [0, 1, 2, 1, 3, 2]:
+				var point: Vector2 = corners[index]
+				surface.add_vertex(Vector3(point.x, field.sample_bed(point), point.y))
+	surface.generate_normals()
+	var mesh := surface.commit()
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.42, 0.36, 0.28)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.surface_set_material(0, material)
+	return mesh
+
+
+func _run_river_domain() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var scene := _river_probe_stage()
+	var camera := scene.get_node("Camera") as Camera3D
+	var field := SlopeChannel.new(0.05, Vector2(0.0, -1.0), Vector2(40.0, 40.0))
+	_river_prepare_images(field, Vector2.ZERO)
+	var config := RiverConfig.new()
+	config.water_level_m = 0.0
+	config.current_guidance_hz = 1.0
+	config.level_guidance_hz = 5.0
+	var river := _river_probe_system(field, config, camera)
+	river.swe_window_m = Vector2(16.0, 24.0)
+	river.swe_range_m = 10.0
+	river.swe_cell_m = 0.25
+	river.fixed_delta_s = 1.0 / 60.0
+	_river_look(camera, Vector2(0.0, 0.0))
+	scene.add_child(river)
+	var started := Time.get_ticks_usec()
+	river.loading_stage = func(label: String) -> void:
+		if not label.is_empty():
+			print("RIVER DOMAIN stage %.2f ms %s" % [(Time.get_ticks_usec() - started) / 1000.0, label])
+	river.start()
+	var start_ms := (Time.get_ticks_usec() - started) / 1000.0
+	var start_frame_ms := await _river_slowest_frame_ms(3)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(river.swe.initialized and river.swe.region_m.size == Vector2(16.0, 24.0),
+		"river_domain: the windowed solver must start on a 16 x 24 m window")
+	await _boot_frames(120)
+	river.frozen = true
+	await _boot_frames(2)
+	var before: Dictionary = await _river_window_state(river)
+	_river_look(camera, Vector2(0.0, -8.0))
+	await _boot_frames(3)
+	var after: Dictionary = await _river_window_state(river)
+	var moved: bool = after.region != before.region
+	var shared := 0
+	var identical := 0
+	for key: Vector2i in before.depth:
+		if after.depth.has(key):
+			shared += 1
+			identical += int(is_equal_approx(before.depth[key], after.depth[key]))
+	print("RIVER DOMAIN window_follow moved=%s region=%s -> %s shared_cells=%d identical=%d" % [moved, before.region, after.region, shared, identical])
+	_check(moved and shared > 0 and identical == shared,
+		"river_domain: a window snap must carry the overlapping state over unchanged")
+	river.frozen = false
+	var steady_frame_ms := await _river_slowest_frame_ms(30)
+	_river_prepare_images(field, Vector2(0.0, -24.0))
+	started = Time.get_ticks_usec()
+	river.move_domain(Vector2(0.0, -24.0))
+	var move_ms := (Time.get_ticks_usec() - started) / 1000.0
+	var move_frame_ms := await _river_slowest_frame_ms(3)
+	_river_look(camera, Vector2(0.0, -24.0))
+	await _boot_frames(180)
+	var metrics := await _river_window_metrics(river, field)
+	print("RIVER DOMAIN move_domain steady_frame_max_ms=%.2f start_ms=%.2f start_frame_ms=%.2f move_ms=%.2f move_frame_ms=%.2f region=%s kept=%.2f%% depth_p50=%.3f bed_error_m=%.4f" % [
+		steady_frame_ms, start_ms, start_frame_ms, move_ms, move_frame_ms, river.swe.region_m, metrics.kept, metrics.depth_p50, metrics.bed_error_m])
+	_check(river.field.domain_rect().has_point(Vector2(0.0, -24.0)) and river.swe.region_m.get_center().distance_to(Vector2(0.0, -24.0)) < 4.0
+		and metrics.kept >= 99.0 and absf(metrics.depth_p50 - 1.0) < 0.05 and metrics.bed_error_m < 0.02,
+		"river_domain: move_domain must keep simulating the moved river without a restart")
+	_river_look(camera, Vector2(15.0, -24.0))
+	var faded := await _river_wait(func() -> bool: return river.swe.blend == 0.0 and not river.swe.live, 3.0)
+	_river_look(camera, Vector2(0.0, -24.0))
+	await _boot_frames(2)
+	var warming := river.swe.live and river.swe.blend == 0.0
+	var returned := await _river_wait(func() -> bool: return river.swe.blend == 1.0, 3.0)
+	print("RIVER DOMAIN lod faded=%s warming=%s returned=%s" % [faded, warming, returned])
+	_check(faded and warming and returned,
+		"river_domain: far from water the solver must fade out and stop, then warm up and fade back in")
+	_river_prepare_images(field, Vector2(200.0, -24.0))
+	river.move_domain(Vector2(200.0, -24.0))
+	await _boot_frames(3)
+	var idle := not river.field.has_water and not river._surface.visible
+	_river_prepare_images(field, Vector2(0.0, -24.0))
+	river.move_domain(Vector2(0.0, -24.0))
+	await _boot_frames(3)
+	var woken := river.field.has_water and river._surface.visible
+	print("RIVER DOMAIN idle dry=%s woken=%s" % [idle, woken])
+	_check(idle and woken, "river_domain: a dry domain must idle and wake again with water")
+	river.stop()
+	await _boot_frames(2)
+	started = Time.get_ticks_usec()
+	started = Time.get_ticks_usec()
+	river.start()
+	var restart_ms := (Time.get_ticks_usec() - started) / 1000.0
+	var restart_frame_ms := await _river_slowest_frame_ms(3)
+	print("RIVER DOMAIN restart start_ms=%.2f first_frame_ms=%.2f" % [restart_ms, restart_frame_ms])
+	river.queue_free()
+	scene.queue_free()
+	await _boot_frames(2)
+	_finish("river_domain")
+
+
+func _river_prepare_images(field: RiverField, origin: Vector2) -> void:
+	field.origin_m = origin
+	field.flow_image = null
+	field.bed_image = null
+	var cells := Vector2i(160, 160)
+	var flow := field.bake(0.0, cells)
+	field.flow_image = flow.get_image()
+	field.bed_image = field.bed_texture.get_image()
+	var values := PackedFloat32Array()
+	values.resize(cells.x * cells.y * 4)
+	var corner := field.domain_rect().position
+	for y in cells.y:
+		for x in cells.x:
+			var point := corner + (Vector2(x, y) + Vector2.ONE * 0.5) * field.domain_m / Vector2(cells)
+			var drive := field.sample_solver(point, 0.0)
+			var i := (y * cells.x + x) * 4
+			values[i] = field.sample_bed(point)
+			values[i + 1] = field.sample_height(point, 0.0)
+			values[i + 2] = drive.r
+			values[i + 3] = drive.g
+	field.solver_terrain_image = Image.create_from_data(cells.x, cells.y, false, Image.FORMAT_RGBAF, values.to_byte_array())
+
+
+func _river_look(camera: Camera3D, point: Vector2) -> void:
+	camera.global_transform = Transform3D(Basis.from_euler(Vector3(-PI * 0.5, 0.0, 0.0)), Vector3(point.x, 6.0, point.y))
+
+
+func _river_wait(condition: Callable, seconds: float) -> bool:
+	var deadline := Time.get_ticks_msec() + roundi(seconds * 1000.0)
+	while not condition.call() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return condition.call()
+
+
+func _river_slowest_frame_ms(count: int) -> float:
+	var slowest := 0.0
+	for frame in count:
+		var started := Time.get_ticks_usec()
+		await process_frame
+		slowest = maxf(slowest, (Time.get_ticks_usec() - started) / 1000.0)
+	return slowest
+
+
+func _river_window_state(river: RiverSystem) -> Dictionary:
+	var grid: Vector2i = river.swe.solver.grid
+	var snapshot: Dictionary = river.swe.solver.snapshot()
+	var surface := (await TextureReadback.new().read_layer(snapshot.surface, 0, grid.x * grid.y * 16)).to_float32_array()
+	var region: Rect2 = river.swe.region_m
+	var depth := {}
+	for y in grid.y:
+		for x in grid.x:
+			var world := Vector2i(((region.position + (Vector2(x, y) + Vector2.ONE * 0.5) * river.swe.cell_m) / river.swe.cell_m).floor())
+			depth[world] = surface[(y * grid.x + x) * 4 + 3]
+	return {"region": region, "depth": depth}
+
+
+func _river_window_metrics(river: RiverSystem, field: RiverField) -> Dictionary:
+	var grid: Vector2i = river.swe.solver.grid
+	var snapshot: Dictionary = river.swe.solver.snapshot()
+	var size := grid.x * grid.y * 16
+	var surface := (await TextureReadback.new().read_layer(snapshot.surface, 0, size)).to_float32_array()
+	var terrain := (await TextureReadback.new().read_layer(snapshot.terrain, 0, size)).to_float32_array()
+	var region: Rect2 = river.swe.region_m
+	var wet := 0
+	var kept := 0
+	var bed_error := 0.0
+	var ratios := PackedFloat32Array()
+	for y in grid.y:
+		for x in grid.x:
+			var point := region.position + (Vector2(x, y) + Vector2.ONE * 0.5) * river.swe.cell_m
+			if minf(minf(point.x - region.position.x, region.end.x - point.x),
+					minf(point.y - region.position.y, region.end.y - point.y)) < 2.5:
+				continue
+			var i := (y * grid.x + x) * 4
+			var reference := maxf(terrain[i + 1] - terrain[i], 0.0)
+			if reference <= 0.015:
+				continue
+			wet += 1
+			kept += int(surface[i + 3] > 0.015)
+			if reference >= 0.2:
+				ratios.append(surface[i + 3] / reference)
+				bed_error = maxf(bed_error, absf(terrain[i] - field.sample_bed(point)))
+	ratios.sort()
+	return {"kept": 100.0 * kept / maxf(wet, 1.0), "depth_p50": ratios[ratios.size() / 2] if not ratios.is_empty() else 0.0,
+		"bed_error_m": bed_error}

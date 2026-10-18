@@ -55,6 +55,7 @@ func _ready() -> void:
 	river.foam_bubbles = load("res://resources/ocean/foam_variant_01_microbubbles.png")
 	river.riverbed_albedo = load("res://resources/materials/clean_pebbles/clean_pebbles_diff_2k.jpg")
 	river.scenery_materials = _scenery.materials
+	river.loading_stage = func(label: String) -> void: LoadingPump.stage(label)
 	river.compute_available = GpuPreflight.available()
 	river.camera = camera
 	river.reflection_anchor_z_m = orbit.target.z

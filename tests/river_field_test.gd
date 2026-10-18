@@ -191,3 +191,17 @@ func _check_prepared_field() -> void:
 	var flow := field.sample(Vector2.ZERO, 0.0)
 	_check(absf(flow.r - 2.0) < 0.0001 and absf(flow.g + 2.0) < 0.0001,
 		"Guided current must apply the shallow wet fade exactly once")
+	field.origin_m = Vector2(120.0, -40.0)
+	for index in points.size():
+		_check(absf(field.sample_bed(points[index] + field.origin_m) - beds[index]) < 0.00001,
+			"Prepared field must sample the same texels around a moved domain origin")
+	_check(field.domain_rect() == Rect2(Vector2(119.0, -41.0), Vector2(2.0, 2.0)),
+		"Domain rectangle must be centred on the origin")
+	field.flow_image = Image.create(4, 4, false, Image.FORMAT_RGBAF)
+	field.flow_image.fill(Color(0.25, -0.5, 0.0, 1.0))
+	field.bed_image = Image.create(4, 4, false, Image.FORMAT_RGBF)
+	field.bed_image.fill(Color(-0.3, 0.1, 1.0))
+	var baked := field.bake(0.0, Vector2i(64, 64))
+	_check(baked.get_size() == Vector2(4, 4) and field.bed_texture.get_size() == Vector2(4, 4)
+		and baked.get_image().get_pixel(1, 2).is_equal_approx(Color(0.25, -0.5, 0.0, 1.0)),
+		"Prepared flow and bed images must be uploaded as given, without sampling")

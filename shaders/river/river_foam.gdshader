@@ -6,19 +6,21 @@ uniform sampler2D previous_foam : filter_linear, repeat_disable, hint_default_bl
 uniform sampler2D flow_map : filter_linear, repeat_disable;
 uniform sampler2D turbulence_texture : filter_linear, repeat_enable;
 uniform vec2 domain_m = vec2(1.0);
+uniform vec2 domain_origin_m = vec2(0.0);
 uniform float speed_m_s = 0.85;
 uniform float delta_s = 0.016;
 uniform float foam_amount = 0.65;
 uniform float simulation_time_s = 0.0;
 uniform float whitewater_strength = 0.12;
 uniform bool reset = true;
+uniform vec2 history_shift_uv = vec2(0.0);
 
 void fragment() {
 	vec4 field = texture(flow_map, UV);
-	vec2 position = (UV - 0.5) * domain_m;
+	vec2 position = (UV - 0.5) * domain_m + domain_origin_m;
 	float weight = river_swe_weight(position);
 	vec2 velocity = mix(field.rg * speed_m_s, texture(swe_surface, river_swe_uv(position)).xy, weight);
-	vec2 previous_uv = UV - velocity * delta_s / domain_m;
+	vec2 previous_uv = UV + history_shift_uv - velocity * delta_s / domain_m;
 	vec2 inside = step(vec2(0.0), previous_uv) * step(previous_uv, vec2(1.0));
 	float history = texture(previous_foam, clamp(previous_uv, vec2(0.0), vec2(1.0))).r;
 	history *= inside.x * inside.y;

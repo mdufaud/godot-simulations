@@ -10,6 +10,8 @@ class_name RiverConfig extends Resource
 @export_range(0.02, 0.5, 0.01) var roughness: float = 0.085
 @export_range(0.0, 1.0, 0.01) var whitewater_strength: float = 0.12
 @export var deep_color: Color = Color(0.035, 0.19, 0.17)
+@export_range(0.0, 10.0, 0.01) var current_guidance_hz: float = 0.2
+@export_range(0.0, 10.0, 0.01) var level_guidance_hz: float = 0.6
 
 
 func validate() -> String:
@@ -29,4 +31,8 @@ func validate() -> String:
 		return "River roughness must be between 0.02 and 0.5"
 	if not is_finite(whitewater_strength) or whitewater_strength < 0.0 or whitewater_strength > 1.0:
 		return "River whitewater strength must be between 0 and 1"
+	if not is_finite(current_guidance_hz) or current_guidance_hz < 0.0 or current_guidance_hz > 10.0:
+		return "River current guidance must be between 0 and 10 Hz"
+	if not is_finite(level_guidance_hz) or level_guidance_hz < 0.0 or level_guidance_hz > 10.0:
+		return "River level guidance must be between 0 and 10 Hz"
 	return ""

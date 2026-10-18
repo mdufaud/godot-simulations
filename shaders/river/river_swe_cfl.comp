@@ -20,6 +20,7 @@ layout(push_constant, std430) uniform Params {
     vec4 control_params;
     vec4 waterfall;
     vec4 cascade;
+    vec4 relaxation;
 } params;
 
 shared float signals[64];

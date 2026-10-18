@@ -136,7 +136,7 @@ func _contact_is_current(kind: int, point: Vector3, surface: Vector3, normal: Ve
 	var config: RiverWaterfallConfig = field.waterfall
 	var xz := Vector2(point.x, point.z)
 	if kind == 1:
-		if not Rect2(-field.domain_m * 0.5, field.domain_m).has_point(xz):
+		if not field.domain_rect().has_point(xz):
 			return false
 		var receiver_run := 0.125 if config.is_vertical() else maxf((config.height_m - 0.65 - water_level_m) / tan(deg_to_rad(config.angle_degrees)), 0.125)
 		if point.z < config.crest_z_m and point.z > config.crest_z_m - receiver_run:

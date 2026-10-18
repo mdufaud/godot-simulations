@@ -13,9 +13,12 @@ const EMISSION_HZ := 120.0
 const ROCK_MAP_SIZE := 96
 
 var region_m := Rect2()
+var loading_stage := Callable()
 var cell_m := CELL_M
 var grid := Vector2i.ZERO
 var _source_domain: Rect2
+var _source_size := Vector2i.ZERO
+var _render_origin := Vector2.ZERO
 var _rd: RenderingDevice
 var _states: Array[RID] = []
 var _sets: Array[RID] = []
@@ -66,12 +69,21 @@ var _progress_generation := 0
 func start(field: RiverField, config: RiverConfig) -> void:
 	_waterfall = field.get("waterfall")
 	_ground_image = field.ground_height_image
-	_source_domain = Rect2(-field.domain_m * 0.5, field.domain_m)
+	_source_domain = field.domain_rect()
+	var image := _solver_terrain(field)
+	_request_init_render(image.get_data(), image.get_size(), config)
+
+
+func move_source(field: RiverField) -> void:
+	_source_domain = field.domain_rect()
+	var image := _solver_terrain(field)
+	RenderingServer.call_on_render_thread(_update_source_render.bind(image.get_data(), image.get_size()))
+
+
+func _solver_terrain(field: RiverField) -> Image:
 	if field.solver_terrain_image != null:
-		_request_init_render(field.solver_terrain_image.get_data(),
-			field.solver_terrain_image.get_size(), config)
-		return
-	LoadingPump.stage("Sampling river terrain")
+		return field.solver_terrain_image
+	_report_stage("Sampling river terrain")
 	var size := Vector2i(field.domain_m / CELL_M)
 	var rows := []
 	rows.resize(size.y)
@@ -87,23 +99,36 @@ func start(field: RiverField, config: RiverConfig) -> void:
 			row[x * 4 + 2] = flow.r
 			row[x * 4 + 3] = flow.g
 		rows[y] = row, size.y)
-	LoadingPump.wait_for_group(task)
+	RiverField.wait_for_group(task, loading_stage)
 	var values := PackedFloat32Array()
 	for row: PackedFloat32Array in rows:
 		values.append_array(row)
 	for instance in field.obstacle_meshes:
 		_stamp_rock(values, instance, size)
-	var bytes := values.to_byte_array()
-	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, bytes)
-	_request_init_render(bytes, size, config)
+	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, values.to_byte_array())
+	return field.solver_terrain_image
 
 
 func _request_init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, config: RiverConfig) -> void:
 	var parameters_bytes := parameters(config, 0.0)
-	LoadingPump.stage("Compiling water solver (GPU)")
+	_report_stage("Compiling water solver (GPU)")
 	RenderingServer.call_on_render_thread(_init_render.bind(terrain_bytes, source_size, parameters_bytes))
-	LoadingPump.stage("Compiling waterfall pipelines (GPU)" if _waterfall != null else "Starting water solver (GPU)")
+	_report_stage("Compiling waterfall pipelines (GPU)" if _waterfall != null else "Starting water solver (GPU)")
 	RenderingServer.call_on_render_thread(_init_waterfall_render.bind(parameters_bytes))
+
+
+func _update_source_render(terrain_bytes: PackedByteArray, source_size: Vector2i) -> void:
+	if _rd == null or not _source.is_valid():
+		return
+	if source_size != _source_size:
+		push_error("River solver source image changed size: %s -> %s" % [_source_size, source_size])
+		return
+	_rd.texture_update(_source, 0, terrain_bytes)
+
+
+func _report_stage(label: String) -> void:
+	if loading_stage.is_valid():
+		loading_stage.call(label)
 
 
 func _stamp_rock(values: PackedFloat32Array, instance: MeshInstance3D, size: Vector2i) -> void:
@@ -207,6 +232,7 @@ func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
 		0.0, config.whitewater_strength, 0.0, 0.0,
 		waterfall.x, waterfall.y, waterfall.z, waterfall.w,
 		cascade.x, cascade.y, cascade.z, cascade.w,
+		config.current_guidance_hz, config.level_guidance_hz, 0.0, 0.0,
 	]).to_byte_array()
 
 
@@ -238,6 +264,8 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_shader = _rd.shader_create_from_spirv(spirv)
 	_pipeline = _rd.compute_pipeline_create(_shader)
 	_source = _texture_render(source_size, terrain_bytes)
+	_source_size = source_size
+	_render_origin = Vector2(parameters_bytes.decode_float(0), parameters_bytes.decode_float(4))
 	var size := Vector2i(parameters_bytes.decode_float(16), parameters_bytes.decode_float(20))
 	_terrain = _texture_render(size)
 	_surface = _texture_render(size)
@@ -374,11 +402,19 @@ func advance_render(delta_s: float, parameters_bytes: PackedByteArray, reset: bo
 	if profiling:
 		_rd.capture_timestamp("river_swe/start")
 	var next_cell := parameters_bytes.decode_float(8)
+	var origin := Vector2(parameters_bytes.decode_float(0), parameters_bytes.decode_float(4))
 	var list := _rd.compute_list_begin()
 	if reset:
 		_index = 0
 		_dispatch_render(list, parameters_bytes, 0.0)
 		_rd.compute_list_add_barrier(list)
+	elif origin != _render_origin:
+		parameters_bytes.encode_float(72, _render_origin.x)
+		parameters_bytes.encode_float(76, _render_origin.y)
+		_dispatch_render(list, parameters_bytes, 7.0)
+		_rd.compute_list_add_barrier(list)
+		_index = 1 - _index
+	_render_origin = origin
 	var max_step := MAX_STEP_S * next_cell / CELL_M
 	var duration := minf(delta_s, MAX_SUBSTEPS * max_step)
 	var steps := ceili(duration / max_step)
@@ -660,7 +696,7 @@ func _texture_render(size: Vector2i, data: PackedByteArray = PackedByteArray()) 
 	format.height = size.y
 	format.format = RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT
 	format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
 	var texture := _rd.texture_create(format, RDTextureView.new(), [data] if not data.is_empty() else [])
 	if data.is_empty():
 		_rd.texture_clear(texture, Color(0.0, 0.0, 0.0, 0.0), 0, 1, 0, 1)

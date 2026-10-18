@@ -25,6 +25,7 @@ layout(push_constant, std430) uniform Params {
     vec4 control_params;
     vec4 waterfall;
     vec4 cascade_params;
+    vec4 relaxation;
 } params;
 float theta() { return radians(params.waterfall.x); }
 float ds() { return params.waterfall.y / sin(theta()) / params.cascade_params.y; }

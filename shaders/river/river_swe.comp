@@ -32,6 +32,7 @@ layout(push_constant, std430) uniform Params {
     vec4 control;
     vec4 waterfall;
     vec4 cascade_params;
+    vec4 relaxation;
 } params;
 
 ivec2 bound_cell(ivec2 p) {
@@ -193,6 +194,22 @@ float surface_height(ivec2 p, vec4 q, vec4 bed) {
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (params.control.x > 6.5) {
+        if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
+        vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
+        vec4 bed = source_bed(world);
+        ivec2 old = p + ivec2(round((params.domain.xy - params.control.zw) / params.domain.z));
+        vec4 q;
+        if (all(greaterThanEqual(old, ivec2(0))) && all(lessThan(old, ivec2(params.grid.xy)))) {
+            q = imageLoad(state_in, old);
+        } else {
+            float depth = max(bed.y + params.water.x - bed.x, 0.0);
+            q = vec4(depth, bed.zw * params.grid.w * depth, 0.0);
+        }
+        imageStore(terrain, p, bed);
+        imageStore(state_out, p, q);
+        return;
+    }
     if (params.control.x > 5.5) {
         uint lane = gl_LocalInvocationIndex;
         vec2 sum = vec2(0.0);
@@ -368,13 +385,13 @@ void main() {
     ) / (2.0 * params.domain.z);
     if (!seam_cell(world)) next.yz += dt * params.domain.w * next.x * reference_gradient;
     if (next.x > 0.004) {
-        next.yz += dt * 0.2 * (bed.zw * params.grid.w * next.x - next.yz);
+        next.yz += dt * params.relaxation.x * (bed.zw * params.grid.w * next.x - next.yz);
         next.yz /= 1.0 + dt * (0.06 + 0.018 * length(velocity(next)) / max(next.x, 0.05));
         float foam = clamp(next.w / next.x, 0.0, 1.0) * exp(-dt * 0.8);
         foam = 1.0 - (1.0 - foam) * exp(-source * dt * 2.0);
         next.w = foam * next.x;
     } else next.yzw = vec3(0.0);
-    float relaxed_depth = seam_cell(world) ? next.x : mix(next.x, reference_depth, 1.0 - exp(-dt * 0.6));
+    float relaxed_depth = seam_cell(world) ? next.x : mix(next.x, reference_depth, 1.0 - exp(-dt * params.relaxation.y));
     float relaxation_volume = (relaxed_depth - next.x) * params.domain.z * params.domain.z;
     next.yzw *= relaxed_depth / max(next.x, 0.004);
     next.x = relaxed_depth;
@@ -387,7 +404,11 @@ void main() {
     if (outflow && edge < params.domain.z) {
         next = read_state(p - ivec2(outward));
     } else {
-        float incoming = float(dot(bed.zw, vec2(0.0, p.y < int(params.grid.y) / 2 ? -1.0 : 1.0)) < 0.0);
+        vec2 edge_m = vec2(min(float(p.x), params.grid.x - 1.0 - float(p.x)),
+            min(float(p.y), params.grid.y - 1.0 - float(p.y))) * params.domain.z;
+        vec2 nearest = edge_m.x < edge_m.y ? vec2(p.x < int(params.grid.x) / 2 ? -1.0 : 1.0, 0.0)
+            : vec2(0.0, p.y < int(params.grid.y) / 2 ? -1.0 : 1.0);
+        float incoming = float(dot(bed.zw, nearest) < 0.0);
         float restore = edge < params.domain.z ? 1.0 : 1.0 - exp(-dt * sponge * incoming * 5.0);
         next = mix(next, seed_state(p), restore);
     }

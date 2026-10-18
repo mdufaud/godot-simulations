@@ -7,8 +7,8 @@ uniform sampler2D bed_height_texture : filter_linear, repeat_disable;
 uniform sampler2D riverbed_albedo : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D foam_map : filter_linear, repeat_disable, hint_default_black;
 uniform sampler2D micro_normal : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
-uniform sampler2D foam_filaments : filter_linear_mipmap_anisotropic, repeat_enable;
-uniform sampler2D foam_bubbles : filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D foam_filaments : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_black;
+uniform sampler2D foam_bubbles : filter_linear_mipmap_anisotropic, repeat_enable, hint_default_black;
 uniform sampler2D turbulence_texture : filter_linear_mipmap, repeat_enable;
 uniform sampler2D reflection_texture : filter_linear, repeat_disable;
 uniform sampler2D reflection_texture_1 : filter_linear, repeat_disable;
@@ -34,6 +34,7 @@ uniform vec4 terrace_heights_m = vec4(0.0);
 uniform float surface_slope = 0.0;
 uniform float surface_detail = 0.0;
 uniform vec2 domain_m = vec2(1.0);
+uniform vec2 domain_origin_m = vec2(0.0);
 uniform float water_level_m = 0.06;
 uniform float flow_distance_m = 0.0;
 uniform float simulation_time_s = 0.0;
@@ -45,6 +46,14 @@ uniform float roughness = 0.085;
 uniform float whitewater_strength = 0.12;
 uniform float foam_amount = 0.65;
 uniform vec3 deep_color : source_color = vec3(0.035, 0.19, 0.17);
+uniform vec3 deep_tint : source_color = vec3(0.035, 0.19, 0.17);
+uniform vec2 deep_tint_depth_m = vec2(0.0);
+uniform bool lit_body = false;
+uniform float body_min_thickness_m = 0.0;
+uniform float shore_fade_depth_m = 0.0;
+uniform float shore_soft_thickness_m = 0.0;
+uniform float domain_edge_fade_m = 0.0;
+uniform bool guided_coverage = false;
 uniform bool reflection_enabled = true;
 uniform bool foam_enabled = true;
 uniform bool foam_detail = true;
@@ -52,6 +61,20 @@ uniform vec4 geometry_region_m = vec4(-6.0, -7.0, 16.0, 24.0);
 
 varying vec3 world_position;
 varying vec3 surface_normal;
+
+vec2 domain_uv(vec2 point) {
+	return (point - domain_origin_m) / domain_m + 0.5;
+}
+
+float live_share(vec2 point) {
+	float weight = river_swe_weight(point);
+	if (guided_coverage && weight > 0.0) {
+		vec2 guided = texture(bed_height_texture, domain_uv(point)).rg;
+		float live_depth = texture(swe_surface, river_swe_uv(point)).w;
+		weight *= 1.0 - step(0.015, guided.y - guided.x) * (1.0 - smoothstep(0.004, 0.015, live_depth));
+	}
+	return weight;
+}
 
 float waterfall_receiver(float x) {
 	if (waterfall_clock_enabled) {
@@ -116,7 +139,9 @@ float basin_height(vec2 point) {
 		float pool = river_swe_height(vec2(point.x, boundary.z - 2.5), level);
 		return mix(height, min(total / 5.0, pool + 0.06), near);
 	}
-	return river_swe_height(point, texture(bed_height_texture, point / domain_m + 0.5).g);
+	float original = texture(bed_height_texture, domain_uv(point)).g;
+	float weight = live_share(point);
+	return weight > 0.0 ? mix(original, texture(swe_surface, river_swe_uv(point)).z, weight) : original;
 }
 
 vec2 flow_uv(vec2 position, vec2 flow, float phase) {
@@ -187,10 +212,10 @@ vec4 planar_sample(int index, vec3 position) {
 
 void vertex() {
 	vec2 point = VERTEX.xz;
-	if (waterfall_enabled && UV2.x < 0.5) point.y = mix(-domain_m.y * 0.5, waterfall_pool_end(point.x), UV2.y);
+	if (waterfall_enabled && UV2.x < 0.5) point.y = mix(domain_origin_m.y - domain_m.y * 0.5, waterfall_pool_end(point.x), UV2.y);
 	VERTEX.z = point.y;
-	vec4 field = texture(flow_map, point / domain_m + 0.5);
-	float weight = river_swe_weight(point);
+	vec4 field = texture(flow_map, domain_uv(point));
+	float weight = live_share(point);
 	vec4 live = texture(swe_surface, river_swe_uv(point));
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), weight);
 	float h = basin_height(point)
@@ -200,9 +225,9 @@ void vertex() {
 	vec2 right = point + vec2(0.08, 0.0);
 	vec2 down = point + vec2(0.0, 0.08);
 	float dx = (basin_height(right)
-		+ ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, river_swe_weight(right)) - h) / 0.08;
+		+ ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(right)) - h) / 0.08;
 	float dz = (basin_height(down)
-		+ ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, river_swe_weight(down)) - h) / 0.08;
+		+ ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(down)) - h) / 0.08;
 	surface_normal = normalize(vec3(-dx, 1.0, -dz));
 	if (waterfall_enabled && !swe_enabled) surface_normal = vec3(0.0, 1.0, 0.0);
 	world_position = VERTEX;
@@ -213,21 +238,25 @@ void fragment() {
 		&& world_position.z < waterfall_geometry.z + 0.001 && world_position.z > waterfall_pool_end(world_position.x) - 0.001) { discard; }
 	vec2 sample_point = world_position.xz;
 	if (waterfall_enabled && sample_point.y < waterfall_geometry.z) sample_point.y = min(sample_point.y, waterfall_wet_end());
-	vec2 field_uv = sample_point / domain_m + 0.5;
+	vec2 field_uv = domain_uv(sample_point);
 	vec4 field = texture(flow_map, field_uv);
-	float live_weight = river_swe_weight(sample_point);
+	float live_weight = live_share(sample_point);
 	vec2 live_uv = river_swe_uv(sample_point);
 	vec4 live = texture(swe_surface, live_uv);
 	float wet_coverage = 1.0;
+	vec3 guided_bed = texture(bed_height_texture, field_uv).rgb;
+	if (shore_fade_depth_m > 0.0) {
+		wet_coverage = mix(1.0, smoothstep(0.0, shore_fade_depth_m, guided_bed.y - guided_bed.x), guided_bed.z);
+	}
 	if (swe_enabled) {
-		vec2 bed = texture(bed_height_texture, field_uv).rg;
-		bed.x = texture(bed_height_texture, world_position.xz / domain_m + 0.5).r;
+		vec2 bed = guided_bed.xy;
+		bed.x = texture(bed_height_texture, domain_uv(world_position.xz)).r;
 		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, river_swe_uv(world_position.xz)).r, 0.0));
 		float depth = mix(max(bed.y - bed.x, 0.0), live_depth, live_weight);
 		float edge_width = max(fwidth(depth), 0.002);
-		wet_coverage = mix(1.0, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
-		if (wet_coverage <= 0.0) { discard; }
+		wet_coverage = mix(wet_coverage, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
 	}
+	if (wet_coverage <= 0.0) { discard; }
 	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), live_weight);
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
@@ -266,7 +295,8 @@ void fragment() {
 	NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
 	vec4 behind = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, texture(depth_texture, SCREEN_UV).r, 1.0);
 	behind.xyz /= behind.w;
-	float thickness = max(-behind.z + VERTEX.z, 0.0);
+	float behind_m = max(-behind.z + VERTEX.z, 0.0);
+	float thickness = max(behind_m, body_min_thickness_m * field.a);
 	vec2 edge_fade = smoothstep(vec2(0.0), vec2(0.04), SCREEN_UV) * (1.0 - smoothstep(vec2(0.96), vec2(1.0), SCREEN_UV));
 	vec2 refracted_uv = SCREEN_UV + NORMAL.xy * 0.015 * smoothstep(0.0, 0.3, thickness) * edge_fade.x * edge_fade.y;
 	vec4 refracted_depth = INV_PROJECTION_MATRIX * vec4(refracted_uv * 2.0 - 1.0, texture(depth_texture, refracted_uv).r, 1.0);
@@ -282,7 +312,10 @@ void fragment() {
 	}
 	float absorption = mix(mix(3.8, 0.32, clarity), mix(3.8, 0.08, pow(clarity, 0.6)), surface_detail);
 	vec3 transmittance = exp(-vec3(absorption * 1.25, absorption * 0.72, absorption * 0.63) * thickness);
-	vec3 body = transmission * transmittance + deep_color * (vec3(1.0) - transmittance);
+	vec3 body_tint = deep_tint_depth_m.y > deep_tint_depth_m.x
+		? mix(deep_color, deep_tint, smoothstep(deep_tint_depth_m.x, deep_tint_depth_m.y, max(guided_bed.y - guided_bed.x, 0.0)))
+		: deep_color;
+	vec3 body = transmission * transmittance + body_tint * (vec3(1.0) - transmittance);
 	body = mix(body, vec3(0.32, 0.4, 0.41), fall_impact * 0.85);
 	float fresnel = 0.02 + 0.98 * pow(1.0 - max(dot(NORMAL, VIEW), 0.0), 5.0);
 	vec3 reflected_point = world_position + vec3(normal_world.x, 0.0, normal_world.z)
@@ -359,6 +392,10 @@ void fragment() {
 	foam = clamp(foam, 0.0, 0.9);
 	ALBEDO = vec3(0.82, 0.87, 0.83) * foam;
 	EMISSION = mix(mix(body, reflected_color, fresnel), body * (1.0 - fresnel), surface_detail) * (1.0 - foam);
+	if (lit_body) {
+		ALBEDO = mix(body_tint * (vec3(1.0) - transmittance), vec3(0.82, 0.87, 0.83), foam);
+		EMISSION = transmission * transmittance * (1.0 - fresnel) * (1.0 - foam);
+	}
 	RADIANCE = vec4(reflection.rgb, reflection_weight * surface_detail * (1.0 - foam));
 	vec3 nx = dFdx(normal_world);
 	vec3 ny = dFdy(normal_world);
@@ -367,5 +404,8 @@ void fragment() {
 	float water_roughness = mix(roughness, sqrt(polished * polished + variance * 0.08), surface_detail);
 	ROUGHNESS = mix(water_roughness, 0.72, foam);
 	SPECULAR = mix(mix(0.18, 0.35, surface_detail), 0.12, foam);
-	ALPHA = wet_coverage;
+	vec2 border = min(domain_uv(world_position.xz), vec2(1.0) - domain_uv(world_position.xz)) * domain_m;
+	float domain_fade = domain_edge_fade_m > 0.0 ? smoothstep(0.0, domain_edge_fade_m, min(border.x, border.y)) : 1.0;
+	float soft_shore = shore_soft_thickness_m > 0.0 ? mix(1.0, smoothstep(0.0, shore_soft_thickness_m, behind_m), guided_bed.z) : 1.0;
+	ALPHA = wet_coverage * domain_fade * soft_shore;
 }

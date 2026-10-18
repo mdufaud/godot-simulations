@@ -62,6 +62,8 @@ PROBE_TABLE=(
 	"river_shutdown|90|^TEST PASS river_shutdown$|RIVER SHUTDOWN "
 	"river_motion|240|^PROBE DONE river_motion|RIVER MOTION "
 	"river_foam_render|60|^TEST PASS river_foam_render$|RIVER FOAM "
+	"river_slope|900|^TEST PASS river_slope$|RIVER SLOPE "
+	"river_domain|180|^TEST PASS river_domain$|RIVER DOMAIN "
 	"ocean_contracts|60|^TEST PASS ocean_contracts$|OCEAN CONTRACTS "
 	"ocean_parameters|600|^TEST PASS ocean_parameters_gpu$|OCEAN PARAM "
 	"ocean_swell|240|^TEST PASS ocean_swell$|OCEAN (PARAM|SWELL) "

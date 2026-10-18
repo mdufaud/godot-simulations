@@ -3,6 +3,7 @@ uniform sampler2D swe_foam : filter_linear, repeat_disable, hint_default_black;
 uniform sampler2D swe_terrain : filter_linear, repeat_disable, hint_default_black;
 uniform vec4 swe_region_m = vec4(0.0, 0.0, 1.0, 1.0);
 uniform bool swe_enabled = false;
+uniform float swe_blend = 1.0;
 uniform sampler2D waterfall_clock : filter_nearest, repeat_disable;
 uniform bool waterfall_clock_enabled = false;
 
@@ -20,7 +21,7 @@ float river_swe_edge(vec2 point) {
 }
 
 float river_swe_weight(vec2 point) {
-	return float(swe_enabled) * smoothstep(1.0, 2.5, river_swe_edge(point));
+	return float(swe_enabled) * swe_blend * smoothstep(1.0, 2.5, river_swe_edge(point));
 }
 
 float river_swe_height(vec2 point, float original) {
