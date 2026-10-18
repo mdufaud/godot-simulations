@@ -1,31 +1,31 @@
 // White-particle prepass. Renders the solver's foam/spray/bubbles into an
-// offscreen coverage buffer that the fluid composite consumes: R = coverage,
-// G = coverage-weighted eye depth of the sprite's sphere surface. Foam is blended by
-// coverage in the composite (col * (1 - foam) + foam), so overlapping sprites
-// build a solid sheet of froth while the soft rim antialiases every sprite
-// edge instead of popping as a hard circle. Depth is per fragment from the
-// analytic sphere, so a sprite sliding behind scene geometry is clipped pixel
-// by pixel instead of vanishing as a whole.
+// offscreen buffer that the fluid composite consumes: R = optical density,
+// G = density-weighted eye depth of the sprite's sphere surface. Sprites are
+// soft and add up, so a lone particle is a faint fleck while a cluster
+// saturates into a solid sheet of froth (the composite maps density to
+// coverage). Depth is per fragment from the analytic sphere, so a sprite
+// sliding behind scene geometry is clipped pixel by pixel instead of vanishing
+// as a whole.
 shader_type spatial;
-// FOG (liquid nitrogen vapour): faint soft puffs that add up into a cloud
-// instead of the nearest sprite winning.
-#ifdef FOG
 render_mode unshaded, cull_disabled, blend_add, depth_draw_never;
-const float FOG_DENSITY = 0.035;
-// Puffs keep one world size and fade in and out with the particle's swell
-// (NITROGEN_FOG_SCALE when fully grown), so the cloud never reads as dots.
+#ifdef FOG
+// Liquid nitrogen vapour: faint puffs that add up into a cloud. Puffs keep one
+// world size and fade in and out with the particle's swell (NITROGEN_FOG_SCALE
+// when fully grown), so the cloud never reads as dots.
+const float DENSITY = 0.035;
 const float FOG_SPRITE = 0.7;
 const float FOG_FULL_SWELL = 8.0;
 #else
-render_mode unshaded, cull_disabled;
+const float DENSITY = 0.3;
 #endif
+// A sprite smaller than this on screen shimmers as single-pixel glitter: it is
+// grown to it and dimmed by the area ratio, so far foam keeps its coverage.
+const float MIN_PIXELS = 3.0;
 
 uniform sampler2D foam_tex : filter_nearest;
 uniform int foam_tex_width = 256;
-// Full sprite width (the quad mesh spans +-0.5). SebLague: uniform scale 0.02,
-// vertScale = scale * 2 * ... = 0.04 at his smoothing radius of 0.2, i.e. h/5.
-// Scaled to our h = 0.25. Sprites must be far smaller than the smoothing radius
-// or they read as golf balls instead of froth.
+// Full sprite width (the quad mesh spans +-0.5), scaled per particle by the
+// size foam_compact publishes.
 uniform float billboard_size = 0.05;
 
 varying vec3 center_view;
@@ -44,32 +44,29 @@ void vertex() {
 	sprite_size = fd.w > 0.001 ? FOG_SPRITE : 0.0;
 	#endif
 	center_view = (VIEW_MATRIX * vec4(fd.xyz, 1.0)).xyz;
+	// The Vulkan projection flips Y, so [1][1] is negative.
+	float pixels = sprite_size * abs(PROJECTION_MATRIX[1][1]) * 0.5 * VIEWPORT_SIZE.y / max(-center_view.z, 0.01);
+	if (sprite_size > 0.0 && pixels < MIN_PIXELS) {
+		float grow = MIN_PIXELS / max(pixels, 1e-3);
+		sprite_size *= grow;
+		sprite_alpha /= grow * grow;
+	}
 	vec3 view_pos = center_view;
 	view_pos.xy += VERTEX.xy * sprite_size;
 	POSITION = PROJECTION_MATRIX * vec4(view_pos, 1.0);
 }
 
 void fragment() {
-	if (sprite_size <= 0.0) {
-		discard;
-	}
 	float r = length(UV - 0.5) * 2.0;
-	if (r > 1.0) {
+	if (sprite_size <= 0.0 || r > 1.0) {
 		discard;
 	}
-	// Coverage fades over the outer ~20% of the disc; the interior saturates at
-	// 1. The wide solid core matters because the prepass is front-most-wins: a
-	// soft rim over a sparse field overwrites neighbours' interiors and reads
-	// as dotted grain instead of a merged froth sheet.
-	#ifdef FOG
-	float coverage = FOG_DENSITY * sprite_alpha * (1.0 - r * r) * (1.0 - r * r);
-	#else
-	float coverage = smoothstep(1.0, 0.78, r);
-	#endif
+	float falloff = (1.0 - r * r) * (1.0 - r * r);
+	float density = DENSITY * sprite_alpha * falloff;
 	// Sphere-surface eye depth for this fragment: the quad sits at the sphere
 	// centre and the written surface is its front hemisphere, bulging toward
 	// the camera by up to the sprite radius.
 	float nz = sqrt(max(1.0 - r * r, 0.0));
 	float eye_depth = max(-center_view.z - nz * sprite_size * 0.5, 0.01);
-	ALBEDO = vec3(coverage, eye_depth * coverage, 0.0);
+	ALBEDO = vec3(density, eye_depth * density, 0.0);
 }

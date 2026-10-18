@@ -10,10 +10,11 @@ uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear;
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_nearest;
 uniform sampler2D fluid_depth_tex : filter_nearest;
 uniform sampler2D thickness_tex : filter_linear;
-// Foam-particle prepass: R = coverage, G = coverage-weighted eye depth.
+// Foam-particle prepass: R = optical density, G = density-weighted eye depth.
 uniform sampler2D foam_tex : filter_linear;
 uniform bool foam_enabled = false;
-uniform vec3 foam_color : source_color = vec3(0.62, 0.78, 0.80);
+// Froth albedo; it is lit by the sky and the sun like any diffuse surface.
+uniform vec3 foam_color : source_color = vec3(0.9, 0.94, 0.96);
 
 uniform vec3 absorption = vec3(0.55, 0.18, 0.09);
 uniform float absorption_scale = 0.5;
@@ -112,6 +113,13 @@ vec3 sample_sky(vec3 world_dir, vec3 to_sun, vec3 up_axis) {
 	return sky + vec3(sun);
 }
 
+// Froth scatters light diffusely: sky ambient plus a wrapped sun term, so
+// sheets facing away from the sun fall into a soft blue-grey.
+vec3 shade_froth(vec3 n_world) {
+	float sun = clamp(dot(n_world, normalize(-sun_direction)) * 0.6 + 0.4, 0.0, 1.0);
+	return foam_color * (0.5 * (sky_zenith + sky_horizon) + vec3(0.75 * sun));
+}
+
 float astral_noise(vec2 p) {
 	vec2 cell = floor(p);
 	vec2 f = fract(p);
@@ -130,10 +138,13 @@ void fragment() {
 	}
 	float foam = fm.r;
 	float foam_d = fm.g / max(foam, 1e-5);
-	// Additive fog sprites can stack past full coverage; even a tank full of
-	// nitrogen fog lets the liquid show through.
-	foam = min(foam, mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG_MAX : 1.0);
-	vec3 froth = mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG : foam_color;
+	// Fog puffs add up to a capped haze, so even a tank full of nitrogen fog
+	// lets the liquid show through. Froth is thresholded like a metaball field:
+	// a lone particle stays a faint smudge while overlapping ones merge into an
+	// opaque white sheet.
+	foam = mode == MATERIAL_LIQUID_NITROGEN ? min(foam, NITROGEN_FOG_MAX)
+		: (1.0 - exp(-2.0 * foam)) * smoothstep(0.15, 0.6, foam);
+	vec3 froth = mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG : shade_froth(normalize(sky_up_axis));
 	// Foam behind opaque scene geometry is hidden by it.
 	if (foam_d > scene_d) {
 		foam = 0.0;
@@ -306,6 +317,9 @@ void fragment() {
 				vec2 slope = vec2(astral_noise(q + vec2(0.1, 0.0)) - astral_noise(q - vec2(0.1, 0.0)),
 					astral_noise(q + vec2(0.0, 0.1)) - astral_noise(q - vec2(0.0, 0.1))) * 5.0;
 				n = normalize(n + (VIEW_MATRIX * vec4(slope.x, 0.0, slope.y, 0.0)).xyz * 0.12);
+			}
+			if (!nitrogen) {
+				froth = shade_froth(normalize((INV_VIEW_MATRIX * vec4(n, 0.0)).xyz));
 			}
 			float reflectance = dielectric_reflectance(in_view, n, 1.0, local_ior);
 			if (mode == MATERIAL_HONEY) {

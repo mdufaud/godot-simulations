@@ -125,6 +125,11 @@ void main() {
 		float exposed = remap01(params.sim.y * 0.9 - density, 0.0, params.sim.y * 0.2);
 		spawn_factor = foam.spawn.x * (phase + NITROGEN_SURFACE_BOIL * exposed) * params.sim.x;
 	}
+	// Fresh emitter layers are packed into the ones ahead of them: that
+	// convergence is the nozzle's, not air entrained by the flow.
+	if (scene.emitter_velocity.w > 0.5 && distance(pos, scene.emitter_origin.xyz) < NOZZLE_FOAM_CLEARANCE) {
+		return;
+	}
 	if (spawn_factor <= 0.0) {
 		return;
 	}

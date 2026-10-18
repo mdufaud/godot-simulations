@@ -513,7 +513,7 @@ func _configure_solver() -> void:
 	# (|v| = 0.63): the
 	# lower ramp edges sit INSIDE the measured distribution, the density gate
 	# (Ihmsen 2011's surface test) keeps interior/wall spawn at zero.
-	sph_solver.foam_spawn_rate = 90.0
+	sph_solver.foam_spawn_rate = 180.0
 	sph_solver.foam_spawn_fade_start = 0.2
 	sph_solver.foam_spawn_fade_time = 0.35
 	sph_solver.foam_trapped_min = 2.0
@@ -521,9 +521,9 @@ func _configure_solver() -> void:
 	sph_solver.foam_surface_gate = 0.9
 	sph_solver.foam_ke_min = 2.25
 	sph_solver.foam_ke_max = 9.0
-	sph_solver.foam_life_min = 5.0
-	sph_solver.foam_life_max = 15.0
-	sph_solver.foam_dissolve_time = 3.0
+	sph_solver.foam_life_min = 2.0
+	sph_solver.foam_life_max = 6.0
+	sph_solver.foam_dissolve_time = 2.0
 	if mode == FluidKind.LIQUID_NITROGEN:
 		# The white particles are boiling: heated particles shed bubbles that
 		# rise, burst and drift off as short-lived cold fog.
@@ -540,10 +540,10 @@ func _configure_solver() -> void:
 
 
 ## SebLague's Earth.unity: foam render scale 4, applied as scale * 0.01 * 2, i.e.
-## 0.08 world units against his smoothing radius of 0.2. The flat-world demo keeps
-## the smaller sprite of his "Fluid ScreenSpace 2" scene.
+## 0.08 world units against his smoothing radius of 0.2. Foam sprites add up, so
+## they must overlap their neighbours to merge into a sheet instead of glitter.
 func _foam_billboard_size() -> float:
-	return sph_solver.h * 0.4 if planet_mode() else 0.05
+	return sph_solver.h * 0.8
 
 
 func emitter_origin_for_scene(value: Scenario) -> Vector3:

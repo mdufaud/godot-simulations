@@ -161,6 +161,9 @@ const float NITROGEN_FOG_COOLED = 1.5;
 const float NITROGEN_FOG_DRAG = 1.6;
 const float NITROGEN_FOG_SCALE = 8.0;
 
+// No white particles spawn within this distance (m) of an active nozzle.
+const float NOZZLE_FOAM_CLEARANCE = 1.5;
+
 // Must match FluidSystem.Scenario.
 const int SCENE_POOL = 0;
 const int SCENE_CASCADE = 1;

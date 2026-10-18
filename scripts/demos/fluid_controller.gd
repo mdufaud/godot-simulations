@@ -273,11 +273,10 @@ func _build_scene_decor() -> void:
 	stone.albedo_color = Color(0.42, 0.46, 0.48)
 	stone.metallic = 0.12
 	stone.roughness = 0.62
-	var basin_wall := StandardMaterial3D.new()
-	basin_wall.albedo_color = Color(0.68, 0.84, 0.92, 0.12)
-	basin_wall.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	basin_wall.metallic = 0.12
-	basin_wall.roughness = 0.06
+	var tank_frame := StandardMaterial3D.new()
+	tank_frame.albedo_color = Color(0.07, 0.08, 0.09)
+	tank_frame.metallic = 0.8
+	tank_frame.roughness = 0.35
 	var floor_material := StandardMaterial3D.new()
 	floor_material.albedo_color = Color(0.08, 0.15, 0.22)
 	floor_material.metallic = 0.22
@@ -298,15 +297,19 @@ func _build_scene_decor() -> void:
 		add_child(decor)
 		var obstacles := fluid.obstacles_for_scene(scene_id as FluidSystem.Scenario)
 		for obstacle_index in obstacles.size():
+			# Basin walls show only as glass panes on their inner faces.
+			if scene_id == FluidSystem.Scenario.BASIN and obstacle_index > 0:
+				continue
 			var obstacle: Dictionary = obstacles[obstacle_index]
 			var box := BoxMesh.new()
 			box.size = obstacle.size
-			box.material = floor_material if scene_id == FluidSystem.Scenario.BASIN \
-				and obstacle_index == 0 else basin_wall if scene_id == FluidSystem.Scenario.BASIN else stone
+			box.material = floor_material if scene_id == FluidSystem.Scenario.BASIN else stone
 			var mesh_instance := MeshInstance3D.new()
 			mesh_instance.mesh = box
 			mesh_instance.transform = obstacle.transform
 			decor.add_child(mesh_instance)
+		if scene_id == FluidSystem.Scenario.BASIN:
+			_add_basin_glass(decor, obstacles, tank_frame)
 		_add_scene_pipe(decor, scene_id as FluidSystem.Scenario)
 		decor.visible = false
 		scene_decor[scene_id] = decor
@@ -336,6 +339,45 @@ func _add_pool_frame(parent: Node3D, frame_material: StandardMaterial3D) -> void
 		mesh_instance.mesh = box
 		mesh_instance.position = rail_data[0]
 		parent.add_child(mesh_instance)
+
+
+## Thin panes on the inner faces of the basin's wall colliders, held by a slim
+## frame that hides the pane edges and corners.
+func _add_basin_glass(parent: Node3D, obstacles: Array[Dictionary], frame_material: StandardMaterial3D) -> void:
+	var floor_box: Dictionary = obstacles[0]
+	var wall: Dictionary = obstacles[1]
+	var bottom: float = floor_box.transform.origin.y + floor_box.size.y * 0.5
+	var top: float = wall.transform.origin.y + wall.size.y * 0.5
+	var inner: float = absf(wall.transform.origin.x) - wall.size.x * 0.5
+	var pane := 0.05
+	var bar := 0.12
+	var face := inner + pane * 0.5
+	var height := top - bottom
+	var middle := bottom + height * 0.5
+	var rim := (face + bar * 0.5) * 2.0
+	var glass := ShaderMaterial.new()
+	glass.shader = preload("res://shaders/fluid/tank_glass.gdshader")
+	for side in [-1.0, 1.0]:
+		for pane_data in [[Vector3(side * face, middle, 0.0), Vector3(pane, height, inner * 2.0)],
+				[Vector3(0.0, middle, side * face), Vector3(inner * 2.0, height, pane)]]:
+			var glass_pane := _add_tank_box(parent, pane_data[0], pane_data[1], glass)
+			glass_pane.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		for y in [top, bottom + bar * 0.5]:
+			_add_tank_box(parent, Vector3(side * face, y, 0.0), Vector3(bar, bar, rim), frame_material)
+			_add_tank_box(parent, Vector3(0.0, y, side * face), Vector3(rim, bar, bar), frame_material)
+		for other in [-1.0, 1.0]:
+			_add_tank_box(parent, Vector3(side * face, middle, other * face), Vector3(bar, height, bar), frame_material)
+
+
+func _add_tank_box(parent: Node3D, center: Vector3, size: Vector3, material: Material) -> MeshInstance3D:
+	var box := BoxMesh.new()
+	box.size = size
+	box.material = material
+	var mesh_instance := MeshInstance3D.new()
+	mesh_instance.mesh = box
+	mesh_instance.position = center
+	parent.add_child(mesh_instance)
+	return mesh_instance
 
 
 func _add_scene_pipe(parent: Node3D, scene: FluidSystem.Scenario) -> void:
