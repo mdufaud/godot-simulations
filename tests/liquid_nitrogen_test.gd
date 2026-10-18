@@ -38,10 +38,10 @@ func _make_nitrogen() -> SphFluidSolver:
 	solver.collision_damping = spec.collision_damping
 	solver.foam_enabled = true
 	solver.foam_tex_width = 64
-	solver.foam_spawn_rate = 4.0
+	solver.foam_spawn_rate = 3.0
 	solver.foam_spawn_fade_time = 0.0
-	solver.foam_life_min = 1.5
-	solver.foam_life_max = 4.0
+	solver.foam_life_min = 2.0
+	solver.foam_life_max = 5.0
 	solver.foam_dissolve_time = 1.5
 	solver.config = FluidConfig.new()
 	solver.config.default_particle_count = COUNT

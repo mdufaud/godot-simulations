@@ -59,22 +59,32 @@ func _run() -> void:
 	_check(absf(drift - 0.5) < 0.001, "Paste froze uniform bulk translation: %.4f" % drift)
 	await _free_solver(drifting)
 
-	print("LIGHT PASTE heights=%s soft=%.4f hard=%.4f fall=%.4f drift=%.4f" % [
-		heights, soft, hard, fall, drift])
+	var honey_heights: Array[float] = []
+	for threshold in [0.0, FluidMaterial.for_kind(FluidSystem.FluidKind.HONEY).yield_stress]:
+		var honey := await _make_solver(threshold, 0.06, true, FluidSystem.FluidKind.HONEY)
+		await _step(honey, 180)
+		honey_heights.append(_height((await _read_state(honey)).positions))
+		await _free_solver(honey)
+	_check(honey_heights[1] > honey_heights[0] + 0.1, "The yield plug did not thicken honey: %s" % [honey_heights])
+
+	print("LIGHT PASTE heights=%s soft=%.4f hard=%.4f fall=%.4f drift=%.4f honey=%s" % [
+		heights, soft, hard, fall, drift, honey_heights])
 	_finish("light_paste")
 
 
-func _make_solver(threshold: float, base: float, falling: bool) -> SphFluidSolver:
-	var spec := FluidMaterial.for_kind(FluidSystem.FluidKind.LIGHT_PASTE)
+func _make_solver(threshold: float, base: float, falling: bool,
+		kind := FluidSystem.FluidKind.LIGHT_PASTE) -> SphFluidSolver:
+	var spec := FluidMaterial.for_kind(kind)
 	var solver := SphFluidSolver.new()
 	solver.particle_count = COUNT
 	solver.active_count = COUNT
-	solver.material = FluidSystem.FluidKind.LIGHT_PASTE
+	solver.material = kind
 	solver.gravity = Vector3(0.0, -9.8, 0.0) if falling else Vector3.ZERO
 	solver.foam_enabled = false
 	solver.viscosity_strength = spec.viscosity
 	solver.cohesion_strength = spec.cohesion
 	solver.collision_damping = spec.collision_damping
+	solver.extension_strength = spec.extension_strength
 	solver.yield_stress = threshold
 	solver.config = FluidConfig.new()
 	solver.config.default_particle_count = COUNT

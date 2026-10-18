@@ -8,6 +8,20 @@ const float LAVA_STICK_SPEED = 0.15;
 // the particle's viscosity squared, so thick lava creeps while runny lava keeps
 // sliding.
 const float LAVA_BED_RATE = 20.0;
+// Bingham plug, for any material with a yield (scene.fluid_rheology.x, m/s^2).
+// A particle resting on a collider, or touching plugged fluid that already
+// stopped, is supported: its velocity loses up to the yield deceleration every
+// sub-step, so anything pushed softer than the yield stops dead and in turn
+// supports what lies on it. Piles keep their relief; shoves harder than the
+// yield flow. Unsupported fluid falls freely. positions.w carries PLUG_ANCHORED
+// on top of the material's own attribute while the particle is stuck.
+const float PLUG_ANCHORED = 2.0;
+// Light Paste glows where it flows; the glow fades in and out over this time.
+const float PASTE_GLOW_RESPONSE = 0.25;
+
+vec3 plug_yield(vec3 v, float yield_decel) {
+	return v * max(0.0, 1.0 - yield_decel * params.sim.x / max(length(v), 1e-6));
+}
 
 void main() {
 	uint i = gl_GlobalInvocationID.x;
@@ -15,16 +29,10 @@ void main() {
 		return;
 	}
 	vec3 pos = predicted.data[i].xyz;
-	#ifdef LIGHT_PASTE
-	float stress = mod(positions.data[i].w, PASTE_ANCHORED);
-	bool supported;
-	vec3 v = paste_viscosity(i, pos, supported);
-	if (supported) {
-		v = paste_yield(v);
-	}
-	float freeze = 0.0;
-	float viscosity = params.sim2.x;
-	#else
+	float yield_decel = scene.fluid_rheology.x;
+	float carried = positions.data[i].w;
+	bool supported = carried >= PLUG_ANCHORED;
+	carried -= supported ? PLUG_ANCHORED : 0.0;
 	vec3 v_live = velocities.data[i].xyz;
 	vec3 vi_snap = velocities_snap.data[i].xyz;
 	vec3 visc = vec3(0.0);
@@ -42,12 +50,13 @@ void main() {
 			continue;
 		}
 		neighbours++;
+		supported = supported || (yield_decel > 0.0 && positions.data[j].w >= PLUG_ANCHORED);
 		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
 		float weight = 1.0;
 		if (params.material == MATERIAL_HONEY) {
 			float shear = length(relative) / params.kernel.x;
 			weight = 0.25 + 0.75 / (1.0 + 0.15 * shear);
-		} else if (params.material == MATERIAL_OIL && abs(positions.data[i].w - positions.data[j].w) > 0.5) {
+		} else if (params.material == MATERIAL_OIL && abs(carried - positions.data[j].w) > 0.5) {
 			weight = 0.1;
 		}
 		float kernel_weight = sph_poly6(r2) * weight;
@@ -58,7 +67,7 @@ void main() {
 		}
 	)
 	float viscosity = params.sim2.x;
-	float stress = positions.data[i].w;
+	float stress = carried;
 	if (params.material == MATERIAL_ASTRAL) {
 		float target_stress = smoothstep(2.0, 12.0, strain_sum / max(weight_sum, 1e-6));
 		float response_time = target_stress > stress ? 0.06 : 0.9;
@@ -75,24 +84,24 @@ void main() {
 	// A lone cold droplet has no support: it keeps falling instead of freezing
 	// in mid-air.
 	float crust = 0.0;
-	if (params.material == MATERIAL_OIL && positions.data[i].w > 0.5) {
+	if (params.material == MATERIAL_OIL && carried > 0.5) {
 		viscosity *= 2.0;
 	} else if (is_lava()) {
-		float heat = clamp(positions.data[i].w, 0.0, 1.0);
+		float heat = clamp(carried, 0.0, 1.0);
 		viscosity *= mix(8.0, 1.5, heat);
 		float freeze_heat = scene.fluid_material.w;
 		freeze = freeze_heat > 0.0 ? 1.0 - smoothstep(0.0, freeze_heat, heat) : 0.0;
 		crust = freeze * smoothstep(2.0, 8.0, float(neighbours));
 	}
 	vec3 v;
-	if (params.material == MATERIAL_HONEY || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_SPECTRAL_GEL || params.material == MATERIAL_PRISMATIC_SLIME) {
-		float rate = params.material == MATERIAL_HONEY ? 150.0 : params.material == MATERIAL_ASTRAL ? 100.0 : is_lava() ? 200.0 : params.material == MATERIAL_PRISMATIC_SLIME ? 35.0 : 20.0;
+	if (params.material == MATERIAL_HONEY || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_SPECTRAL_GEL || params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
+		float rate = params.material == MATERIAL_HONEY ? 150.0 : params.material == MATERIAL_ASTRAL ? 100.0 : is_lava() ? 200.0 : params.material == MATERIAL_PRISMATIC_SLIME ? 35.0 : params.material == MATERIAL_LIGHT_PASTE ? 40.0 : 20.0;
 		vec3 target = vi_snap + visc / max(weight_sum, 1e-6);
 		float blend = 1.0 - exp(-rate * viscosity * params.sim.x);
 		if (is_lava()) {
 			blend = mix(blend, max(blend, 1.0 - exp(-LAVA_CRUST_RATE * params.sim.x)), crust);
 			v = v_live + blend * (target - vi_snap);
-		} else if (params.material == MATERIAL_PRISMATIC_SLIME) {
+		} else if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
 			v = v_live + blend * (target - vi_snap);
 		} else {
 			v = mix(v_live, target, blend);
@@ -111,7 +120,9 @@ void main() {
 		v.xz *= exp(-3.0 * viscosity * contact * params.sim.x);
 	}
 	v *= 1.0 - crust * (1.0 - smoothstep(0.5 * LAVA_STICK_SPEED, LAVA_STICK_SPEED, length(v)));
-	#endif
+	if (yield_decel > 0.0 && supported) {
+		v = plug_yield(v, yield_decel);
+	}
 	vec3 p = positions.data[i].xyz + v * params.sim.x;
 	vec3 p_free = p;
 	vec3 before_collision = v;
@@ -151,20 +162,20 @@ void main() {
 	if (nitrogen_contact) {
 		uint rng = pcg_hash(i * 9781u + uint(params.misc.w) * 6271u);
 		v += vec3(rand01(rng) - 0.5, rand01(rng) * 0.5, rand01(rng) - 0.5)
-			* NITROGEN_SKITTER * positions.data[i].w * params.sim.x;
+			* NITROGEN_SKITTER * carried * params.sim.x;
 	}
-	#ifdef LIGHT_PASTE
-	if (p != p_free) {
-		v = paste_yield(v);
+	bool anchored = false;
+	if (yield_decel > 0.0) {
+		if (p != p_free) {
+			v = plug_yield(v, yield_decel);
+		}
+		anchored = (supported || p != p_free) && dot(v, v) == 0.0;
 	}
-	bool anchored = (supported || p != p_free) && dot(v, v) == 0.0;
-	stress = mix(anchored ? 0.0 : 1.0, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
-	#endif
-	float temp = positions.data[i].w;
-	#ifdef LIGHT_PASTE
-	temp = stress + (anchored ? PASTE_ANCHORED : 0.0);
-	#endif
-	if (params.material == MATERIAL_PRISMATIC_SLIME) {
+	if (params.material == MATERIAL_LIGHT_PASTE) {
+		stress = mix(anchored ? 0.0 : 1.0, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
+	}
+	float temp = carried;
+	if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
 		temp = stress;
 	}
 	if (params.material == MATERIAL_ASTRAL) {
@@ -178,16 +189,12 @@ void main() {
 	if (params.material == MATERIAL_LIQUID_NITROGEN) {
 		temp = nitrogen_boil ? 1.0 : max(temp - params.sim.x * NITROGEN_COOL_RATE, 0.0);
 	}
-	positions.data[i] = vec4(p, temp);
+	positions.data[i] = vec4(p, temp + (anchored ? PLUG_ANCHORED : 0.0));
 	velocities.data[i] = vec4(v, velocities.data[i].w);
 	if (params.misc.z == 1) {
 		uint w = uint(params.misc.x);
 		ivec2 texel = ivec2(int(i % w), int(i / w));
-		#ifdef LIGHT_PASTE
-		float attrib = stress;
-		#else
-		float attrib = params.material == MATERIAL_OIL || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_PRISMATIC_SLIME ? temp : length(v);
-		#endif
+		float attrib = params.material == MATERIAL_OIL || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE ? temp : length(v);
 		imageStore(position_tex, texel, vec4(p, attrib));
 	}
 }

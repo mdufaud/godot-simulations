@@ -146,12 +146,11 @@ func set_flow(value: float) -> void:
 	sph_solver.emitter_velocity = Vector3(0.0, -_launch_speed(), 0.0)
 
 
-## Paste is extruded: the nozzle speed follows the volume flux, so the rope
-## leaves at rest density instead of as a dotted line of half-filled layers.
+## A slow flux (thick liquids, low particle tiers) is extruded rather than
+## sprayed: the nozzle slows down to the speed the volume flux allows, so the
+## rope leaves at rest density instead of as a dotted line of half-filled layers.
 func _launch_speed() -> float:
 	var speed := 6.0 if scenario == Scenario.BASIN else 2.0
-	if mode != FluidKind.LIGHT_PASTE:
-		return speed
 	var per_second := float(sph_solver.particle_count) * flow_rate / sph_solver.emission_cycle_seconds
 	return minf(speed, per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width))
 
@@ -528,11 +527,11 @@ func _configure_solver() -> void:
 	if mode == FluidKind.LIQUID_NITROGEN:
 		# The white particles are boiling: heated particles shed bubbles that
 		# rise, burst and drift off as short-lived cold fog.
-		sph_solver.foam_spawn_rate = 4.0
+		sph_solver.foam_spawn_rate = 3.0
 		sph_solver.foam_spawn_fade_start = 0.0
 		sph_solver.foam_spawn_fade_time = 0.0
-		sph_solver.foam_life_min = 1.5
-		sph_solver.foam_life_max = 4.0
+		sph_solver.foam_life_min = 2.0
+		sph_solver.foam_life_max = 5.0
 		sph_solver.foam_dissolve_time = 1.5
 	sph_solver.extension_strength = spec.extension_strength
 	sph_solver.viscosity_strength = spec.viscosity

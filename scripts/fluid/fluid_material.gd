@@ -11,6 +11,7 @@ var cohesion := 0.0
 var collision_damping := 0.15
 ## Honey-only stretch term, applied in the pressure pass (0 = no kernel work).
 var extension_strength := 0.0
+## Bingham plug: yield deceleration (m/s^2) of supported fluid; 0 = flows freely.
 var yield_stress := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
@@ -63,6 +64,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 9000.0
 			spec.collision_damping = 0.02
 			spec.extension_strength = 24.0
+			spec.yield_stress = 6.0
 			spec.radius = 0.24
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.WATER_OIL:
@@ -84,6 +86,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.PRISMATIC_SLIME:
 			spec.viscosity = 2.6
+			spec.yield_stress = 12.0
 			spec.cohesion = 1800.0
 			spec.collision_damping = 0.06
 			spec.radius = 0.22

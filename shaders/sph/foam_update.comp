@@ -53,7 +53,10 @@ void main() {
 	// Nitrogen bubbles burst at the surface: whatever is not submerged is vapour.
 	bool vapour = params.material == MATERIAL_LIQUID_NITROGEN && !is_bubble;
 	if (vapour) {
-		v = (v - g * NITROGEN_FOG_LIFT * dt) * exp(-NITROGEN_FOG_DRAG * dt);
+		// Fresh vapour billows up; once it has cooled it is heavier than air and
+		// sinks, rolling along the floor and over edges.
+		float buoyancy = mix(-NITROGEN_FOG_SINK, NITROGEN_FOG_LIFT, smoothstep(NITROGEN_FOG_COOLED, NITROGEN_FOG_FRESH, life));
+		v = (v - g * buoyancy * dt) * exp(-NITROGEN_FOG_DRAG * dt);
 		life -= dt * foam.aging.x;
 	} else if (is_spray) {
 		float sp2 = dot(v, v);

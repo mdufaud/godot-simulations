@@ -11,7 +11,11 @@ shader_type spatial;
 // instead of the nearest sprite winning.
 #ifdef FOG
 render_mode unshaded, cull_disabled, blend_add, depth_draw_never;
-const float FOG_DENSITY = 0.06;
+const float FOG_DENSITY = 0.035;
+// Puffs keep one world size and fade in and out with the particle's swell
+// (NITROGEN_FOG_SCALE when fully grown), so the cloud never reads as dots.
+const float FOG_SPRITE = 0.7;
+const float FOG_FULL_SWELL = 8.0;
 #else
 render_mode unshaded, cull_disabled;
 #endif
@@ -26,6 +30,7 @@ uniform float billboard_size = 0.05;
 
 varying vec3 center_view;
 varying float sprite_size;
+varying float sprite_alpha;
 
 void vertex() {
 	ivec2 texel = ivec2(int(INSTANCE_ID) % foam_tex_width, int(INSTANCE_ID) / foam_tex_width);
@@ -33,6 +38,11 @@ void vertex() {
 	// Size already folds in age dissolve, per-particle scale and speed; 0 means
 	// dead and collapses the quad.
 	sprite_size = fd.w > 0.001 ? fd.w * billboard_size : 0.0;
+	sprite_alpha = 1.0;
+	#ifdef FOG
+	sprite_alpha = clamp(fd.w / FOG_FULL_SWELL, 0.0, 1.0);
+	sprite_size = fd.w > 0.001 ? FOG_SPRITE : 0.0;
+	#endif
 	center_view = (VIEW_MATRIX * vec4(fd.xyz, 1.0)).xyz;
 	vec3 view_pos = center_view;
 	view_pos.xy += VERTEX.xy * sprite_size;
@@ -52,7 +62,7 @@ void fragment() {
 	// soft rim over a sparse field overwrites neighbours' interiors and reads
 	// as dotted grain instead of a merged froth sheet.
 	#ifdef FOG
-	float coverage = FOG_DENSITY * (1.0 - r * r) * (1.0 - r * r);
+	float coverage = FOG_DENSITY * sprite_alpha * (1.0 - r * r) * (1.0 - r * r);
 	#else
 	float coverage = smoothstep(1.0, 0.78, r);
 	#endif

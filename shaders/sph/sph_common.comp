@@ -139,20 +139,25 @@ const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
 const int MATERIAL_PRISMATIC_SLIME = 8;
+const int MATERIAL_LIGHT_PASTE = 9;
 const int MATERIAL_LIQUID_NITROGEN = 10;
 
 // Liquid nitrogen boils where it strikes a surface: an impact faster than
 // BOIL_IMPACT (m/s) heats a particle to 1 (positions.w), which cools at COOL_RATE
 // per second and sheds vapour while hot. A hot particle in contact skitters on a
 // Leidenfrost vapour film (m/s^2). Liquid at rest only steams from its surface.
-// Vapour drifts up against a heavy drag (FOG_LIFT is a fraction of gravity) and
-// swells into soft fog as it fades.
-const float NITROGEN_BOIL_IMPACT = 0.3;
+// Vapour swells into soft fog against a heavy drag: it rises (FOG_LIFT, a
+// fraction of gravity) while more than FOG_FRESH seconds of life remain, then
+// sinks (FOG_SINK) once fewer than FOG_COOLED do.
+const float NITROGEN_BOIL_IMPACT = 1.0;
 const float NITROGEN_COOL_RATE = 1.5;
 const float NITROGEN_SURFACE_BOIL = 0.02;
 const float NITROGEN_SKITTER = 25.0;
 const float NITROGEN_PUFF_SPEED = 0.7;
 const float NITROGEN_FOG_LIFT = 0.12;
+const float NITROGEN_FOG_SINK = 0.06;
+const float NITROGEN_FOG_FRESH = 3.0;
+const float NITROGEN_FOG_COOLED = 1.5;
 const float NITROGEN_FOG_DRAG = 1.6;
 const float NITROGEN_FOG_SCALE = 8.0;
 
@@ -176,6 +181,7 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 	vec4 domain_min;
 	vec4 domain_max;
+	vec4 fluid_rheology; // x = yield deceleration in m/s^2 (0 = flows freely), yzw = pad
 }
 scene;
 

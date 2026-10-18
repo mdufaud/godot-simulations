@@ -102,7 +102,7 @@ func _setup_ui() -> void:
 	]
 	yield_group = menu.add_group()
 	_parameter_pairs.append([menu.add_slider("Yield threshold", 0.0, 160.0,
-		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 1.0), fluid.get_sph_yield_stress])
+		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 0.5), fluid.get_sph_yield_stress])
 	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Performance")
@@ -172,7 +172,7 @@ func _sync_scene_ui() -> void:
 	scene_option.select(scene)
 	material_option.select(int(fluid.mode))
 	flow_group.visible = scene != FluidSystem.Scenario.POOL
-	yield_group.visible = fluid.mode == FluidSystem.FluidKind.LIGHT_PASTE
+	yield_group.visible = FluidMaterial.for_kind(fluid.mode).yield_stress > 0.0
 	if flow_slider != null:
 		var honey_cascade := scene == FluidSystem.Scenario.CASCADE and \
 			fluid.mode == FluidSystem.FluidKind.HONEY

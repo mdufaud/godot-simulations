@@ -42,6 +42,7 @@ const int MATERIAL_PRISMATIC_SLIME = 8;
 const int MATERIAL_LIQUID_NITROGEN = 10;
 // Nitrogen's white particles are cold fog, not sea froth.
 const vec3 NITROGEN_FOG = vec3(0.86, 0.91, 0.96);
+const float NITROGEN_FOG_MAX = 0.65;
 uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
@@ -129,8 +130,9 @@ void fragment() {
 	}
 	float foam = fm.r;
 	float foam_d = fm.g / max(foam, 1e-5);
-	// Additive fog sprites can stack past full coverage.
-	foam = min(foam, 1.0);
+	// Additive fog sprites can stack past full coverage; even a tank full of
+	// nitrogen fog lets the liquid show through.
+	foam = min(foam, mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG_MAX : 1.0);
 	vec3 froth = mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG : foam_color;
 	// Foam behind opaque scene geometry is hidden by it.
 	if (foam_d > scene_d) {
@@ -297,11 +299,21 @@ void fragment() {
 			vec3 local_tint = mode == MATERIAL_HONEY ? vec3(0.28, 0.085, 0.004) :
 				mode == MATERIAL_OIL ? mix(tint_color, vec3(0.16, 0.05, 0.006), oil_front) :
 				nitrogen ? vec3(0.1, 0.32, 0.5) : tint_color;
+			if (nitrogen) {
+				// Boiling keeps the surface shivering with fine ripples.
+				vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+				vec2 q = world.xz * 6.0 + TIME * vec2(2.1, -1.7);
+				vec2 slope = vec2(astral_noise(q + vec2(0.1, 0.0)) - astral_noise(q - vec2(0.1, 0.0)),
+					astral_noise(q + vec2(0.0, 0.1)) - astral_noise(q - vec2(0.0, 0.1))) * 5.0;
+				n = normalize(n + (VIEW_MATRIX * vec4(slope.x, 0.0, slope.y, 0.0)).xyz * 0.12);
+			}
 			float reflectance = dielectric_reflectance(in_view, n, 1.0, local_ior);
 			if (mode == MATERIAL_HONEY) {
 				reflectance = max(reflectance, 0.18);
 			} else if (mode == MATERIAL_OIL) {
 				reflectance = max(reflectance, 0.08 * oil_front);
+			} else if (nitrogen) {
+				reflectance = max(reflectance, 0.05);
 			}
 			// Foam is matte froth, not glass: fade the surface specular out as
 			// front coverage rises so the water does not glint through the
