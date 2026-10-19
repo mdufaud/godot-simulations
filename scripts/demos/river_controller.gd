@@ -13,6 +13,7 @@ const STEEP_GUIDANCE_HZ := Vector2(1.0, 5.0)
 const STEEP_WINDOW_M := Vector2(16.0, 24.0)
 const STEEP_RANGE_M := 24.0
 const STEEP_EDGE_FADE_M := 2.0
+const FIELD_CACHE_SIZE := 6
 const STEEP_VIEWS := {
 	"default": Vector3(20.0, -50.0, 20.0), "near": Vector3(10.0, -30.0, 20.0), "top": Vector3(34.0, -88.0, 0.0),
 	"far": Vector3(48.0, -50.0, 20.0), "low": Vector3(12.0, -14.0, 215.0), "low_down": Vector3(14.0, -24.0, 35.0),
@@ -47,6 +48,7 @@ var _scenery := Scenery.new()
 var _menu_builder := MenuBuilder.new()
 var interactions := Interactions.new()
 var _profile := false
+var _fields: Dictionary = {}
 var _previous_fps_limit := 60
 var _frames := 0
 var _sample_count := 0
@@ -65,6 +67,7 @@ func _ready() -> void:
 	camera.cull_mask |= 4
 	set_capture_view("default")
 	_scenery.build(self)
+	_fields[[0]] = _scenery.field
 	LoadingPump.stage("Loading water textures")
 	config = PRESETS[1].duplicate() as RiverConfig
 	river.config = config
@@ -152,8 +155,7 @@ func _build_scene(index: int) -> void:
 	river.stop()
 	_scenery.clear()
 	scene_index = index
-	var selected: RiverField = RiverLandscape.new() if index == 0 else (TorrentLandscape.new(CHANNEL_GRADES[channel_grade_index],
-		CHANNEL_HEADINGS[channel_heading_index], Vector2(56.0, 56.0)) if index == STEEP_SCENE else WaterfallLandscape.new(waterfall_angles[index]))
+	var selected := _field_for(index)
 	_scenery.build(self, selected)
 	river.field = selected
 	river.swe_window_m = STEEP_WINDOW_M if index == STEEP_SCENE and steep_window else Vector2.ZERO
@@ -176,6 +178,21 @@ func _build_scene(index: int) -> void:
 	_menu_builder.sync_scene(index, waterfall_angles)
 	_menu_builder.sync_flow(river.swe)
 	set_capture_view("default")
+
+
+func _field_for(index: int) -> RiverField:
+	var key := [index] if index == 0 else ([index, channel_grade_index, channel_heading_index] if index == STEEP_SCENE else [index, waterfall_angles[index]])
+	var selected: RiverField = _fields.get(key)
+	if selected == null:
+		selected = RiverLandscape.new() if index == 0 else (TorrentLandscape.new(CHANNEL_GRADES[channel_grade_index],
+			CHANNEL_HEADINGS[channel_heading_index], Vector2(56.0, 56.0)) if index == STEEP_SCENE else WaterfallLandscape.new(waterfall_angles[index]))
+	_fields.erase(key)
+	_fields[key] = selected
+	if _fields.size() > FIELD_CACHE_SIZE:
+		var oldest: Array = _fields.keys()[0]
+		_scenery.ground_cache.erase(_fields[oldest])
+		_fields.erase(oldest)
+	return selected
 
 
 func set_channel_grade(index: int) -> void:

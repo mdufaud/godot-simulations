@@ -17,6 +17,8 @@ var has_water := true
 var ground_height_image: Image
 var ground_rows_m := PackedFloat32Array()
 var waterfall: RiverWaterfallConfig
+var _baked_key: Array = []
+var _baked: Array = []
 
 
 func sample_bed(point: Vector2) -> float:
@@ -107,6 +109,11 @@ func bake(level_m: float, size: Vector2i = Vector2i(384, 512), loading_stage := 
 		bed_texture = ImageTexture.create_from_image(bed_image)
 		has_water = flow_image.get_used_rect().has_area()
 		return ImageTexture.create_from_image(flow_image)
+	var key := [level_m, size, origin_m, solver_terrain_image]
+	if key == _baked_key:
+		bed_texture = _baked[0]
+		has_water = _baked[1]
+		return _baked[2]
 	var rows := []
 	rows.resize(size.y)
 	var task := WorkerThreadPool.add_group_task(func(y: int) -> void:
@@ -143,7 +150,9 @@ func bake(level_m: float, size: Vector2i = Vector2i(384, 512), loading_stage := 
 	bed_texture = ImageTexture.create_from_image(Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBF, bed_data.to_byte_array()))
 	var flow := Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, flow_data.to_byte_array())
 	has_water = flow.get_used_rect().has_area()
-	return ImageTexture.create_from_image(flow)
+	_baked_key = key
+	_baked = [bed_texture, has_water, ImageTexture.create_from_image(flow)]
+	return _baked[2]
 
 
 static func wait_for_group(task: int, loading_stage: Callable) -> void:

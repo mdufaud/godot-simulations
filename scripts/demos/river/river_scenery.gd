@@ -23,6 +23,7 @@ var grass_distance_m := 38.0
 var grass_detail := false
 var grass_shadows := false
 var water_detail := 0.0
+var ground_cache: Dictionary = {}
 var _grass_tiles: Array[MultiMeshInstance3D] = []
 var _grass_meshes: Array[ArrayMesh] = []
 var _host: Node3D
@@ -135,14 +136,23 @@ func _build_ground() -> void:
 	material.set_shader_parameter("water_normal", load("res://resources/ocean/micro_normal.png"))
 	material.set_shader_parameter("water_detail", water_detail)
 	materials.append(material)
-	LoadingPump.stage("Computing terrain mesh")
+	var ground: Array = ground_cache.get(field, [])
+	if ground.is_empty():
+		LoadingPump.stage("Computing terrain mesh")
+		var built := _ground_mesh()
+		LoadingPump.stage("Building terrain collision")
+		ground = [built, built.create_trimesh_shape()]
+		ground_cache[field] = ground
 	var mesh := MeshInstance3D.new()
 	mesh.name = "RiverBanks"
-	mesh.mesh = _ground_mesh()
+	mesh.mesh = ground[0]
 	mesh.material_override = material
 	_host.add_child(mesh)
-	LoadingPump.stage("Building terrain collision")
-	mesh.create_trimesh_collision()
+	var body := StaticBody3D.new()
+	var shape := CollisionShape3D.new()
+	shape.shape = ground[1]
+	mesh.add_child(body)
+	body.add_child(shape)
 
 
 func _ground_mesh() -> ArrayMesh:
@@ -167,7 +177,6 @@ func _ground_mesh() -> ArrayMesh:
 				field.ground_rows_m.append(z)
 		rows = field.ground_rows_m.duplicate()
 		size.y = rows.size()
-		field.ground_height_image = Image.create(size.x, size.y, false, Image.FORMAT_RGBAF)
 	var columns := PackedFloat32Array()
 	for x in size.x:
 		columns.append(-field.domain_m.x * 0.5 + float(x) / float(size.x - 1) * field.domain_m.x)
@@ -176,13 +185,15 @@ func _ground_mesh() -> ArrayMesh:
 	var count := Vector2i(columns.size(), rows.size())
 	var inner := (count - size) / 2
 	var cell_size := field.domain_m / Vector2(size - Vector2i.ONE)
-	var vertices := PackedVector3Array()
-	var normals := PackedVector3Array()
-	var uvs := PackedVector2Array()
-	var tangents := PackedFloat32Array()
-	var indices := PackedInt32Array()
-	for z in count.y:
-		LoadingPump.tick()
+	var height_image := field.waterfall != null
+	var vertex_rows := []
+	vertex_rows.resize(count.y)
+	var vertex_task := WorkerThreadPool.add_group_task(func(z: int) -> void:
+		var row_vertices := PackedVector3Array()
+		var row_normals := PackedVector3Array()
+		var row_uvs := PackedVector2Array()
+		var row_tangents := PackedFloat32Array()
+		var row_heights := PackedFloat32Array()
 		for x in count.x:
 			var point := Vector2(columns[x], rows[z])
 			var dx := (_terrain(point + Vector2(0.05, 0.0)) - _terrain(point - Vector2(0.05, 0.0))) / 0.1
@@ -192,23 +203,46 @@ func _ground_mesh() -> ArrayMesh:
 					and absf(point.y - field.waterfall.crest_z_m) < 0.4:
 				dz = 0.0
 			var height := _terrain(point)
-			vertices.append(Vector3(point.x, height, point.y))
+			row_vertices.append(Vector3(point.x, height, point.y))
 			var image_cell := Vector2i(x, z) - inner
-			if field.ground_height_image != null and image_cell.x >= 0 and image_cell.y >= 0 and image_cell.x < size.x and image_cell.y < size.y:
-				field.ground_height_image.set_pixel(image_cell.x, image_cell.y, Color(height, point.y, 0.0, 1.0))
-			normals.append(Vector3(-dx, 1.0, -dz).normalized())
-			uvs.append(point)
+			if height_image and image_cell.x >= 0 and image_cell.y >= 0 and image_cell.x < size.x and image_cell.y < size.y:
+				row_heights.append_array(PackedFloat32Array([height, point.y, 0.0, 1.0]))
+			row_normals.append(Vector3(-dx, 1.0, -dz).normalized())
+			row_uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
-			tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
-	for z in count.y - 1:
+			row_tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
+		vertex_rows[z] = [row_vertices, row_normals, row_uvs, row_tangents, row_heights], count.y)
+	LoadingPump.wait_for_group(vertex_task)
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var tangents := PackedFloat32Array()
+	var heights := PackedFloat32Array()
+	for row: Array in vertex_rows:
+		vertices.append_array(row[0])
+		normals.append_array(row[1])
+		uvs.append_array(row[2])
+		tangents.append_array(row[3])
+		heights.append_array(row[4])
+	if height_image:
+		field.ground_height_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, heights.to_byte_array())
+	var index_rows := []
+	index_rows.resize(count.y - 1)
+	var index_task := WorkerThreadPool.add_group_task(func(z: int) -> void:
+		var row := PackedInt32Array()
 		for x in count.x - 1:
 			if _inside_cliff_gap(Vector2(columns[x] + columns[x + 1], rows[z] + rows[z + 1]) * 0.5):
 				continue
 			var i := z * count.x + x
 			if torrent and absf(vertices[i].y - vertices[i + count.x + 1].y) < absf(vertices[i + 1].y - vertices[i + count.x].y):
-				indices.append_array(PackedInt32Array([i, i + 1, i + count.x + 1, i, i + count.x + 1, i + count.x]))
+				row.append_array(PackedInt32Array([i, i + 1, i + count.x + 1, i, i + count.x + 1, i + count.x]))
 			else:
-				indices.append_array(PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x]))
+				row.append_array(PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x]))
+		index_rows[z] = row, count.y - 1)
+	LoadingPump.wait_for_group(index_task)
+	var indices := PackedInt32Array()
+	for row: PackedInt32Array in index_rows:
+		indices.append_array(row)
 	if field.waterfall != null and field.waterfall.is_vertical():
 		var crest := field.waterfall.crest_z_m
 		for side: float in [-1.0, 1.0]:
