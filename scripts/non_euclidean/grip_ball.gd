@@ -1,8 +1,8 @@
 class_name GripBall extends PortalRigidBody3D
 ## A portal rigid body that can be held: the grab controller freezes it
 ## kinematically, slides it along the view ray and commits a new size at the
-## discrete events only (grab, contact, release) — never per frame on a free
-## body, which would loop collisions.
+## release only — never per frame on a free body, which would loop collisions.
+## Its collision is off while held, so the hand never shoves the world.
 ##
 ## Size changes go through [method commit_scale], the single door that keeps
 ## mesh, collision sphere and mass consistent. The portal preview mesh does not
@@ -44,6 +44,7 @@ func display_radius() -> float:
 
 
 func begin_hold() -> void:
+	_collision.disabled = true
 	freeze = true
 	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
 	linear_velocity = Vector3.ZERO
@@ -53,15 +54,11 @@ func begin_hold() -> void:
 ## Hands the body back to physics with explicitly zeroed velocities, so the
 ## drop is calm regardless of physics-server sync timing.
 func end_hold() -> void:
+	_collision.disabled = false
 	freeze = false
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
 	sleeping = false
-
-
-## Kinematic hold: direct positioning is allowed, the lerp smooths the slide.
-func hold_to(target: Vector3) -> void:
-	global_position = global_position.lerp(target, 0.55)
 
 
 ## Exact kinematic placement — the size resolution must not lerp.

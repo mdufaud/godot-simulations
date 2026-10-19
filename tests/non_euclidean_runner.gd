@@ -318,9 +318,6 @@ func _test_grip_room(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	var camera := player.get_camera()
 	var exclude: Array[RID] = [player.get_rid()]
 	var ball_position := room.to_global(Vector3(-2.6, 0.35, 3.0))
-	# Grab the near ball from ~1 m and keep it held: re-aim level in the same
-	# tick, before the controller's next probe, so the floor behind the ball
-	# cannot count as a contact.
 	_place_aiming(player, ball_position + Vector3(0.0, 1.3, 0.75),
 		ball_position + Vector3(0.0, 0.1, 0.0))
 	await physics_frame
@@ -347,14 +344,14 @@ func _test_grip_room(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 		"mesh and collision radius diverged after the small put-down")
 	_check(small_radius < GripBall.RADIUS_MAX * 0.5,
 		"floor put-down did not keep the ball small")
-	# Grab again and put it down against the far wall through the opening:
-	# the size resolves at the wall's distance and clamps to the giant bound.
+	# Grab again and aim from the back of the room down a clear lane at the far
+	# wall: the projection clamps to the giant bound before reaching it.
 	_place_aiming(player, ball.global_position + Vector3(0.0, 1.3, 0.75),
 		ball.global_position)
 	await physics_frame
 	_check(grab.try_grab(camera, 1, exclude), "ball not grabbed again for the wall test")
-	_place_aiming(player, room.to_global(Vector3(0.0, 1.65, -0.5)),
-		room.to_global(Vector3(0.0, 1.65, -12.0)))
+	_place_aiming(player, room.to_global(Vector3(-2.0, 1.65, 7.0)),
+		room.to_global(Vector3(-2.4, 3.2, -8.0)))
 	await physics_frame
 	_check(grab.held_body == ball, "held ball resolved before the wall put-down")
 	grab.release()
