@@ -15,6 +15,7 @@ resources/*
 !resources/fire/**
 !resources/materials/
 !resources/materials/**
+resources/materials/*/
 !resources/parallax/
 !resources/parallax/**
 !resources/terrain/
