@@ -1,8 +1,9 @@
-class_name FireGameScenery extends Node3D
-## Static props for the wildfire demo: ground, torches, log piles, rocks and
-## the hero campfire's stone ring. The controller places soot from the cell
-## grid's signals; nothing here knows about the grid itself beyond the shared
-## origin constants.
+class_name WildfireScenery extends Node3D
+## Static props for the wildfire demo, built from the Fire-X demo's assets:
+## scorched ground, torches, log piles, rocks and the campfire's stone ring.
+## The controller places soot and heats log piles from the cell grid's
+## signals; nothing here knows about the grid beyond the shared origin
+## constants.
 
 const GRID_SIZE := Vector2i(32, 32)
 const CELL_SIZE := 1.5
@@ -15,14 +16,43 @@ const TORCHES: Array[Vector3] = [Vector3(-8, 0, -6), Vector3(7, 0, -9), Vector3(
 const LOG_PILES: Array[Vector3] = [Vector3(-6, 0, 7), Vector3(9, 0, -3)]
 
 const SOOT_POOL := 256
+const PILE_RADIUS := 1.4
+## Seconds a freshly lit log pile takes to reach full red heat.
+const PILE_HEAT_UP_S := 8.0
+
+const EMBER_LOG_SHADER := preload("res://shaders/wildfire/ember_log.gdshader")
+const LOG_MESH := preload("res://resources/fire/fire_log.res")
+const BARK_MATERIAL := preload("res://resources/fire/fire_bark.tres")
+const STONE_MATERIAL := preload("res://resources/fire/fire_stone.tres")
+const GROUND_TEXTURE := preload("res://resources/fire/fire_scorched_ground.png")
+const ROCK_MESHES: Array[Mesh] = [
+	preload("res://resources/fire/fire_rock_0.res"),
+	preload("res://resources/fire/fire_rock_1.res"),
+	preload("res://resources/fire/fire_rock_2.res"),
+]
 
 var _soot: Array[Decal] = []
 var _soot_next := 0
+var _pulse: NoiseTexture2D
+## Per log pile: its [bark, endgrain] materials, current heat and target heat.
+var _pile_materials: Array[Array] = []
+var _pile_heat := PackedFloat32Array()
+var _pile_target := PackedFloat32Array()
 
 
 func _ready() -> void:
 	_build_ground()
 	_build_props()
+
+
+func _process(delta: float) -> void:
+	for index in _pile_heat.size():
+		if _pile_heat[index] == _pile_target[index]:
+			continue
+		_pile_heat[index] = move_toward(_pile_heat[index], _pile_target[index],
+			delta / PILE_HEAT_UP_S)
+		for material: ShaderMaterial in _pile_materials[index]:
+			material.set_shader_parameter("heat", _pile_heat[index])
 
 
 func place_soot(world_pos: Vector3) -> void:
@@ -41,17 +71,23 @@ func clear_soot() -> void:
 	_soot_next = 0
 
 
+## Starts heating the log pile under a burning wood cell.
+func ignite_pile_near(world_pos: Vector3) -> void:
+	for index in LOG_PILES.size():
+		if LOG_PILES[index].distance_to(world_pos) <= PILE_RADIUS + 0.5:
+			_pile_target[index] = 1.0
+
+
+func extinguish_piles() -> void:
+	_pile_target.fill(0.0)
+
+
 ## World zones that burn as wood (log piles), for the controller's material pass.
 func wood_zones() -> Array:
 	var zones: Array = []
 	for pos in LOG_PILES:
-		zones.append({"pos": pos, "radius": 1.4})
+		zones.append({"pos": pos, "radius": PILE_RADIUS})
 	return zones
-
-
-## World zones that cannot ignite at all (stone ring, rocks).
-func inert_zones() -> Array:
-	return [{"pos": HERO_POS, "radius": 2.3}]
 
 
 func _build_ground() -> void:
@@ -64,35 +100,29 @@ func _build_ground() -> void:
 	shape.position = Vector3(0, -0.2, 0)
 	body.add_child(shape)
 	add_child(body)
+	# The flamethrower stream's particles slide along this.
+	var particle_floor := GPUParticlesCollisionBox3D.new()
+	particle_floor.size = box.size
+	particle_floor.position = shape.position
+	add_child(particle_floor)
 	var ground := MeshInstance3D.new()
 	var mesh := PlaneMesh.new()
 	mesh.size = Vector2(GROUND_HALF * 2.0, GROUND_HALF * 2.0)
 	var material := StandardMaterial3D.new()
-	material.albedo_color = Color(0.10, 0.095, 0.07)
+	material.albedo_texture = GROUND_TEXTURE
 	material.roughness = 1.0
+	material.uv1_scale = Vector3(20.0, 20.0, 20.0)
 	ground.mesh = mesh
 	ground.material_override = material
 	add_child(ground)
 
 
 func _build_props() -> void:
-	var wood := StandardMaterial3D.new()
-	wood.albedo_color = Color(0.23, 0.15, 0.09)
-	wood.roughness = 0.95
-	var stone := StandardMaterial3D.new()
-	stone.albedo_color = Color(0.16, 0.16, 0.17)
-	stone.roughness = 0.9
-	var bark_texture := _log_texture()
-	var bark := StandardMaterial3D.new()
-	bark.albedo_texture = bark_texture
-	bark.roughness = 1.0
-	var ember_log := StandardMaterial3D.new()
-	ember_log.albedo_texture = bark_texture
-	ember_log.albedo_color = Color(0.42, 0.38, 0.35)
-	ember_log.roughness = 0.95
-	ember_log.emission_enabled = true
-	ember_log.emission = Color(0.75, 0.2, 0.04)
-	ember_log.emission_energy_multiplier = 0.15
+	var noise := FastNoiseLite.new()
+	noise.frequency = 0.01
+	_pulse = NoiseTexture2D.new()
+	_pulse.seamless = true
+	_pulse.noise = noise
 
 	for pos in TORCHES:
 		var pole := MeshInstance3D.new()
@@ -101,128 +131,100 @@ func _build_props() -> void:
 		pole_mesh.bottom_radius = 0.07
 		pole_mesh.height = 1.3
 		pole.mesh = pole_mesh
-		pole.material_override = wood
+		pole.material_override = BARK_MATERIAL
 		pole.position = pos + Vector3(0, 0.65, 0)
 		add_child(pole)
 
 	for pos in LOG_PILES:
+		var materials := _log_materials(pos, PILE_RADIUS, 0.0)
+		_pile_materials.append(materials)
+		_pile_heat.append(0.0)
+		_pile_target.append(0.0)
 		_add_log(pos + Vector3(-0.31, 0.17, 0.02), 1.15, 0.17,
-			Vector3(cos(0.1), 0, sin(0.1)), bark, 0.05)
+			Vector3(cos(0.1), 0, sin(0.1)), materials, 0.05)
 		_add_log(pos + Vector3(0.31, 0.16, -0.03), 1.05, 0.16,
-			Vector3(cos(-0.12), 0, sin(-0.12)), bark, -0.1)
+			Vector3(cos(-0.12), 0, sin(-0.12)), materials, -0.1)
 		_add_log(pos + Vector3(0.0, 0.17, -0.28), 1.1, 0.17,
-			Vector3(cos(0.04), 0, sin(0.04)), bark, 0.2)
+			Vector3(cos(0.04), 0, sin(0.04)), materials, 0.2)
 		_add_log(pos + Vector3(0.0, 0.26, 0.0), 1.2, 0.15,
-			Vector3(cos(0.5), 0, sin(0.5)), bark, -0.35)
+			Vector3(cos(0.5), 0, sin(0.5)), materials, -0.35)
 
-	_build_campfire_wood(ember_log)
+	_build_campfire_wood(_log_materials(HERO_POS, 0.95, 1.0))
 	_build_soot_pool()
 
 	for i in 6:
-		var rock := MeshInstance3D.new()
-		var rock_mesh := SphereMesh.new()
-		rock_mesh.radius = 0.5
-		rock_mesh.height = 0.7
-		rock.mesh = rock_mesh
-		rock.material_override = stone
-		rock.position = Vector3(-22 + float(i) * 7.3, 0.1, -14 + (float(i % 3)) * 13.0)
-		rock.scale = Vector3.ONE * (0.7 + 0.3 * float(i % 4))
-		add_child(rock)
-
-	var dirt := MeshInstance3D.new()
-	var dirt_mesh := CylinderMesh.new()
-	dirt_mesh.top_radius = 2.3
-	dirt_mesh.bottom_radius = 2.3
-	dirt_mesh.height = 0.04
-	dirt.mesh = dirt_mesh
-	var dirt_material := StandardMaterial3D.new()
-	dirt_material.albedo_color = Color(0.09, 0.075, 0.06)
-	dirt_material.roughness = 1.0
-	dirt.material_override = dirt_material
-	dirt.position = HERO_POS + Vector3(0, 0.015, 0)
-	add_child(dirt)
+		_add_rock(Vector3(-22 + float(i) * 7.3, 0.12, -14 + (float(i % 3)) * 13.0),
+			Vector3.ONE * (0.8 + 0.35 * float(i % 4)), float(i) * 1.3, i)
 
 	for k in 9:
 		var angle := TAU * float(k) / 9.0
-		var stone_node := MeshInstance3D.new()
-		var stone_mesh := SphereMesh.new()
-		stone_mesh.radius = 0.2
-		stone_mesh.height = 0.32
-		stone_node.mesh = stone_mesh
-		stone_node.material_override = stone
-		stone_node.position = HERO_POS + Vector3(cos(angle) * 1.15, 0.08,
-			sin(angle) * 1.15)
-		add_child(stone_node)
+		_add_rock(HERO_POS + Vector3(cos(angle) * 1.2, 0.06, sin(angle) * 1.2),
+			Vector3(0.42, 0.32, 0.36), angle, k)
 
 
-## Log lying along [param axis], [param center] is the log's midpoint. The
-## basis is built directly; the cylinder mesh's axis is its local Y.
+## [bark, endgrain] ember materials for one group of logs heated around
+## [param center].
+func _log_materials(center: Vector3, radius: float, heat: float) -> Array:
+	var materials := []
+	for surface in [["fire_bark.png", "fire_bark_ember.png"],
+			["fire_endgrain.png", "fire_endgrain_ember.png"]]:
+		var material := ShaderMaterial.new()
+		material.shader = EMBER_LOG_SHADER
+		material.set_shader_parameter("albedo_tex", load("res://resources/fire/" + surface[0]))
+		material.set_shader_parameter("ember_tex", load("res://resources/fire/" + surface[1]))
+		material.set_shader_parameter("pulse_tex", _pulse)
+		material.set_shader_parameter("heat_center", center)
+		material.set_shader_parameter("heat_radius_m", radius)
+		material.set_shader_parameter("heat", heat)
+		materials.append(material)
+	materials[0].set_shader_parameter("normal_tex",
+		load("res://resources/fire/fire_bark_normal.png"))
+	materials[0].set_shader_parameter("use_normal", true)
+	return materials
+
+
+## Fire-X log mesh (unit length along local Y, unit radius) lying along
+## [param axis]; [param center] is the log's midpoint.
 func _add_log(center: Vector3, length: float, radius: float, axis: Vector3,
-		material: StandardMaterial3D, roll := 0.0) -> void:
-	var log_mesh := CylinderMesh.new()
-	log_mesh.top_radius = radius
-	log_mesh.bottom_radius = radius
-	log_mesh.height = length
+		materials: Array, roll := 0.0) -> void:
 	var log_node := MeshInstance3D.new()
-	log_node.mesh = log_mesh
-	log_node.material_override = material
+	log_node.mesh = LOG_MESH
+	log_node.set_surface_override_material(0, materials[0])
+	log_node.set_surface_override_material(1, materials[1])
 	var y := axis.normalized()
 	var x := y.cross(Vector3.UP)
 	x = x.normalized() if x.length() > 0.001 else Vector3.RIGHT
 	var z := x.cross(y).normalized()
-	log_node.basis = Basis(x.rotated(y, roll), y, z.rotated(y, roll))
+	log_node.basis = Basis(x.rotated(y, roll) * radius, y * length,
+		z.rotated(y, roll) * radius)
 	log_node.position = center
 	add_child(log_node)
 
 
+func _add_rock(pos: Vector3, size: Vector3, yaw: float, variant: int) -> void:
+	var rock := MeshInstance3D.new()
+	rock.mesh = ROCK_MESHES[variant % ROCK_MESHES.size()]
+	rock.material_override = STONE_MATERIAL
+	rock.basis = Basis(Vector3.UP, yaw) * Basis.from_scale(size)
+	rock.position = pos
+	add_child(rock)
+
+
 ## Fuel bed of the hero campfire: five logs radiating from the middle, inner
-## ends raised, glowing slightly through the ember material.
-func _build_campfire_wood(ember_log: StandardMaterial3D) -> void:
+## ends raised.
+func _build_campfire_wood(materials: Array) -> void:
 	for k in 5:
 		var angle := TAU * float(k) / 5.0 + 0.3
 		var dir := Vector3(cos(angle), 0.0, sin(angle))
 		var inner := HERO_POS + dir * 0.08 + Vector3(0, 0.26, 0)
 		var outer := HERO_POS + dir * 0.92 + Vector3(0, 0.1, 0)
 		_add_log((inner + outer) * 0.5, inner.distance_to(outer), 0.1,
-			outer - inner, ember_log, float(k) * 1.7)
+			outer - inner, materials, float(k) * 1.7)
 	for k in 2:
 		var angle := 1.1 + TAU * float(k) / 2.0
 		var dir := Vector3(cos(angle), 0.0, sin(angle))
 		_add_log(HERO_POS + dir * 0.12 + Vector3(0, 0.36, 0), 0.7, 0.075,
-			Vector3(-dir.z, 0.25, dir.x), ember_log, 0.8)
-
-
-## Bark on the cylinder side (UV v < 0.5), growth rings on both caps
-## (CylinderMesh paints them as circles at UV (0.25, 0.75) and (0.75, 0.75)).
-func _log_texture() -> ImageTexture:
-	var size := 256
-	var img := Image.create(size, size, false, Image.FORMAT_RGBA8)
-	var bark := Color(0.25, 0.165, 0.095)
-	var bark_dark := Color(0.13, 0.085, 0.05)
-	var wood_light := Color(0.66, 0.52, 0.34)
-	var wood_dark := Color(0.42, 0.3, 0.17)
-	for y in size:
-		var v := 1.0 - float(y) / float(size)
-		for x in size:
-			if v < 0.5:
-				var groove := 0.5 + 0.5 * sin(float(x) * 0.42
-					+ 2.6 * sin(float(x) * 0.11))
-				var crack := smoothstep(0.82, 0.95, 0.5 + 0.5
-					* sin(float(x) * 0.21 + float(y) * 0.047))
-				img.set_pixel(x, y, bark.lerp(bark_dark,
-					0.55 * groove + 0.45 * crack))
-				continue
-			var cap_x := 64.0 if x < 128 else 192.0
-			var d := Vector2(float(x) - cap_x, float(y) - 64.0).length()
-			if d > 62.0:
-				img.set_pixel(x, y, bark_dark)
-				continue
-			var ring := 0.5 + 0.5 * sin(d * 0.62)
-			var col := wood_light.lerp(wood_dark, ring)
-			if sin(atan2(float(y) - 64.0, float(x) - cap_x) * 7.0) > 0.88:
-				col = col * 0.55
-			img.set_pixel(x, y, col)
-	return ImageTexture.create_from_image(img)
+			Vector3(-dir.z, 0.25, dir.x), materials, 0.8)
 
 
 func _build_soot_pool() -> void:

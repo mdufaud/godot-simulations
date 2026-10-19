@@ -10,7 +10,6 @@ render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabl
 
 uniform sampler2D screen_tex : hint_screen_texture, filter_linear_mipmap, repeat_disable;
 uniform float strength = 0.035; // UV offset amplitude at full intensity
-uniform float height_m = 3.0; // matches the haze volume mesh height
 
 instance uniform float haze_intensity = 0.0;
 instance uniform float haze_seed = 0.0;
@@ -41,7 +40,8 @@ void fragment() {
 	// Soft cylinder mask: strongest where the surface faces the camera, gone at
 	// the silhouette; ramps in just above the ground and fades out near the top.
 	float facing = clamp(dot(normalize(NORMAL), normalize(VIEW)), 0.0, 1.0);
-	float h = clamp(v_local.y / height_m + 0.5, 0.0, 1.0);
+	// The unit-height mesh is scaled to the haze height by the node transform.
+	float h = clamp(v_local.y + 0.5, 0.0, 1.0);
 	float vertical = smoothstep(0.02, 0.2, h) * (1.0 - smoothstep(0.35, 0.85, h));
 	float intensity = haze_intensity * smoothstep(0.0, 0.55, facing) * vertical;
 	if (intensity >= 0.003) {

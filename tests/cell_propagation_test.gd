@@ -14,6 +14,7 @@ func _initialize() -> void:
 	_test_config_validation()
 	_test_symmetric_front()
 	_test_wind_bias()
+	_test_wind_strength()
 	_test_fuel_burnout()
 	_test_budget_cap()
 	_test_inert_cells_stop_fire()
@@ -85,6 +86,21 @@ func _test_wind_bias() -> void:
 	_check(downwind >= 0, "downwind cell ignited")
 	_check(upwind < 0 or downwind < upwind,
 		"front advanced downwind (downwind %s vs upwind %s)" % [downwind, upwind])
+
+
+## Stronger wind reaches the same downwind cell in fewer steps.
+func _test_wind_strength() -> void:
+	var reached := []
+	for wind in [Vector2(0.5, 0.0), Vector2(8.0, 0.0)]:
+		var grid: CellPropagation = CellPropagationScript.new()
+		grid.setup(_make_config(9, 10000), Vector3.ZERO, 13)
+		_watch(grid)
+		grid.ignite_at(Vector3(4.5, 0.0, 4.5), 100.0)
+		_run(grid, 40, wind)
+		reached.append(_ignited_steps.get(Vector2i(7, 4), -1))
+	_check(reached[0] >= 0 and reached[1] >= 0, "downwind cell reached in both winds")
+	_check(reached[1] < reached[0],
+		"strong wind spreads faster (8 m/s step %s vs 0.5 m/s step %s)" % [reached[1], reached[0]])
 
 
 func _test_fuel_burnout() -> void:

@@ -1,9 +1,9 @@
 [gd_scene load_steps=17 format=3 uid="uid://fire_game_demo"]
 
-[ext_resource type="Script" path="res://scripts/demos/fire_game_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/demos/wildfire_controller.gd" id="1_controller"]
 [ext_resource type="Script" path="res://scripts/player/fps_walker.gd" id="2_walker"]
 [ext_resource type="Script" path="res://scripts/fire/fire_weapons.gd" id="3_weapons"]
-[ext_resource type="Script" path="res://scripts/demos/game_fire/fire_game_scenery.gd" id="4_scenery"]
+[ext_resource type="Script" path="res://scripts/demos/wildfire/wildfire_scenery.gd" id="4_scenery"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="5_sim_menu"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_player"]
@@ -49,18 +49,23 @@ radial_segments = 12
 
 [sub_resource type="Environment" id="Environment_night"]
 background_mode = 1
-background_color = Color(0.015, 0.02, 0.035, 1)
+background_color = Color(0.005, 0.008, 0.016, 1.0)
 ambient_light_source = 2
-ambient_light_color = Color(0.07, 0.08, 0.12, 1.0)
-ambient_light_energy = 0.3
+ambient_light_color = Color(0.05, 0.06, 0.09, 1.0)
+ambient_light_energy = 0.15
 tonemap_mode = 2
-tonemap_exposure = 0.95
+tonemap_exposure = 0.9
 glow_enabled = true
-glow_intensity = 1.0
-glow_bloom = 0.2
+glow_intensity = 0.8
+glow_bloom = 0.15
 glow_blend_mode = 1
+volumetric_fog_enabled = true
+volumetric_fog_density = 0.0025
+volumetric_fog_albedo = Color(0.65, 0.6, 0.55, 1.0)
+volumetric_fog_emission = Color(0.0, 0.0, 0.0, 1.0)
+volumetric_fog_length = 40.0
 
-[node name="FireGameDemo" type="Node3D"]
+[node name="WildfireDemo" type="Node3D"]
 script = ExtResource("1_controller")
 
 [node name="Player" type="CharacterBody3D" parent="."]
@@ -137,7 +142,7 @@ environment = SubResource("Environment_night")
 [node name="MoonLight" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 5, 15, 5)
 light_color = Color(0.5, 0.6, 0.9, 1.0)
-light_energy = 0.25
+light_energy = 0.3
 shadow_enabled = true
 
 [node name="Scenery" type="Node3D" parent="."]

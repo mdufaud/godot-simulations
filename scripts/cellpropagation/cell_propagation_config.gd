@@ -17,6 +17,8 @@ class_name CellPropagationConfig extends Resource
 ## How strongly the wind biases damage: multiplier ranges from
 ## 1 + wind_damage_gain downwind to the upwind floor upwind.
 @export_range(0.0, 4.0, 0.05) var wind_damage_gain: float = 1.5
+## Wind speed that applies the full wind_damage_gain; slower wind scales it down.
+@export_range(0.5, 30.0, 0.5) var wind_reference_mps: float = 5.0
 ## Minimum fraction of burn power a neighbour still takes against the wind.
 @export_range(0.0, 1.0, 0.05) var upwind_floor: float = 0.15
 ## Every spread ignition spends one point; an empty pool stops the spread
@@ -29,6 +31,8 @@ func validate() -> String:
 		return "grid_size must be at least 2x2"
 	if cell_size_m <= 0.0:
 		return "cell_size_m must be positive"
+	if wind_reference_mps <= 0.0:
+		return "wind_reference_mps must be positive"
 	if material_hitpoints.is_empty() or material_burn_seconds.is_empty() \
 			or material_burn_power.is_empty():
 		return "material tables must not be empty"

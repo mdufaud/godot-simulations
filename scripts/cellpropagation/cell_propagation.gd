@@ -58,6 +58,7 @@ func setup(config: CellPropagationConfig, origin: Vector3, seed_value: int = -1)
 
 func step(delta: float, wind_xz: Vector2) -> void:
 	var wind_norm := wind_xz.normalized() if wind_xz.length() > 0.001 else Vector2.ZERO
+	var wind_bias := clampf(wind_xz.length() / _config.wind_reference_mps, 0.0, 1.0)
 	var width := _config.grid_size.x
 	for index in _state.size():
 		if _state[index] != STATE_BURNING:
@@ -76,7 +77,7 @@ func step(delta: float, wind_xz: Vector2) -> void:
 			var scale := 1.0
 			if wind_norm != Vector2.ZERO:
 				scale = maxf(_config.upwind_floor,
-					1.0 + _config.wind_damage_gain * wind_norm.dot(facing))
+					1.0 + _config.wind_damage_gain * wind_bias * wind_norm.dot(facing))
 			_damage_cell(index_of(neighbour), power * scale * delta, true)
 
 
