@@ -8,6 +8,7 @@ func _initialize() -> void:
 	_check_rotated_cliff()
 	_check_ramp()
 	_check_fast_rounded_ramp()
+	_check_deep_inlet()
 	_check_gorge()
 	_finish("river_waterfall_curtain")
 
@@ -105,6 +106,28 @@ func _check_fast_rounded_ramp() -> void:
 		attached += 1 if traits[index * 4 + 3] > 0.5 else 0
 	_check(slope_vertices > 0 and attached == slope_vertices,
 		"A thick fast film must cling to a rounded 50 degree lip instead of jumping over an air pocket")
+
+
+func _check_deep_inlet() -> void:
+	var slope := tan(deg_to_rad(50.0))
+	var grounds := [
+		func(point: Vector2) -> float: return 6.0 if point.y > 0.0 else 0.0,
+		func(point: Vector2) -> float: return 6.0 if point.y >= 0.0 else maxf(6.0 + slope * point.y, 0.0),
+	]
+	var flush := true
+	for ground: Callable in grounds:
+		var curtain := _curtain(ground, Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0))
+		curtain.surface_height_m = 7.19
+		curtain.speed_m_s = 1.7
+		curtain.landing_level_m = 0.54
+		var arrays := curtain.build().surface_get_arrays(0)
+		var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+		var traits: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM0]
+		for index in vertices.size():
+			if traits[index * 4 + 3] < -0.5 or vertices[index].z < 0.0:
+				continue
+			flush = flush and absf(vertices[index].y - curtain.surface_height_m) < 0.02
+	_check(flush, "A 1.19 m deep inlet must reach the upstream surface up to the lip, with no step under the pool edge")
 
 
 func _check_gorge() -> void:

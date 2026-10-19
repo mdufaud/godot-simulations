@@ -158,6 +158,7 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 	_profile_origin = origin
 	var inlet_speed := maxf(speed_m_s, 0.05)
 	var discharge := inlet_speed * maxf(depth, MIN_FILM_M)
+	var max_film := maxf(MAX_FILM_M, depth)
 	var along := -inlet_m
 	var bottom := _ground(along)
 	var velocity := Vector2(inlet_speed, 0.0)
@@ -170,7 +171,7 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 	var samples := PackedFloat32Array()
 	for step in MAX_STEPS:
 		var speed := maxf(velocity.length(), 0.01)
-		var thickness := clampf(discharge / speed, MIN_FILM_M, MAX_FILM_M)
+		var thickness := clampf(discharge / speed, MIN_FILM_M, max_film)
 		samples.append_array(PackedFloat32Array([time, along, bottom, velocity.x, velocity.y, thickness,
 			1.0 if attached else 0.0, impact, travelled, 1.0 if landed else 0.0]))
 		var surface := bottom + velocity.x / speed * thickness
