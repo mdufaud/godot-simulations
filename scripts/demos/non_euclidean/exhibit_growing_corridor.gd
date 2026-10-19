@@ -42,9 +42,8 @@ var _segments: Dictionary = {}
 var _cum: Array[float] = [0.0]
 var _floor_index := 0
 var _previous_depth := 0.0
-var _cell_states: Array = []
 var _original_far := -1.0
-var _original_fog := -1.0
+var _environment: Environment
 
 
 func build(cells: Node3D, materials: Dictionary) -> void:
@@ -79,24 +78,21 @@ func track(player: NonEuclideanPlayer) -> bool:
 
 func set_active(active: bool, player: NonEuclideanPlayer) -> void:
 	var camera := player.get_camera()
-	var environment := player.get_world_3d().environment
-	if camera != null:
-		if active:
-			if _original_far < 0.0:
-				_original_far = camera.far
-			camera.far = DEPTH_FAR
-		elif _original_far >= 0.0:
-			camera.far = _original_far
-	if environment != null:
-		if active:
-			if _original_fog < 0.0:
-				_original_fog = environment.fog_density
-			environment.fog_density = CORRIDOR_FOG
-		elif _original_fog >= 0.0:
-			environment.fog_density = _original_fog
-			_original_fog = -1.0
 	if active:
+		if _original_far < 0.0:
+			_original_far = camera.far
+		camera.far = DEPTH_FAR
+		if _environment == null:
+			_environment = player.get_world_3d().environment.duplicate() as Environment
+			_environment.fog_enabled = true
+			_environment.fog_density = CORRIDOR_FOG
+		camera.environment = _environment
 		_previous_depth = -_cell.to_local(player.global_position).z
+		return
+	if _original_far >= 0.0:
+		camera.far = _original_far
+	if camera.environment == _environment:
+		camera.environment = null
 
 
 ## Rebuilds the whole corridor at scale 1 and zeroes the counters. The host
@@ -116,16 +112,12 @@ func _reset_segments() -> void:
 	_previous_depth = 0.0
 	virtual_distance = 0.0
 	crossing_count = 0
-	_cell_states = []
 	for index in SEGMENTS_AHEAD + 1:
 		_build_segment(index)
 	_update_backdrop()
 
 
 func _enter_segment(index: int) -> void:
-	var direction := GrowingCorridorState.Entered.FORWARD \
-		if index > current_index else GrowingCorridorState.Entered.BACKWARD
-	_cell_states = GrowingCorridorState.next_state(_cell_states, index, direction)
 	current_index = index
 	crossing_count += 1
 	_ensure_window()
@@ -240,7 +232,22 @@ func _build_segment(index: int) -> void:
 		Color(0.45, 0.85, 1.0), 40)
 	if index == 0:
 		_build_reset_door(node, size)
+	else:
+		_build_collar(node, size, _segment_size(index - 1))
 	_segments[index] = node
+
+
+## Walls the step around the smaller doorway behind, so looking back never
+## shows the void.
+func _build_collar(node: Node3D, size: Vector3, previous: Vector3) -> void:
+	if previous.is_equal_approx(size):
+		return
+	var collar := Node3D.new()
+	collar.name = "Collar"
+	node.add_child(collar)
+	GeometryKit.add_opening_wall(collar, Vector3(size.x + 1.0, size.y + 0.5, 0.0),
+		Vector2(previous.x + 1.0, previous.y + 0.5), size.z * 0.5 + 0.25,
+		_materials["concrete"])
 
 
 ## Sealed doorway at the corridor start: the reset goes through the menu, this
@@ -265,6 +272,9 @@ func _add_recycle_cap(index: int) -> void:
 		return
 	var node := _segments[index] as Node3D
 	var size := _segment_size(index)
+	var collar := node.get_node_or_null("Collar")
+	if collar != null:
+		collar.queue_free()
 	GeometryKit.add_box(node, Vector3(0.0, size.y * 0.5, size.z * 0.5 + 0.25),
 		Vector3(size.x + 1.0, size.y + 0.5, 0.5), _materials["concrete_dark"])
 	GeometryKit.add_label(node, "⟲ RECYCLED\nTHE SPACE BEHIND NO LONGER EXISTS",

@@ -280,6 +280,23 @@ func _test_growing_corridor(demo: Node3D, player: NonEuclideanPlayer,
 		"virtual distance stayed at zero while walking forward")
 	_check(exhibit.current_index >= 3,
 		"player did not reach the fourth segment after three crossings")
+	var camera_environment := player.get_camera().environment
+	_check(camera_environment != null \
+		and is_equal_approx(camera_environment.fog_density, ExhibitGrowingCorridor.CORRIDOR_FOG),
+		"corridor fog is not on the player camera")
+	_check(not is_equal_approx(player.get_world_3d().environment.fog_density,
+		ExhibitGrowingCorridor.CORRIDOR_FOG), "corridor fog leaked into the shared environment")
+	# Looking back from a bigger segment, the step around the smaller doorway is a wall.
+	var segment := exhibit.current_index
+	var segment_node := corridor.get_node("Segment%02d" % segment) as Node3D
+	var size: Vector3 = exhibit._segment_size(segment)
+	var previous: Vector3 = exhibit._segment_size(segment - 1)
+	var step_eye := segment_node.to_global(Vector3(
+		(previous.x * 0.5 + 0.5 + size.x * 0.5) * 0.5, 1.0, size.z * 0.5 - 1.0))
+	var back := PhysicsRayQueryParameters3D.create(step_eye,
+		step_eye + corridor.global_basis.z * 2.0, 1, [player.get_rid()])
+	_check(not player.get_world_3d().direct_space_state.intersect_ray(back).is_empty(),
+		"looking back from segment %d sees the void around the smaller doorway" % segment)
 	# Turnaround: the corridor behind is a capped dead end, never a hole.
 	var local_before_back := corridor.to_local(player.global_position)
 	for _frame in 240:
