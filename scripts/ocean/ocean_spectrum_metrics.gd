@@ -11,6 +11,14 @@ static var _swell_grid_key := PackedFloat64Array()
 static var _swell_grid := {}
 
 
+static func jonswap_alpha(wind_speed_m_s: float, fetch_m: float) -> float:
+	return 0.076 * pow(wind_speed_m_s * wind_speed_m_s / (fetch_m * GRAVITY), 0.22)
+
+
+static func jonswap_peak_frequency(wind_speed_m_s: float, fetch_m: float) -> float:
+	return 22.0 * pow(GRAVITY * GRAVITY / (wind_speed_m_s * fetch_m), 1.0 / 3.0)
+
+
 static func compute(solver) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var swell_alpha: float = _swell_alpha_scale(solver)
@@ -127,8 +135,8 @@ static func _integrate_component(solver, cascade: int, is_wind: bool,
 
 	var wind_speed: float = maxf(float(solver.wind_speed), 0.01)
 	var fetch_m: float = maxf(float(solver.fetch_km) * 1000.0, 1.0)
-	var wind_peak: float = 22.0 * pow(GRAVITY * GRAVITY / (wind_speed * fetch_m), 1.0 / 3.0)
-	var wind_alpha: float = 0.076 * pow(wind_speed * wind_speed / (fetch_m * GRAVITY), 0.22)
+	var wind_peak: float = jonswap_peak_frequency(wind_speed, fetch_m)
+	var wind_alpha: float = jonswap_alpha(wind_speed, fetch_m)
 	var amplitude_scale: float = float(solver.effective_amplitude_scale()) \
 		if apply_master_scale else 1.0
 	var master_scale: float = pow(maxf(amplitude_scale, 0.0), 2.0) \

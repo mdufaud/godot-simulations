@@ -1,6 +1,5 @@
 #define PI 3.141592653589793
 #define G_GRAV 9.81
-#define NUM_SPECTRA 2u
 
 layout(rgba32f, set = 0, binding = 0) readonly uniform image2DArray spectrum_tex;
 

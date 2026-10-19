@@ -213,6 +213,8 @@ func _process(delta: float) -> void:
 		spray.set_foam_state(state.center, solver.foam_field_domains(), float(state.index))
 	var local_centers: Vector4 = solver.local_centers()
 	surface_mat.set_shader_parameter("local_centers", local_centers)
+	surface_mat.set_shader_parameter("local_domains",
+		Vector2(OceanLocalSolver.COAST_DOMAIN_M, OceanLocalSolver.WAKE_DOMAIN_M))
 	var simulation_delta := _capture_fixed_delta if _capture_fixed_delta > 0.0 else delta
 	var step_scale := 0.0 if _frozen else time_scale
 	if not _warmup_active:

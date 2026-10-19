@@ -6,7 +6,6 @@
 
 #define PI 3.141592653589793
 #define G_GRAV 9.81
-#define NUM_SPECTRA 4u
 
 layout(rgba32f, set = 0, binding = 0) restrict uniform image2DArray spectrum_tex;
 
@@ -25,7 +24,7 @@ layout(push_constant, std430) uniform Params {
     vec4 spectrum_a; //  0: tile_length, jonswap_alpha, peak_frequency, wind_speed
     vec4 spectrum_b; // 16: wind_dir_rad, depth, swell, detail
     vec4 spectrum_c; // 32: spread, k_min, k_max, choppiness
-    vec4 foam_p;     // 48: whitecap, reserved, reserved, time
+    vec4 foam_p;     // 48: whitecap, amplitude scale, reserved, time
     ivec4 misc;      // 64: cascade_index, seed_x, seed_y, flags (bit0 tutorial, bit1 jonswap)
     vec4 gains;      // 80: height_gain, long height, long wavelength, wind height
     vec4 art_a;      // 96: wind wavelength, unused, JONSWAP gamma, crest gain

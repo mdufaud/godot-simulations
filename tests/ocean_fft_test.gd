@@ -512,11 +512,15 @@ func _run() -> void:
 	var wake_image := Image.create_from_data(wake_n, wake_n, false, Image.FORMAT_RGBAH,
 		await _read_texture(demo.solver.local_solver.get_wake_texture_rid(), 0))
 	var centers: Vector4 = demo.solver.local_centers()
+	var shader_domains: Variant = demo.surface_mat.get_shader_parameter("local_domains")
+	var domains := Vector2(OceanLocalSolver.COAST_DOMAIN_M, OceanLocalSolver.WAKE_DOMAIN_M)
+	_check(shader_domains is Vector2 and shader_domains == domains,
+		"surface local_domains %s is not the local solver's %s" % [shader_domains, domains])
 	var local_height := func(point: Vector2) -> float:
 		if not demo.solver.physical_features_enabled:
 			return 0.0
-		return _query_local_height(coast_image, Vector2(centers.x, centers.y), 256.0, point) \
-			+ _query_local_height(wake_image, Vector2(centers.z, centers.w), 64.0, point)
+		return _query_local_height(coast_image, Vector2(centers.x, centers.y), domains.x, point) \
+			+ _query_local_height(wake_image, Vector2(centers.z, centers.w), domains.y, point)
 	var height_errors: Array[float] = []
 	var slope_errors: Array[float] = []
 	var cascade_contribution: Array[float] = [0.0, 0.0, 0.0]

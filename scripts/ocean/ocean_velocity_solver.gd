@@ -106,10 +106,14 @@ func free_render() -> void:
 	_rd = null
 
 
-func _create_resources() -> bool:
-	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n\n" % [
-		VELOCITY_SIZE, VELOCITY_SIZE,
+static func shader_header() -> String:
+	return "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define NUM_SPECTRA %du\n\n" % [
+		VELOCITY_SIZE, VELOCITY_SIZE, NUM_SPECTRA,
 	]
+
+
+func _create_resources() -> bool:
+	var defines := shader_header()
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "ocean_velocity_common.comp")
 	var sources := {
 		"velocity_pack": FileAccess.get_file_as_string(SHADER_DIR + "ocean_velocity_pack.comp"),

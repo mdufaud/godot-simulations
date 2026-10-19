@@ -1,6 +1,7 @@
 class_name OceanConfig extends Resource
 
 const MIN_WAVELENGTH_M := 0.25
+const CASCADE_COUNT := 3
 
 ## Measurement thresholds shared by the capture readbacks and the test suite.
 const MEASURE_FOAM_THRESHOLD := 0.02
@@ -27,7 +28,7 @@ func validate() -> String:
 		return "map_size must be a power of two from 256 to 1024"
 	# The whole pipeline is 3-cascade: CHOP_PER_CASCADE, MAX_CASCADES uniform
 	# arrays, the query/near push constants and the 3-layer foam field.
-	if clipmap_tile_lengths_m.size() != 3:
+	if clipmap_tile_lengths_m.size() != CASCADE_COUNT:
 		return "clipmap requires exactly 3 cascade tile lengths"
 	for tile in clipmap_tile_lengths_m:
 		if not is_finite(tile) or tile <= 0.0:

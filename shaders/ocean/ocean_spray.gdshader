@@ -1,7 +1,6 @@
 shader_type spatial;
 render_mode unshaded, blend_mix, cull_disabled, depth_draw_never, shadows_disabled, fog_disabled;
 
-#define GRID 128
 #define CASCADES 3
 
 uniform sampler2DArray displacements : filter_linear, repeat_enable;
@@ -17,6 +16,7 @@ uniform bool foam_near_enabled = false;
 // mood-only gate.
 uniform float spray_breaking_threshold = 0.2;
 uniform vec4 map_scales[CASCADES];
+uniform int grid_cells;
 uniform vec2 window_center = vec2(0.0);
 uniform float window_size = 168.0;
 uniform float storm_mood = 0.0;
@@ -118,11 +118,11 @@ void vertex() {
 			* vec4(center_view + vec3(billboard, 0.0), 1.0);
 		}
 	} else {
-	int ix = int(INSTANCE_ID) % GRID;
-	int iz = int(INSTANCE_ID) / GRID;
+	int ix = int(INSTANCE_ID) % grid_cells;
+	int iz = int(INSTANCE_ID) / grid_cells;
 	float seed = float(INSTANCE_ID) + 17.0;
-	vec2 jitter = (hash21(seed) - 0.5) * window_size / float(GRID);
-	vec2 cell = (vec2(float(ix), float(iz)) + 0.5) / float(GRID) - 0.5;
+	vec2 jitter = (hash21(seed) - 0.5) * window_size / float(grid_cells);
+	vec2 cell = (vec2(float(ix), float(iz)) + 0.5) / float(grid_cells) - 0.5;
 	vec2 xz = window_center + cell * window_size + jitter;
 
 	vec3 displacement = vec3(0.0);

@@ -12,7 +12,7 @@ const PROBES: Array[Vector3] = [
 ]
 const BOX_SIZE := Vector3(1.2, 1.2, 1.2)
 const BODY_DENSITY_KG_M3 := 450.0
-const WATER_DENSITY_KG_M3 := 1025.0
+const WATER_DENSITY_KG_M3 := OceanSolver.WATER_DENSITY_KG_M3
 const DRAG_COEFFICIENT := 0.8
 const BUOYANCY := 32.0
 const MAX_DEPTH := 1.4

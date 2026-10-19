@@ -14,6 +14,7 @@ const STAGES: Array[String] = [
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
+const WATER_DENSITY_KG_M3 := 1025.0
 const MIN_WAVELENGTH_M := OceanConfig.MIN_WAVELENGTH_M
 const FOAM_NOISE_TEXTURE := preload("res://resources/ocean/foam_detail.png")
 ## Chop stays full on the long/mid cascades: crests pinch and the Jacobian
@@ -171,6 +172,12 @@ var _cascade_dirty: Array[bool] = []
 var _render_refresh_pending := false
 var _frame := 0
 var _timing_store := GpuTimingStore.new()
+
+
+static func shader_header(map_n: int) -> String:
+	return "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define MIN_WAVELENGTH_M %.8f\n#define NUM_SPECTRA %du\n\n" % [
+		map_n, map_n, MIN_WAVELENGTH_M, NUM_SPECTRA,
+	]
 
 
 func num_cascades() -> int:
@@ -366,9 +373,7 @@ func init_render() -> void:
 		push_error("Ocean GPU resources exceed texture or compute limits")
 		return
 
-	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define MIN_WAVELENGTH_M %.8f\n\n" % [
-		map_size, map_size, MIN_WAVELENGTH_M,
-	]
+	var defines := shader_header(map_size)
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "ocean_common.comp")
 	var deformation := FileAccess.get_file_as_string(SHADER_DIR + "ocean_deformation.gdshaderinc")
 	for stage in STAGES:
@@ -681,8 +686,8 @@ func _dispatch_pending_queries() -> void:
 	pc.encode_float(36, coast_center.y)
 	pc.encode_float(40, wake_center.x)
 	pc.encode_float(44, wake_center.y)
-	pc.encode_float(48, 256.0)
-	pc.encode_float(52, 64.0)
+	pc.encode_float(48, OceanLocalSolver.COAST_DOMAIN_M)
+	pc.encode_float(52, OceanLocalSolver.WAKE_DOMAIN_M)
 	pc.encode_float(64, current_velocity_m_s.x)
 	pc.encode_float(68, current_velocity_m_s.y)
 	var shore_depth_blend := shore_solver.config.surface_depth_blend_m()
@@ -1049,8 +1054,8 @@ func _pack_near_push_constant(dt: float, layer: int = 0) -> PackedByteArray:
 	pc.encode_float(100, coast_center.y)
 	pc.encode_float(104, wake_center.x)
 	pc.encode_float(108, wake_center.y)
-	pc.encode_float(112, 256.0)
-	pc.encode_float(116, 64.0)
+	pc.encode_float(112, OceanLocalSolver.COAST_DOMAIN_M)
+	pc.encode_float(116, OceanLocalSolver.WAKE_DOMAIN_M)
 	pc.encode_float(120, 1.0 if physical_features_enabled else 0.0)
 	return pc
 
@@ -1088,11 +1093,11 @@ func _k_max(cascade: int) -> float:
 
 func _pack_push_constant(cascade: int, step_time: float = -1.0) -> PackedByteArray:
 	var fetch_m := fetch_km * 1000.0
-	var alpha := 0.076 * pow(wind_speed * wind_speed / (fetch_m * GRAVITY), 0.22)
+	var amplitude := effective_amplitude_scale()
 	# amplitude_scale rides on alpha: the JONSWAP/TMA spectrum is linear in
 	# alpha, so the height amplitude scales with its square root exactly.
-	alpha *= pow(effective_amplitude_scale(), 2.0)
-	var omega_p := 22.0 * pow(GRAVITY * GRAVITY / (wind_speed * fetch_m), 1.0 / 3.0)
+	var alpha := SpectrumMetrics.jonswap_alpha(wind_speed, fetch_m) * pow(amplitude, 2.0)
+	var omega_p := SpectrumMetrics.jonswap_peak_frequency(wind_speed, fetch_m)
 	var k_min := TAU / tile_lengths[0] if cascade == 0 else _k_max(cascade - 1)
 	var eff_chop := effective_choppiness(cascade)
 
@@ -1111,6 +1116,7 @@ func _pack_push_constant(cascade: int, step_time: float = -1.0) -> PackedByteArr
 	pc.encode_float(40, _k_max(cascade))
 	pc.encode_float(44, eff_chop)
 	pc.encode_float(48, whitecap)
+	pc.encode_float(52, amplitude)
 	pc.encode_float(60, sim_time if step_time < 0.0 else step_time)
 	pc.encode_s32(64, cascade)
 	pc.encode_s32(68, 1000 + cascade * 7919)

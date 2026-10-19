@@ -1,7 +1,5 @@
 #define PI 3.141592653589793
 #define GRAVITY 9.81
-#define WATER_DENSITY 1025.0
-#define LOCAL_SPECTRA 4u
 
 layout(rgba16f, set = 0, binding = 0) readonly uniform image2DArray offshore_displacement;
 layout(rgba16f, set = 0, binding = 1) readonly uniform image2DArray offshore_velocity;
@@ -18,10 +16,10 @@ layout(std430, set = 0, binding = 6) restrict buffer FFTBuffer {
     vec2 fft_data[];
 };
 layout(std430, set = 0, binding = 7) readonly restrict buffer WakeImpulseBuffer {
-    vec4 wake_impulses[8];
+    vec4 wake_impulses[MAX_IMPULSES];
 };
 layout(std430, set = 0, binding = 10) readonly restrict buffer PressureForceBuffer {
-    vec4 pressure_forces[8];
+    vec4 pressure_forces[MAX_IMPULSES];
 };
 
 layout(push_constant, std430) uniform LocalParams {

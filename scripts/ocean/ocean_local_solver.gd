@@ -5,12 +5,13 @@ const SHADER_DIR := "res://shaders/ocean/"
 const FIXED_DT := 1.0 / 30.0
 const MAX_SUBSTEPS_PER_RENDER := 8
 const MAX_IMPULSES := 8
+const NUM_SPECTRA := 4
 const COAST_DOMAIN_M := 256.0
 const WAKE_DOMAIN_M := 64.0
 const COAST_CENTER := Vector2(0.0, 20.0)
 const MIN_WAKE_WAVELENGTH_M := 2.0
 const MIN_COAST_WAVELENGTH_M := 32.0
-const VELOCITY_MAP_N := 256
+const VELOCITY_MAP_N := OceanVelocitySolver.VELOCITY_SIZE
 const STAGES := ["butterfly", "pack", "fft", "transpose", "spectral", "assemble", "output"]
 
 var _rd: RenderingDevice
@@ -160,6 +161,16 @@ func get_water_depth() -> float:
 	return _offshore_depth_m
 
 
+static func shader_header(size: int) -> String:
+	return "#version 450\n#define LOCAL_N %du\n#define LOCAL_N_I %d\n#define LOCAL_SPECTRA %du\n#define MAX_IMPULSES %du\n#define WATER_DENSITY %.6f\n\n" % [
+		size, size, NUM_SPECTRA, MAX_IMPULSES, OceanSolver.WATER_DENSITY_KG_M3]
+
+
+static func domain_defines() -> String:
+	return "#define LOCAL_COAST_DOMAIN_M %.6f\n#define LOCAL_WAKE_DOMAIN_M %.6f\n" % [
+		COAST_DOMAIN_M, WAKE_DOMAIN_M]
+
+
 func estimate_vram_bytes() -> int:
 	var total := 0
 	for domain in _domains.values():
@@ -169,7 +180,7 @@ func estimate_vram_bytes() -> int:
 		var pixels := n * n
 		var state_bytes := pixels * 5 * 3 * 16
 		var output_bytes := pixels * 8
-		var fft_bytes := pixels * 5 * 2 * 4 * 8
+		var fft_bytes := pixels * 5 * 2 * NUM_SPECTRA * 8
 		var butterfly_bytes := int(log(float(n)) / log(2.0)) * n * 16
 		total += state_bytes + output_bytes + fft_bytes + butterfly_bytes
 	return total + (MAX_IMPULSES * 16 if _force_buffer.is_valid() else 0) \
@@ -271,7 +282,7 @@ func _create_domain(size: int, domain_length_m: float) -> Dictionary:
 		"state_center": COAST_CENTER if domain_length_m == COAST_DOMAIN_M else Vector2.ZERO,
 		"initialized": false,
 	}
-	var defines := "#version 450\n#define LOCAL_N %du\n#define LOCAL_N_I %d\n\n" % [size, size]
+	var defines := shader_header(size)
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "ocean_local_common.comp")
 	for stage in STAGES:
 		var source := FileAccess.get_file_as_string(SHADER_DIR + "ocean_local_" + stage + ".comp")
@@ -285,7 +296,7 @@ func _create_domain(size: int, domain_length_m: float) -> Dictionary:
 		domain.pipelines[stage] = _rd.compute_pipeline_create(domain.shaders[stage])
 	var log2n := int(log(float(size)) / log(2.0) + 0.5)
 	domain.buffers.butterfly = _rd.storage_buffer_create(log2n * size * 16)
-	domain.buffers.fft = _rd.storage_buffer_create(size * size * 5 * 2 * 4 * 8)
+	domain.buffers.fft = _rd.storage_buffer_create(size * size * 5 * 2 * NUM_SPECTRA * 8)
 	for _index in 3:
 		domain.states.append(_create_state_texture(size))
 	domain.output = _create_output_texture(size)
@@ -375,11 +386,11 @@ func _advance_domain(domain: Dictionary, next_center: Vector2,
 			MIN_COAST_WAVELENGTH_M if domain.length == COAST_DOMAIN_M
 			else MIN_WAKE_WAVELENGTH_M)
 		_dispatch(cl, domain, "fft", "%d_%d" % [source_index, target_index],
-			fft_pc, 1, domain.size, 4)
+			fft_pc, 1, domain.size, NUM_SPECTRA)
 		_dispatch(cl, domain, "transpose", "%d_%d" % [source_index, target_index],
-			fft_pc, domain.size / 32, domain.size / 32, 4)
+			fft_pc, domain.size / 32, domain.size / 32, NUM_SPECTRA)
 		_dispatch(cl, domain, "fft", "%d_%d" % [source_index, target_index],
-			fft_pc, 1, domain.size, 4)
+			fft_pc, 1, domain.size, NUM_SPECTRA)
 		_dispatch(cl, domain, "spectral", "%d_%d" % [source_index, target_index],
 			pc, bank_group, bank_group, 1)
 		fft_pc = _pack_params(domain, next_center, source_center,
@@ -388,11 +399,11 @@ func _advance_domain(domain: Dictionary, next_center: Vector2,
 			MIN_COAST_WAVELENGTH_M if domain.length == COAST_DOMAIN_M
 			else MIN_WAKE_WAVELENGTH_M)
 		_dispatch(cl, domain, "fft", "%d_%d" % [source_index, target_index],
-			fft_pc, 1, domain.size, 4)
+			fft_pc, 1, domain.size, NUM_SPECTRA)
 		_dispatch(cl, domain, "transpose", "%d_%d" % [source_index, target_index],
-			fft_pc, domain.size / 32, domain.size / 32, 4)
+			fft_pc, domain.size / 32, domain.size / 32, NUM_SPECTRA)
 		_dispatch(cl, domain, "fft", "%d_%d" % [source_index, target_index],
-			fft_pc, 1, domain.size, 4)
+			fft_pc, 1, domain.size, NUM_SPECTRA)
 		_dispatch(cl, domain, "assemble", "%d_%d" % [source_index, target_index],
 			pc, bank_group, bank_group, 1)
 	_rd.compute_list_end()

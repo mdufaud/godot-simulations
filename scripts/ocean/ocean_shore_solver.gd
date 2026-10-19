@@ -9,6 +9,7 @@ const MACRO_DT := CoastalConfig.DEFAULT_MACRO_STEP_S
 const MAX_SUBSTEPS_PER_RENDER := CoastalConfig.DEFAULT_MAX_SUBSTEPS_PER_RENDER
 const MIN_SUBSTEPS_PER_RENDER := CoastalConfig.DEFAULT_MIN_SUBSTEPS_PER_RENDER
 const MAX_FORCES := 32
+const NUM_SPECTRA := 3
 const BOUNDARY_LOG2 := 9
 const BOUNDARY_SIZE := 1 << BOUNDARY_LOG2
 const MIN_SOURCE_SIZE := 128
@@ -145,14 +146,14 @@ func step_render(delta_s: float, time_s: float, current_m_s: Vector2,
 		_rd.capture_timestamp("shore/start")
 	var cl := _rd.compute_list_begin()
 	if _initial_wave_pending:
-		for cascade in 3:
+		for cascade in _tiles.size():
 			if _tiles[cascade] < config.minimum_wavelength_m:
 				continue
 			pc.encode_s32(84, cascade)
 			_dispatch(cl, "pack", pc, BOUNDARY_SIZE / 16, BOUNDARY_SIZE / 16, 1)
-			_dispatch(cl, "fft", pc, 1, BOUNDARY_SIZE, 3)
-			_dispatch(cl, "transpose", pc, BOUNDARY_SIZE / 32, BOUNDARY_SIZE / 32, 3)
-			_dispatch(cl, "fft", pc, 1, BOUNDARY_SIZE, 3)
+			_dispatch(cl, "fft", pc, 1, BOUNDARY_SIZE, NUM_SPECTRA)
+			_dispatch(cl, "transpose", pc, BOUNDARY_SIZE / 32, BOUNDARY_SIZE / 32, NUM_SPECTRA)
+			_dispatch(cl, "fft", pc, 1, BOUNDARY_SIZE, NUM_SPECTRA)
 			_dispatch(cl, "assemble", pc, BOUNDARY_SIZE / 16, BOUNDARY_SIZE / 16, 1)
 		_dispatch(cl, "init_wave", pc, grid_size / 8, grid_size / 8, 1)
 		_initial_wave_pending = false
@@ -169,7 +170,7 @@ func step_render(delta_s: float, time_s: float, current_m_s: Vector2,
 	for substep in budget:
 		pc.encode_s32(80, 1)
 		_dispatch(cl, "schedule", pc, 1, 1, 1)
-		for cascade in 3:
+		for cascade in _tiles.size():
 			if _tiles[cascade] < config.minimum_wavelength_m:
 				continue
 			pc.encode_s32(84, cascade)
@@ -321,9 +322,14 @@ func free_render() -> void:
 	_rd = null
 
 
+static func shader_header() -> String:
+	return "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define NUM_SPECTRA %du\n" % [
+		BOUNDARY_SIZE, BOUNDARY_SIZE, NUM_SPECTRA]
+
+
 func _create_resources() -> bool:
-	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define SHORE_FOAM_RETENTION_S %.3f\n#define SHORE_DISP_B %.9f\n#define SHORE_DISP_CD %.9f\n#define SHORE_BREAK_FR_START %.4f\n#define SHORE_BREAK_FR_END %.4f\n#define SHORE_EDDY %.4f\n#define SHORE_MAX_GRID %d\n" % [
-		BOUNDARY_SIZE, BOUNDARY_SIZE, config.foam_retention_s,
+	var defines := shader_header() + "#define SHORE_FOAM_RETENTION_S %.3f\n#define SHORE_DISP_B %.9f\n#define SHORE_DISP_CD %.9f\n#define SHORE_BREAK_FR_START %.4f\n#define SHORE_BREAK_FR_END %.4f\n#define SHORE_EDDY %.4f\n#define SHORE_MAX_GRID %d\n" % [
+		config.foam_retention_s,
 		CoastalConfig.DISPERSIVE_COEFFICIENT_B, CoastalConfig.DISPERSIVE_COEFFICIENT_C,
 		config.break_froude_start, config.break_froude_end, config.eddy_coefficient,
 		config.max_supported_grid]
@@ -367,7 +373,7 @@ func _create_resources() -> bool:
 		_buffers[name] = _rd.storage_buffer_create(pixels * 32)
 	_buffers.control = _rd.storage_buffer_create(CONTROL_BYTES, PackedByteArray(),
 		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
-	_buffers.fft = _rd.storage_buffer_create(BOUNDARY_SIZE * BOUNDARY_SIZE * 48)
+	_buffers.fft = _rd.storage_buffer_create(BOUNDARY_SIZE * BOUNDARY_SIZE * 2 * NUM_SPECTRA * 8)
 	_buffers.butterfly = _rd.storage_buffer_create(BOUNDARY_LOG2 * BOUNDARY_SIZE * 16)
 	_buffers.events = _rd.storage_buffer_create(MAX_FORCES * 32)
 	_buffers.pressures = _rd.storage_buffer_create(MAX_FORCES * 16)

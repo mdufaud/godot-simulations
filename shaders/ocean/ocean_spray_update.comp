@@ -88,9 +88,9 @@ vec4 local_surface_at(vec2 material, vec3 displacement) {
     }
     vec2 world = material + displacement.xz;
     vec4 coast = ocean_local_sample(coast_field,
-        vec2(sp.foam_a_params.w, sp.foam_b_params.x), sp.tiles.w, world);
+        vec2(sp.foam_a_params.w, sp.foam_b_params.x), LOCAL_COAST_DOMAIN_M, world);
     vec4 wake = ocean_local_sample(wake_field,
-        sp.foam_b_params.zw, sp.window.z, world);
+        sp.foam_b_params.zw, LOCAL_WAKE_DOMAIN_M, world);
     return vec4(coast.xyz + wake.xyz, max(coast.w, wake.w));
 }
 
