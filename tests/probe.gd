@@ -6951,3 +6951,390 @@ func _river_window_metrics(river: RiverSystem, field: RiverField) -> Dictionary:
 	ratios.sort()
 	return {"kept": 100.0 * kept / maxf(wet, 1.0), "depth_p50": ratios[ratios.size() / 2] if not ratios.is_empty() else 0.0,
 		"bed_error_m": bed_error}
+
+
+const FIXTURE_WALK_M_S := 1.5
+const FIXTURE_WALK_FRAMES := 600
+const FIXTURE_EYE_M := 2.5
+
+
+func _run_river_fixtures() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var source_dir := ProjectSettings.globalize_path("res://tmp/simple_forest_fixtures")
+	var output_dir := ProjectSettings.globalize_path("res://tmp/river-fixtures-probe")
+	var only := PackedStringArray()
+	var continuous_dry := false
+	var current_cap := 0.0
+	var guided := false
+	var record := false
+	for arg in _extra:
+		var pair := arg.split("=", true, 1)
+		if pair[0] == "dir":
+			source_dir = pair[1] if pair[1].begins_with("/") else ProjectSettings.globalize_path("res://" + pair[1])
+		elif pair[0] == "out":
+			output_dir = pair[1] if pair[1].begins_with("/") else ProjectSettings.globalize_path("res://" + pair[1])
+		elif pair[0] == "only":
+			only = pair[1].split(",")
+		elif pair[0] == "dry_surface":
+			continuous_dry = pair[1] == "continuous"
+		elif pair[0] == "current_cap":
+			current_cap = float(pair[1])
+		elif pair[0] == "guided":
+			guided = pair[1] == "1"
+		elif pair[0] == "record":
+			record = pair[1] == "1"
+	DirAccess.make_dir_recursive_absolute(output_dir)
+	var names := PackedStringArray()
+	for file in DirAccess.get_files_at(source_dir):
+		if file.ends_with(".json") and (only.is_empty() or only.has(file.get_basename())):
+			names.append(file.get_basename())
+	names.sort()
+	var scene := _river_probe_stage()
+	var camera := scene.get_node("Camera") as Camera3D
+	var passed := 0
+	for name in names:
+		passed += int(await _river_fixture_case(scene, camera, source_dir, name, output_dir, continuous_dry,
+			current_cap, guided, record))
+	scene.queue_free()
+	await _boot_frames(2)
+	print("RIVER FIXTURES DONE passed=%d/%d" % [passed, names.size()])
+	quit(0)
+
+
+func _river_fixture_case(scene: Node3D, camera: Camera3D, source_dir: String, name: String, output_dir: String, continuous_dry: bool,
+		current_cap: float, guided: bool, record: bool) -> bool:
+	var meta: Dictionary = JSON.parse_string(FileAccess.get_file_as_string("%s/%s.json" % [source_dir, name]))
+	var field := RiverField.new()
+	field.solver_terrain_image = Image.load_from_file("%s/%s_solver_terrain.exr" % [source_dir, name])
+	field.flow_image = Image.load_from_file("%s/%s_flow.exr" % [source_dir, name])
+	field.bed_image = Image.load_from_file("%s/%s_bed.exr" % [source_dir, name])
+	field.origin_m = Vector2(meta.origin_m[0], meta.origin_m[1])
+	field.domain_m = Vector2(meta.domain_m[0], meta.domain_m[1])
+	field.height_range_m = Vector2(meta.height_range_m[0], meta.height_range_m[1])
+	if continuous_dry:
+		print("RIVER FIXTURE %s dry_surface=continuous rewritten_texels=%d/%d" % [name,
+			_river_fixture_continuous_dry(field.solver_terrain_image), _river_fixture_continuous_dry(field.bed_image)])
+	if current_cap > 0.0:
+		print("RIVER FIXTURE %s current_cap=%.2f capped_texels=%d" % [name, current_cap,
+			_river_fixture_cap_current(field.solver_terrain_image, 2, false, current_cap)
+			+ _river_fixture_cap_current(field.flow_image, 0, true, current_cap)])
+	var terrain_image := field.solver_terrain_image
+	var image_wet := 0
+	var low_banks := 0
+	for y in terrain_image.get_height():
+		for x in terrain_image.get_width():
+			image_wet += int(_river_fixture_wet(terrain_image, Vector2i(x, y)))
+			low_banks += int(_river_fixture_low_bank(terrain_image, Vector2i(x, y)))
+	print("RIVER FIXTURE %s loaded formats=%d/%d/%d wet_texels=%d expected=%d low_bank_texels=%d" % [name,
+		terrain_image.get_format(), field.flow_image.get_format(), field.bed_image.get_format(),
+		image_wet, int(meta.wet_texels), low_banks])
+	var config := RiverConfig.new()
+	config.water_level_m = 0.0
+	config.speed_m_s = 1.0
+	config.current_guidance_hz = 1.0
+	config.level_guidance_hz = 5.0
+	var river := _river_probe_system(field, config, camera)
+	river.swe_window_m = Vector2(16.0, 24.0)
+	river.swe_cell_m = 0.25
+	river.swe_range_m = 20.0
+	river.fixed_delta_s = 1.0 / 60.0
+	var ground := MeshInstance3D.new()
+	ground.mesh = _river_fixture_ground(field)
+	scene.add_child(ground)
+	var point := _river_fixture_start(field)
+	var heading := _river_fixture_heading(field, point, Vector2.RIGHT)
+	for step in roundi(FIXTURE_WALK_M_S * FIXTURE_WALK_FRAMES / 60.0 * 0.5 / 0.25):
+		heading = _river_fixture_heading(field, point, heading)
+		point -= heading * 0.25
+	heading = _river_fixture_heading(field, point, heading)
+	var walk_start := point
+	_river_fixture_pose(camera, field, point, heading)
+	scene.add_child(river)
+	river.start()
+	river.water_material.set_shader_parameter("guided_coverage", true)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	if not river.swe.initialized:
+		print("RIVER FIXTURE %s FAIL: solver did not initialize" % name)
+		river.queue_free()
+		ground.queue_free()
+		await _boot_frames(2)
+		return false
+	await _boot_frames(120)
+	var start_pair: Array[Image] = []
+	if guided:
+		river.swe.set_enabled(false)
+	else:
+		start_pair = await _river_fixture_pair(river, output_dir, name, "start")
+	river.frozen = false
+	river.swe.profiling = true
+	var gpu_ms := 0.0
+	var clip_dir := "%s/%s_%s" % [output_dir, name, "guided" if guided else ("swe_cap" + str(current_cap) if current_cap > 0.0 else "swe")]
+	if record:
+		DirAccess.make_dir_recursive_absolute(clip_dir)
+	for frame in FIXTURE_WALK_FRAMES:
+		heading = heading.lerp(_river_fixture_heading(field, point, heading), 0.05).normalized()
+		point += heading * FIXTURE_WALK_M_S / 60.0
+		_river_fixture_pose(camera, field, point, heading)
+		await process_frame
+		if record and frame % 2 == 0:
+			await RenderingServer.frame_post_draw
+			root.get_texture().get_image().save_png("%s/%04d.png" % [clip_dir, frame / 2])
+		if frame >= FIXTURE_WALK_FRAMES / 2:
+			gpu_ms += river.swe.gpu_ms() / float(FIXTURE_WALK_FRAMES - FIXTURE_WALK_FRAMES / 2)
+	if guided:
+		print("RIVER FIXTURE %s guided walk done frames=%s" % [name, clip_dir if record else "none"])
+		river.queue_free()
+		ground.queue_free()
+		await _boot_frames(2)
+		return false
+	river.frozen = true
+	await _boot_frames(3)
+	var snapshot: Dictionary = river.swe.solver.snapshot()
+	var grid: Vector2i = river.swe.solver.grid
+	var size := grid.x * grid.y * 16
+	var surface := (await TextureReadback.new().read_layer(snapshot.surface, 0, size)).to_float32_array()
+	var terrain := (await TextureReadback.new().read_layer(snapshot.terrain, 0, size)).to_float32_array()
+	var foam := (await TextureReadback.new().read_layer(snapshot.foam, 0, size)).to_float32_array()
+	var region: Rect2 = river.swe.region_m
+	var wet := 0
+	var kept := 0
+	var overflow := 0
+	var overflow_max := 0.0
+	var foamy := 0
+	var ratios := PackedFloat32Array()
+	var faults := {"lost": [0, 0, 0], "overflow": [0, 0, 0], "depth": [0, 0, 0], "foam": [0, 0, 0]}
+	var examples := PackedStringArray()
+	var depth_map := Image.create(grid.x, grid.y, false, Image.FORMAT_RGB8)
+	for y in grid.y:
+		for x in grid.x:
+			var cell_point := region.position + (Vector2(x, y) + Vector2.ONE * 0.5) * river.swe.cell_m
+			var i := (y * grid.x + x) * 4
+			var reference := maxf(terrain[i + 1] - terrain[i], 0.0)
+			var depth := surface[i + 3]
+			depth_map.set_pixel(x, y, Color(clampf(depth - reference, 0.0, 0.5) * 2.0, clampf(reference, 0.0, 0.3) / 0.3, clampf(reference - depth, 0.0, 0.3) / 0.3))
+			if minf(minf(cell_point.x - region.position.x, region.end.x - cell_point.x),
+					minf(cell_point.y - region.position.y, region.end.y - cell_point.y)) < 2.5:
+				continue
+			var kinds: Array[String] = []
+			if reference <= 0.015:
+				if depth > 0.05:
+					overflow += 1
+					kinds.append("overflow")
+				overflow_max = maxf(overflow_max, depth)
+			else:
+				wet += 1
+				kept += int(depth > 0.015)
+				if depth <= 0.015:
+					kinds.append("lost")
+				if foam[i] > 0.5:
+					foamy += 1
+					kinds.append("foam")
+				if reference >= 0.2:
+					var ratio := depth / reference
+					ratios.append(ratio)
+					if ratio < 0.8 or ratio > 1.2:
+						kinds.append("depth")
+			if kinds.is_empty():
+				continue
+			var texel := Vector2i(((cell_point - field.domain_rect().position) / field.domain_m * Vector2(terrain_image.get_size())).floor())
+			var cause := _river_fixture_cause(terrain_image, field, cell_point)
+			for kind in kinds:
+				faults[kind][cause] += 1
+			if examples.size() < 12:
+				var source := terrain_image.get_pixelv(texel)
+				examples.append("%s@texel%s(%.2f,%.2f):solver_ref=%.3f,texel_depth=%.3f,depth=%.3f,%s" % ["+".join(kinds), texel,
+					cell_point.x, cell_point.y, reference, source.g - source.r, depth, ["sentinel", "low_bank", "solver"][cause]])
+	ratios.sort()
+	depth_map.save_png("%s/%s_depth.png" % [output_dir, name])
+	var end_pair := await _river_fixture_pair(river, output_dir, name, "end")
+	var sheet := Image.create(1280, 720, false, Image.FORMAT_RGBA8)
+	for index in 4:
+		var tile: Image = (start_pair + end_pair)[index]
+		tile.convert(Image.FORMAT_RGBA8)
+		tile.resize(640, 360)
+		sheet.blit_rect(tile, Rect2i(0, 0, 640, 360), Vector2i(index % 2 * 640, index / 2 * 360))
+	sheet.save_png("%s/%s_sheet.png" % [output_dir, name])
+	var kept_pct := 100.0 * kept / maxf(wet, 1.0)
+	var p01 := ratios[int(ratios.size() * 0.01)] if not ratios.is_empty() else 0.0
+	var p99 := ratios[mini(int(ratios.size() * 0.99), ratios.size() - 1)] if not ratios.is_empty() else 0.0
+	var passed := wet > 0 and not ratios.is_empty() and kept_pct >= 99.0 and p01 >= 0.8 and p99 <= 1.2 and overflow == 0 and foamy == 0
+	print("RIVER FIXTURE %s speed_p50=%.2f grade_p50=%.3f walk=%s->%s region=%s wet_cells=%d kept=%.2f%% depth_p01=%.3f depth_p50=%.3f depth_p99=%.3f overflow=%d overflow_max_m=%.3f foam_cells=%d gpu_ms=%.3f diff_start=%.4f diff_end=%.4f %s" % [
+		name, float(meta.current_m_s.p50), float(meta.surface_grade.p50), walk_start.snapped(Vector2.ONE * 0.1), point.snapped(Vector2.ONE * 0.1),
+		region, wet, kept_pct, p01, ratios[ratios.size() / 2] if not ratios.is_empty() else 0.0, p99, overflow, overflow_max, foamy, gpu_ms,
+		_river_fixture_difference(start_pair[0], start_pair[1]), _river_fixture_difference(end_pair[0], end_pair[1]), "PASS" if passed else "FAIL"])
+	print("RIVER FIXTURE %s faults sentinel/low_bank/solver lost=%s overflow=%s depth=%s foam=%s" % [
+		name, faults.lost, faults.overflow, faults.depth, faults.foam])
+	for example in examples:
+		print("RIVER FIXTURE %s fault %s" % [name, example])
+	river.queue_free()
+	ground.queue_free()
+	await _boot_frames(2)
+	return passed
+
+
+func _river_fixture_wet(terrain: Image, texel: Vector2i) -> bool:
+	var data := terrain.get_pixelv(texel.clamp(Vector2i.ZERO, terrain.get_size() - Vector2i.ONE))
+	return data.g - data.r > 0.015
+
+
+func _river_fixture_continuous_dry(image: Image) -> int:
+	var source := image.duplicate() as Image
+	var bounds := Rect2i(Vector2i.ZERO, source.get_size())
+	var rewritten := 0
+	for y in bounds.size.y:
+		for x in bounds.size.x:
+			var texel := source.get_pixel(x, y)
+			if _river_fixture_wet(source, Vector2i(x, y)):
+				continue
+			var level := -INF
+			for neighbour_y in range(y - 1, y + 2):
+				for neighbour_x in range(x - 1, x + 2):
+					var neighbour := Vector2i(neighbour_x, neighbour_y)
+					if bounds.has_point(neighbour) and _river_fixture_wet(source, neighbour):
+						level = maxf(level, source.get_pixelv(neighbour).g)
+			if level == -INF:
+				continue
+			texel.g = minf(texel.r - 0.05, level)
+			image.set_pixel(x, y, texel)
+			rewritten += 1
+	return rewritten
+
+
+func _river_fixture_cap_current(image: Image, channel: int, scaled_by_wet: bool, cap_m_s: float) -> int:
+	var capped := 0
+	for y in image.get_height():
+		for x in image.get_width():
+			var texel := image.get_pixel(x, y)
+			var wet := texel.a if scaled_by_wet else 1.0
+			if wet <= 0.0:
+				continue
+			var current := Vector2(texel[channel], texel[channel + 1]) / wet
+			if current.length() <= cap_m_s:
+				continue
+			current = current.limit_length(cap_m_s) * wet
+			texel[channel] = current.x
+			texel[channel + 1] = current.y
+			image.set_pixel(x, y, texel)
+			capped += 1
+	return capped
+
+
+func _river_fixture_low_bank(terrain: Image, texel: Vector2i) -> bool:
+	if _river_fixture_wet(terrain, texel):
+		return false
+	var bed := terrain.get_pixelv(texel).r
+	for offset: Vector2i in [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]:
+		var neighbour := texel + offset
+		if Rect2i(Vector2i.ZERO, terrain.get_size()).has_point(neighbour) and _river_fixture_wet(terrain, neighbour) \
+				and terrain.get_pixelv(neighbour).g > bed + 0.05:
+			return true
+	return false
+
+
+func _river_fixture_cause(terrain: Image, field: RiverField, point: Vector2) -> int:
+	var cell := (point - field.domain_rect().position) / field.domain_m * Vector2(terrain.get_size()) - Vector2.ONE * 0.5
+	var texel := Vector2i(cell.round())
+	if _river_fixture_wet(terrain, texel):
+		var low := Vector2i(cell.floor())
+		for offset: Vector2i in [Vector2i.ZERO, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.ONE]:
+			if not _river_fixture_wet(terrain, low + offset):
+				return 0
+		return 2
+	return 1 if _river_fixture_low_bank(terrain, texel) else 2
+
+
+func _river_fixture_ground(field: RiverField) -> ArrayMesh:
+	var image := field.solver_terrain_image
+	var size := image.get_size()
+	var cell := field.domain_m / Vector2(size)
+	var corner := field.domain_rect().position + cell * 0.5
+	var vertices := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var indices := PackedInt32Array()
+	for y in size.y:
+		for x in size.x:
+			var slope := Vector2(image.get_pixel(mini(x + 1, size.x - 1), y).r - image.get_pixel(maxi(x - 1, 0), y).r,
+				image.get_pixel(x, mini(y + 1, size.y - 1)).r - image.get_pixel(x, maxi(y - 1, 0)).r) / (cell * 2.0)
+			var point := corner + Vector2(x, y) * cell
+			vertices.append(Vector3(point.x, image.get_pixel(x, y).r, point.y))
+			normals.append(Vector3(-slope.x, 1.0, -slope.y).normalized())
+			if x + 1 < size.x and y + 1 < size.y:
+				var a := y * size.x + x
+				indices.append_array([a, a + 1, a + size.x, a + 1, a + size.x + 1, a + size.x])
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var material := StandardMaterial3D.new()
+	material.albedo_color = Color(0.42, 0.36, 0.28)
+	material.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mesh.surface_set_material(0, material)
+	return mesh
+
+
+func _river_fixture_start(field: RiverField) -> Vector2:
+	var image := field.solver_terrain_image
+	var size := image.get_size()
+	var cell := field.domain_m / Vector2(size)
+	var corner := field.domain_rect().position
+	var deepest := Vector2.INF
+	var deepest_m := 0.0
+	var nearest := Vector2.INF
+	for y in size.y:
+		for x in size.x:
+			var texel := image.get_pixel(x, y)
+			var depth := texel.g - texel.r
+			if depth <= 0.015:
+				continue
+			var point := corner + (Vector2(x, y) + Vector2.ONE * 0.5) * cell
+			if point.distance_to(field.origin_m) <= 3.0 and depth > deepest_m:
+				deepest = point
+				deepest_m = depth
+			if nearest == Vector2.INF or point.distance_to(field.origin_m) < nearest.distance_to(field.origin_m):
+				nearest = point
+	return deepest if deepest_m > 0.0 else nearest
+
+
+func _river_fixture_heading(field: RiverField, point: Vector2, previous: Vector2) -> Vector2:
+	var drive := field.sample_solver(point, 0.0)
+	var current := Vector2(drive.r, drive.g)
+	return current.normalized() if current.length() >= 0.05 else previous
+
+
+func _river_fixture_pose(camera: Camera3D, field: RiverField, point: Vector2, heading: Vector2) -> void:
+	var eye := Vector3(point.x, maxf(field.sample_height(point, 0.0), field.sample_bed(point)) + FIXTURE_EYE_M, point.y)
+	var forward := Vector3(heading.x * cos(PI / 6.0), -sin(PI / 6.0), heading.y * cos(PI / 6.0))
+	camera.look_at_from_position(eye, eye + forward, Vector3.UP)
+
+
+func _river_fixture_pair(river: RiverSystem, output_dir: String, name: String, label: String) -> Array[Image]:
+	river.frozen = true
+	await _boot_frames(3)
+	await RenderingServer.frame_post_draw
+	var simulated := root.get_texture().get_image()
+	river.swe.set_enabled(false)
+	await _boot_frames(3)
+	await RenderingServer.frame_post_draw
+	var guided := root.get_texture().get_image()
+	river.swe.set_enabled(true)
+	simulated.save_png("%s/%s_%s_swe.png" % [output_dir, name, label])
+	guided.save_png("%s/%s_%s_guided.png" % [output_dir, name, label])
+	return [simulated, guided]
+
+
+func _river_fixture_difference(a: Image, b: Image) -> float:
+	var small_a := a.duplicate() as Image
+	var small_b := b.duplicate() as Image
+	small_a.resize(320, 180)
+	small_b.resize(320, 180)
+	var total := 0.0
+	for y in 180:
+		for x in 320:
+			total += absf(small_a.get_pixel(x, y).get_luminance() - small_b.get_pixel(x, y).get_luminance())
+	return total / (320.0 * 180.0)

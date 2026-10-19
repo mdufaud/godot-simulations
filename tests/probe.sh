@@ -64,6 +64,7 @@ PROBE_TABLE=(
 	"river_foam_render|60|^TEST PASS river_foam_render$|RIVER FOAM "
 	"river_slope|900|^TEST PASS river_slope$|RIVER SLOPE "
 	"river_domain|180|^TEST PASS river_domain$|RIVER DOMAIN "
+	"river_fixtures|1200|^RIVER FIXTURES DONE|RIVER FIXTURE "
 	"ocean_contracts|60|^TEST PASS ocean_contracts$|OCEAN CONTRACTS "
 	"ocean_parameters|600|^TEST PASS ocean_parameters_gpu$|OCEAN PARAM "
 	"ocean_swell|240|^TEST PASS ocean_swell$|OCEAN (PARAM|SWELL) "
