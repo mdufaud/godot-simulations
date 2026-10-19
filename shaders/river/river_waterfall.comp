@@ -59,6 +59,8 @@ float ground_at(vec2 point) {
     }
     ivec2 lo = ivec2(int(floor(x)), row);
     vec2 f = vec2(fract(x), f_y);
+    if (params.waterfall.x >= 90.0 && point.y < params.waterfall.w
+            && texelFetch(ground_height, ivec2(0, min(row + 1, last.y)), 0).g >= params.waterfall.w) f.y = 0.0;
     float a = texelFetch(ground_height, lo, 0).r;
     float b = texelFetch(ground_height, min(lo + ivec2(1, 0), last), 0).r;
     float c = texelFetch(ground_height, min(lo + ivec2(0, 1), last), 0).r;
@@ -190,7 +192,7 @@ void step_ballistic(ivec2 p) {
         vec3 point = vec3(start.x + start.w * age, packet.z - 0.5 * params.domain.w * age * age,
             start.z + packet.w * age);
         vec2 impact_xz = vec2(point.x, min(point.z, params.waterfall.w - params.domain.z * 1.5));
-        if (point.y <= pool_height(impact_xz, true)) {
+        if (point.y <= max(pool_height(impact_xz, true), ground_at(point.xz) + 0.01)) {
             arrival.x += packet.x;
             arrival.yz += packet.x * impact_xz.yx;
             momentum += packet.x * vec2(start.w, packet.w);

@@ -116,6 +116,16 @@ func _check_triangle_ground() -> void:
 			field.ground_height_image.set_pixel(x, y, Color(float(y * 4 + x), field.ground_rows_m[y], 0.0, 1.0))
 	_check(absf(field.sample_ground_height(Vector2(0.0, 0.95)) - 6.5) < 0.00001,
 		"Adaptive ground sampling must interpolate the actual Z rows rather than assuming uniform spacing")
+	field.waterfall = WaterfallConfig.new()
+	field.waterfall.crest_z_m = 1.0
+	field.ground_rows_m = PackedFloat32Array([-1.0, 0.5, 1.0])
+	for y in 3:
+		for x in 2:
+			field.ground_height_image.set_pixel(x, y, Color(float(y * 4 + x), field.ground_rows_m[y], 0.0, 1.0))
+	_check(absf(field.sample_ground_height(Vector2(-1.0, 0.9)) - 4.0) < 0.00001
+		and absf(field.sample_ground_height(Vector2(-1.0, 1.0)) - 8.0) < 0.00001
+		and absf(field.sample_ground_height(Vector2(-1.0, 0.0)) - 8.0 / 3.0) < 0.00001,
+		"Ground below a vertical lip must follow the lower mesh row instead of a ramp across the cliff gap")
 
 
 func _check_waterfall_field() -> void:

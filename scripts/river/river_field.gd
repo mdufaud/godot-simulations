@@ -32,8 +32,6 @@ func sample_height(point: Vector2, level_m: float) -> float:
 func sample_ground_height(point: Vector2) -> float:
 	if ground_height_image == null:
 		return sample_bed(point)
-	if waterfall != null and waterfall.is_vertical() and point.y < waterfall.crest_z_m:
-		point.y = minf(point.y, waterfall.crest_z_m - 0.25)
 	var last := ground_height_image.get_size() - Vector2i.ONE
 	var cell := (((point - origin_m) / domain_m + Vector2.ONE * 0.5) * Vector2(last)).clamp(Vector2.ZERO, Vector2(last))
 	if not ground_rows_m.is_empty():
@@ -50,6 +48,9 @@ func sample_ground_height(point: Vector2) -> float:
 		cell.y = float(low_y) + fraction_y
 	var low := Vector2i(cell.floor())
 	var fraction := cell - Vector2(low)
+	if waterfall != null and waterfall.is_vertical() and point.y < waterfall.crest_z_m \
+			and ground_height_image.get_pixel(0, mini(low.y + 1, last.y)).g >= waterfall.crest_z_m:
+		fraction.y = 0.0
 	var a := ground_height_image.get_pixelv(low).r
 	var b := ground_height_image.get_pixelv((low + Vector2i.RIGHT).min(last)).r
 	var c := ground_height_image.get_pixelv((low + Vector2i.DOWN).min(last)).r
