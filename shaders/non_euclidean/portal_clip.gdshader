@@ -4,6 +4,7 @@ render_mode diffuse_burley, specular_schlick_ggx;
 uniform vec3 albedo : source_color = vec3(0.35);
 uniform float roughness : hint_range(0.0, 1.0) = 0.55;
 uniform float metallic : hint_range(0.0, 1.0) = 0.0;
+uniform float glow : hint_range(0.0, 1.0) = 0.0;
 uniform bool clip_enabled = false;
 uniform vec4 clip_plane = vec4(0.0, 0.0, 1.0, 0.0);
 
@@ -20,4 +21,5 @@ void fragment() {
 	ALBEDO = albedo;
 	ROUGHNESS = roughness;
 	METALLIC = metallic;
+	EMISSION = albedo * glow;
 }

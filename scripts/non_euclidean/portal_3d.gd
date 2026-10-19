@@ -6,6 +6,9 @@ signal teleported(body: Node3D, destination: Portal3D)
 const WORLD_LAYER := 1
 const MAIN_PORTAL_LAYER := 2
 const PROXY_LAYER := 8
+## Geometry between a portal and the virtual camera behind it, which the near
+## plane cannot cut exactly: views leaving through [member exit_hidden_layers] skip it.
+const BEHIND_LAYER := 16
 const SCREEN_OFFSET := -0.03
 const SCREEN_OVERSCAN := Vector2(0.06, 0.06)
 const SURFACE_SHADER := preload("res://shaders/non_euclidean/portal_surface.gdshader")
@@ -16,6 +19,8 @@ const SURFACE_SHADER := preload("res://shaders/non_euclidean/portal_surface.gdsh
 @export var exit_clearance := 0.001
 @export var gravity_override_enabled := false
 @export var gravity_override := Vector3.DOWN * 12.0
+## Layers culled from every view that comes out of this portal.
+@export_flags_3d_render var exit_hidden_layers := 0
 
 var _area: Area3D
 var _screen: MeshInstance3D
@@ -109,9 +114,20 @@ func is_visible_from(camera: Camera3D) -> bool:
 	return false
 
 
+## Live view: a full-window render sampled in screen space.
 func set_render_texture(texture: Texture2D) -> void:
+	_set_texture(texture, true)
+
+
+## Static stand-in stretched over the aperture, for doors with no live view.
+func set_placeholder(texture: Texture2D) -> void:
+	_set_texture(texture, false)
+
+
+func _set_texture(texture: Texture2D, screen_space: bool) -> void:
 	if _surface_material != null:
 		_surface_material.set_shader_parameter("portal_texture", texture)
+		_surface_material.set_shader_parameter("screen_space", screen_space)
 
 
 func set_debug_enabled(enabled: bool) -> void:

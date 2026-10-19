@@ -4,15 +4,29 @@ class_name ExhibitGarden extends RefCounted
 ##
 ## Gravity points radially outwards, so the floor curves up in every direction and
 ## a straight walk closes on itself. Three great circles and a ring of columns give
-## the eye something to measure the curvature against.
+## the eye something to measure the curvature against, and a scatter of balls the
+## same field holds to the shell: carried up and let go, one falls back outward.
 
 const SHADER := preload("res://shaders/non_euclidean/spherical_garden.gdshader")
 const RADIUS := 30.0
+const BALL_RADIUS := 0.45
+const BALL_COLORS := [
+	Color(0.95, 0.28, 0.24),
+	Color(1.0, 0.78, 0.2),
+	Color(0.3, 0.82, 0.45),
+	Color(0.28, 0.58, 1.0),
+	Color(0.86, 0.4, 0.95),
+	Color(1.0, 0.55, 0.18),
+]
 
 ## Where the player starts, in world space. Valid after [method build].
 var spawn_pose: Transform3D
 ## Radial field the host hands to the player so their up vector follows the shell.
 var gravity_field: GravityField3D
+## Carryable balls; the field pulls them like the player.
+var balls: Array[GripBall] = []
+
+var _ball_poses: Array[Transform3D] = []
 
 
 func build(cells: Node3D, materials: Dictionary) -> void:
@@ -83,6 +97,30 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 	var garden_right := garden_forward.cross(garden_up).normalized()
 	var garden_basis := Basis(garden_right, garden_up, -garden_forward).orthonormalized()
 	spawn_pose = cell.global_transform * Transform3D(garden_basis, garden_position)
+	_add_balls(cell, garden_position, garden_forward)
+
+
+## Returns every ball to its built spot, at rest.
+func reset() -> void:
+	for index in balls.size():
+		balls[index].global_transform = _ball_poses[index]
+		balls[index].linear_velocity = Vector3.ZERO
+		balls[index].angular_velocity = Vector3.ZERO
+
+
+## Scattered ahead of the spawn in two staggered rows, resting on the shell.
+func _add_balls(cell: Node3D, spawn: Vector3, forward: Vector3) -> void:
+	var outward := spawn.normalized()
+	var across := outward.cross(forward)
+	for index in BALL_COLORS.size():
+		var at := outward * RADIUS + forward * (3.0 + 1.4 * float(index)) \
+			+ across * (1.6 if index % 2 == 0 else -1.6)
+		var ball := GeometryKit.add_grip_ball(cell,
+			at.normalized() * (RADIUS - BALL_RADIUS - 0.05), BALL_RADIUS, BALL_COLORS[index],
+			0.6, 0.35)
+		ball.resizes = false
+		balls.append(ball)
+		_ball_poses.append(ball.global_transform)
 
 
 ## Three orthogonal great circles, one [MultiMesh] for the 288 segments.

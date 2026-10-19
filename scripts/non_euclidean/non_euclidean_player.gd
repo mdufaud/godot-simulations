@@ -42,7 +42,8 @@ func _ready() -> void:
 		_camera = _camera_pivot.get_node_or_null("Camera3D") as Camera3D
 	if _camera != null:
 		_camera.fov = fov
-		_camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER | Portal3D.PROXY_LAYER
+		_camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER \
+			| Portal3D.PROXY_LAYER | Portal3D.BEHIND_LAYER
 	gravity_vector = gravity_vector.normalized() * gravity_strength
 	_portal_previous_position = global_position
 	_align_to_gravity()

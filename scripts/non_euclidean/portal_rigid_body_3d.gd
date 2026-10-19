@@ -6,6 +6,8 @@ const CLIP_SHADER := preload("res://shaders/non_euclidean/portal_clip.gdshader")
 @export var albedo := Color(0.34, 0.38, 0.42)
 @export var material_roughness := 0.55
 @export var material_metallic := 0.05
+## Self-lit share of the albedo, so the color reads under any light.
+@export var material_glow := 0.0
 
 var gravity_vector := Vector3.DOWN * 12.0
 var gravity_field: GravityField3D
@@ -111,8 +113,7 @@ func _create_preview() -> void:
 	_preview_mesh = MeshInstance3D.new()
 	_preview_mesh.name = "%sPortalPreview" % name
 	_preview_mesh.mesh = _source_mesh.mesh
-	_preview_mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	_preview_mesh.layers = 8
+	_preview_mesh.layers = Portal3D.PROXY_LAYER
 	_preview_mesh.top_level = true
 	_preview_material = _make_material()
 	_preview_mesh.material_override = _preview_material
@@ -158,6 +159,7 @@ func _make_material() -> ShaderMaterial:
 	material.set_shader_parameter("albedo", Vector3(albedo.r, albedo.g, albedo.b))
 	material.set_shader_parameter("roughness", material_roughness)
 	material.set_shader_parameter("metallic", material_metallic)
+	material.set_shader_parameter("glow", material_glow)
 	return material
 
 

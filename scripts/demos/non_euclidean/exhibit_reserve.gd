@@ -26,6 +26,9 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 	_build_courtyard(courtyard, materials)
 	var source := GeometryKit.add_portal(courtyard, "ReserveExpansion",
 		Transform3D(Basis.IDENTITY, Vector3(0.0, 1.7, 2.5)))
+	# The whole shed stands behind the doorway: seen from inside the warehouse
+	# its walls would cover the courtyard view.
+	source.exit_hidden_layers = Portal3D.BEHIND_LAYER
 
 	var interior := _new_cell(cells, "ImpossibleReserve",
 		Transform3D(Basis.IDENTITY, Vector3(0.0, 0.0, -450.0)))
@@ -91,8 +94,15 @@ func _build_courtyard(parent: Node3D, materials: Dictionary) -> void:
 		materials["concrete"])
 	GeometryKit.add_box(parent, Vector3(0.0, 4.0, 13.25), Vector3(30.0, 8.0, 0.5),
 		materials["concrete"])
-	_build_outer_shell(parent, Vector3(0.0, 0.0, -1.5), OUTER_SIZE, Vector2(2.6, 3.4),
+	var shed := Node3D.new()
+	shed.name = "Shed"
+	parent.add_child(shed)
+	_build_outer_shell(shed, Vector3(0.0, 0.0, -1.5), OUTER_SIZE, Vector2(2.6, 3.4),
 		materials)
+	for body in shed.get_children():
+		for child in body.get_children():
+			if child is MeshInstance3D:
+				(child as MeshInstance3D).layers = Portal3D.BEHIND_LAYER
 	GeometryKit.add_label(parent, "STORAGE A-01", Vector3(0.0, 4.05, 2.53), 0.0,
 		Color(0.68, 0.82, 0.9), 68)
 	GeometryKit.add_box(parent, Vector3(7.0, 1.55, 2.45), Vector3(4.6, 2.7, 0.14),

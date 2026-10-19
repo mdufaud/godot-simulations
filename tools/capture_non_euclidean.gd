@@ -63,6 +63,10 @@ func _run() -> void:
 		quit(1)
 		return
 	await _capture_spherical_garden()
+	await _capture_growing_corridor()
+	await _capture_grip_room()
+	await _capture_wrap_world()
+	await _capture_holonomy_loop()
 	print("CAPTURE_NON_EUCLIDEAN_DONE")
 	quit(0)
 
@@ -97,7 +101,7 @@ func _test_portal_pose(source: Portal3D, test_name: String,
 	var main_camera := player.get_camera()
 	main_camera.near = 0.01
 	main_camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER \
-		| Portal3D.PROXY_LAYER
+		| Portal3D.PROXY_LAYER | Portal3D.BEHIND_LAYER
 	player.set_pose(_aimed_pose(source, local_position))
 	for _frame in 5:
 		await process_frame
@@ -139,7 +143,7 @@ func _test_crossing_continuity(source: Portal3D) -> bool:
 	var camera := player.get_camera()
 	camera.near = 0.01
 	camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER \
-		| Portal3D.PROXY_LAYER
+		| Portal3D.PROXY_LAYER | Portal3D.BEHIND_LAYER
 	var before_local := Vector3(0.0, -0.8, 0.004)
 	player.set_pose(_aimed_pose(source, before_local))
 	for _frame in 5:
@@ -242,6 +246,76 @@ func _capture_spherical_garden() -> void:
 	for _frame in 4:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_spherical_garden.png")
+
+
+## The corridor at three depths: the far door recedes and the folds ahead open
+## as the bellows widens.
+func _capture_growing_corridor() -> void:
+	demo._go_to_case(3)
+	var corridor := demo.get_node("Cells/GrowingCorridor") as Node3D
+	var depths := [Vector3(0.0, 0.9, -2.2), Vector3(0.0, 0.9, -40.0),
+		Vector3(0.0, 0.9, -120.0)]
+	for index in depths.size():
+		player.set_pose(Transform3D(Basis.IDENTITY, corridor.to_global(depths[index])))
+		for _tick in 60:
+			demo._physics_process(0.0)
+		for _frame in 4:
+			await process_frame
+		await _capture("res://tmp/non_euclidean_corridor_depth%d.png" % index)
+
+
+## The grip lab: the near ball resting small at the spawn view, then a ball
+## committed to the giant bound on the shelf.
+func _capture_grip_room() -> void:
+	demo._go_to_case(4)
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_grip_small.png")
+	var ball: GripBall = demo._grip.props[1]
+	ball.commit_scale(GripBall.RADIUS_MAX)
+	ball.place_at(demo.get_node("Cells/GripRoom").to_global(Vector3(0.0, 3.25, -7.0)))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_grip_giant.png")
+	demo._grip.reset()
+
+
+## The wrap garden: the block from the spawn, then from the far edge where the
+## eight neighbour copies should read as the continuation of the floor.
+func _capture_wrap_world() -> void:
+	demo._go_to_case(5)
+	var world := demo.get_node("Cells/WrapWorld") as Node3D
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_wrap_center.png")
+	player.set_pose(Transform3D(Basis.IDENTITY, world.to_global(Vector3(8.0, 2.6, 16.0))))
+	(player.get_node("CameraPivot") as Node3D).rotation.x = -0.28
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_wrap_edge.png")
+	(player.get_node("CameraPivot") as Node3D).rotation.x = 0.0
+
+
+## The holonomy loop: the start vault facing its exit, a mid-loop vault facing
+## its own exit, then the start vault again from its entrance — the doors where
+## the walk says they cannot be. The draw is random, so the shots vary by run.
+func _capture_holonomy_loop() -> void:
+	demo._go_to_case(6)
+	var vault1 := demo.get_node("Cells/HolonomyLoop/Vault1") as Node3D
+	var vault4 := demo.get_node("Cells/HolonomyLoop/Vault4") as Node3D
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_vault1.png")
+	player.set_pose(Transform3D(vault4.global_basis * Basis(Vector3.UP,
+		HolonomyState.inward_yaw(demo._holonomy.exit_walls[3])), vault4.to_global(Vector3(0.0, 0.9, 0.0))))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_vault4.png")
+	player.set_pose(Transform3D(vault1.global_basis * Basis(Vector3.UP,
+		HolonomyState.inward_yaw(demo._holonomy.entrance_walls[0])), vault1.to_global(Vector3(0.0, 0.9, 0.0))))
+	for _frame in 4:
+		await process_frame
+	await _capture("res://tmp/non_euclidean_holonomy_returned.png")
 
 
 func _aimed_pose(portal: Portal3D, local_position: Vector3) -> Transform3D:
