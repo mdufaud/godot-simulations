@@ -411,6 +411,24 @@ func _test_wrap_world(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) -
 		"player ended outside the bounded cell after wrapping")
 	_check(walked_local.z > ExhibitWrapWorld.PERIODS.z * 0.5 - 4.0,
 		"wrap did not carry the player one full period over")
+	_check(player.get_camera().environment != null \
+		and player.get_camera().environment.fog_mode == Environment.FOG_MODE_DEPTH,
+		"wrap world does not fog out the lattice edge")
+	for slot in demo.render_manager._slots:
+		_check(slot["portal"] == null, "a portal of a previous exhibit kept its render slot")
+	# A fall out of the cell bottom re-enters from the top without crossing a seam.
+	var seam_before := exhibit.last_seam
+	var loops_after_walk := exhibit.wrap_count
+	await physics_frame
+	player.set_pose(Transform3D(Basis.IDENTITY, world.to_global(
+		Vector3(0.0, -ExhibitWrapWorld.PERIODS.y * 0.5 - 0.5, 0.0))))
+	exhibit.track(player, 0.0)
+	_check(world.to_local(player.global_position).y > 0.0,
+		"a fall out of the cell bottom did not re-enter from the top")
+	_check(exhibit.last_seam == seam_before and exhibit.wrap_count == loops_after_walk,
+		"a fall through the shaft was reported as a seam crossing")
+	player.set_pose(exhibit.spawn_pose)
+	await physics_frame
 	# The prop loops through the central shaft: re-entering from above, staying
 	# in the shaft, and never accelerating past the terminal fall cap.
 	var sphere := exhibit.props[0]
@@ -456,6 +474,7 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 	var exhibit: ExhibitHolonomyLoop = demo._holonomy
 	var vault1 := cell.get_node("Vault1") as Node3D
 	await physics_frame
+	_check(player.get_camera().environment == null, "wrap world fog leaked into the next exhibit")
 	_check(exhibit.exits.size() == 4 and exhibit.entrances.size() == 4,
 		"holonomy loop does not chain four exits into four entrances")
 	# Every lit door frame hugs its own aperture, on the room side of the wall.

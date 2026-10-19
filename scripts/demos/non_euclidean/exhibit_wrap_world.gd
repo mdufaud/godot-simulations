@@ -32,6 +32,8 @@ const SHAFT_WALL := 0.4
 const SHAFT_LIP := 0.6
 const TERMINAL_FALL := 26.0
 const PROP_RADIUS := 0.4
+const FOG_BEGIN := 14.0
+const FOG_END := 38.0
 ## Trim key -> readable seam name. The trim colors double as direction codes:
 ## the +X seam is blue, -X orange, +Z green, -Z the dark cyan measure color.
 const SEAM_NAMES := {
@@ -58,6 +60,7 @@ var _seam_materials: Dictionary = {}
 var _base_emission: Dictionary = {}
 var _pulses: Dictionary = {}
 var _prop_copies: Array[MeshInstance3D] = []
+var _environment: Environment
 
 
 func build(cells: Node3D, materials: Dictionary) -> void:
@@ -103,14 +106,14 @@ func track(player: NonEuclideanPlayer, delta: float) -> bool:
 	var changed := false
 	var offset := WrapWorldState.wrap_offset(_cell.to_local(player.global_position), PERIODS)
 	if offset != Vector3.ZERO:
+		player.request_portal_teleport(Transform3D(Basis.IDENTITY,
+			_cell.global_basis * offset), null)
 		var seam := _seam_for(offset)
-		last_seam = SEAM_NAMES[seam]
-		_pulses[seam] = 1.0
-		player.global_position += _cell.global_basis * offset
-		player._portal_previous_position = player.global_position
-		player.reset_physics_interpolation()
-		wrap_count += 1
-		changed = true
+		if not seam.is_empty():
+			last_seam = SEAM_NAMES[seam]
+			_pulses[seam] = 1.0
+			wrap_count += 1
+			changed = true
 	_cap_player_fall(player)
 	for body in props:
 		var body_offset := WrapWorldState.wrap_offset(
@@ -124,6 +127,23 @@ func track(player: NonEuclideanPlayer, delta: float) -> bool:
 	_update_prop_copies()
 	_decay_pulses(delta)
 	return changed
+
+
+## Camera-only depth fog closes before the lattice edge, 40 m out at the closest.
+func set_active(active: bool, player: NonEuclideanPlayer) -> void:
+	var camera := player.get_camera()
+	if active:
+		if _environment == null:
+			_environment = player.get_world_3d().environment.duplicate() as Environment
+			_environment.fog_enabled = true
+			_environment.fog_mode = Environment.FOG_MODE_DEPTH
+			_environment.fog_density = 1.0
+			_environment.fog_depth_begin = FOG_BEGIN
+			_environment.fog_depth_end = FOG_END
+			_environment.fog_sky_affect = 1.0
+		camera.environment = _environment
+	elif camera.environment == _environment:
+		camera.environment = null
 
 
 ## Zeroes the counters and returns every prop to its built pose. The host
@@ -144,7 +164,8 @@ func reset() -> void:
 
 
 ## The seam key whose boundary the given wrap [param offset] crossed: the
-## offset carries one full negative period per crossed axis.
+## offset carries one full negative period per crossed axis. Empty for a fall
+## through the shaft, which crosses no seam.
 func _seam_for(offset: Vector3) -> String:
 	if offset.x < 0.0:
 		return "blue"
@@ -152,7 +173,9 @@ func _seam_for(offset: Vector3) -> String:
 		return "orange"
 	if offset.z < 0.0:
 		return "green"
-	return "measure"
+	if offset.z > 0.0:
+		return "measure"
+	return ""
 
 
 func _decay_pulses(delta: float) -> void:

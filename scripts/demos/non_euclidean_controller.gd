@@ -145,6 +145,7 @@ func _go_to_case(index: int) -> void:
 	player.set_pose(pose, gravity)
 	_staircase.set_active(index == 1, player)
 	_corridor.set_active(index == 3, player)
+	_wrap.set_active(index == 5, player)
 	if index != 4:
 		_grab.release()
 		_hud.set_grab_hint(false)
