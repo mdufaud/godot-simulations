@@ -31,7 +31,7 @@ void main() {
 	vec3 pos = predicted.data[i].xyz;
 	float yield_decel = scene.fluid_rheology.x;
 	float carried = positions.data[i].w;
-	bool supported = carried >= PLUG_ANCHORED;
+	bool supported = yield_decel > 0.0 && carried >= PLUG_ANCHORED;
 	carried -= supported ? PLUG_ANCHORED : 0.0;
 	vec3 v_live = velocities.data[i].xyz;
 	vec3 vi_snap = velocities_snap.data[i].xyz;
