@@ -112,6 +112,7 @@ declare -a CPU_SUITES=(
 	"river_boot|res://tests/river_boot_test.gd"
 	"river_waterfall_curtain|res://tests/river_waterfall_curtain_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
+	"fire_ssot|res://tests/fire_ssot_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
 	"mixwell|res://tests/mixwell_test.gd"

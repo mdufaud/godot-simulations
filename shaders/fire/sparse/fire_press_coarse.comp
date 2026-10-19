@@ -26,20 +26,20 @@ shared float coarse_p[COARSE_SLOTS];
 void main() {
 	uint threads = gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z;
 	uint tid = gl_LocalInvocationIndex;
-	uint count = min(tile_counts[C_ACTIVE_WORD], COARSE_SLOTS);
+	uint count = min(tile_counts[C_ACTIVE], COARSE_SLOTS);
 
 	// Resolve the coarse adjacency once. It cannot be done in the restrict pass:
 	// a tile's neighbour is found through the indirection volume as an atlas slot,
 	// and the slot -> unknown map is only complete once every restrict workgroup
 	// has run.
 	for (uint a = tid; a < count; a += threads) {
-		ivec3 vt = tile_of_index(active_list[a]);
+		ivec3 vt = vti_to_vt(active_list[a]);
 		for (int f = 0; f < 6; ++f) {
 			ivec3 nvt = vt + COARSE_DIR[f];
 			uint nb = COARSE_NONE;
 			if (all(greaterThanEqual(nvt, ivec3(0))) && all(lessThan(nvt, VTILES))) {
 				uint slot = imageLoad(tile_indir, nvt).r;
-				if (slot < TILE_SLOT_MAX) {
+				if (slot < SLOT_MAX) {
 					uint na = coarse_idx[COARSE_SLOT_BASE + slot];
 					if (na < count && coarse_idx[na] == COARSE_INTERIOR) {
 						nb = na;
@@ -60,7 +60,7 @@ void main() {
 				if (coarse_idx[a] != COARSE_INTERIOR) {
 					continue;
 				}
-				ivec3 vt = tile_of_index(active_list[a]);
+				ivec3 vt = vti_to_vt(active_list[a]);
 				if (uint((vt.x + vt.y + vt.z) & 1) != colour) {
 					continue;
 				}

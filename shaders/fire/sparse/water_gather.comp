@@ -51,24 +51,16 @@ layout(push_constant, std430) uniform Params {
 	int grid_dim_y;
 	int grid_dim_z;
 	float cell_size;
+	// FireGpuSolver.ambient_temperature, what an empty cell's liquid reads as.
+	float ambient_temperature;
 } params;
 
-// Must match water_scatter.comp.
-const float SCALE_M = 10000000.0;
-const float SCALE_W = 2000000.0;
-const float SCALE_T = 100000.0;
-const float SCALE_V = 100000.0;
-
-const float AMBIENT_T = 300.0;
+// SCALE_M/W/T/V: FireWater.FIXED_POINT_SCALES, the ones water_scatter encoded with.
 
 void main() {
 	ivec3 dims = ivec3(params.grid_dim_x, params.grid_dim_y, params.grid_dim_z);
 	uint slot = water_slots.data[gl_WorkGroupID.x];
-	ivec3 tile = ivec3(
-		int(slot % 16u),
-		int((slot / 16u) % 8u),
-		int(slot / 128u));
-	ivec3 c = tile * 8 + ivec3(gl_LocalInvocationID);
+	ivec3 c = slot_atlas_origin(slot) + ivec3(gl_LocalInvocationID);
 	if (any(greaterThanEqual(c, dims))) {
 		return;
 	}
@@ -84,7 +76,7 @@ void main() {
 
 	// Mass weighted, so an empty cell has no temperature to report and falls
 	// back to ambient rather than dividing by zero.
-	float T_l = (m_w > 1e-12) ? (T_m_w / m_w) : AMBIENT_T;
+	float T_l = (m_w > 1e-12) ? (T_m_w / m_w) : params.ambient_temperature;
 
 	// Eq. 25: weighted mean droplet velocity. The same omega_j divides it, since
 	// the scattered weights are the normalised ones.

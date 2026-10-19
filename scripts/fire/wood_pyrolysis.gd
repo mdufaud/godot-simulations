@@ -7,7 +7,6 @@ const C_WOOD := 1600.0
 const THERMAL_DEPTH := 0.006
 const VIEW_FACTOR := 0.15
 const EMISSIVITY := 0.9
-const SIGMA_SB := 5.67e-8
 const H_CONV := 15.0
 const MAX_FLUX := 4.0e4
 const DH_GAS := 4.5e6
@@ -26,7 +25,8 @@ func step(entry: Dictionary, delta: float, t_gas: float, ambient: float,
 		emit_radius: float) -> void:
 	var t_s: float = entry["t_solid"]
 	var area: float = entry["area"]
-	var q := VIEW_FACTOR * EMISSIVITY * SIGMA_SB * (pow(t_gas, 4.0) - pow(t_s, 4.0)) \
+	var q := VIEW_FACTOR * EMISSIVITY * FIRE_GPU_SOLVER.SIGMA_SB \
+		* (pow(t_gas, 4.0) - pow(t_s, 4.0)) \
 		+ H_CONV * (t_gas - t_s)
 	q = minf(q, MAX_FLUX)
 	var capacity := RHO_WOOD * area * THERMAL_DEPTH * C_WOOD

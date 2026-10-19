@@ -139,8 +139,8 @@ func update(delta: float, gas_temperatures: PackedFloat32Array,
 
 func _update_look(entry: Dictionary) -> void:
 	var charred := 1.0 - float(entry["m_volatile"]) / maxf(entry["m_volatile_max"], 1e-4)
-	var glow := clampf((float(entry["t_char"]) - 700.0)
-		/ (WoodPyrolysis.T_GLOW - 700.0), 0.0, 1.0)
+	var glow := clampf((float(entry["t_char"]) - WoodPyrolysis.T_CHAR_OUT)
+		/ (WoodPyrolysis.T_GLOW - WoodPyrolysis.T_CHAR_OUT), 0.0, 1.0)
 	charred = maxf(charred, glow * 0.8)
 	for material: StandardMaterial3D in [entry["mat"], entry["end_mat"]]:
 		material.albedo_color = COLOR_FRESH.lerp(COLOR_CHAR, clampf(charred, 0.0, 1.0))

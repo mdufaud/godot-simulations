@@ -1,0 +1,28 @@
+// Tile-pool layout shared by every fire compute shader. The numbers are
+// FireTilePool's, prepended as defines by FireTilePool.glsl_header(); this file
+// only says how a slot and a virtual tile map onto them.
+
+// The stages address cells within a tile with >> 3 and & 7, and run one 8^3
+// workgroup per tile with 8^3-sized shared caches.
+#if TILE != 8
+#error "fire shaders assume 8^3 tiles"
+#endif
+
+// Slot -> atlas texel of the low corner of its block.
+ivec3 slot_atlas_origin(uint s) {
+	return ivec3(int(s % uint(ATLAS_TILES.x)),
+		int((s / uint(ATLAS_TILES.x)) % uint(ATLAS_TILES.y)),
+		int(s / uint(ATLAS_TILES.x * ATLAS_TILES.y))) * TILE;
+}
+
+ivec3 vti_to_vt(uint vti) {
+	uint xy = uint(VTILES.x) * uint(VTILES.y);
+	return ivec3(int(vti % uint(VTILES.x)),
+		int((vti / uint(VTILES.x)) % uint(VTILES.y)),
+		int(vti / xy));
+}
+
+uint vt_to_vti(ivec3 vt) {
+	return uint(vt.x) + uint(vt.y) * uint(VTILES.x)
+		+ uint(vt.z) * uint(VTILES.x) * uint(VTILES.y);
+}

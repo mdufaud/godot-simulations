@@ -35,7 +35,7 @@ void main() {
 	barrier();
 	store_visual_activity(c, uintBitsToFloat(visual_max_bits));
 
-	atomicMax(stats.data[0], uint(max(s.x, 0.0)));
+	atomicMax(stats.data[STAT_MAX_T], uint(max(s.x, 0.0)));
 
 	// Peak |div u| surviving the projection, in milli-1/s so it fits an atomic
 	// uint. This stage runs after fire_project, so it measures what the solve
@@ -48,18 +48,18 @@ void main() {
 	// divergence by construction, since one of its faces does not exist to be
 	// corrected.
 	if (solved_cell(c)) {
-		atomicMax(stats.data[8], uint(clamp(abs(divergence_at(c)) * 1000.0, 0.0, 4.2e9)));
+		atomicMax(stats.data[STAT_MAX_DIVERGENCE], uint(clamp(abs(divergence_at(c)) * STAT_SCALE, 0.0, 4.2e9)));
 	}
-	atomicAdd(stats.data[1], uint(reaction * 1000.0));
-	atomicMax(stats.data[2], uint(reaction * 1000.0));
+	atomicAdd(stats.data[STAT_REACTION_SUM], uint(reaction * STAT_SCALE));
+	atomicMax(stats.data[STAT_REACTION_MAX], uint(reaction * STAT_SCALE));
 
 	// Fuel and oxygen are only meaningful over the burner region: averaged over
 	// the whole domain they would read as "no fuel, plain air" forever.
 	ivec3 centre = params.dims.xyz / 2;
 	if (abs(c.x - centre.x) < 8 && abs(c.z - centre.z) < 8 && c.y < 24) {
-		atomicAdd(stats.data[3], uint(s.y * 1000.0));
-		atomicAdd(stats.data[4], uint(s.z * 1000.0));
-		atomicAdd(stats.data[5], 1u);
+		atomicAdd(stats.data[STAT_FUEL_SUM], uint(s.y * STAT_SCALE));
+		atomicAdd(stats.data[STAT_O2_SUM], uint(s.z * STAT_SCALE));
+		atomicAdd(stats.data[STAT_REGION_CELLS], 1u);
 	}
 
 	// Wood probes: the peak gas temperature inside each log's emitter sphere.
@@ -72,7 +72,7 @@ void main() {
 	for (int i = 0; i < MAX_LOGS; i++) {
 		float r = cfg.wood[i].w;
 		if (r > 0.0 && distance(wc, cfg.wood[i].xyz) <= r) {
-			atomicMax(stats.data[11 + i], uint(max(s.x, 0.0)));
+			atomicMax(stats.data[STAT_WOOD + i], uint(max(s.x, 0.0)));
 		}
 	}
 
@@ -80,8 +80,8 @@ void main() {
 	// conservation check (should hold at 1.0 with default product coefficients).
 	if (c.x == centre.x && c.z == centre.z) {
 		float total = s.y + s.z + s.w + s2.x + nitrogen_fraction(s, s2);
-		atomicAdd(stats.data[6], uint(total * 1000.0));
-		atomicAdd(stats.data[7], 1u);
+		atomicAdd(stats.data[STAT_MASS_SUM], uint(total * STAT_SCALE));
+		atomicAdd(stats.data[STAT_COLUMN_CELLS], 1u);
 	}
 
 	// Keep signal for the tile pool, reduced per tile by tile_mark at the head of

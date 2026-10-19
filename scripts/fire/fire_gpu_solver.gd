@@ -43,16 +43,57 @@ const VEL_CACHE_STAGES := ["advect", "maccormack"]
 ## out by FIRE_MERGED.
 const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
 ## Wood emitters the campfire can hold. Each one costs a slot in the config tail
-## and a distance test per cell in fire_display; keep it in step with the
-## MAX_LOGS define in fire_common.comp.
+## and a distance test per cell in fire_display.
 const MAX_LOGS := 12
-## 11 reduced scalars, then one probed gas temperature per wood emitter, then the
-## six words of the resident-set bounding box (see STAT_BOUNDS in
-## fire_common.comp).
-const STAT_BOUNDS := 11 + MAX_LOGS
+## Stats buffer words, reduced by fire_display and fire_evaporate: 11 scalars, then
+## one probed gas temperature per wood emitter, then the six words of the
+## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to.
+## Fractional quantities are stored as fixed point at STAT_SCALE.
+const STAT_MAX_T := 0
+const STAT_REACTION_SUM := 1
+const STAT_REACTION_MAX := 2
+const STAT_FUEL_SUM := 3
+const STAT_O2_SUM := 4
+const STAT_REGION_CELLS := 5
+const STAT_MASS_SUM := 6
+const STAT_COLUMN_CELLS := 7
+const STAT_MAX_DIVERGENCE := 8
+const STAT_ENERGY_RESIDUAL := 9
+const STAT_ENERGY_BUDGET := 10
+const STAT_WOOD := 11
+const STAT_BOUNDS := STAT_WOOD + MAX_LOGS
 const STATS_WORDS := STAT_BOUNDS + 6
-## 12 physical blocks, the wood tail, then three torch blocks.
-const CONFIG_VEC4S := 12 + 2 * MAX_LOGS + 3
+const STAT_SCALE := 1000.0
+## std430 layout of fire_common.comp's Config buffer: [name, vec4 count] in order.
+## The GLSL block body is generated from this list (FIRE_CONFIG_FIELDS) and
+## [method _upload_config] writes by name, so the order lives only here.
+##   kinetics   A (SI), Ea/R [K], a, b              Fire-X Eq. 5 / WD Tab. I
+##   fuel       dcH [J/mol], M_f [kg/mol], Cp, k    Fire-X Tab. 1
+##   stoich     q_f, q_o, q_CO2, q_H2O              Fire-X Tab. 1
+##   coeffs     D_f, phi, residual_coeff, co2_coeff Fire-X Tab. 1 / Tab. 3
+##   thermo     T_amb, radiation_coeff, p_amb, T_clamp
+##   transport  buoyancy, vorticity_eps, drag, nu
+##   vort       vel_lo, vel_hi, temp_lo, h2o_coeff  Fire-X Tab. 3
+##   wind       wind.xyz, residual_dissipation
+##   molar      M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
+##   misc       o2_replenish, display_temperature, reaction_reference, emitter_T
+##   liquid     T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
+##   liquid2    d_d [m], h_conv [W/(m^2.K)], wet_suppression, wood_shelter_rate
+##   wood       per log: pos.xyz, radius [m] (radius 0 = free slot)
+##   wood_rate  per log: Y_fuel per simulated second, pilot temperature [K]
+##   torch      pos.xyz, nozzle radius
+##   torch2     direction * length, fuel rate
+##   torch3     tip radius, temperature, speed, pilot fraction
+## NON-PAPER wood tail: Fire-X only has the gas grid emitter of Tab. 3; the solid
+## fuel bed lives on the CPU (wood_pile.gd). The release goes down through
+## fire_inject (mode 5), the gas temperature that drives it comes back up through
+## fire_display's probes.
+const CONFIG_LAYOUT := [
+	["kinetics", 1], ["fuel", 1], ["stoich", 1], ["coeffs", 1], ["thermo", 1],
+	["transport", 1], ["vort", 1], ["wind", 1], ["molar", 1], ["misc", 1],
+	["liquid", 1], ["liquid2", 1], ["wood", MAX_LOGS], ["wood_rate", MAX_LOGS],
+	["torch", 1], ["torch2", 1], ["torch3", 1],
+]
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
 	EVENT_WOOD = 5, EVENT_TORCH = 6 }
@@ -119,6 +160,7 @@ const FUELS: Array[Dictionary] = [
 ## Activation energy, Westbrook & Dryer Tab. I (kcal/mol -> J/mol).
 const ACTIVATION_ENERGY := 30.0 * 4184.0
 const R_GAS := 8.314 ## Fire-X nomenclature
+const SIGMA_SB := 5.67e-8 ## Stefan-Boltzmann [W/(m^2.K^4)]
 const P_AMBIENT := 101325.0 ## Standard atmosphere
 
 # Molar masses [kg/mol] of the non-fuel species. Their specific heats are
@@ -496,36 +538,36 @@ func get_stats() -> Dictionary:
 	_stats_mutex.lock()
 	var s := _stats.duplicate()
 	_stats_mutex.unlock()
-	var region := maxf(float(s[5]), 1.0)
-	var column := maxf(float(s[7]), 1.0)
+	var region := maxf(float(s[STAT_REGION_CELLS]), 1.0)
+	var column := maxf(float(s[STAT_COLUMN_CELLS]), 1.0)
 	# Peak gas temperature inside each wood emitter's sphere over the last
 	# substep, in kelvins. This is what couples the pyrolysis to the flame the
 	# solver actually produced rather than to a global scalar.
 	var wood_temps := PackedFloat32Array()
 	wood_temps.resize(MAX_LOGS)
 	for i in MAX_LOGS:
-		wood_temps[i] = float(s[11 + i])
+		wood_temps[i] = float(s[STAT_WOOD + i])
 	return {
 		"wood_temperatures": wood_temps,
-		"max_temperature": float(s[0]),
-		"total_reaction": float(s[1]) * 0.001,
-		"max_reaction": float(s[2]) * 0.001,
-		"avg_fuel": float(s[3]) * 0.001 / region,
-		"avg_oxygen": float(s[4]) * 0.001 / region,
-		"mass_fraction_sum": float(s[6]) * 0.001 / column,
+		"max_temperature": float(s[STAT_MAX_T]),
+		"total_reaction": float(s[STAT_REACTION_SUM]) / STAT_SCALE,
+		"max_reaction": float(s[STAT_REACTION_MAX]) / STAT_SCALE,
+		"avg_fuel": float(s[STAT_FUEL_SUM]) / STAT_SCALE / region,
+		"avg_oxygen": float(s[STAT_O2_SUM]) / STAT_SCALE / region,
+		"mass_fraction_sum": float(s[STAT_MASS_SUM]) / STAT_SCALE / column,
 		# Peak |div u| left over after the projection, in 1/s. The falsifiable
 		# check on the staggered discretisation: with the gradient the exact
 		# adjoint of the divergence this is the Jacobi residual and nothing else,
 		# so it must fall when pressure_iterations rises. A collocated grid leaves
 		# a checkerboard the projection cannot see, and the value stalls instead.
-		"max_divergence": float(s[8]) * 0.001,
+		"max_divergence": float(s[STAT_MAX_DIVERGENCE]) / STAT_SCALE,
 		# The P4 criterion: |dE_gas + dE_liq + latent| summed over the wet cells,
 		# against the sum of the three magnitudes. Zero by construction of the
 		# evaporation update, so what it actually reports is what breaks that —
 		# the temperature clamp above all. Per-cell magnitudes are summed, so
 		# opposite-signed errors in different cells cannot cancel into a pass.
-		"energy_residual": float(s[9]) / maxf(float(s[10]), 1.0),
-		"energy_budget": float(s[10]) * 0.001, # millijoules -> J
+		"energy_residual": float(s[STAT_ENERGY_RESIDUAL]) / maxf(float(s[STAT_ENERGY_BUDGET]), 1.0),
+		"energy_budget": float(s[STAT_ENERGY_BUDGET]) / STAT_SCALE, # millijoules -> J
 	}
 
 
@@ -579,7 +621,6 @@ func get_timings() -> Dictionary:
 func init_render() -> void:
 	config.dense_grid_dims = grid_dims
 	config.cell_size_m = cell_size
-	config.pool_budget = pool_budget
 	var config_error := config.validate()
 	if config_error != "":
 		push_error("Fire config: %s" % config_error)
@@ -588,7 +629,8 @@ func init_render() -> void:
 	if _rd == null:
 		return
 
-	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"])
+	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"]) \
+		+ glsl_defines() + FireTilePool.glsl_header()
 	_stages = STAGES.duplicate()
 	_stages.append(CLEAR_STAGE)
 	_stages.append_array(COARSE_STAGES)
@@ -631,7 +673,7 @@ func init_render() -> void:
 	_stats_buf = _rd.storage_buffer_create(stats_bytes.size(), stats_bytes)
 
 	var config_bytes := PackedByteArray()
-	config_bytes.resize(CONFIG_VEC4S * 16)
+	config_bytes.resize(config_vec4s() * 16)
 	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
 
 	# The coarse level of the pressure solve. One unknown per atlas slot, so both
@@ -1231,97 +1273,105 @@ func _push_constant(mode: int, pos: Vector3, radius: float, amount: float) -> Pa
 	return pc
 
 
+## Float index of [param block] in the Config buffer.
+static func config_offset(block: String) -> int:
+	var vec4s := 0
+	for entry in CONFIG_LAYOUT:
+		if entry[0] == block:
+			return vec4s * 4
+		vec4s += entry[1]
+	push_error("FireGpuSolver: no config block '%s'" % block)
+	return -1
+
+
+static func config_vec4s() -> int:
+	var vec4s := 0
+	for entry in CONFIG_LAYOUT:
+		vec4s += entry[1]
+	return vec4s
+
+
+## A float as a GLSL literal: always with a decimal point or an exponent.
+static func glsl_float(x: float) -> String:
+	var text := String.num_scientific(x)
+	return text if text.contains(".") or text.contains("e") else text + ".0"
+
+
+## Everything the solver stages share with this script as defines: the wood slot
+## count, the stats word names, the Config block body and the physical constants.
+static func glsl_defines() -> String:
+	var lines := PackedStringArray([
+		"#define MAX_LOGS %d" % MAX_LOGS,
+		"#define STAT_BOUNDS %d" % STAT_BOUNDS,
+		"#define STATS_WORDS %d" % STATS_WORDS,
+		"#define STAT_SCALE %s" % glsl_float(STAT_SCALE),
+		"#define R_GAS %s" % glsl_float(R_GAS),
+		"#define SIGMA_SB %s" % glsl_float(SIGMA_SB),
+	])
+	var stats := {"STAT_MAX_T": STAT_MAX_T, "STAT_REACTION_SUM": STAT_REACTION_SUM,
+		"STAT_REACTION_MAX": STAT_REACTION_MAX, "STAT_FUEL_SUM": STAT_FUEL_SUM,
+		"STAT_O2_SUM": STAT_O2_SUM, "STAT_REGION_CELLS": STAT_REGION_CELLS,
+		"STAT_MASS_SUM": STAT_MASS_SUM, "STAT_COLUMN_CELLS": STAT_COLUMN_CELLS,
+		"STAT_MAX_DIVERGENCE": STAT_MAX_DIVERGENCE,
+		"STAT_ENERGY_RESIDUAL": STAT_ENERGY_RESIDUAL,
+		"STAT_ENERGY_BUDGET": STAT_ENERGY_BUDGET, "STAT_WOOD": STAT_WOOD}
+	for name in stats:
+		lines.append("#define %s %d" % [name, stats[name]])
+	var fields := PackedStringArray()
+	for entry in CONFIG_LAYOUT:
+		fields.append("vec4 %s%s;" % [entry[0], "" if entry[1] == 1 else "[%d]" % entry[1]])
+	lines.append("#define FIRE_CONFIG_FIELDS " + " ".join(fields))
+	return "\n".join(lines) + "\n"
+
+
+func _put_config(v: PackedFloat32Array, block: String, values: Array) -> void:
+	var offset := config_offset(block)
+	for i in values.size():
+		v[offset + i] = values[i]
+
+
 func _upload_config() -> void:
 	var f := current_fuel()
 	var q: Array = f["q"]
 	var v := PackedFloat32Array()
-	v.resize(CONFIG_VEC4S * 4)
+	v.resize(config_vec4s() * 4)
 
-	# kinetics: A (in shader units), Ea/R [K], a, b
-	v[0] = effective_pre_exponential()
-	v[1] = ACTIVATION_ENERGY / R_GAS
-	v[2] = f["a"]
-	v[3] = f["b"]
-	# fuel: dcH [J/mol], M_f [kg/mol], Cp, k
-	v[4] = f["dch"]
-	v[5] = f["m_f"]
-	v[6] = f["cp"]
-	v[7] = f["k"]
-	# stoich: q_f, q_o, q_CO2, q_H2O
-	v[8] = q[0]
-	v[9] = q[1]
-	v[10] = q[2]
-	v[11] = q[3]
-	# coeffs: D_f, phi, residual, CO2
-	v[12] = f["d_f"]
-	v[13] = heat_efficiency
-	v[14] = residual_coefficient
-	v[15] = co2_coefficient
-	# thermo: T_amb, radiation coeff, p_amb, T clamp
-	v[16] = ambient_temperature
-	v[17] = radiation_coefficient
-	v[18] = P_AMBIENT
-	v[19] = temperature_clamp
-	# transport: buoyancy, vorticity, drag, nu
-	v[20] = gravity
-	v[21] = _effective_vorticity_strength()
-	v[22] = drag
-	v[23] = kinematic_viscosity
-	# vort thresholds + H2O coefficient
-	v[24] = vorticity_velocity_lo
-	v[25] = vorticity_velocity_hi
-	v[26] = vorticity_temperature_lo
-	v[27] = h2o_coefficient
-	# wind + residual dissipation
-	v[28] = wind.x
-	v[29] = wind.y
-	v[30] = wind.z
-	v[31] = residual_dissipation
-	# molar masses
-	v[32] = M_O2
-	v[33] = M_CO2
-	v[34] = M_H2O
-	v[35] = M_N2
-	# misc: O2 replenish, display T, reaction reference, emitter T
-	v[36] = oxygen_replenish
-	v[37] = display_temperature
-	v[38] = reaction_reference
-	v[39] = emitter_temperature
-	# liquid: T_B, latent heat, Cp_l, rho_d
-	v[40] = boiling_temperature
-	v[41] = latent_heat
-	v[42] = liquid_heat_capacity
-	v[43] = droplet_density
-	# liquid2: droplet diameter, heat transfer coefficient, wet suppression, wood
-	# shelter rate. The drain moved to water_return.comp, which reads
-	# liquid_drain_rate through FireWater's push constant instead — it has to run on
-	# frames where the evaporation stage does not.
-	v[44] = droplet_diameter
-	v[45] = droplet_heat_transfer
-	v[46] = water_suppression
-	v[47] = wood_shelter_rate
+	_put_config(v, "kinetics", [effective_pre_exponential(), ACTIVATION_ENERGY / R_GAS,
+		f["a"], f["b"]])
+	_put_config(v, "fuel", [f["dch"], f["m_f"], f["cp"], f["k"]])
+	_put_config(v, "stoich", [q[0], q[1], q[2], q[3]])
+	_put_config(v, "coeffs", [f["d_f"], heat_efficiency, residual_coefficient, co2_coefficient])
+	_put_config(v, "thermo", [ambient_temperature, radiation_coefficient, P_AMBIENT,
+		temperature_clamp])
+	_put_config(v, "transport", [gravity, _effective_vorticity_strength(), drag,
+		kinematic_viscosity])
+	_put_config(v, "vort", [vorticity_velocity_lo, vorticity_velocity_hi,
+		vorticity_temperature_lo, h2o_coefficient])
+	_put_config(v, "wind", [wind.x, wind.y, wind.z, residual_dissipation])
+	_put_config(v, "molar", [M_O2, M_CO2, M_H2O, M_N2])
+	_put_config(v, "misc", [oxygen_replenish, display_temperature, reaction_reference,
+		emitter_temperature])
+	_put_config(v, "liquid", [boiling_temperature, latent_heat, liquid_heat_capacity,
+		droplet_density])
+	# The drain moved to water_return.comp, which reads liquid_drain_rate through
+	# FireWater's push constant instead — it has to run on frames where the
+	# evaporation stage does not.
+	_put_config(v, "liquid2", [droplet_diameter, droplet_heat_transfer, water_suppression,
+		wood_shelter_rate])
 
 	# Wood tail: the emitter/probe table, read by fire_inject (mode 5) and by
-	# fire_display's temperature probes.
+	# fire_display's temperature probes. _wood holds the positions, then the rates.
 	_wood_mutex.lock()
-	for i in _wood.size():
-		v[48 + i] = _wood[i]
+	_put_config(v, "wood", Array(_wood.slice(0, MAX_LOGS * 4)))
+	_put_config(v, "wood_rate", Array(_wood.slice(MAX_LOGS * 4)))
 	_wood_mutex.unlock()
-	var torch_offset := (12 + 2 * MAX_LOGS) * 4
 	_torch_mutex.lock()
-	v[torch_offset + 0] = _torch_position.x
-	v[torch_offset + 1] = _torch_position.y
-	v[torch_offset + 2] = _torch_position.z
-	v[torch_offset + 3] = torch_nozzle_radius
 	var torch_axis := _torch_direction * _torch_axis_length
-	v[torch_offset + 4] = torch_axis.x
-	v[torch_offset + 5] = torch_axis.y
-	v[torch_offset + 6] = torch_axis.z
-	v[torch_offset + 7] = torch_rate
-	v[torch_offset + 8] = torch_tip_radius
-	v[torch_offset + 9] = torch_temperature
-	v[torch_offset + 10] = torch_speed
-	v[torch_offset + 11] = torch_ignite_fraction
+	_put_config(v, "torch", [_torch_position.x, _torch_position.y, _torch_position.z,
+		torch_nozzle_radius])
+	_put_config(v, "torch2", [torch_axis.x, torch_axis.y, torch_axis.z, torch_rate])
+	_put_config(v, "torch3", [torch_tip_radius, torch_temperature, torch_speed,
+		torch_ignite_fraction])
 	_torch_mutex.unlock()
 
 	var bytes := v.to_byte_array()

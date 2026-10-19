@@ -47,10 +47,12 @@ layout(push_constant, std430) uniform Params {
 	float origin_x;
 	float origin_y;
 	float origin_z;
-	// Only this stage declares these two; water_scatter shares _particle_push() and
+	// Only this stage declares the tail; water_scatter shares _particle_push() and
 	// reads the prefix above. Both land in the same 48-byte padded block.
 	float drain_rate;
 	float dt;
+	// FireWater.drain_cutoff(): below this a droplet has soaked away.
+	float drain_cutoff;
 } params;
 
 void main() {
@@ -141,11 +143,7 @@ void main() {
 	// away: banish it below the world so it stops rendering as a stray blob and
 	// drops out of the domain the next scatter skips. The SPH integrator then just
 	// lets it fall further, never to return.
-	// Stays 4% of a fresh parcel: FireWater.DROPLET_MASS is 0.025 kg, sized so a
-	// dense stream renders as a surface without changing the delivered kg/s. An
-	// absolute cutoff would banish healthy droplets once the parcel mass shrank.
-	const float DRAIN_CUTOFF = 0.001; // kg, 4% of a fresh droplet
-	if (m_new < DRAIN_CUTOFF) {
+	if (m_new < params.drain_cutoff) {
 		part.positions[pidx].y = -1000.0;
 		vel.velocities[pidx].w = 0.0;
 		return;
