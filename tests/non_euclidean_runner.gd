@@ -458,6 +458,17 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 	await physics_frame
 	_check(exhibit.exits.size() == 4 and exhibit.entrances.size() == 4,
 		"holonomy loop does not chain four exits into four entrances")
+	# Every lit door frame hugs its own aperture, on the room side of the wall.
+	for index in 4:
+		var vault := cell.get_node("Vault%d" % (index + 1)) as Node3D
+		for door in [[ExhibitHolonomyLoop.ENTRANCE_WALLS[index], exhibit.entrances[index]],
+				[ExhibitHolonomyLoop.EXIT_WALLS[index], exhibit.exits[index]]]:
+			var frame := vault.get_node("DoorFrame%s" % String(door[0]).capitalize()) as Node3D
+			var portal: Portal3D = door[1]
+			var trim := frame.get_child(0) as Node3D
+			var depth := (trim.global_position - portal.global_position).dot(portal.global_basis.z)
+			_check(depth > 0.0 and depth <= 0.35,
+				"vault %d %s door frame floats off its wall (%.2f m)" % [index + 1, door[0], depth])
 	var spawn_local := vault1.to_local(player.global_position)
 	_check(absf(spawn_local.x) <= ExhibitHolonomyLoop.VAULT.x * 0.5 \
 		and absf(spawn_local.z) <= ExhibitHolonomyLoop.VAULT.z * 0.5,
@@ -484,6 +495,8 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 		entry._physics_process(0.0)
 		_check(player.global_position.distance_to(arrival.global_position) <= 3.0,
 			"crossing exit %d did not land in front of the next entrance" % (step + 1))
+		_check(exhibit.active_portals.has(arrival),
+			"live views did not follow the player through exit %d" % (step + 1))
 		await physics_frame
 	_check(exhibit.crossing_count == 4, "the four crossings were not all counted")
 	# The loop returns the player inside the first vault, through its entrance:

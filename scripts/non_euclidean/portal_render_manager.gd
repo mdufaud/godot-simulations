@@ -107,10 +107,10 @@ func get_debug_text() -> String:
 ## Binds each portal to its pool slot; portals without a slot (views capped)
 ## keep the last image they rendered (see _preserve_capped_portals).
 func _assign_portal_slots() -> void:
-	for index in _portals.size():
-		var portal := _portals[index]
-		if index < _slots.size():
-			_slots[index]["portal"] = portal
+	for index in _slots.size():
+		var portal: Portal3D = _portals[index] if index < _portals.size() else null
+		_slots[index]["portal"] = portal
+		if portal != null:
 			portal.set_render_texture((_slots[index]["viewport"] as SubViewport).get_texture())
 
 

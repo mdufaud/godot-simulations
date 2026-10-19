@@ -19,9 +19,8 @@ class_name ExhibitHolonomyLoop extends RefCounted
 ## its room, yet the vault you return to has no door on the wall you just
 ## walked in from — four left turns and a straight should not close a square.
 ## The HUD counts crossings; [method HolonomyState.turn_angle] states the
-## quarter turn for the tests. The portals render an opaque accent gradient
-## (MVP): the doors read as glowing membranes, and crossing one swaps the room
-## without spending a live view slot.
+## quarter turn for the tests. Only the current vault's two doors hold live
+## views ([member active_portals]); the others wait behind an accent gradient.
 ##
 ## The host drives it: [method track] every physics frame while active, [method
 ## reset] on reset.
@@ -54,8 +53,8 @@ var exits: Array[Portal3D] = []
 ## The four entrance portals; [code]entrances[i][/code] receives the walk from
 ## [code]exits[(i + 3) % 4][/code].
 var entrances: Array[Portal3D] = []
-## Every portal of the cycle, walk order (exits then entrances interleaved).
-var portals: Array[Portal3D] = []
+## The current vault's two doors: the only ones the render pool needs.
+var active_portals: Array[Portal3D] = []
 ## Boundary crossings counted so far — one per portal traversed, four per loop.
 var crossing_count := 0
 
@@ -81,6 +80,7 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 	# handing back.
 	spawn_pose = _vault_node(0).global_transform * Transform3D(
 		Basis(Vector3.UP, PI * 0.5), Vector3(0.0, 0.9, 0.0))
+	_enter_vault(0)
 
 
 ## Reports whether a crossing happened since the last call, so the host can
@@ -96,6 +96,7 @@ func track(_player: NonEuclideanPlayer) -> bool:
 func reset() -> void:
 	crossing_count = 0
 	_reported = 0
+	_enter_vault(0)
 
 
 func _build_vault(index: int, materials: Dictionary) -> void:
@@ -124,9 +125,7 @@ func _build_vault(index: int, materials: Dictionary) -> void:
 		var portal := GeometryKit.add_portal(vault, "Portal%d%s" % [index + 1,
 			"In" if is_entrance else "Out"],
 			_door_pose(wall, APERTURE))
-		_set_gradient(portal, accent)
 		portal.teleported.connect(_on_portal_crossed)
-		portals.append(portal)
 		if is_entrance:
 			entrances.append(portal)
 		else:
@@ -182,15 +181,7 @@ func _add_solid_wall(vault: Node3D, side: String, material: Material) -> void:
 func _add_aperture_wall(vault: Node3D, side: String, material: Material) -> void:
 	var frame := Node3D.new()
 	frame.name = "Aperture%s" % side.capitalize()
-	match side:
-		"south":
-			frame.rotation.y = 0.0
-		"west":
-			frame.rotation.y = -PI * 0.5
-		"east":
-			frame.rotation.y = PI * 0.5
-		"north":
-			frame.rotation.y = PI
+	frame.rotation.y = _outward_yaw(side)
 	vault.add_child(frame)
 	# Offset and width follow the wall's own axis: the vault is 6 m wide but
 	# 8 m deep, so reusing the depth offset for the east/west walls left them
@@ -206,17 +197,7 @@ func _add_aperture_wall(vault: Node3D, side: String, material: Material) -> void
 ## Portal pose flush in the aperture: node at the wall's mid-thickness, front
 ## facing into the vault.
 func _door_pose(wall: String, size: Vector2) -> Transform3D:
-	var yaw := 0.0
-	match wall:
-		"south":
-			yaw = PI
-		"west":
-			yaw = PI * 0.5
-		"east":
-			yaw = -PI * 0.5
-		"north":
-			yaw = 0.0
-	return Transform3D(Basis(Vector3.UP, yaw), _wall_point(wall,
+	return Transform3D(Basis(Vector3.UP, _inward_yaw(wall)), _wall_point(wall,
 		Vector3(0.0, size.y * 0.5, 0.0)))
 
 
@@ -260,9 +241,10 @@ func _build_door_frame(vault: Node3D, wall: String, accent: Color) -> void:
 	var frame_material := GeometryKit.make_material(Color(0.1, 0.12, 0.14), 0.2, 0.25,
 		accent, 3.2)
 	var frame := Node3D.new()
+	frame.name = "DoorFrame%s" % wall.capitalize()
 	frame.rotation.y = _outward_yaw(wall)
 	vault.add_child(frame)
-	var depth := VAULT.z * 0.5 - 0.04
+	var depth := (VAULT.z if wall == "south" or wall == "north" else VAULT.x) * 0.5 - 0.04
 	GeometryKit.add_box(frame, Vector3(-APERTURE.x * 0.5 - 0.06, APERTURE.y * 0.5, depth),
 		Vector3(0.12, APERTURE.y + 0.12, 0.08), frame_material, false)
 	GeometryKit.add_box(frame, Vector3(APERTURE.x * 0.5 + 0.06, APERTURE.y * 0.5, depth),
@@ -271,7 +253,7 @@ func _build_door_frame(vault: Node3D, wall: String, accent: Color) -> void:
 		Vector3(APERTURE.x + 0.36, 0.12, 0.08), frame_material, false)
 
 
-## Opaque MVP surface: a screen-space accent gradient instead of a live view.
+## Placeholder surface until the render pool binds the door to a live view.
 func _set_gradient(portal: Portal3D, accent: Color) -> void:
 	var gradient := Gradient.new()
 	gradient.set_color(0, accent)
@@ -281,8 +263,17 @@ func _set_gradient(portal: Portal3D, accent: Color) -> void:
 	portal.set_render_texture(texture)
 
 
-func _on_portal_crossed(_body: Node3D, _destination: Portal3D) -> void:
+func _on_portal_crossed(_body: Node3D, destination: Portal3D) -> void:
 	crossing_count += 1
+	_enter_vault(maxi(entrances.find(destination), exits.find(destination)))
+
+
+## Idle doors get their gradient back, so none samples another vault's view.
+func _enter_vault(index: int) -> void:
+	for vault in entrances.size():
+		_set_gradient(entrances[vault], ACCENTS[vault])
+		_set_gradient(exits[vault], ACCENTS[vault])
+	active_portals.assign([entrances[index], exits[index]])
 
 
 func _vault_node(index: int) -> Node3D:

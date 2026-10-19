@@ -65,6 +65,7 @@ func _physics_process(delta: float) -> void:
 	elif _current_exhibit == 5 and _wrap.track(player, delta):
 		_update_hud()
 	elif _current_exhibit == 6 and _holonomy.track(player):
+		render_manager.configure_portals(_holonomy.active_portals)
 		_update_hud()
 
 
@@ -149,10 +150,12 @@ func _go_to_case(index: int) -> void:
 		_hud.set_grab_hint(false)
 	if index == 2:
 		player.set_gravity_field(_garden.gravity_field)
-	# Only the active exhibit occupies the two portal render slots.
+	# Only the active exhibit occupies the portal render slots.
 	match index:
 		0:
 			render_manager.configure_portals(_reserve.portals)
+		6:
+			render_manager.configure_portals(_holonomy.active_portals)
 		_:
 			render_manager.configure_portals([] as Array[Portal3D])
 	_hud.select_case(index)
