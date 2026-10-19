@@ -18,12 +18,18 @@ func sample(point: Vector2, level_m: float) -> Color:
 		return Color(0.0, 0.0, 0.0, 0.0)
 	var tangent := _tangent(point)
 	var velocity := tangent
-	var source := 0.0
+	var along_m := _along_m(point)
+	var lateral_m := _lateral_m(point)
+	var depth := maxf(height - sample_bed(point), 0.05)
+	var source := smoothstep(0.05, 0.2, _roughness_m(along_m, lateral_m, _edge_m(along_m, lateral_m)) / depth) * 0.5
 	for rock in obstacles:
-		if rock.w < height - 0.08:
-			continue
 		var offset := point - Vector2(rock.x, rock.y)
 		var radius := rock.z
+		var submerged := height - rock.w
+		if submerged > 0.08:
+			var boil := offset - tangent * radius * 0.6
+			source = maxf(source, (1.0 - smoothstep(0.08, 0.35, submerged)) * exp(-boil.length_squared() / (radius * radius)) * 0.5)
+			continue
 		var distance := offset.length()
 		if distance < radius * 0.82:
 			return Color(0.0, 0.0, 0.0, 0.0)
@@ -64,10 +70,18 @@ func point_at(along_m: float, lateral_m: float) -> Vector2:
 
 func _bed_at(along_m: float, lateral_m: float) -> float:
 	var side := -1.0 if lateral_m < 0.0 else 1.0
-	var edge := absf(lateral_m) - half_width_m(along_m) - 0.18 * sin(along_m * 1.3 + side * 2.1) - 0.09 * sin(along_m * 2.9 + side)
+	var edge := _edge_m(along_m, lateral_m)
 	var bank := smoothstep(-0.25, BANK_WIDTH_M, edge) * (1.0 + 0.35 * sin(along_m * 0.37 + side * 1.7))
-	var roughness := (0.05 * sin(along_m * 1.7 + lateral_m * 2.3) + 0.04 * sin(along_m * 3.1 - lateral_m * 1.1)) \
-		* (1.0 - smoothstep(-0.25, 0.5, edge))
 	var sides := maxf(edge - SIDE_START_M, 0.0) * SIDE_GRADE \
 		+ smoothstep(4.0, 16.0, edge) * HILL_HEIGHT_M * (1.0 + 0.5 * sin(along_m * 0.13 + side * 2.4))
-	return -grade * along_m - DEPTH_M + roughness + bank + sides
+	return -grade * along_m - DEPTH_M + _roughness_m(along_m, lateral_m, edge) + bank + sides
+
+
+func _edge_m(along_m: float, lateral_m: float) -> float:
+	var side := -1.0 if lateral_m < 0.0 else 1.0
+	return absf(lateral_m) - half_width_m(along_m) - 0.18 * sin(along_m * 1.3 + side * 2.1) - 0.09 * sin(along_m * 2.9 + side)
+
+
+func _roughness_m(along_m: float, lateral_m: float, edge_m: float) -> float:
+	return (0.05 * sin(along_m * 1.7 + lateral_m * 2.3) + 0.04 * sin(along_m * 3.1 - lateral_m * 1.1)) \
+		* (1.0 - smoothstep(-0.25, 0.5, edge_m))

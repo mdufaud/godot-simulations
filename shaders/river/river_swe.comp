@@ -161,15 +161,18 @@ float agitation(ivec2 p, vec4 q) {
     float compression = max(-(east.x - west.x + north.y - south.y) / (2.0 * params.domain.z), 0.0);
     float froude = length(v) / sqrt(max(params.domain.w * q.x, 0.01));
     float breaking = smoothstep(0.2, 1.0, compression);
-    float curvature = length(east + west + north + south - 4.0 * v) / params.domain.z;
+    vec4 wet = step(vec4(0.004), vec4(qe.x, qw.x, qn.x, qs.x));
+    float curvature = length(mix(v, east, wet.x) + mix(v, west, wet.y) + mix(v, north, wet.z)
+        + mix(v, south, wet.w) - 4.0 * v) / params.domain.z;
     float surface = imageLoad(terrain, p).x + q.x;
     vec4 heights = vec4(imageLoad(terrain, bound_cell(p + ivec2(1, 0))).x + qe.x,
         imageLoad(terrain, bound_cell(p - ivec2(1, 0))).x + qw.x,
         imageLoad(terrain, bound_cell(p + ivec2(0, 1))).x + qn.x,
         imageLoad(terrain, bound_cell(p - ivec2(0, 1))).x + qs.x);
-    heights = mix(vec4(surface), heights, step(vec4(0.004), vec4(qe.x, qw.x, qn.x, qs.x)));
+    heights = mix(vec4(surface), heights, wet);
+    // Near-critical flow amplifies bed roughness into undular waves that do not break; jumps foam through `breaking`.
     float bend = abs(dot(heights, vec4(1.0)) - 4.0 * surface)
-        * length(v) / (params.domain.z * params.domain.z);
+        * length(v) / (params.domain.z * params.domain.z) * (1.0 - smoothstep(0.6, 0.9, froude));
     float interaction = curvature * smoothstep(0.08, 0.3, curvature) * 0.12
         + bend * smoothstep(0.08, 0.3, bend) * 0.6;
     if (p.x == 0 || p.y == 0 || p.x == int(params.grid.x) - 1 || p.y == int(params.grid.y) - 1) interaction = 0.0;
