@@ -101,7 +101,7 @@ func _test_portal_pose(source: Portal3D, test_name: String,
 	var main_camera := player.get_camera()
 	main_camera.near = 0.01
 	main_camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER \
-		| Portal3D.PROXY_LAYER
+		| Portal3D.PROXY_LAYER | Portal3D.BEHIND_LAYER
 	player.set_pose(_aimed_pose(source, local_position))
 	for _frame in 5:
 		await process_frame
@@ -143,7 +143,7 @@ func _test_crossing_continuity(source: Portal3D) -> bool:
 	var camera := player.get_camera()
 	camera.near = 0.01
 	camera.cull_mask = Portal3D.WORLD_LAYER | Portal3D.MAIN_PORTAL_LAYER \
-		| Portal3D.PROXY_LAYER
+		| Portal3D.PROXY_LAYER | Portal3D.BEHIND_LAYER
 	var before_local := Vector3(0.0, -0.8, 0.004)
 	player.set_pose(_aimed_pose(source, before_local))
 	for _frame in 5:
@@ -248,13 +248,13 @@ func _capture_spherical_garden() -> void:
 	await _capture("res://tmp/non_euclidean_spherical_garden.png")
 
 
-## The corridor at three depths: one capture per segment entered, so the growth
-## of the rebuilt geometry is on camera.
+## The corridor at three depths: the far door recedes and the folds ahead open
+## as the bellows widens.
 func _capture_growing_corridor() -> void:
 	demo._go_to_case(3)
 	var corridor := demo.get_node("Cells/GrowingCorridor") as Node3D
-	var depths := [Vector3(0.0, 0.9, -2.2), Vector3(0.0, 0.9, -10.0),
-		Vector3(0.0, 0.9, -25.0)]
+	var depths := [Vector3(0.0, 0.9, -2.2), Vector3(0.0, 0.9, -40.0),
+		Vector3(0.0, 0.9, -120.0)]
 	for index in depths.size():
 		player.set_pose(Transform3D(Basis.IDENTITY, corridor.to_global(depths[index])))
 		for _tick in 60:
@@ -296,28 +296,23 @@ func _capture_wrap_world() -> void:
 	(player.get_node("CameraPivot") as Node3D).rotation.x = 0.0
 
 
-## The holonomy square: the start vault facing its exit, the straight-through
-## fourth vault with its two opposed doors, then the first vault as the loop
-## returns to it — through an entrance its walls could not close into.
+## The holonomy loop: the start vault facing its exit, a mid-loop vault facing
+## its own exit, then the start vault again from its entrance — the doors where
+## the walk says they cannot be. The draw is random, so the shots vary by run.
 func _capture_holonomy_loop() -> void:
 	demo._go_to_case(6)
 	var vault1 := demo.get_node("Cells/HolonomyLoop/Vault1") as Node3D
 	var vault4 := demo.get_node("Cells/HolonomyLoop/Vault4") as Node3D
 	for _frame in 4:
 		await process_frame
-	player.set_pose(demo._holonomy.spawn_pose)
-	for _frame in 4:
-		await process_frame
 	await _capture("res://tmp/non_euclidean_holonomy_vault1.png")
-	# Vault nodes carry their ring yaw, so aim through each vault's own basis:
-	# the east-side view looks straight at the west exit door.
-	player.set_pose(Transform3D(vault4.global_basis * Basis(Vector3.UP, PI * 0.5),
-		vault4.to_global(Vector3(2.4, 0.9, 0.0))))
+	player.set_pose(Transform3D(vault4.global_basis * Basis(Vector3.UP,
+		HolonomyState.inward_yaw(demo._holonomy.exit_walls[3])), vault4.to_global(Vector3(0.0, 0.9, 0.0))))
 	for _frame in 4:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_holonomy_vault4.png")
-	player.set_pose(Transform3D(Basis.IDENTITY,
-		vault1.to_global(Vector3(0.0, 0.9, 3.2))))
+	player.set_pose(Transform3D(vault1.global_basis * Basis(Vector3.UP,
+		HolonomyState.inward_yaw(demo._holonomy.entrance_walls[0])), vault1.to_global(Vector3(0.0, 0.9, 0.0))))
 	for _frame in 4:
 		await process_frame
 	await _capture("res://tmp/non_euclidean_holonomy_returned.png")

@@ -1,7 +1,9 @@
 class_name GrabController3D extends RefCounted
 ## Superliminal-style grip: a held [class GripBall] keeps its grabbed angular
 ## size ([code]ratio * distance[/code]) and sits where its view cone first meets
-## something. Release commits exactly what is on screen.
+## something. Release commits exactly what is on screen. A ball that does not
+## [member GripBall.resizes] is simply carried at [constant CARRY_DISTANCE] and
+## let go dead still, so it drops plumb.
 ##
 ## Driven by the host: [method try_grab] on the grab action, [method
 ## physics_update] every physics frame, [method release] on action release,
@@ -13,6 +15,7 @@ const MIN_FIT_DISTANCE := 0.3
 const FIT_GROWTH := 1.15
 const FIT_REFINE_STEPS := 4
 const SURFACE_GAP := 0.02
+const CARRY_DISTANCE := 1.8
 
 ## The ball currently held, or null.
 var held_body: GripBall = null
@@ -63,26 +66,34 @@ func aim_target(camera: Camera3D, mask: int, exclude: Array[RID]) -> GripBall:
 func release() -> void:
 	if held_body == null:
 		return
-	held_body.commit_scale(_ratio * _project())
+	var distance := _project()
+	if held_body.resizes:
+		held_body.commit_scale(_ratio * distance)
 	held_body.end_hold()
 	held_body = null
 
 
 ## Past [constant GripBall.RADIUS_MAX] the ball sits closer instead of popping.
 func _project() -> float:
-	var distance := _fit_distance(minf(RESOLVE_REACH, GripBall.RADIUS_MAX / _ratio))
+	var reach := CARRY_DISTANCE
+	if held_body.resizes:
+		reach = minf(RESOLVE_REACH, GripBall.RADIUS_MAX / _ratio)
+	var distance := _fit_distance(reach)
 	held_body.place_at(_view_point(distance))
-	held_body.set_display_radius(_ratio * distance)
+	if held_body.resizes:
+		held_body.set_display_radius(_ratio * distance)
 	return distance
 
 
 ## Grows the ball outward from the eye until it would touch something, so
 ## nothing ever stands between a held ball and the eye.
 func _fit_distance(max_distance: float) -> float:
-	var hit := _view_ray(_camera, max_distance * (1.0 + _ratio), _mask, _exclude)
+	var hit := _view_ray(_camera, max_distance + _radius_at(max_distance), _mask, _exclude)
 	if not hit.is_empty():
 		var surface := _camera.global_position.distance_to(hit.position) - SURFACE_GAP
-		max_distance = minf(max_distance, surface / (1.0 + _ratio))
+		var fit := surface / (1.0 + _ratio) if held_body.resizes \
+			else surface - held_body.display_radius()
+		max_distance = minf(max_distance, fit)
 	var clear := MIN_FIT_DISTANCE
 	var blocked := INF
 	while clear < max_distance:
@@ -103,13 +114,17 @@ func _fit_distance(max_distance: float) -> float:
 
 
 func _overlaps(distance: float) -> bool:
-	_probe.radius = _ratio * distance
+	_probe.radius = _radius_at(distance)
 	var query := PhysicsShapeQueryParameters3D.new()
 	query.shape = _probe
 	query.transform = Transform3D(Basis.IDENTITY, _view_point(distance))
 	query.collision_mask = _mask
 	query.exclude = _exclude
 	return not _camera.get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
+
+
+func _radius_at(distance: float) -> float:
+	return _ratio * distance if held_body.resizes else held_body.display_radius()
 
 
 func _view_point(distance: float) -> Vector3:

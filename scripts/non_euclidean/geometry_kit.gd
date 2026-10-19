@@ -118,18 +118,19 @@ static func room_shell_with_front_opening(parent: Node3D, size: Vector3, opening
 	parent.add_child(probe)
 
 
-## Wall at [param wall_z] made of two jambs and a lintel around [param opening].
+## Wall at [param wall_z] made of two jambs and a lintel around [param opening],
+## centred on [param opening_x] along the wall.
 static func add_opening_wall(parent: Node3D, size: Vector3, opening: Vector2, wall_z: float,
-		wall_material: Material) -> void:
+		wall_material: Material, opening_x := 0.0) -> void:
 	var wall := 0.5
-	var side_width := (size.x - opening.x) * 0.5
-	var side_offset := opening.x * 0.5 + side_width * 0.5
-	add_box(parent, Vector3(-side_offset, size.y * 0.5, wall_z),
-		Vector3(side_width, size.y, wall), wall_material)
-	add_box(parent, Vector3(side_offset, size.y * 0.5, wall_z),
-		Vector3(side_width, size.y, wall), wall_material)
+	var left_end := opening_x - opening.x * 0.5
+	var right_end := opening_x + opening.x * 0.5
+	add_box(parent, Vector3((left_end - size.x * 0.5) * 0.5, size.y * 0.5, wall_z),
+		Vector3(left_end + size.x * 0.5, size.y, wall), wall_material)
+	add_box(parent, Vector3((right_end + size.x * 0.5) * 0.5, size.y * 0.5, wall_z),
+		Vector3(size.x * 0.5 - right_end, size.y, wall), wall_material)
 	var top_height := size.y - opening.y
-	add_box(parent, Vector3(0.0, opening.y + top_height * 0.5, wall_z),
+	add_box(parent, Vector3(opening_x, opening.y + top_height * 0.5, wall_z),
 		Vector3(opening.x, top_height, wall), wall_material)
 
 
@@ -252,6 +253,36 @@ static func add_sphere_prop(parent: Node3D, local_position: Vector3, radius: flo
 	var physics_material := PhysicsMaterial.new()
 	physics_material.friction = 0.48
 	physics_material.bounce = 0.32
+	body.physics_material_override = physics_material
+	parent.add_child(body)
+	return body
+
+
+static func add_grip_ball(parent: Node3D, local_position: Vector3, radius: float,
+		color: Color, mass_value: float, glow := 0.0) -> GripBall:
+	var body := GripBall.new()
+	body.position = local_position
+	body.mass = mass_value
+	body.base_mass = mass_value
+	body.albedo = color
+	body.material_roughness = 0.3
+	body.material_glow = glow
+	body.continuous_cd = true
+	var mesh_instance := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh_instance.mesh = mesh
+	mesh_instance.layers = Portal3D.WORLD_LAYER
+	body.add_child(mesh_instance)
+	var collision := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = radius
+	collision.shape = shape
+	body.add_child(collision)
+	var physics_material := PhysicsMaterial.new()
+	physics_material.friction = 0.6
+	physics_material.bounce = 0.25
 	body.physics_material_override = physics_material
 	parent.add_child(body)
 	return body

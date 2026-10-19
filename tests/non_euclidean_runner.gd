@@ -143,21 +143,39 @@ func _test_staircase(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	var fill_light := player.get_node("StairFillLight") as OmniLight3D
 	_check(fill_light.visible, "player-relative stair light is disabled inside staircase")
 	_check(fill_light.get_parent() == player, "stair lighting does not follow recycled player pose")
+	# Every drawn tread sits within half a riser of the ramp the player walks, and
+	# every flight but the based first turn is opaque from below.
+	var space := stair.get_world_3d().direct_space_state
 	for child in stair.get_children():
 		if not child.has_meta("infinite_stair_ramp"):
 			continue
-		var previous_top := -INF
-		for flight_child in child.get_children():
-			if flight_child is not MeshInstance3D:
-				continue
-			var mesh_instance := flight_child as MeshInstance3D
-			var box := mesh_instance.mesh as BoxMesh
-			_check(box.size.y >= 0.29, "helical slab is visibly transparent from below")
-			var bottom := mesh_instance.position.y - box.size.y * 0.5
-			if previous_top != -INF:
-				_check(bottom <= previous_top + 0.00001,
-					"helical slab has visible gaps between steps")
-			previous_top = mesh_instance.position.y + box.size.y * 0.5
+		var steps := child.get_node("Steps") as MeshInstance3D
+		var faces := steps.mesh.generate_triangle_mesh()
+		var module := floori((steps.get_aabb().position.y + 0.5) / ExhibitStaircase.PERIOD)
+		var base_y := float(module) * ExhibitStaircase.PERIOD
+		for sample in 40:
+			var turn := (float(sample) + 0.37) * TAU / 40.0
+			var angle := ExhibitStaircase.START_ANGLE + turn
+			for radius in [2.2, ExhibitStaircase.CENTER_RADIUS, 4.3]:
+				var at := Vector3(cos(angle) * radius, 0.0, sin(angle) * radius)
+				var walk_line := base_y + ExhibitStaircase.PERIOD * turn / TAU
+				var above := at + Vector3.UP * (walk_line + 1.0)
+				var tread := faces.intersect_ray(above, Vector3.DOWN)
+				var ramp := space.intersect_ray(PhysicsRayQueryParameters3D.create(
+					stair.to_global(above), stair.to_global(above + Vector3.DOWN * 2.0)))
+				_check(not tread.is_empty() and _front_normal(faces, tread).y > 0.9 \
+					and not ramp.is_empty() \
+					and absf(tread["position"].y - stair.to_local(ramp["position"]).y) \
+						<= ExhibitStaircase.RISE * 0.5 + 0.02,
+					"stair tread at %.0f° of flight %d strays from the walked ramp" % [
+						rad_to_deg(turn), module])
+				if module == 0 and turn < float(ExhibitStaircase.BASE_STEPS) * TAU \
+						/ float(ExhibitStaircase.STEPS):
+					continue
+				var under := faces.intersect_ray(at + Vector3.UP * (walk_line - 1.0), Vector3.UP)
+				_check(not under.is_empty() and _front_normal(faces, under).y < -0.5,
+					"stair flight %d is transparent from below at %.0f°" % [module,
+						rad_to_deg(turn)])
 	_check(not loop_seal.visible, "ground-floor corridor does not start open")
 	player.capture_mouse()
 	for _frame in 45:
@@ -211,6 +229,15 @@ func _test_staircase(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) ->
 	_check(is_zero_approx(ground_level.position.y), "ground floor does not return while descending")
 
 
+## Normal of the hit triangle's drawn side: Godot fronts are clockwise, while
+## TriangleMesh reports the normal facing the ray.
+func _front_normal(faces: TriangleMesh, hit: Dictionary) -> Vector3:
+	var corners := faces.get_faces()
+	var first: int = hit["face_index"] * 3
+	return (corners[first + 2] - corners[first]).cross(
+		corners[first + 1] - corners[first]).normalized()
+
+
 func _test_spherical_curvature(demo: Node3D, player: NonEuclideanPlayer,
 		cells: Node3D) -> void:
 	demo._go_to_case(2)
@@ -241,6 +268,22 @@ func _test_spherical_curvature(demo: Node3D, player: NonEuclideanPlayer,
 		"spherical transport changed shell radius")
 	_check(_basis_error(player.global_basis, initial_basis) <= 0.0002,
 		"full great-circle transport did not restore view frame")
+	# The balls rest on the shell under the same radial pull, and one lifted
+	# toward the centre falls back outward.
+	var garden: ExhibitGarden = demo._garden
+	var resting := ExhibitGarden.RADIUS - ExhibitGarden.BALL_RADIUS
+	for ball in garden.balls:
+		_check(ball.gravity_field == radial_field, "a garden ball escaped the radial gravity")
+		_check(absf(ball.global_position.distance_to(radial_field.global_position) - resting)
+			<= 0.1, "a garden ball does not rest on the shell")
+	var lifted := garden.balls[0]
+	var lift_direction := (lifted.global_position - radial_field.global_position).normalized()
+	lifted.global_position = radial_field.global_position + lift_direction * (resting - 2.0)
+	lifted.linear_velocity = Vector3.ZERO
+	for _frame in 120:
+		await physics_frame
+	_check(absf(lifted.global_position.distance_to(radial_field.global_position) - resting)
+		<= 0.15, "a ball lifted off the shell did not fall back outward")
 
 
 func _test_growing_corridor(demo: Node3D, player: NonEuclideanPlayer,
@@ -250,79 +293,52 @@ func _test_growing_corridor(demo: Node3D, player: NonEuclideanPlayer,
 	var exhibit: ExhibitGrowingCorridor = demo._corridor
 	await physics_frame
 	_check(absf(player.global_position.y - 0.9) <= 0.05,
-		"corridor spawn does not rest on the first segment floor")
-	_check(corridor.get_node_or_null("Segment00") != null,
-		"corridor does not start with its scale-1 segment")
+		"corridor spawn does not rest on the floor")
+	var far_at_start := exhibit.far_distance
+	var depth_at_start := -corridor.to_local(player.global_position).z
 	player.capture_mouse()
-	var ceiling_heights: Array[float] = []
-	var previous_crossings := 0
-	var frame := 0
-	while frame < 1500 and exhibit.crossing_count < 3:
-		frame += 1
+	var lowest := INF
+	for _frame in 480:
 		Input.action_press("move_forward")
 		Input.action_press("move_down")
 		await physics_frame
-		if frame % 10 == 0:
-			_check(player.global_position.y >= 0.85,
-				"floor vanished under the player during a segment swap")
-		if exhibit.crossing_count > previous_crossings:
-			previous_crossings = exhibit.crossing_count
-			var height := _ceiling_height_above(player)
-			ceiling_heights.append(height)
-			if ceiling_heights.size() > 1:
-				_check(height > ceiling_heights[ceiling_heights.size() - 2] + 0.5,
-					"corridor ceiling did not grow across threshold %d" % previous_crossings)
+		lowest = minf(lowest, player.global_position.y)
 	Input.action_release("move_forward")
 	Input.action_release("move_down")
-	_check(ceiling_heights.size() >= 3,
-		"walking the corridor did not cross three thresholds")
-	_check(exhibit.virtual_distance > 0.0,
-		"virtual distance stayed at zero while walking forward")
-	_check(exhibit.current_index >= 3,
-		"player did not reach the fourth segment after three crossings")
+	var walked := -corridor.to_local(player.global_position).z - depth_at_start
+	_check(lowest >= 0.85, "floor vanished under the player while walking the corridor")
+	_check(walked > 25.0, "sprinting eight seconds did not carry the player down the corridor")
+	_check(exhibit.far_distance > far_at_start + walked * 0.4,
+		"the far door did not recede while walking toward it")
+	_check(absf(corridor.to_local(player.global_position).x) < ExhibitGrowingCorridor.SIZE.x * 0.5,
+		"player left the corridor walls")
 	var camera_environment := player.get_camera().environment
 	_check(camera_environment != null \
 		and is_equal_approx(camera_environment.fog_density, ExhibitGrowingCorridor.CORRIDOR_FOG),
 		"corridor fog is not on the player camera")
 	_check(not is_equal_approx(player.get_world_3d().environment.fog_density,
 		ExhibitGrowingCorridor.CORRIDOR_FOG), "corridor fog leaked into the shared environment")
-	# Looking back from a bigger segment, the step around the smaller doorway is a wall.
-	var segment := exhibit.current_index
-	var segment_node := corridor.get_node("Segment%02d" % segment) as Node3D
-	var size: Vector3 = exhibit._segment_size(segment)
-	var previous: Vector3 = exhibit._segment_size(segment - 1)
-	var step_eye := segment_node.to_global(Vector3(
-		(previous.x * 0.5 + 0.5 + size.x * 0.5) * 0.5, 1.0, size.z * 0.5 - 1.0))
-	var back := PhysicsRayQueryParameters3D.create(step_eye,
-		step_eye + corridor.global_basis.z * 2.0, 1, [player.get_rid()])
-	_check(not player.get_world_3d().direct_space_state.intersect_ray(back).is_empty(),
-		"looking back from segment %d sees the void around the smaller doorway" % segment)
-	# Turnaround: the corridor behind is a capped dead end, never a hole.
-	var local_before_back := corridor.to_local(player.global_position)
-	for _frame in 240:
+	# Turnaround: walking back retraces the folds and the start door still holds.
+	var far_before_back := exhibit.far_distance
+	for _frame in 1200:
 		Input.action_press("move_back")
 		Input.action_press("move_down")
 		await physics_frame
 	Input.action_release("move_back")
 	Input.action_release("move_down")
-	_check(player.global_position.y >= 0.85,
-		"floor vanished under the player while walking back")
-	var local_after_back := corridor.to_local(player.global_position)
-	_check(local_after_back.z > local_before_back.z,
-		"walking back did not move the player toward the start")
-	_check(exhibit.current_index >= 1,
-		"player escaped the corridor window while walking back")
-	# Reset: counters to zero and geometry rebuilt at scale 1.
+	_check(player.global_position.y >= 0.85, "floor vanished under the player while walking back")
+	_check(exhibit.far_distance < far_before_back,
+		"walking back did not fold the corridor up again")
+	_check(-corridor.to_local(player.global_position).z > 0.0,
+		"player walked through the start door")
+	# Reset: the readout returns to the start and the player to the spawn.
 	demo._reset_current_case()
 	await physics_frame
 	await physics_frame
-	_check(exhibit.crossing_count == 0 and is_zero_approx(exhibit.virtual_distance),
-		"corridor reset did not zero its counters")
-	_check(exhibit.current_index == 0, "corridor reset did not return to the first segment")
 	_check(player.global_position.distance_to(exhibit.spawn_pose.origin) <= 0.05,
 		"corridor reset did not re-pose the player at the spawn")
-	_check(_ceiling_height_above(player) < 2.5,
-		"corridor reset did not rebuild scale-1 geometry")
+	_check(is_equal_approx(exhibit.far_distance, far_at_start),
+		"corridor reset did not fold the corridor back to its start")
 
 
 func _test_grip_room(demo: Node3D, player: NonEuclideanPlayer, cells: Node3D) -> void:
@@ -492,39 +508,70 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 	var vault1 := cell.get_node("Vault1") as Node3D
 	await physics_frame
 	_check(player.get_camera().environment == null, "wrap world fog leaked into the next exhibit")
-	_check(exhibit.exits.size() == 4 and exhibit.entrances.size() == 4,
-		"holonomy loop does not chain four exits into four entrances")
-	# Every lit door frame hugs its own aperture, on the room side of the wall.
-	for index in 4:
+	var count := ExhibitHolonomyLoop.VAULT_COUNT
+	_check(exhibit.exits.size() == count and exhibit.entrances.size() == count,
+		"holonomy loop does not chain one exit into one entrance per vault")
+	# Every lit door frame hugs its own aperture, on the room side of the wall,
+	# and the wall leaves that aperture open wherever along it the door sits.
+	var space := demo.get_world_3d().direct_space_state
+	for index in count:
 		var vault := cell.get_node("Vault%d" % (index + 1)) as Node3D
-		for door in [[ExhibitHolonomyLoop.ENTRANCE_WALLS[index], exhibit.entrances[index]],
-				[ExhibitHolonomyLoop.EXIT_WALLS[index], exhibit.exits[index]]]:
+		_check(exhibit.entrance_walls[index] != exhibit.exit_walls[index],
+			"vault %d has both doors on one wall" % (index + 1))
+		for door in [[exhibit.entrance_walls[index], exhibit.entrances[index]],
+				[exhibit.exit_walls[index], exhibit.exits[index]]]:
 			var frame := vault.get_node("DoorFrame%s" % String(door[0]).capitalize()) as Node3D
 			var portal: Portal3D = door[1]
 			var trim := frame.get_child(0) as Node3D
-			var depth := (trim.global_position - portal.global_position).dot(portal.global_basis.z)
+			var offset := trim.global_position - portal.global_position
+			var depth := offset.dot(portal.global_basis.z)
 			_check(depth > 0.0 and depth <= 0.35,
 				"vault %d %s door frame floats off its wall (%.2f m)" % [index + 1, door[0], depth])
+			_check(absf(absf(offset.dot(portal.global_basis.x))
+				- ExhibitHolonomyLoop.APERTURE.x * 0.5 - 0.06) <= 0.01,
+				"vault %d %s door frame slid off its aperture" % [index + 1, door[0]])
+			var normal := portal.global_basis.z * 0.6
+			var through := PhysicsRayQueryParameters3D.create(portal.global_position + normal,
+				portal.global_position - normal)
+			_check(space.intersect_ray(through).is_empty(),
+				"vault %d %s aperture is walled up" % [index + 1, door[0]])
 	var spawn_local := vault1.to_local(player.global_position)
 	_check(absf(spawn_local.x) <= ExhibitHolonomyLoop.VAULT.x * 0.5 \
 		and absf(spawn_local.z) <= ExhibitHolonomyLoop.VAULT.z * 0.5,
 		"holonomy spawn is not inside the first vault")
 	_check(absf(player.global_position.y - 0.9) <= 0.06,
 		"holonomy spawn does not rest on the vault floor")
-	# The built square must compose to a pure quarter turn — the exhibit's claim.
+	# The built loop composes to the turn its door walls predict, never to none.
 	var walk: Array[Transform3D] = []
-	for step in 4:
-		walk.append(exhibit.exits[step].get_mapping())
-	var loop := HolonomyState.loop_mapping(walk[0], walk[1], walk[2], walk[3])
-	_check(absf(HolonomyState.turn_angle(loop) - PI * 0.5) <= 0.001,
-		"the built square does not compose to a +90° turn")
+	for step in count:
+		walk.append(exhibit.exits[exhibit.order[step]].get_mapping())
+	var loop := HolonomyState.loop_mapping(walk)
+	_check(not is_zero_approx(exhibit.turn_angle), "the drawn loop closes straight")
+	_check(not exhibit.sight_outruns_views(),
+		"the drawn loop lines a view up past the live doors onto a stand-in")
+	# The draw check itself: four straight rooms line their doors up past the
+	# live views; five left turns fold every view back.
+	var probe := ExhibitHolonomyLoop.new()
+	probe.order.assign(range(count))
+	for _index in count:
+		probe.vault_sizes.append(ExhibitHolonomyLoop.VAULT)
+		probe.entrance_walls.append("south")
+		probe.entrance_offsets.append(0.0)
+		probe.exit_offsets.append(0.0)
+	probe.exit_walls.assign(["north", "north", "north", "north", "west"])
+	_check(probe.sight_outruns_views(), "four straight rooms in a row pass the draw check")
+	probe.exit_walls.assign(["west", "west", "west", "west", "west"])
+	_check(not probe.sight_outruns_views(), "five left turns fail the draw check")
+	_check(absf(angle_difference(HolonomyState.turn_angle(loop), exhibit.turn_angle)) <= 0.001,
+		"the built loop does not turn as its door walls predict")
 	_check(loop.basis.y.distance_to(Vector3.UP) <= 0.001,
-		"the built square's loop turns about a tilted axis")
-	# Walk the cycle I→II→III→IV→I with scripted crossings: every crossing must
-	# land in front of the next vault's entrance, and every one must be counted.
-	for step in 4:
-		var entry: Portal3D = exhibit.exits[step]
-		var arrival: Portal3D = exhibit.entrances[(step + 1) % 4]
+		"the built loop turns about a tilted axis")
+	# Walk the whole cycle with scripted crossings: every crossing must land in
+	# front of the next vault's entrance, and every one must be counted. The
+	# order is read afresh each step: the loop may rearrange out of sight.
+	for step in count:
+		var entry: Portal3D = exhibit.exits[exhibit.order[step]]
+		var arrival: Portal3D = exhibit.entrances[exhibit.order[(step + 1) % count]]
 		player.set_pose(Transform3D(Basis.IDENTITY,
 			entry.to_global(Vector3(0.0, -0.8, -0.05))))
 		player._portal_previous_position = entry.to_global(Vector3(0.0, -0.8, 0.05))
@@ -533,8 +580,15 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 			"crossing exit %d did not land in front of the next entrance" % (step + 1))
 		_check(exhibit.active_portals.has(arrival),
 			"live views did not follow the player through exit %d" % (step + 1))
+		# process_frame fires before _process: two frames see the views re-bound.
+		await process_frame
+		await process_frame
+		var far_vault := exhibit.order[(step + 2) % count]
+		var far_door: Portal3D = exhibit.exits[far_vault]
+		_check(far_door._surface_material.get_shader_parameter("portal_texture") is ViewportTexture,
+			"vault %d's exit, seen through the next door, renders as a hole" % (far_vault + 1))
 		await physics_frame
-	_check(exhibit.crossing_count == 4, "the four crossings were not all counted")
+	_check(exhibit.crossing_count == count, "the loop's crossings were not all counted")
 	# The loop returns the player inside the first vault, through its entrance:
 	# they settle in the doorway itself, so the bounds are the shell envelope.
 	var returned_local := vault1.to_local(player.global_position)
@@ -548,6 +602,7 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 	await physics_frame
 	_check(player.global_position.distance_to(settled) <= 0.001,
 		"the player ping-ponged through the return portal")
+	_test_holonomy_rearrangement(player, exhibit, vault1)
 	# Reset zeroes the counter and re-poses the player at the spawn.
 	demo._reset_current_case()
 	await physics_frame
@@ -557,6 +612,53 @@ func _test_holonomy_loop(demo: Node3D, player: NonEuclideanPlayer,
 		"holonomy reset did not re-pose the player at the spawn")
 	_check(_basis_error(player.global_basis, exhibit.spawn_pose.basis) <= 0.001,
 		"holonomy reset did not restore the spawn orientation")
+
+
+## Rearranging never touches what the player may see: from poses all over the
+## start vault, the vaults in sight keep their place and their build, the start
+## vault keeps place 0, and the loop keeps its turn and its sight-line bound.
+func _test_holonomy_rearrangement(player: NonEuclideanPlayer, exhibit: ExhibitHolonomyLoop,
+		vault1: Node3D) -> void:
+	var count := ExhibitHolonomyLoop.VAULT_COUNT
+	var camera := player.get_camera()
+	(player.get_node("CameraPivot") as Node3D).rotation.x = 0.0
+	var turn := exhibit.turn_angle
+	var rearranged := 0
+	var partly_seen := 0
+	for pose_index in 32:
+		var yaw := TAU * float(pose_index) / 32.0
+		var spot := Vector3(sin(yaw * 3.0) * 1.4, 0.0, cos(yaw * 2.0) * 1.8)
+		player.set_pose(vault1.global_transform * Transform3D(Basis(Vector3.UP, yaw), spot))
+		var seen := exhibit.seen_vaults(camera)
+		if seen.size() < count:
+			partly_seen += 1
+		var before := {}
+		for vault: int in seen:
+			before[vault] = [exhibit.order.find(vault), exhibit._vault_node(vault).get_instance_id()]
+		var lost: Array[int] = []
+		for vault in count:
+			if not seen.has(vault):
+				lost.append(vault)
+		if not exhibit._rearrange(seen, lost):
+			continue
+		rearranged += 1
+		for vault: int in seen:
+			_check(before[vault] == [exhibit.order.find(vault),
+				exhibit._vault_node(vault).get_instance_id()],
+				"pose %d: vault %d changed while in sight" % [pose_index, vault + 1])
+		_check(exhibit.order[0] == 0, "pose %d: the start vault left place 0" % pose_index)
+		_check(absf(angle_difference(HolonomyState.layout_turn(exhibit.entrance_walls,
+			exhibit.exit_walls), turn)) <= 0.0001,
+			"pose %d: rearranging changed the loop's turn" % pose_index)
+		_check(not exhibit.sight_outruns_views(),
+			"pose %d: rearranging lined a view up onto a stand-in" % pose_index)
+		for place in count:
+			var vault := exhibit.order[place]
+			_check(exhibit.exits[vault].linked_portal \
+				== exhibit.entrances[exhibit.order[(place + 1) % count]],
+				"pose %d: the cycle broke at place %d" % [pose_index, place])
+	_check(partly_seen >= 8, "too few poses leave part of the loop unseen (%d)" % partly_seen)
+	_check(rearranged >= 8, "too few poses let the loop rearrange (%d)" % rearranged)
 
 
 func _place_aiming(player: NonEuclideanPlayer, eye: Vector3, target: Vector3) -> void:
@@ -572,13 +674,6 @@ func _collision_radius(ball: GripBall) -> float:
 		if child is CollisionShape3D:
 			return ((child as CollisionShape3D).shape as SphereShape3D).radius
 	return -1.0
-
-
-func _ceiling_height_above(player: NonEuclideanPlayer) -> float:
-	var query := PhysicsRayQueryParameters3D.create(player.global_position,
-		player.global_position + Vector3.UP * 60.0, 1, [player.get_rid()])
-	var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-	return hit.position.y - player.global_position.y if not hit.is_empty() else -1.0
 
 
 func _test_existing_input_contract() -> void:

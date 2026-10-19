@@ -33,9 +33,12 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 	_build_shell(materials)
 	_build_markers(materials)
 	props.assign([
-		_add_grip_ball(Vector3(-2.6, 0.35, 3.0), 0.35, Color(0.2, 0.55, 0.85), 1.2),
-		_add_grip_ball(Vector3(0.0, SHELF_TOP + 0.5, -7.0), 0.5, Color(0.9, 0.42, 0.1), 2.0),
-		_add_grip_ball(Vector3(0.0, 0.45, -11.5), 0.45, Color(0.2, 0.75, 0.4), 1.6),
+		GeometryKit.add_grip_ball(_cell, Vector3(-2.6, 0.35, 3.0), 0.35,
+			Color(0.2, 0.55, 0.85), 1.2),
+		GeometryKit.add_grip_ball(_cell, Vector3(0.0, SHELF_TOP + 0.5, -7.0), 0.5,
+			Color(0.9, 0.42, 0.1), 2.0),
+		GeometryKit.add_grip_ball(_cell, Vector3(0.0, 0.45, -11.5), 0.45,
+			Color(0.2, 0.75, 0.4), 1.6),
 	])
 	for ball in props:
 		_prop_poses.append(ball.global_transform)
@@ -106,32 +109,3 @@ func _build_markers(materials: Dictionary) -> void:
 			materials["measure"], false)
 		GeometryKit.add_label(_cell, "%.0f m" % float(depth),
 			Vector3(0.0, 0.06, z + 0.55), 0.0, Color(0.35, 0.78, 1.0), 40)
-
-
-func _add_grip_ball(local_position: Vector3, radius: float, color: Color,
-		mass_value: float) -> GripBall:
-	var body := GripBall.new()
-	body.position = local_position
-	body.mass = mass_value
-	body.base_mass = mass_value
-	body.albedo = color
-	body.material_roughness = 0.3
-	body.continuous_cd = true
-	var mesh_instance := MeshInstance3D.new()
-	var mesh := SphereMesh.new()
-	mesh.radius = radius
-	mesh.height = radius * 2.0
-	mesh_instance.mesh = mesh
-	mesh_instance.layers = Portal3D.WORLD_LAYER
-	body.add_child(mesh_instance)
-	var collision := CollisionShape3D.new()
-	var shape := SphereShape3D.new()
-	shape.radius = radius
-	collision.shape = shape
-	body.add_child(collision)
-	var physics_material := PhysicsMaterial.new()
-	physics_material.friction = 0.6
-	physics_material.bounce = 0.25
-	body.physics_material_override = physics_material
-	_cell.add_child(body)
-	return body

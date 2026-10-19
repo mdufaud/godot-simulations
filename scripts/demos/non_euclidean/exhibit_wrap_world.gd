@@ -4,14 +4,16 @@ class_name ExhibitWrapWorld extends RefCounted
 ## The walkable slab spans the whole cell in X and Z, so walking a straight line
 ## crosses a boundary every [constant PERIODS].x/z metres and continues on the
 ## same floor one period over — nothing marks the seam but the colored trim it
-## passes. The Y period is taller so the fall through the central shaft breathes:
-## dropped in, a body falls out of the cell below and re-enters from just under
-## the shared ceiling, looping until it is scooped out. Colored trims per face
-## keep the directions readable, and eight collision-free copies of the block
-## stand one period away in X and Z, furnished identically to the centre cell —
-## the wrap invariant is that the world is the same one period over, so the
-## teleport at the boundary never moves visible content. Y loops without a
-## neighbour: the shared ceiling plus the fog carry the illusion.
+## passes. The Y period is shorter, so the floors above and below stay in view:
+## dropped in, a body falls out of the cell bottom and re-enters from the top,
+## looping until it is scooped out. Colored trims per face keep the directions
+## readable, and the block repeats as a lattice [constant LATTICE_RINGS] periods
+## out in X and Z and [constant LATTICE_LAYERS] up and down — one MultiMesh of
+## the furnished cell, so the floors above and below and the endless columns are
+## the same world seen again. The wrap invariant is that the world is the same
+## one period over, so the teleport at the boundary never moves visible content:
+## the lattice edge sits past the fog, and one directional light lights every
+## copy alike.
 ##
 ## A torus under uniform gravity gains speed on every loop, so [constant
 ## TERMINAL_FALL] caps the fall of the player and the props — the loop stays
@@ -21,19 +23,32 @@ class_name ExhibitWrapWorld extends RefCounted
 ## reset] on reset.
 ##
 ## Reading aids: a HOME beacon marks the spawn, chevron arrows run from it
-## toward the far seams in the seam's own color, the prop ball is mirrored into
-## the eight neighbour copies every frame, and a crossing pulses that seam's
-## trim across the whole lattice while the HUD names it.
+## toward the far seams in the seam's own color, the ball and the player are
+## mirrored into every lattice copy — you see yourself walk over there and fall
+## below you — and a crossing pulses that seam's trim across the whole lattice
+## while the HUD names it. The ball is a carryable [GripBall]: take it, drop it
+## down the shaft.
 
-const PERIODS := Vector3(40.0, 60.0, 40.0)
+const PERIODS := Vector3(40.0, 30.0, 40.0)
 const SLAB_THICKNESS := 1.0
 const SHAFT_INNER := 3.4
 const SHAFT_WALL := 0.4
 const SHAFT_LIP := 0.6
 const TERMINAL_FALL := 26.0
 const PROP_RADIUS := 0.4
-const FOG_BEGIN := 14.0
-const FOG_END := 38.0
+const PROP_COLOR := Color(0.85, 0.55, 0.12)
+## Fog closes before the lattice edge, at least 120 m from anywhere in the cell
+## both across ([constant LATTICE_RINGS]) and up or down ([constant LATTICE_LAYERS]).
+const FOG_BEGIN := 45.0
+const FOG_END := 115.0
+const LATTICE_RINGS := 3
+const LATTICE_LAYERS := 4
+const HAZE := Color(0.13, 0.19, 0.27)
+## Render layer only the wrap's directional light reaches.
+const SUN_LAYER := 32
+const COLUMN := 1.4
+const COLUMN_AT := 12.0
+const BEAM_HEIGHT := 9.0
 ## Trim key -> readable seam name. The trim colors double as direction codes:
 ## the +X seam is blue, -X orange, +Z green, -Z the dark cyan measure color.
 const SEAM_NAMES := {
@@ -59,7 +74,10 @@ var _prop_poses: Array[Transform3D] = []
 var _seam_materials: Dictionary = {}
 var _base_emission: Dictionary = {}
 var _pulses: Dictionary = {}
-var _prop_copies: Array[MeshInstance3D] = []
+var _lattice_offsets: Array[Vector3] = []
+var _prop_copies: MultiMeshInstance3D
+var _self_copies: MultiMeshInstance3D
+var _self_basis := Basis()
 var _environment: Environment
 
 
@@ -73,12 +91,16 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 		_seam_materials[key] = owned
 		_base_emission[key] = owned.emission_energy_multiplier
 		_pulses[key] = 0.0
+	_lattice_offsets = _neighbor_offsets(LATTICE_RINGS, LATTICE_LAYERS)
 	_build_block(_cell, materials, true)
 	_furnish_cell(_cell, materials)
 	_add_prop()
-	_build_neighbors(materials)
-	_build_shared_ceiling(materials)
-	_build_prop_copies()
+	_build_lattice(materials)
+	_build_neighbor_labels()
+	_build_copies(materials)
+	_build_sun()
+	for node in _cell.find_children("*", "GeometryInstance3D", true, false):
+		(node as GeometryInstance3D).layers |= SUN_LAYER
 	# Spawn near an edge, facing across the whole block: a straight walk passes
 	# the shaft and crosses the far seam after one period.
 	spawn_pose = _cell.global_transform * Transform3D(Basis.IDENTITY,
@@ -86,21 +108,18 @@ func build(cells: Node3D, materials: Dictionary) -> void:
 
 
 ## Everything a cell wears besides its collision block: labels, the shaft sign,
-## the HOME beacon, the seam arrows and the corner lights. Applied verbatim to
-## every neighbour copy — the wrap invariant is that the world is identical one
-## period over, so looking anywhere across a seam (or backwards across the
-## crossing moment) must show the same content the centre cell has.
+## the HOME beacon and the seam arrows. The lattice copies all of it but the
+## labels — the wrap invariant is that the world is identical one period over,
+## so looking anywhere across a seam (or backwards across the crossing moment)
+## must show the same content the centre cell has.
 func _furnish_cell(cell: Node3D, materials: Dictionary) -> void:
 	_build_labels(cell)
 	_build_beacon(cell, materials)
 	_build_seam_arrows(cell, materials)
-	for corner in [Vector3(10.0, 4.0, 10.0), Vector3(-10.0, 4.0, 10.0),
-			Vector3(10.0, 4.0, -10.0), Vector3(-10.0, 4.0, -10.0)]:
-		GeometryKit.add_omni_light(cell, corner, Color(0.55, 0.75, 0.95), 1.5, 24.0, false)
 
 
-## Wraps the player and every prop back into the cell, mirrors the prop into
-## the neighbour copies and decays the seam pulses. Returns [code]true[/code]
+## Wraps the player and every prop back into the cell, mirrors both into the
+## lattice copies and decays the seam pulses. Returns [code]true[/code]
 ## when the player crossed a boundary, so the host can refresh its readout.
 func track(player: NonEuclideanPlayer, delta: float) -> bool:
 	var changed := false
@@ -116,6 +135,9 @@ func track(player: NonEuclideanPlayer, delta: float) -> bool:
 			changed = true
 	_cap_player_fall(player)
 	for body in props:
+		# Carried: the grab keeps it with the player, who does the wrapping.
+		if body.freeze:
+			continue
 		var body_offset := WrapWorldState.wrap_offset(
 			_cell.to_local(body.global_position), PERIODS)
 		if body_offset != Vector3.ZERO:
@@ -124,12 +146,13 @@ func track(player: NonEuclideanPlayer, delta: float) -> bool:
 				_cell.global_basis * body_offset), null)
 			prop_wraps += 1
 		_cap_body_fall(body)
-	_update_prop_copies()
+	_update_copies(player)
 	_decay_pulses(delta)
 	return changed
 
 
-## Camera-only depth fog closes before the lattice edge, 40 m out at the closest.
+## Camera-only depth fog closes before the lattice edge; the background is the
+## haze itself, so the last copies dissolve instead of ending.
 func set_active(active: bool, player: NonEuclideanPlayer) -> void:
 	var camera := player.get_camera()
 	if active:
@@ -141,6 +164,10 @@ func set_active(active: bool, player: NonEuclideanPlayer) -> void:
 			_environment.fog_depth_begin = FOG_BEGIN
 			_environment.fog_depth_end = FOG_END
 			_environment.fog_sky_affect = 1.0
+			_environment.fog_light_color = HAZE
+			_environment.fog_light_energy = 1.0
+			_environment.background_mode = Environment.BG_COLOR
+			_environment.background_color = HAZE
 		camera.environment = _environment
 	elif camera.environment == _environment:
 		camera.environment = null
@@ -190,41 +217,65 @@ func _apply_pulse(key: String) -> void:
 	material.emission_energy_multiplier = _base_emission[key] * (1.0 + 4.0 * _pulses[key])
 
 
-## Eight collision-free mirrors of the prop, one period away in X and Z: the
-## same ball seen in every repeating cell, so the wrap is visible continuously
-## and not only at the crossing.
-func _build_prop_copies() -> void:
-	for x_offset in [-1.0, 0.0, 1.0]:
-		for z_offset in [-1.0, 0.0, 1.0]:
-			if x_offset == 0.0 and z_offset == 0.0:
-				continue
-			var copy := MeshInstance3D.new()
-			var mesh := SphereMesh.new()
-			mesh.radius = PROP_RADIUS
-			mesh.height = PROP_RADIUS * 2.0
-			copy.mesh = mesh
-			copy.layers = Portal3D.WORLD_LAYER
-			var material := StandardMaterial3D.new()
-			material.albedo_color = Color(0.85, 0.55, 0.12)
-			material.metallic = 0.35
-			material.roughness = 0.22
-			copy.material_override = material
-			_cell.add_child(copy)
-			_prop_copies.append(copy)
+## The ball and the player seen again in every lattice copy, moving as one:
+## what repeats is the same space, not a set of clones. The player's copy wears
+## a visor so its heading reads from afar; the centre copy is left out — it is
+## the player.
+func _build_copies(materials: Dictionary) -> void:
+	var sphere := SphereMesh.new()
+	sphere.radius = PROP_RADIUS
+	sphere.height = PROP_RADIUS * 2.0
+	sphere.material = GeometryKit.make_material(PROP_COLOR, 0.05, 0.3)
+	_prop_copies = _instance_over_lattice("PropCopies", sphere)
+	var body := CapsuleMesh.new()
+	body.radius = 0.35
+	body.height = 1.8
+	body.material = GeometryKit.make_material(Color(0.7, 0.76, 0.82), 0.0, 0.5)
+	var visor := BoxMesh.new()
+	visor.size = Vector3(0.42, 0.12, 0.12)
+	visor.material = materials["blue"]
+	var figure := ArrayMesh.new()
+	for part in [[body, Vector3.ZERO], [visor, Vector3(0.0, 0.6, -0.3)]]:
+		var tool := SurfaceTool.new()
+		tool.begin(Mesh.PRIMITIVE_TRIANGLES)
+		tool.append_from(part[0], 0, Transform3D(Basis.IDENTITY, part[1]))
+		tool.commit(figure)
+		figure.surface_set_material(figure.get_surface_count() - 1,
+			(part[0] as PrimitiveMesh).material)
+	_self_copies = _instance_over_lattice("SelfCopies", figure)
 
 
-func _update_prop_copies() -> void:
-	if props.is_empty():
+## One instance of [param mesh] per lattice copy, the centre excluded.
+func _instance_over_lattice(instance_name: String, mesh: Mesh) -> MultiMeshInstance3D:
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = mesh
+	multimesh.instance_count = _lattice_offsets.size()
+	for index in _lattice_offsets.size():
+		multimesh.set_instance_transform(index, Transform3D(Basis.IDENTITY,
+			_lattice_offsets[index] * PERIODS))
+	var instance := MultiMeshInstance3D.new()
+	instance.name = instance_name
+	instance.multimesh = multimesh
+	instance.layers = Portal3D.WORLD_LAYER
+	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_cell.add_child(instance)
+	return instance
+
+
+## Followers ride on their original; only the player's heading needs every
+## instance rewritten, and only when it changed.
+func _update_copies(player: NonEuclideanPlayer) -> void:
+	if not props.is_empty():
+		_prop_copies.global_position = props[0].global_position
+	_self_copies.global_position = player.global_position
+	var heading := _cell.global_basis.inverse() * player.global_basis
+	if heading.is_equal_approx(_self_basis):
 		return
-	var origin := _cell.to_local(props[0].global_position)
-	var index := 0
-	for x_offset in [-1.0, 0.0, 1.0]:
-		for z_offset in [-1.0, 0.0, 1.0]:
-			if x_offset == 0.0 and z_offset == 0.0:
-				continue
-			_prop_copies[index].global_position = _cell.to_global(origin
-				+ Vector3(x_offset * PERIODS.x, 0.0, z_offset * PERIODS.z))
-			index += 1
+	_self_basis = heading
+	for index in _lattice_offsets.size():
+		_self_copies.multimesh.set_instance_transform(index, Transform3D(heading,
+			_lattice_offsets[index] * PERIODS))
 
 
 ## Glowing pillar and floor ring beside the spawn point: walk straight in any
@@ -315,6 +366,27 @@ func _build_block(parent: Node3D, materials: Dictionary, with_collision: bool) -
 		var side := Vector3(at.x, 0.0, at.z).normalized()
 		GeometryKit.add_box(parent, Vector3(at.x, -SLAB_THICKNESS * 0.5, at.z)
 			+ side * 0.03, Vector3(size.x + 0.06, 0.5, size.z + 0.06), material, false)
+	# Light strips under the slab: from the floor below, the slab overhead reads
+	# as a lit ceiling instead of melting into the haze.
+	for x in [-15.0, -5.0, 5.0, 15.0]:
+		GeometryKit.add_box(parent, Vector3(x, -SLAB_THICKNESS - 0.02, 0.0),
+			Vector3(0.3, 0.04, PERIODS.z - 1.0), materials["corridor_light"], false)
+	# Four columns one full period tall: stacked by the lattice they read as
+	# endless pillars through every floor, tied by lit beams overhead.
+	for x_sign in [-1.0, 1.0]:
+		for z_sign in [-1.0, 1.0]:
+			GeometryKit.add_box(parent, Vector3(x_sign * COLUMN_AT, 0.0, z_sign * COLUMN_AT),
+				Vector3(COLUMN, PERIODS.y, COLUMN), materials["white"], with_collision)
+	var span := COLUMN_AT * 2.0 - COLUMN
+	for edge in [-1.0, 1.0]:
+		GeometryKit.add_box(parent, Vector3(0.0, BEAM_HEIGHT, edge * COLUMN_AT),
+			Vector3(span, 0.8, 0.8), materials["white"], false)
+		GeometryKit.add_box(parent, Vector3(edge * COLUMN_AT, BEAM_HEIGHT, 0.0),
+			Vector3(0.8, 0.8, span), materials["white"], false)
+		GeometryKit.add_box(parent, Vector3(0.0, BEAM_HEIGHT - 0.42, edge * COLUMN_AT),
+			Vector3(span, 0.05, 0.24), materials["corridor_light"], false)
+		GeometryKit.add_box(parent, Vector3(edge * COLUMN_AT, BEAM_HEIGHT - 0.42, 0.0),
+			Vector3(0.24, 0.05, span), materials["corridor_light"], false)
 
 
 func _build_labels(cell: Node3D) -> void:
@@ -326,33 +398,77 @@ func _build_labels(cell: Node3D) -> void:
 
 
 func _add_prop() -> void:
-	var sphere := GeometryKit.add_sphere_prop(_cell, Vector3(-4.0, 0.5, 4.0), PROP_RADIUS,
-		Color(0.85, 0.55, 0.12), 1.4)
+	var sphere := GeometryKit.add_grip_ball(_cell, Vector3(-4.0, 0.5, 4.0), PROP_RADIUS,
+		PROP_COLOR, 1.4)
+	sphere.resizes = false
 	props.assign([sphere])
 	_prop_poses.append(sphere.global_transform)
 
 
-## Eight collision-free copies one period away in X and Z, each furnished like
-## the centre cell (no physics prop: the prop is mirrored visually by the wrap
-## copies). What the wrap promises is visibly — and identically — there.
-func _build_neighbors(materials: Dictionary) -> void:
-	for x_offset in [-1.0, 0.0, 1.0]:
-		for z_offset in [-1.0, 0.0, 1.0]:
-			if x_offset == 0.0 and z_offset == 0.0:
-				continue
-			var copy := Node3D.new()
-			copy.name = "Neighbor%d%d" % [int(x_offset), int(z_offset)]
-			copy.position = Vector3(x_offset * PERIODS.x, 0.0, z_offset * PERIODS.z)
-			_cell.add_child(copy)
-			_build_block(copy, materials, false)
-			_furnish_cell(copy, materials)
+## The furnished cell merged into one mesh (one surface per material, the
+## seam materials shared so a pulse lights every copy) and instanced over the
+## whole lattice but the centre, which is the real, colliding cell.
+func _build_lattice(materials: Dictionary) -> void:
+	var template := Node3D.new()
+	_build_block(template, materials, false)
+	_build_beacon(template, materials)
+	_build_seam_arrows(template, materials)
+	var surfaces := {}
+	for node in template.find_children("*", "MeshInstance3D", true, false):
+		var mesh_instance := node as MeshInstance3D
+		var material := mesh_instance.material_override
+		if not surfaces.has(material):
+			var tool := SurfaceTool.new()
+			tool.begin(Mesh.PRIMITIVE_TRIANGLES)
+			surfaces[material] = tool
+		var placement := mesh_instance.transform
+		var parent := mesh_instance.get_parent()
+		while parent != template:
+			placement = (parent as Node3D).transform * placement
+			parent = parent.get_parent()
+		(surfaces[material] as SurfaceTool).append_from(mesh_instance.mesh, 0, placement)
+	template.free()
+	var merged := ArrayMesh.new()
+	for material in surfaces:
+		(surfaces[material] as SurfaceTool).commit(merged)
+		merged.surface_set_material(merged.get_surface_count() - 1, material)
+	_instance_over_lattice("Lattice", merged)
 
 
-## One slab shared by the nine visible copies: the fall re-enters from just
-## under it, and it hides where the vertical repetition would begin.
-func _build_shared_ceiling(materials: Dictionary) -> void:
-	GeometryKit.add_box(_cell, Vector3(0.0, PERIODS.y * 0.5 + 0.25, 0.0),
-		Vector3(PERIODS.x * 3.0, 0.5, PERIODS.z * 3.0), materials["concrete_dark"], false)
+## Labels stay out of the merged lattice; the ring next to the centre carries
+## them so the signs read across a seam.
+func _build_neighbor_labels() -> void:
+	for offset in _neighbor_offsets(1, 0):
+		var copy := Node3D.new()
+		copy.name = "NeighborLabels%d%d" % [int(offset.x), int(offset.z)]
+		copy.position = offset * PERIODS
+		_cell.add_child(copy)
+		_build_labels(copy)
+
+
+## Every lattice step within [param rings] periods in X and Z and [param layers]
+## in Y, the centre excluded.
+func _neighbor_offsets(rings: int, layers: int) -> Array[Vector3]:
+	var offsets: Array[Vector3] = []
+	for x in range(-rings, rings + 1):
+		for y in range(-layers, layers + 1):
+			for z in range(-rings, rings + 1):
+				if x != 0 or y != 0 or z != 0:
+					offsets.append(Vector3(x, y, z))
+	return offsets
+
+
+## One sun for every copy: a directional light shades all cells identically,
+## which no set of omni lights placed in a finite lattice can.
+func _build_sun() -> void:
+	var sun := DirectionalLight3D.new()
+	sun.name = "Sun"
+	sun.rotation = Vector3(deg_to_rad(-58.0), deg_to_rad(28.0), 0.0)
+	sun.light_color = Color(1.0, 0.93, 0.82)
+	sun.light_energy = 0.85
+	sun.light_cull_mask = SUN_LAYER
+	sun.shadow_enabled = false
+	_cell.add_child(sun)
 
 
 func _cap_player_fall(player: NonEuclideanPlayer) -> void:

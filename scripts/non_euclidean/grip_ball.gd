@@ -14,6 +14,8 @@ const RADIUS_MAX := 2.0
 
 ## Mass at [member base_radius]; [method commit_scale] scales it cubically.
 var base_mass := 1.0
+## False: the grab carries it at arm's length at its own size, no resolve.
+var resizes := true
 
 var _base_radius := 0.0
 var _mesh_child: MeshInstance3D

@@ -1,5 +1,8 @@
 extends Node3D
 
+## Exhibits whose balls the grab action can hold: the grip lab resizes them,
+## the spherical and wrap gardens carry theirs.
+const GRAB_EXHIBITS := [2, 4, 5]
 const EXHIBIT_NAMES := [
 	"1 · Impossible Storage",
 	"2 · Infinite Staircase",
@@ -58,22 +61,20 @@ func _physics_process(delta: float) -> void:
 		_update_hud()
 	elif _current_exhibit == 3 and _corridor.track(player):
 		_update_hud()
-	elif _current_exhibit == 4:
+	elif _current_exhibit == 5 and _wrap.track(player, delta):
+		_update_hud()
+	# After the wrap: a carried ball follows the camera the wrap just moved.
+	if _current_exhibit in GRAB_EXHIBITS:
 		_grab.physics_update(player.get_camera())
 		_hud.set_grab_hint(_grab.aim_target(player.get_camera(), 1,
 			[player.get_rid()]) != null)
-	elif _current_exhibit == 5 and _wrap.track(player, delta):
-		_update_hud()
-	elif _current_exhibit == 6 and _holonomy.track(player):
-		render_manager.configure_portals(_holonomy.active_portals)
-		_update_hud()
 
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("toggle_debug"):
 		menu.toggle_panel()
 		get_viewport().set_input_as_handled()
-	elif event.is_action_pressed("grab") and _current_exhibit == 4:
+	elif event.is_action_pressed("grab") and _current_exhibit in GRAB_EXHIBITS:
 		var exclude: Array[RID] = [player.get_rid()]
 		_grab.try_grab(player.get_camera(), 1, exclude)
 	elif event.is_action_released("grab"):
@@ -81,6 +82,11 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _process(_delta: float) -> void:
+	# Before the render pool (priority 1000): the frame that shows the far side
+	# of a crossing must already sample the new vault's views.
+	if _current_exhibit == 6 and _holonomy.track(player):
+		render_manager.configure_portals(_holonomy.active_portals, _holonomy.nested_portals)
+		_update_hud()
 	if _hud.is_debug_visible():
 		_hud.set_debug_text(render_manager.get_debug_text())
 
@@ -138,6 +144,12 @@ func _go_to_case(index: int) -> void:
 	if index < 0 or index >= EXHIBIT_NAMES.size():
 		return
 	_current_exhibit = index
+	# Before the re-pose: releasing places the ball in front of the camera.
+	_grab.release()
+	_hud.set_grab_hint(false)
+	if index == 6:
+		# A fresh random loop every visit, entered from its first vault.
+		_holonomy.reset()
 	var pose := _spawn_pose(index)
 	var gravity := Vector3.DOWN * 12.0
 	if index == 2:
@@ -146,9 +158,6 @@ func _go_to_case(index: int) -> void:
 	_staircase.set_active(index == 1, player)
 	_corridor.set_active(index == 3, player)
 	_wrap.set_active(index == 5, player)
-	if index != 4:
-		_grab.release()
-		_hud.set_grab_hint(false)
 	if index == 2:
 		player.set_gravity_field(_garden.gravity_field)
 	# Only the active exhibit occupies the portal render slots.
@@ -156,7 +165,7 @@ func _go_to_case(index: int) -> void:
 		0:
 			render_manager.configure_portals(_reserve.portals)
 		6:
-			render_manager.configure_portals(_holonomy.active_portals)
+			render_manager.configure_portals(_holonomy.active_portals, _holonomy.nested_portals)
 		_:
 			render_manager.configure_portals([] as Array[Portal3D])
 	_hud.select_case(index)
@@ -170,6 +179,9 @@ func _reset_current_case() -> void:
 		_reserve.reset()
 	elif _current_exhibit == 1:
 		_staircase.reset()
+	elif _current_exhibit == 2:
+		_grab.release()
+		_garden.reset()
 	elif _current_exhibit == 3:
 		_corridor.reset()
 	elif _current_exhibit == 4:
@@ -177,8 +189,6 @@ func _reset_current_case() -> void:
 		_grip.reset()
 	elif _current_exhibit == 5:
 		_wrap.reset()
-	elif _current_exhibit == 6:
-		_holonomy.reset()
 	_go_to_case(_current_exhibit)
 
 
@@ -207,17 +217,18 @@ func _update_hud() -> void:
 			_hud.set_status("%s\nAscents: %d · Turn around and the climb never happened." % [
 				EXHIBIT_NAMES[1], _staircase.ascent_count])
 		2:
-			_hud.set_status("%s\nWalk a great circle. Gravity remains radial." % EXHIBIT_NAMES[2])
+			_hud.set_status("%s\nWalk a great circle. Gravity remains radial.\nHold click to carry a ball — let go and it falls back to the shell." % EXHIBIT_NAMES[2])
 		3:
-			_hud.set_status("%s\nCrossings: %d · Virtual distance: %.0f m — every threshold opens a bigger space." % [
-				EXHIBIT_NAMES[3], _corridor.crossing_count, _corridor.virtual_distance])
+			_hud.set_status("%s\nWalked: %.0f m · Far door: %.0f m ahead — the corridor unfolds as you walk." % [
+				EXHIBIT_NAMES[3], _corridor.walked, _corridor.far_distance])
 		4:
 			_hud.set_status("%s\nHold to grab — its size resolves where it lands. Grab close, place far: it grows." %
 				EXHIBIT_NAMES[4])
 		5:
-			_hud.set_status("%s\nLoops: %d · Ball wraps: %d — walk straight to return to the HOME beacon\nLast seam: %s — space repeats every 40 m" % [
+			_hud.set_status("%s\nLoops: %d · Ball wraps: %d — walk straight to return to the HOME beacon\nHold click to carry the ball, drop it down the shaft · Last seam: %s" % [
 				EXHIBIT_NAMES[5], _wrap.wrap_count, _wrap.prop_wraps,
 				"none yet" if _wrap.last_seam.is_empty() else _wrap.last_seam])
 		6:
-			_hud.set_status("%s\nCrossings: %d — three lefts and a straight: the square comes back turned 90°." % [
-				EXHIBIT_NAMES[6], _holonomy.crossing_count])
+			_hud.set_status("%s\nCrossings: %d · Rearranged behind your back: %d — %d vaults shuffle whenever out of sight; the loop still comes back turned %s." % [
+				EXHIBIT_NAMES[6], _holonomy.crossing_count, _holonomy.rearrangements,
+				ExhibitHolonomyLoop.VAULT_COUNT, _holonomy.turn_text()])

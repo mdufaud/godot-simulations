@@ -12,6 +12,11 @@ const VAULT_ANGLES := [0.0, PI * 0.5, PI, -PI * 0.5]
 const RING := 24.0
 const OPENING_HALF_HEIGHT := 1.7
 const DOOR_DEPTH := 4.25
+## Door centres of one exhibit vault (6 × 8 m) in its own frame, and the half
+## width of its apertures.
+const ROOM_DOORS := {"south": Vector3(0.0, 0.0, 4.25), "north": Vector3(0.0, 0.0, -4.25),
+	"west": Vector3(-3.25, 0.0, 0.0), "east": Vector3(3.25, 0.0, 0.0)}
+const APERTURE_HALF_WIDTH := 1.3
 
 
 func _initialize() -> void:
@@ -19,6 +24,10 @@ func _initialize() -> void:
 	_test_loop_is_quarter_turn()
 	_test_walk_arrivals()
 	_test_reverse_door()
+	_test_room_turns()
+	_test_layout_turn_matches_mappings()
+	_test_sight_line_cases()
+	_test_sight_line_misses_no_sampled_line()
 	_finish("holonomy_state")
 
 
@@ -90,8 +99,7 @@ func _test_pair_mappings_are_rigid() -> void:
 
 func _test_loop_is_quarter_turn() -> void:
 	var mappings := _walk_mappings()
-	var loop: Transform3D = State.loop_mapping(mappings[0], mappings[1], mappings[2],
-		mappings[3])
+	var loop: Transform3D = State.loop_mapping(mappings)
 	_check(absf(State.turn_angle(loop) - PI * 0.5) <= 0.0001,
 		"the square's loop is not a +90° turn")
 	_check(absf(loop.basis.determinant() - 1.0) <= 0.0001,
@@ -155,3 +163,141 @@ func _test_reverse_door() -> void:
 			"walking out of entrance %d did not land at the previous exit" % (index + 1))
 		_check((-arrival.basis.z).normalized().dot(Vector3(1, 0, 0)) >= 0.999,
 			"the reversed crossing did not face into the vault")
+
+
+func _test_room_turns() -> void:
+	_check(is_equal_approx(State.room_turn("south", "west"), PI * 0.5),
+		"in through south, out through west is not a left turn")
+	_check(is_equal_approx(State.room_turn("south", "east"), -PI * 0.5),
+		"in through south, out through east is not a right turn")
+	_check(is_zero_approx(State.room_turn("south", "north")),
+		"in through south, out through north does not go straight")
+	_check(is_zero_approx(State.room_turn("east", "west")),
+		"in through east, out through west does not go straight")
+	_check(is_equal_approx(State.layout_turn(["south", "south", "south", "east"],
+		["west", "west", "west", "west"]), PI * 0.5),
+		"three lefts and a straight do not leave a +90° turn")
+
+
+## The wall arithmetic must agree with the composed portal mappings for any
+## draw: the exhibit trusts it to reject loops that close straight.
+func _test_layout_turn_matches_mappings() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 7
+	for draw in 60:
+		var entrance_walls: Array[String] = []
+		var exit_walls: Array[String] = []
+		for _index in 4:
+			var entrance: String = State.WALLS[rng.randi() % 4]
+			var others := State.WALLS.filter(func(wall: String) -> bool: return wall != entrance)
+			entrance_walls.append(entrance)
+			exit_walls.append(others[rng.randi() % others.size()])
+		var mappings: Array[Transform3D] = []
+		for index in 4:
+			mappings.append(PortalMathScript.mapping(_door_pose(index, exit_walls[index]),
+				_door_pose((index + 1) % 4, entrance_walls[(index + 1) % 4])))
+		var built := State.turn_angle(State.loop_mapping(mappings))
+		_check(absf(angle_difference(built, State.layout_turn(entrance_walls, exit_walls))) <= 0.0001,
+			"draw %d: the wall arithmetic disagrees with the composed mappings" % draw)
+
+
+func _test_sight_line_cases() -> void:
+	var ahead := func(x: float, z: float) -> Transform3D:
+		return Transform3D(Basis.IDENTITY, Vector3(x, 0.0, z))
+	_check(State.sight_line([ahead.call(0.0, 0.0), ahead.call(0.0, 8.0), ahead.call(0.0, 16.0)],
+		APERTURE_HALF_WIDTH), "three doors in a row hide their corridor")
+	_check(State.sight_line([ahead.call(0.0, 0.0), ahead.call(2.0, 8.0), ahead.call(0.0, 16.0)],
+		APERTURE_HALF_WIDTH), "a middle door 2 m aside blocks a view that still fits through")
+	_check(not State.sight_line([ahead.call(0.0, 0.0), ahead.call(3.0, 8.0),
+		ahead.call(0.0, 16.0)], APERTURE_HALF_WIDTH), "a middle door 3 m aside lets a view through")
+	_check(not State.sight_line([ahead.call(0.0, 0.0),
+		Transform3D(Basis(Vector3.UP, PI), Vector3(0.0, 0.0, 8.0)), ahead.call(0.0, 16.0)],
+		APERTURE_HALF_WIDTH), "a view crosses a door against its way through")
+	_check(State.sight_line(_chain(["south", "south", "south"], ["east", "west", "east"]),
+		APERTURE_HALF_WIDTH), "right, left, right rooms do not stair-step a diagonal")
+	_check(not State.sight_line(_chain(["south", "south"], ["east", "east"]), APERTURE_HALF_WIDTH),
+		"two right turns do not fold the view back")
+	_check(State.sight_line(_chain(["south", "south", "south"], ["north", "north", "north"]),
+		APERTURE_HALF_WIDTH), "three straight rooms hide their corridor")
+	# A door 50° off an eye's heading: in view at any width, out of a 60° field.
+	var aside: Array[Transform3D] = [ahead.call(0.0, 0.0), ahead.call(8.0, 6.0)]
+	_check(State.sight_line(aside, APERTURE_HALF_WIDTH), "a door 50° aside hides from a wide eye")
+	_check(not State.sight_line(aside, APERTURE_HALF_WIDTH, tan(deg_to_rad(30.0))),
+		"a door 50° aside shows inside a 60° field of view")
+
+
+## The exact test must find every sight line a brute-force search does, on
+## chains of three rooms drawn at random — a line it misses would show a door
+## past the render pool's reach.
+func _test_sight_line_misses_no_sampled_line() -> void:
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 11
+	var found := 0
+	for draw in 300:
+		var entrance_walls: Array[String] = []
+		var exit_walls: Array[String] = []
+		for _index in 3:
+			var entrance := rng.randi() % 4
+			entrance_walls.append(State.WALLS[entrance])
+			exit_walls.append(State.WALLS[(entrance + 1 + rng.randi() % 3) % 4])
+		var doors := _chain(entrance_walls, exit_walls)
+		if _sampled_sight(doors):
+			found += 1
+			_check(State.sight_line(doors, APERTURE_HALF_WIDTH),
+				"draw %d: the exact test missed a sight line through four doors" % draw)
+	_check(found >= 20, "random draws gave too few sight lines to compare (%d)" % found)
+
+
+## Doors crossed walking through these 6 × 8 m rooms in a row, unfolded through
+## their portal mappings, each pose's +Z along the walk.
+func _chain(entrances: Array, exits: Array) -> Array[Transform3D]:
+	var half_turn := Transform3D(Basis(Vector3.UP, PI), Vector3.ZERO)
+	var frame := Transform3D.IDENTITY
+	var doors: Array[Transform3D] = [_room_door(entrances[0])]
+	for room in entrances.size():
+		if room > 0:
+			frame = frame * PortalMathScript.mapping(_room_door(entrances[room]),
+				_room_door(exits[room - 1]))
+		doors.append(frame * _room_door(exits[room]) * half_turn)
+	return doors
+
+
+func _room_door(wall: String) -> Transform3D:
+	return Transform3D(Basis(Vector3.UP, State.inward_yaw(wall)), ROOM_DOORS[wall])
+
+
+## Brute force: lines through a grid of points on the first two doors, kept
+## when they cross every later door in order and the right way round.
+func _sampled_sight(doors: Array[Transform3D]) -> bool:
+	var ends: Array[PackedVector2Array] = []
+	for door in doors:
+		var plus := door * Vector3(APERTURE_HALF_WIDTH, 0.0, 0.0)
+		var minus := door * Vector3(-APERTURE_HALF_WIDTH, 0.0, 0.0)
+		ends.append(PackedVector2Array([Vector2(minus.x, minus.z), Vector2(plus.x, plus.z)]))
+	for near in 41:
+		for far in 41:
+			var origin := ends[0][0].lerp(ends[0][1], lerpf(0.01, 0.99, near / 40.0))
+			var direction := ends[1][0].lerp(ends[1][1], lerpf(0.01, 0.99, far / 40.0)) - origin
+			var reach := 0.0
+			var first_way := doors[0].basis.z
+			var crosses := direction.dot(Vector2(first_way.x, first_way.z)) > 0.0
+			for index in range(1, doors.size()):
+				var way := doors[index].basis.z
+				var hit := _ray_hit(origin, direction, ends[index])
+				crosses = crosses and hit > reach and direction.dot(Vector2(way.x, way.z)) > 0.0
+				reach = hit
+			if crosses:
+				return true
+	return false
+
+
+## Ray parameter where origin + direction · t crosses the door, −1 on a miss.
+func _ray_hit(origin: Vector2, direction: Vector2, door: PackedVector2Array) -> float:
+	var span := door[1] - door[0]
+	var denominator := direction.cross(span)
+	if is_zero_approx(denominator):
+		return -1.0
+	var offset := door[0] - origin
+	var within := offset.cross(direction) / denominator
+	return offset.cross(span) / denominator if within >= 0.0 and within <= 1.0 else -1.0
+
