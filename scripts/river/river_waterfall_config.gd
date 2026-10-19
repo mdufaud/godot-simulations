@@ -9,6 +9,7 @@ const EMISSION_RATE_HZ := 120.0
 @export var height_m := 6.0
 @export var width_m := 6.0
 @export var crest_z_m := 4.0
+@export var bed_depth_m := 0.65
 @export var lane_count := LANE_COUNT
 @export var film_cells := FILM_CELLS
 @export var packet_capacity := PACKET_CAPACITY
@@ -21,6 +22,8 @@ func validate() -> String:
 	if not is_finite(height_m) or not is_finite(width_m) or not is_finite(crest_z_m) \
 			or height_m <= 0.0 or width_m <= 0.0:
 		return "Waterfall height and width must be finite and positive."
+	if not is_finite(bed_depth_m) or bed_depth_m <= 0.0 or bed_depth_m >= height_m:
+		return "Waterfall bed depth must be positive and below the waterfall height."
 	if lane_count != LANE_COUNT or film_cells != FILM_CELLS or packet_capacity != PACKET_CAPACITY \
 			or not is_equal_approx(emission_rate_hz, EMISSION_RATE_HZ):
 		return "Waterfall simulation dimensions must match the compiled flow kernel."
@@ -35,6 +38,12 @@ func run_m() -> float:
 	if is_vertical():
 		return 0.0
 	return height_m / maxf(tan(deg_to_rad(angle_degrees)), 0.0001)
+
+
+func receiver_run_m(level_m: float) -> float:
+	if is_vertical():
+		return 0.125
+	return maxf((height_m - bed_depth_m - level_m) / tan(deg_to_rad(angle_degrees)), 0.125)
 
 
 func length_m() -> float:

@@ -5,6 +5,7 @@ const Curtain := preload("res://scripts/river/river_waterfall_curtain.gd")
 
 func _initialize() -> void:
 	_check_cliff()
+	_check_cliff_speeds()
 	_check_rotated_cliff()
 	_check_ramp()
 	_check_fast_rounded_ramp()
@@ -40,6 +41,22 @@ func _check_cliff() -> void:
 	for vertex: Vector3 in arrays[Mesh.ARRAY_VERTEX]:
 		finite = finite and vertex.is_finite()
 	_check(finite, "Cliff curtain vertices must be finite")
+
+
+func _check_cliff_speeds() -> void:
+	var thrown := true
+	for speed: float in [0.1, 0.22, 0.5, 0.85, 1.7, 2.4, 4.0]:
+		for surface: float in [6.3, 6.53, 6.88, 7.19]:
+			var curtain := _curtain(func(point: Vector2) -> float: return 6.0 if point.y >= 0.0 else 0.0,
+				Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0))
+			curtain.surface_height_m = surface
+			curtain.speed_m_s = speed
+			curtain.columns = 16
+			curtain.build()
+			var reach := speed * sqrt(2.0 * 5.5 / 9.81)
+			for point in curtain.impact_points:
+				thrown = thrown and -point.z > reach * 0.9 and -point.z < reach * 1.15 + 0.05
+	_check(thrown, "A sharp cliff must throw every column at its lip speed, never let it slide down the face")
 
 
 func _check_rotated_cliff() -> void:

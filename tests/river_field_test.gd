@@ -4,6 +4,7 @@ const Field := preload("res://scripts/demos/river/river_landscape.gd")
 const Config := preload("res://scripts/river/river_config.gd")
 const WaterfallConfig := preload("res://scripts/river/river_waterfall_config.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
+const WaterfallSystem := preload("res://scripts/river/river_waterfall_system.gd")
 
 
 func _initialize() -> void:
@@ -69,21 +70,14 @@ func _check_waterfall_curtain() -> void:
 				var water := Config.new()
 				water.water_level_m = level
 				water.speed_m_s = speed
-				var curtain := RiverWaterfallCurtain.new()
-				curtain.ground = field.sample_bed
-				curtain.crest_from = Vector3(-profile.width_m * 0.5, 0.0, profile.crest_z_m)
-				curtain.crest_to = Vector3(profile.width_m * 0.5, 0.0, profile.crest_z_m)
-				curtain.surface_height_m = profile.height_m + level
-				curtain.speed_m_s = speed
-				curtain.landing_level_m = level
-				curtain.columns = 8
-				curtain.rows = 48
+				var curtain := WaterfallSystem.build_curtain(field, profile, water, 8, 48)
 				var arrays := curtain.build().surface_get_arrays(0)
 				var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 				var traits: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM0]
 				var stride := curtain.columns + 3
 				var above := true
 				var tucked := true
+				var flush := true
 				for index in vertices.size():
 					if traits[index * 4 + 3] > 1.5 or traits[index * 4 + 3] < -0.5:
 						continue
@@ -94,6 +88,10 @@ func _check_waterfall_curtain() -> void:
 						above = above and point.y >= ground - 0.001
 					elif (slot == 0 or slot == stride - 1) and point.z >= profile.crest_z_m:
 						tucked = tucked and point.y <= ground
+					if slot > 0 and slot < stride - 1 and traits[index * 4] > 0.5 and point.z >= profile.crest_z_m:
+						flush = flush and absf(point.y - field.sample_height(Vector2(point.x, point.z), level)) < 0.01
+				_check(flush,
+					"Waterfall curtain must meet the upstream surface from inlet to lip at %.1f deg, level %.2f, speed %.2f" % [angle, level, speed])
 				_check(vertices.size() > 0 and above,
 					"Waterfall curtain must stay above the bed at %.1f deg, level %.2f, speed %.2f" % [angle, level, speed])
 				_check(tucked,

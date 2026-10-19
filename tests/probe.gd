@@ -1650,7 +1650,7 @@ func _run_river_waterfall() -> void:
 				var cell := Vector2i(((bottom - river.swe.region_m.position) / river.swe.cell_m).floor()).clamp(Vector2i.ZERO, grid - Vector2i.ONE)
 				var offset := (cell.y * grid.x + cell.x) * 16
 				var lower := surface_before.decode_float(offset + 8) if surface_before.decode_float(offset + 12) > 0.02 else river.config.water_level_m
-				var last := clampi(floori((config.height_m - 0.65 - lower) / sin(deg_to_rad(angle)) / ds), 1, config.film_cells - 1)
+				var last := clampi(floori((config.height_m - config.bed_depth_m - lower) / sin(deg_to_rad(angle)) / ds), 1, config.film_cells - 1)
 				_check(absf(boundaries[lane * 4 + 1] - float(last + 1) * ds) < 0.00001,
 					"river_waterfall: film reception must follow the simulated pool height, including drawdown below Level")
 		var finite_buffers := true

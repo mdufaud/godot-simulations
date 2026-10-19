@@ -35,6 +35,8 @@ layout(push_constant, std430) uniform Params {
     vec4 relaxation;
 } params;
 
+float bed_depth_m() { return params.relaxation.z; }
+
 ivec2 bound_cell(ivec2 p) {
     return clamp(p, ivec2(0), ivec2(params.grid.xy) - 1);
 }
@@ -69,7 +71,7 @@ void store_current(ivec2 p, vec4 q) {
 
 float receiver_z() {
     float run = params.waterfall.x < 90.0
-        ? max(params.waterfall.y - 0.65 - params.water.x, 0.0) / tan(radians(params.waterfall.x)) : 0.0;
+        ? max(params.waterfall.y - bed_depth_m() - params.water.x, 0.0) / tan(radians(params.waterfall.x)) : 0.0;
     return params.waterfall.w - max(run, params.domain.z);
 }
 

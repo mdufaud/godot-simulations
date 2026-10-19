@@ -78,6 +78,7 @@ func set_water_level(level_m: float) -> void:
 			var profile := field.waterfall
 			material.set_shader_parameter("river_pool_levels_m", Vector2(level_m, level_m + profile.height_m))
 			material.set_shader_parameter("river_fall_geometry", Vector4(profile.width_m, profile.height_m, profile.crest_z_m, profile.run_m()))
+			material.set_shader_parameter("river_fall_bed_depth_m", profile.bed_depth_m)
 
 
 func set_water_detail(value: float) -> void:

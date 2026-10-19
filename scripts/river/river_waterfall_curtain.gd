@@ -25,6 +25,7 @@ const DRY_M := 0.005
 const MAX_FILM_M := 0.8
 const PROFILE_STEP_M := 0.02
 const CLING_FRACTION := 0.75
+const CLING_MAX_TURN_DEG := 60.0
 const EDGE_TUCK_M := 0.2
 const FREE_EDGE_M := 0.6
 const IMPACT_DECAY_S := 0.35
@@ -158,7 +159,7 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 	_profile_origin = origin
 	var inlet_speed := maxf(speed_m_s, 0.05)
 	var discharge := inlet_speed * maxf(depth, MIN_FILM_M)
-	var max_film := maxf(MAX_FILM_M, depth)
+	var max_film := MAX_FILM_M
 	var along := -inlet_m
 	var bottom := _ground(along)
 	var velocity := Vector2(inlet_speed, 0.0)
@@ -172,6 +173,9 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 	for step in MAX_STEPS:
 		var speed := maxf(velocity.length(), 0.01)
 		var thickness := clampf(discharge / speed, MIN_FILM_M, max_film)
+		if along < 0.0:
+			thickness = maxf(surface_height_m - bottom, MIN_FILM_M)
+			max_film = maxf(max_film, thickness)
 		samples.append_array(PackedFloat32Array([time, along, bottom, velocity.x, velocity.y, thickness,
 			1.0 if attached else 0.0, impact, travelled, 1.0 if landed else 0.0]))
 		var surface := bottom + velocity.x / speed * thickness
@@ -189,16 +193,21 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 			var next := along + velocity.x * dt
 			var flight := bottom + velocity.y * dt - 0.5 * GRAVITY_M_S2 * dt * dt
 			var terrain := _ground(next)
-			if flight > terrain + maxf(0.002, thickness * CLING_FRACTION):
+			var direction := Vector2(next - along, terrain - bottom).normalized()
+			var sharp := flight > terrain and direction.dot(velocity / speed) < cos(deg_to_rad(CLING_MAX_TURN_DEG))
+			if sharp or flight > terrain + maxf(0.002, thickness * CLING_FRACTION):
 				attached = false
 				along = next
 				bottom = flight
 				velocity.y -= GRAVITY_M_S2 * dt
 			else:
-				var direction := Vector2(next - along, terrain - bottom).normalized()
 				along = next
 				bottom = terrain
-				velocity = direction * sqrt(maxf(2.0 * GRAVITY_M_S2 * (head - bottom), 0.0025))
+				if along < 0.0:
+					velocity = direction * discharge / maxf(surface_height_m - bottom, MIN_FILM_M)
+					head = bottom + velocity.length_squared() / (2.0 * GRAVITY_M_S2)
+				else:
+					velocity = direction * sqrt(maxf(2.0 * GRAVITY_M_S2 * (head - bottom), 0.0025))
 		else:
 			along += velocity.x * dt
 			bottom += velocity.y * dt - 0.5 * GRAVITY_M_S2 * dt * dt

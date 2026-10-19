@@ -50,7 +50,7 @@ func apply_config(value: RiverConfig) -> void:
 		return
 	material.set_shader_parameter("speed_m_s", water.speed_m_s)
 	material.set_shader_parameter("landing_level_m", water.water_level_m)
-	material.set_shader_parameter("source_height_m", config.height_m + water.water_level_m)
+	material.set_shader_parameter("source_height_m", source_height_m(field, config, water))
 	material.set_shader_parameter("reflection_heights_m", Vector2(water.water_level_m, water.water_level_m + config.height_m))
 	material.set_shader_parameter("foam_amount", water.foam_amount)
 	material.set_shader_parameter("deep_color", water.deep_color)
@@ -67,25 +67,36 @@ func set_quality(tier: int) -> void:
 	_rebuild_at_ms = Time.get_ticks_msec()
 
 
-func _rebuild() -> void:
-	_rebuild_at_ms = -1
+static func source_height_m(river_field: RiverField, profile: RiverWaterfallConfig, flow: RiverConfig) -> float:
+	return river_field.sample_height(Vector2(0.0, profile.crest_z_m + INLET_M), flow.water_level_m)
+
+
+static func build_curtain(river_field: RiverField, profile: RiverWaterfallConfig, flow: RiverConfig,
+		columns: int, rows: int) -> RiverWaterfallCurtain:
 	var curtain := RiverWaterfallCurtain.new()
-	curtain.ground = field.sample_ground_height
-	var half := Vector3(config.width_m * 0.5, 0.0, 0.0)
-	var crest := Vector3(0.0, 0.0, config.crest_z_m)
+	curtain.ground = river_field.sample_ground_height
+	var half := Vector3(profile.width_m * 0.5, 0.0, 0.0)
+	var crest := Vector3(0.0, 0.0, profile.crest_z_m)
 	curtain.crest_from = crest - half
 	curtain.crest_to = crest + half
-	curtain.surface_height_m = config.height_m + water.water_level_m
-	curtain.speed_m_s = water.speed_m_s
-	curtain.landing_level_m = water.water_level_m
+	curtain.surface_height_m = source_height_m(river_field, profile, flow)
+	curtain.speed_m_s = flow.speed_m_s
+	curtain.landing_level_m = flow.water_level_m
 	curtain.inlet_m = INLET_M
-	curtain.columns = COLUMNS[quality_tier]
-	curtain.rows = ROWS[quality_tier]
+	curtain.columns = columns
+	curtain.rows = rows
+	return curtain
+
+
+func _rebuild() -> void:
+	_rebuild_at_ms = -1
+	var curtain := build_curtain(field, config, water, COLUMNS[quality_tier], ROWS[quality_tier])
 	_surface.mesh = curtain.build()
 	_surface.mesh.surface_set_material(0, material)
 	material.set_shader_parameter("across_direction", curtain.across)
 	material.set_shader_parameter("width_m", curtain.width_m)
-	var points := curtain.impact_points if not curtain.impact_points.is_empty() else PackedVector3Array([crest])
+	var points := curtain.impact_points if not curtain.impact_points.is_empty() \
+		else PackedVector3Array([Vector3(0.0, 0.0, config.crest_z_m)])
 	_spray.set_impacts(points, curtain.downstream, curtain.across, curtain.width_m)
 
 
@@ -137,8 +148,8 @@ func guided_contact(point: Vector3) -> Array[Vector4]:
 		if point.z > config.crest_z_m or point.z < config.crest_z_m - config.run_m():
 			return []
 		var speed := sqrt(water.speed_m_s * water.speed_m_s + 2.0 * 9.81 * along * sin(deg_to_rad(config.angle_degrees)))
-		thickness = (0.64 + water.water_level_m) * water.speed_m_s / maxf(speed, 0.05)
-		surface = Vector3(point.x, config.height_m - 0.65, config.crest_z_m) + config.tangent() * along + normal * thickness
+		thickness = (config.bed_depth_m + water.water_level_m) * water.speed_m_s / maxf(speed, 0.05)
+		surface = Vector3(point.x, config.height_m - config.bed_depth_m, config.crest_z_m) + config.tangent() * along + normal * thickness
 		surface.y = maxf(surface.y, field.sample_ground_height(Vector2(surface.x, surface.z)) + 0.01)
 		if surface.y <= water.water_level_m:
 			return []
@@ -149,7 +160,7 @@ func guided_contact(point: Vector3) -> Array[Vector4]:
 			return []
 		velocity = Vector3(0.0, -9.81 * age, -water.speed_m_s)
 		normal = Vector3.RIGHT.cross(velocity).normalized()
-		thickness = (0.64 + water.water_level_m) * water.speed_m_s / maxf(velocity.length(), 0.05)
+		thickness = (config.bed_depth_m + water.water_level_m) * water.speed_m_s / maxf(velocity.length(), 0.05)
 		surface = Vector3(point.x, config.height_m + water.water_level_m - 0.5 * 9.81 * age * age, config.crest_z_m - water.speed_m_s * age)
 		kind = 3.0
 		if absf(point.z - surface.z) > 0.8:

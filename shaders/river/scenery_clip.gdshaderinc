@@ -7,6 +7,7 @@ uniform vec2 river_domain_origin_m = vec2(0.0);
 uniform bool river_waterfall = false;
 uniform vec2 river_pool_levels_m = vec2(0.0, 6.0);
 uniform vec4 river_fall_geometry = vec4(6.0, 6.0, 4.0, 0.0);
+uniform float river_fall_bed_depth_m;
 uniform float river_fall_speed = 0.85;
 uniform float river_fall_foam = 0.65;
 uniform sampler2D waterfall_surface : filter_nearest, repeat_disable;
@@ -56,7 +57,7 @@ float river_surface_height(vec3 position) {
 			return pool.w > 0.004 ? pool.z : heights.r;
 		}
 		float speed = sqrt(river_fall_speed * river_fall_speed + 19.62 * uv.y * river_fall_geometry.y);
-		return heights.r + (0.64 + river_pool_levels_m.x) * river_fall_speed / max(speed, 0.05) * cosine;
+		return heights.r + (river_fall_bed_depth_m + river_pool_levels_m.x) * river_fall_speed / max(speed, 0.05) * cosine;
 	}
 	if (river_waterfall && texture(swe_surface, river_swe_uv(position.xz)).w < 0.004) { return reference; }
 	return river_swe_height(position.xz, reference);

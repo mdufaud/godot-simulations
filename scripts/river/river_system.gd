@@ -80,6 +80,7 @@ func start() -> void:
 	if field.waterfall != null:
 		var profile := field.waterfall
 		water_material.set_shader_parameter("waterfall_geometry", Vector4(profile.width_m, profile.height_m, profile.crest_z_m, profile.run_m()))
+		water_material.set_shader_parameter("waterfall_bed_depth_m", profile.bed_depth_m)
 		water_material.set_shader_parameter("waterfall_grid", Vector3(profile.lane_count, profile.film_cells, profile.packet_capacity))
 	water_material.set_shader_parameter("micro_normal", micro_normal)
 	water_material.set_shader_parameter("foam_filaments", foam_filaments)
@@ -479,7 +480,7 @@ func submit_body_queries(points: PackedVector3Array) -> bool:
 			var p := Vector2(point.x, point.z)
 			var zone := field.water_zone(p)
 			var lower_overlap := field.waterfall != null and not field.waterfall.is_vertical() \
-				and p.y < field.waterfall.crest_z_m - maxf((field.waterfall.height_m - 0.65 - config.water_level_m) / tan(deg_to_rad(field.waterfall.angle_degrees)), 0.125)
+				and p.y < field.waterfall.crest_z_m - field.waterfall.receiver_run_m(config.water_level_m)
 			if contact.is_empty() and zone != 0 and (zone != 3 or lower_overlap):
 				var height := config.water_level_m if lower_overlap else field.sample_height(p, config.water_level_m)
 				var flow := field.sample(p, config.water_level_m)

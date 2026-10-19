@@ -27,6 +27,7 @@ layout(push_constant, std430) uniform Params {
     vec4 cascade_params;
     vec4 relaxation;
 } params;
+float bed_depth_m() { return params.relaxation.z; }
 float theta() { return radians(params.waterfall.x); }
 float ds() { return params.waterfall.y / sin(theta()) / params.cascade_params.y; }
 float lane_width() { return params.waterfall.z / params.cascade_params.x; }
@@ -67,7 +68,7 @@ float ground_at(vec2 point) {
 }
 vec3 crest(int lane) {
     return vec3((float(lane) + 0.5) * lane_width() - params.waterfall.z * 0.5,
-        params.waterfall.y - 0.65, params.waterfall.w);
+        params.waterfall.y - bed_depth_m(), params.waterfall.w);
 }
 vec4 film_state(ivec2 p) {
     p = clamp(p, ivec2(0), ivec2(params.cascade_params.xy) - 1);
@@ -87,7 +88,7 @@ float pool_height(vec2 world, bool next) {
 int last_film_row(int lane) {
     vec3 bottom = crest(lane) + tangent() * (params.waterfall.y / sin(theta()));
     float lower = pool_height(bottom.xz, false);
-    return clamp(int(floor((params.waterfall.y - 0.65 - lower) / sin(theta()) / ds())), 1,
+    return clamp(int(floor((params.waterfall.y - bed_depth_m() - lower) / sin(theta()) / ds())), 1,
         int(params.cascade_params.y) - 1);
 }
 vec2 physical_flux(vec4 q) {
@@ -161,7 +162,7 @@ void step_film(ivec2 p) {
             horizontal_momentum -= cos(theta()) * tail.y * ds() * lane_width();
         }
         vec3 point = crest(p.x) + tangent() * (float(last + 1) * ds());
-        float run = max(params.waterfall.y - 0.65 - params.water.x, 0.0) / tan(theta());
+        float run = max(params.waterfall.y - bed_depth_m() - params.water.x, 0.0) / tan(theta());
         float receiver = params.waterfall.w - max(run, params.domain.z);
         float z = min(point.z, receiver - params.domain.z);
         cascade.arrivals[p.x * 2] = vec4(volume, z, point.x, 1.0);
@@ -250,7 +251,7 @@ void publish(ivec2 p) {
         float source_height = source_state.x > 0.02
             ? imageLoad(terrain, source_cell).x + source_state.x : params.water.x;
         vec2 source_velocity = source_state.x > 0.004 ? source_state.yz / source_state.x : vec2(0.0);
-        float receiver = params.waterfall.w - max((params.waterfall.y - 0.65 - params.water.x)
+        float receiver = params.waterfall.w - max((params.waterfall.y - bed_depth_m() - params.water.x)
             / max(tan(theta()), 1.0e-8), params.domain.z);
         vec2 receiver_point = vec2(source.x, receiver);
         float film_end = params.waterfall.y;

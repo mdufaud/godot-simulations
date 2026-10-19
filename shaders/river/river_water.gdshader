@@ -27,6 +27,7 @@ uniform mat4 reflection_projection_3;
 uniform int reflection_planes = 1;
 uniform bool waterfall_enabled = false;
 uniform vec4 waterfall_geometry = vec4(6.0, 6.0, 4.0, 0.0);
+uniform float waterfall_bed_depth_m;
 uniform vec3 waterfall_grid;
 uniform sampler2D waterfall_surface : filter_nearest, repeat_disable;
 uniform sampler2D waterfall_boundary : filter_nearest, repeat_disable;
@@ -76,12 +77,16 @@ float live_share(vec2 point) {
 	return weight;
 }
 
+float waterfall_submerged_run() {
+	return waterfall_geometry.w * max((waterfall_geometry.y - waterfall_bed_depth_m - water_level_m) / waterfall_geometry.y, 0.0);
+}
+
 float waterfall_receiver(float x) {
 	if (waterfall_clock_enabled) {
 		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);
 		if (boundary.y > 0.0 && waterfall_geometry.w > 0.0) return boundary.z;
 	}
-	return waterfall_geometry.z - max(waterfall_geometry.w * max((waterfall_geometry.y - 0.65 - water_level_m) / waterfall_geometry.y, 0.0), 0.125);
+	return waterfall_geometry.z - max(waterfall_submerged_run(), 0.125);
 }
 
 float waterfall_wet_end() {
@@ -89,7 +94,7 @@ float waterfall_wet_end() {
 	if (waterfall_clock_enabled && waterfall_geometry.w == 0.0) {
 		clearance += swe_region_m.w / float(textureSize(swe_surface, 0).y);
 	}
-	return waterfall_geometry.z - max(waterfall_geometry.w * max((waterfall_geometry.y - 0.65 - water_level_m) / waterfall_geometry.y, 0.0), clearance);
+	return waterfall_geometry.z - max(waterfall_submerged_run(), clearance);
 }
 
 float waterfall_pool_end(float x) {
@@ -106,7 +111,7 @@ float waterfall_source_active(float x) {
 
 float waterfall_impact(vec2 point) {
 	float impact_z = waterfall_geometry.z - (waterfall_geometry.w > 0.0
-		? waterfall_geometry.w * max((waterfall_geometry.y - 0.65 - water_level_m) / waterfall_geometry.y, 0.0)
+		? waterfall_submerged_run()
 		: speed_m_s * sqrt(2.0 * waterfall_geometry.y / 9.81));
 	if (waterfall_clock_enabled) {
 		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(point.x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);

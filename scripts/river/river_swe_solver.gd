@@ -221,9 +221,11 @@ func _stamp_faces(values: PackedFloat32Array, instance: MeshInstance3D, size: Ve
 func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
 	var waterfall := Vector4.ZERO
 	var cascade := Vector4(1.0, 1.0, 1.0, EMISSION_HZ)
+	var bed_depth := 0.0
 	if _waterfall != null:
 		waterfall = Vector4(_waterfall.angle_degrees, _waterfall.height_m, _waterfall.width_m, _waterfall.crest_z_m)
 		cascade = Vector4(_waterfall.lane_count, _waterfall.film_cells, _waterfall.packet_capacity, _waterfall.emission_rate_hz)
+		bed_depth = _waterfall.bed_depth_m
 	return PackedFloat32Array([
 		region_m.position.x, region_m.position.y, cell_m, GRAVITY_M_S2,
 		grid.x, grid.y, 0.0, config.speed_m_s,
@@ -232,7 +234,7 @@ func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
 		0.0, config.whitewater_strength, 0.0, 0.0,
 		waterfall.x, waterfall.y, waterfall.z, waterfall.w,
 		cascade.x, cascade.y, cascade.z, cascade.w,
-		config.current_guidance_hz, config.level_guidance_hz, 0.0, 0.0,
+		config.current_guidance_hz, config.level_guidance_hz, bed_depth, 0.0,
 	]).to_byte_array()
 
 

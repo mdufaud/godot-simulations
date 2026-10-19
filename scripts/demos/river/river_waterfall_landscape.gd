@@ -5,7 +5,6 @@ const ZONE_DRY := 0
 const ZONE_LOWER_POOL := 1
 const ZONE_UPPER_POOL := 2
 const ZONE_RAMP := 3
-const BED_DEPTH_M := 0.65
 const RAMP_ROUND_M := 0.35
 const BANK_WALL_M := 1.45
 const BANK_TOP_M := 2.6
@@ -66,7 +65,7 @@ func water_height(point: Vector2, level_m: float) -> float:
 
 func sample_bed(point: Vector2) -> float:
 	var edge := absf(point.x) - waterfall.width_m * 0.5
-	var floor_m := water_height(point, 0.0) - BED_DEPTH_M - plunge_depth(point) * (1.0 - smoothstep(-1.2, -0.2, edge))
+	var floor_m := water_height(point, 0.0) - waterfall.bed_depth_m - plunge_depth(point) * (1.0 - smoothstep(-1.2, -0.2, edge))
 	var bank := floor_m + smoothstep(-1.1, 0.15, edge) * BANK_WALL_M
 	var outer := smoothstep(0.0, 3.5, edge) * (BANK_TOP_M - BANK_WALL_M) + maxf(edge - 3.0, 0.0) * 0.28
 	if point.y >= waterfall.crest_z_m:
@@ -74,7 +73,7 @@ func sample_bed(point: Vector2) -> float:
 	var below := waterfall.crest_z_m - point.y
 	var opening := maxf(below - GORGE_LENGTH_M * 0.4, 0.0) * 0.35
 	var scarp := below + (3.0 * sin(point.x * 0.31 + 0.7) + 1.4 * sin(point.x * 0.83 - 0.4)) * smoothstep(3.0, 8.0, edge)
-	var rim := lerpf(waterfall.height_m - BED_DEPTH_M + BANK_TOP_M, BANK_TOP_M - BED_DEPTH_M, smoothstep(GORGE_LENGTH_M * 0.5, GORGE_LENGTH_M, scarp))
+	var rim := lerpf(waterfall.height_m - waterfall.bed_depth_m + BANK_TOP_M, BANK_TOP_M - waterfall.bed_depth_m, smoothstep(GORGE_LENGTH_M * 0.5, GORGE_LENGTH_M, scarp))
 	var wall := smoothstep(0.25 + opening, 2.4 + opening * 1.6, edge)
 	var gorge := lerpf(bank, rim + maxf(edge - 3.0, 0.0) * 0.28, wall) + relief(point) * wall * (1.0 - wall) * 1.6
 	var plateau := bank + outer
