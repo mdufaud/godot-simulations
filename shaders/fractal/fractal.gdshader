@@ -33,6 +33,11 @@ uniform bool use_perturbation = false;
 uniform vec2 dc_origin = vec2(0.0); // center - reference point
 uniform sampler2D ref_orbit : filter_nearest, repeat_disable;
 uniform int ref_len = 0;
+// Julia only: orbit of 0 under z^2 + c. Its Z_0 == 0 makes a Zhuoran
+// rebase (dz = z, ri = 0) lossless, which the view-centre orbit cannot
+// offer since its Z_0 is the zoom target itself.
+uniform sampler2D ref_orbit_crit : filter_nearest, repeat_disable;
+uniform int ref_len_crit = 0;
 
 // --- Orbit trap ---
 uniform int trap_shape : hint_range(0, 3) = 0;
@@ -48,8 +53,10 @@ const float BAILOUT2 = BAILOUT * BAILOUT;
 const int MAX_HARD = 32768;
 const int ORBIT_W = 4096;
 
-vec2 fetch_ref(int i) {
-	return texelFetch(ref_orbit, ivec2(i % ORBIT_W, i / ORBIT_W), 0).rg;
+vec2 fetch_ref(int i, bool crit) {
+	ivec2 c = ivec2(i % ORBIT_W, i / ORBIT_W);
+	if (crit) return texelFetch(ref_orbit_crit, c, 0).rg;
+	return texelFetch(ref_orbit, c, 0).rg;
 }
 
 vec2 cmul(vec2 a, vec2 b) {
@@ -116,14 +123,16 @@ vec3 eval_direct(vec2 c) {
 }
 
 // Perturbation: z = Z_ref[i] + dz, iterate dz = (2·Z + dz)·dz (+ dc for Mandelbrot).
-// Zhuoran rebasing (Mandelbrot): when |z| < |dz| or the reference orbit ends,
-// restart deltas from orbit index 0 with dz = z.
+// Rebase (dz = z, ri = 0) is exact only from an orbit whose Z_0 == 0: the
+// uploaded Mandelbrot orbit always qualifies; Julia qualifies only after
+// switching to the critical orbit, which the first glitch triggers.
 vec3 eval_pert(vec2 dc) {
 	vec2 dz = vec2(0.0);
 	if (fractal_type == 1) dz = dc;
 
 	int ri = 0;
-	vec2 z = fetch_ref(0) + dz;
+	bool crit = false;
+	vec2 z = fetch_ref(0, crit) + dz;
 	float trap = 1e10;
 	float n = 0.0;
 	int cap = min(max_iterations, MAX_HARD);
@@ -131,22 +140,27 @@ vec3 eval_pert(vec2 dc) {
 
 	for (int i = 0; i < MAX_HARD; i++) {
 		if (i >= cap) break;
-		vec2 Z = fetch_ref(ri);
+		vec2 Z = fetch_ref(ri, crit);
 		dz = cmul(2.0 * Z + dz, dz);
 		if (fractal_type == 0) dz += dc;
 		ri++;
-		z = fetch_ref(ri) + dz;
+		z = fetch_ref(ri, crit) + dz;
 
 		trap = min(trap, trap_dist(z));
 		n += 1.0;
 		if (dot(z, z) > BAILOUT2) { escaped = true; break; }
 
-		if (ri >= ref_len - 1 || dot(z, z) < dot(dz, dz)) {
-			if (fractal_type == 0) {
+		int orbit_len = crit ? ref_len_crit : ref_len;
+		if (ri >= orbit_len - 1 || dot(z, z) < dot(dz, dz)) {
+			if (fractal_type == 0 || crit) {
+				dz = z;
+				ri = 0;
+			} else if (ref_len_crit > 0) {
+				crit = true;
 				dz = z;
 				ri = 0;
 			} else if (ri >= ref_len - 1) {
-				// Julia reference ended early: treat as escaped approximation
+				// No critical orbit and the reference ended: approximate.
 				escaped = dot(z, z) > 4.0;
 				break;
 			}

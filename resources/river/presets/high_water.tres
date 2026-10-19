@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="RiverConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/river/river_config.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "High Water"
+speed_m_s = 1.7
+water_level_m = 0.54
+clarity = 0.18
+foam_amount = 1.15
+ripple_height_m = 0.075
+roughness = 0.13
+whitewater_strength = 0.45
+deep_color = Color(0.20, 0.19, 0.10, 1)

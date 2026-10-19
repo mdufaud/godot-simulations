@@ -14,7 +14,8 @@ const STAGES: Array[String] = [
 ]
 const NUM_SPECTRA := 4
 const GRAVITY := 9.81
-const FOAM_AMOUNT_REFERENCE := 5.6
+const WATER_DENSITY_KG_M3 := 1025.0
+const MIN_WAVELENGTH_M := OceanConfig.MIN_WAVELENGTH_M
 const FOAM_NOISE_TEXTURE := preload("res://resources/ocean/foam_detail.png")
 ## Chop stays full on the long/mid cascades: crests pinch and the Jacobian
 ## fold — which the foam feeds on — survives at the scales the eye reads.
@@ -31,6 +32,7 @@ const JONSWAP_MAX_CHOPPINESS := 1.8
 const JONSWAP_CHOPPINESS_KNEE := 1.1
 const JONSWAP_CHOPPINESS_LIMIT := 1.35
 const JONSWAP_FINE_CHOPPINESS_LIMIT := 0.86
+const SWELL_MAX_SIGNIFICANT_STEEPNESS := 0.08
 
 ## Wave generation model, driven by OceanPreset.wave_model (int: 0 = FFT, 1 =
 ## TUTORIAL_GERSTNER; kept as plain int so the two enum types stay assignable).
@@ -55,6 +57,20 @@ var wind_direction := 0.0
 var fetch_km := 120.0
 var water_depth := 80.0
 var swell := 0.8
+var swell_height_m := 0.0
+var swell_period_s := 12.0
+var swell_direction_rad := 0.0
+var swell_spread := 0.15
+var current_velocity_m_s := Vector2.ZERO
+var physical_features_enabled := true
+var velocity_solver := OceanVelocitySolver.new()
+var local_solver := OceanLocalSolver.new()
+var shore_solver := OceanShoreSolver.new()
+var shore_enabled := false
+var shore_bathymetry := PackedFloat32Array()
+var _wake_mutex := Mutex.new()
+var _wake_impulses: Dictionary = {}
+var _body_pressures: Dictionary = {}
 var spread := 0.2
 var detail := 1.0
 var jonswap_gamma := 3.3
@@ -63,23 +79,16 @@ var long_wave_height_m := 2.6
 var long_wave_length_m := 48.0
 var mid_wave_height_m := 0.0
 var mid_wave_length_m := 24.0
-var mid_wave_spread := 0.0
 var wind_wave_height_m := 0.8
 var wind_wave_length_m := 7.5
-var ripple_strength := 0.9
-var crosswind_ratio := 0.14
 var crest_bias := 0.08
 var crest_gain := 2.4
 ## Master wave height multiplier, applied k-weighted in spectrum_init (swell
 ## boost, e-fold at 60 m): short wavelets keep physical steepness even at 5x.
 ## Changing it requires mark_spectrum_dirty().
 var height_gain := 1.0
-## Overall amplitude calibration. 1.0 = the physical JONSWAP amplitude (the
-## reference GodotOceanWaves look: every visible wave near its breaking
-## steepness). The spectrum shaders keep their 0.25 base calibration factor,
-## so the solver folds this into the pushed JONSWAP alpha: h ∝ sqrt(alpha),
-## alpha_pushed = alpha * (amplitude_scale / 0.25)^2. 0.25 reproduces the old
-## quarter-height look. Requires mark_spectrum_dirty().
+## Overall amplitude multiplier; 1.0 preserves the spectral energy.
+## Requires mark_spectrum_dirty().
 var amplitude_scale := 1.0
 var whitecap := 0.82
 var foam_amount := 3.5
@@ -118,12 +127,17 @@ var near_center := Vector2.ZERO
 ## tick's results — max one frame of latency, never a blocking readback.
 const MAX_QUERY_POINTS := 64
 
-var _query_points_pending := PackedVector2Array()
 var _query_has_pending := false
 var _query_submitted_count := 0
 var _query_latest := PackedVector4Array()
 var _query_results_valid := false
 var _query_generation := 0
+var _query_mutex := Mutex.new()
+var _query_next_id := 1
+var _query_pending_batch: OceanQueryBatch
+var _query_completed_batch: OceanQueryBatch
+var _query_replaced_ids := PackedInt64Array()
+var _query_published_id := 0
 
 var _rd: RenderingDevice
 var _shaders := {}
@@ -139,6 +153,9 @@ var _foam_near_tex_b := RID()
 var _foam_mip_views: Array[RID] = []
 var _foam_mip_count := 1
 var _spectral_references: Array[Dictionary] = []
+var _moment_key := PackedFloat64Array()
+var _physical_moments: Dictionary = {}
+var _breaking_settings := Vector4.ZERO
 var _render_time := 0.0
 var _render_center := Vector2.ZERO
 var _published_foam_state := {"center": Vector2.ZERO, "index": 0, "time": 0.0, "step": 0}
@@ -157,6 +174,12 @@ var _frame := 0
 var _timing_store := GpuTimingStore.new()
 
 
+static func shader_header(map_n: int) -> String:
+	return "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n#define MIN_WAVELENGTH_M %.8f\n#define NUM_SPECTRA %du\n\n" % [
+		map_n, map_n, MIN_WAVELENGTH_M, NUM_SPECTRA,
+	]
+
+
 func num_cascades() -> int:
 	return tile_lengths.size()
 
@@ -171,6 +194,10 @@ func get_normal_tex_rid() -> RID:
 
 func get_derivative_tex_rid() -> RID:
 	return _derivative_tex
+
+
+func get_breaking_settings_rid() -> RID:
+	return _buffers.get("breaking_settings", RID())
 
 
 func get_foam_near_read_tex_rid() -> RID:
@@ -200,6 +227,7 @@ func spectral_references() -> Array[Dictionary]:
 	_spectral_mutex.lock()
 	if _spectral_references.is_empty():
 		_spectral_references = SpectrumMetrics.compute(self)
+		_update_breaking_settings()
 	var snapshot: Array[Dictionary] = _spectral_references
 	_spectral_mutex.unlock()
 	return snapshot
@@ -212,18 +240,66 @@ func foam_near_active() -> bool:
 
 ## VRAM actually allocated by the current map/near-foam sizes.
 func estimate_vram_bytes() -> int:
-	return OceanQualityProfile.estimate_vram_bytes_for(map_size, foam_near_size)
+	return OceanQualityProfile.estimate_vram_bytes_for(map_size, foam_near_size) \
+		+ velocity_solver.estimate_vram_bytes() + local_solver.estimate_vram_bytes() \
+		+ shore_solver.estimate_vram_bytes()
+
+
+func get_shore_texture_rid() -> RID:
+	return shore_solver.get_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
+func get_shore_foam_texture_rid() -> RID:
+	return shore_solver.get_foam_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
+func get_shore_derivative_texture_rid() -> RID:
+	return shore_solver.get_derivative_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
+func get_shore_breaker_texture_rid() -> RID:
+	return shore_solver.get_breaker_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
+
+
+func get_shore_contact_texture_rid() -> RID:
+	return shore_solver.get_contact_texture_rid() if shore_enabled else local_solver.get_coast_texture_rid()
 
 
 ## Queue world-space query points for the next step. Results land one frame
 ## later; read them with latest_results(). At most MAX_QUERY_POINTS are kept.
-func submit_queries(points: PackedVector2Array) -> void:
-	_query_points_pending = points.slice(0, mini(points.size(), MAX_QUERY_POINTS))
+func submit_queries(points: PackedVector2Array) -> int:
+	var batch := OceanQueryBatch.new()
+	_query_mutex.lock()
+	batch.id = _query_next_id
+	_query_next_id += 1
+	batch.revision = _query_generation
+	batch.points = points.slice(0, mini(points.size(), MAX_QUERY_POINTS))
+	if _query_pending_batch != null:
+		_query_replaced_ids.append(_query_pending_batch.id)
+	_query_pending_batch = batch
 	_query_has_pending = true
+	_query_mutex.unlock()
+	return batch.id
+
+
+func take_query_batch() -> OceanQueryBatch:
+	_query_mutex.lock()
+	var batch := _query_completed_batch
+	_query_completed_batch = null
+	_query_mutex.unlock()
+	return batch
+
+
+func take_replaced_query_ids() -> PackedInt64Array:
+	_query_mutex.lock()
+	var ids := _query_replaced_ids
+	_query_replaced_ids = PackedInt64Array()
+	_query_mutex.unlock()
+	return ids
 
 
 ## Last completed query results, one vec4 per submitted slot:
-## (height, normal_x, normal_z, valid). Empty until the first readback lands.
+## (height_m, slope_x, slope_z, valid). Empty until the first readback lands.
 func latest_results() -> PackedVector4Array:
 	return _query_latest
 
@@ -245,11 +321,23 @@ func set_foam_distance(distance: float) -> void:
 ## Sea-state params changed: regenerate the initial spectra (cheap, one 256²
 ## dispatch per cascade; phases stay stable thanks to the fixed seeds).
 func mark_spectrum_dirty() -> void:
+	local_solver.request_reset()
+	shore_solver.reset(false)
 	_spectral_mutex.lock()
 	_spectral_references = SpectrumMetrics.compute(self)
+	_update_breaking_settings()
 	_spectral_mutex.unlock()
+	_query_mutex.lock()
 	_query_generation += 1
 	_query_results_valid = false
+	if _query_completed_batch != null:
+		_query_replaced_ids.append(_query_completed_batch.id)
+	_query_completed_batch = null
+	if _query_pending_batch != null:
+		_query_replaced_ids.append(_query_pending_batch.id)
+	_query_pending_batch = null
+	_query_has_pending = false
+	_query_mutex.unlock()
 	for i in _cascade_dirty.size():
 		_cascade_dirty[i] = true
 	_foam_reset_pending = true
@@ -257,6 +345,9 @@ func mark_spectrum_dirty() -> void:
 
 
 func request_render_refresh() -> void:
+	_spectral_mutex.lock()
+	_spectral_references.clear()
+	_spectral_mutex.unlock()
 	_render_refresh_pending = true
 
 
@@ -276,20 +367,19 @@ func init_render() -> void:
 	_rd = GpuPreflight.device("OceanSolver")
 	if _rd == null:
 		return
+	var texture_limit := _rd.limit_get(RenderingDevice.LIMIT_MAX_TEXTURE_SIZE_2D)
+	if map_size > texture_limit or foam_near_size > texture_limit \
+			or not OceanQualityProfile.fft_size_supported(map_size, _rd):
+		push_error("Ocean GPU resources exceed texture or compute limits")
+		return
 
-	var defines := "#version 450\n#define MAP_SIZE %du\n#define MAP_SIZE_I %d\n\n" % [
-		map_size, map_size,
-	]
+	var defines := shader_header(map_size)
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "ocean_common.comp")
+	var deformation := FileAccess.get_file_as_string(SHADER_DIR + "ocean_deformation.gdshaderinc")
 	for stage in STAGES:
 		var stage_src := FileAccess.get_file_as_string(SHADER_DIR + "ocean_" + stage + ".comp")
-		var spirv := ShaderCache.compile(_rd, "ocean_" + stage, defines + common + "\n" + stage_src)
-		if not spirv.compile_error_compute.is_empty():
-			push_error("Ocean stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
+		if not _compile_stage_render(stage, defines + deformation + common + "\n" + stage_src):
 			return
-		var shader := _rd.shader_create_from_spirv(spirv)
-		_shaders[stage] = shader
-		_pipelines[stage] = _rd.compute_pipeline_create(shader)
 
 	var n := map_size
 	var cascades := num_cascades()
@@ -302,6 +392,8 @@ func init_render() -> void:
 	var fft_bytes := PackedByteArray()
 	fft_bytes.resize(cascades * 2 * NUM_SPECTRA * n * n * 8)
 	_buffers["fft_data"] = _rd.storage_buffer_create(fft_bytes.size(), fft_bytes)
+	_buffers["swell_settings"] = _rd.storage_buffer_create(16)
+	_buffers["breaking_settings"] = _rd.storage_buffer_create(16)
 
 	_spectrum_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT)
 	_displacement_tex = _create_tex_array(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
@@ -319,31 +411,41 @@ func init_render() -> void:
 		uniforms.append(_buffer_uniform(2, _buffers["fft_data"]))
 		uniforms.append(_image_uniform(3, _displacement_tex))
 		uniforms.append(_image_uniform(4, _normal_tex))
+		if stage == "spectrum_init":
+			uniforms.append(_buffer_uniform(5, _buffers["swell_settings"]))
 		if stage == "map_assemble":
 			uniforms.append(_sampled_texture_uniform(7, _foam_noise_rd))
 			uniforms.append(_image_uniform(8, _derivative_tex))
 		_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders[stage], 0)
-
-	var near_spirv := ShaderCache.compile(_rd, "ocean_foam_near", defines
-		+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_near.comp"))
-	if not near_spirv.compile_error_compute.is_empty():
-		push_error("Ocean stage 'foam_near' compile error:\n%s" % near_spirv.compile_error_compute)
+	if not velocity_solver.init_render(_spectrum_tex, map_size, tile_lengths, water_depth):
+		free_render()
 		return
-	_shaders["foam_near"] = _rd.shader_create_from_spirv(near_spirv)
-	_pipelines["foam_near"] = _rd.compute_pipeline_create(_shaders["foam_near"])
+	if not local_solver.init_render(_displacement_tex, velocity_solver.get_texture_rid(),
+			map_size, tile_lengths, OceanQualityProfile.COAST_SIZE[quality_tier],
+			OceanQualityProfile.WAKE_SIZE[quality_tier], water_depth):
+		free_render()
+		return
+	if shore_enabled:
+		shore_solver.source_depth_m = OceanShoreSolver.RING_DEPTH_M
+		shore_solver.spectrum_depth_m = water_depth
+		if not shore_solver.init_render(_spectrum_tex, map_size, tile_lengths,
+				quality_tier, shore_bathymetry, _derivative_tex, _displacement_tex,
+				velocity_solver.get_texture_rid()):
+			free_render()
+			return
+
+	if not _compile_stage_render("foam_near", defines + deformation
+			+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_near.comp")):
+		return
 	_foam_mip_count = int(log(float(foam_near_size)) / log(2.0)) + 1
 	_foam_near_tex_a = _create_foam_array()
 	_foam_near_tex_b = _create_foam_array()
 	# Vulkan image memory is undefined until cleared, and the first near
 	# dispatch reads the input half.
 	_clear_foam_fields()
-	var mip_spirv := ShaderCache.compile(_rd, "ocean_foam_mipmap", defines
-		+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_mipmap.comp"))
-	if not mip_spirv.compile_error_compute.is_empty():
-		push_error(mip_spirv.compile_error_compute)
+	if not _compile_stage_render("foam_mipmap", defines
+			+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_mipmap.comp")):
 		return
-	_shaders["foam_mipmap"] = _rd.shader_create_from_spirv(mip_spirv)
-	_pipelines["foam_mipmap"] = _rd.compute_pipeline_create(_shaders["foam_mipmap"])
 	for index in 2:
 		var output := get_foam_near_tex_rid(index)
 		for layer in 3:
@@ -359,6 +461,9 @@ func init_render() -> void:
 						_sampled_texture_uniform(0, _derivative_tex),
 						_sampled_texture_uniform(1, get_foam_near_tex_rid(1 - index)),
 						_image_uniform(2, view),
+						_sampled_texture_uniform(3, local_solver.get_coast_texture_rid()),
+						_sampled_texture_uniform(4, local_solver.get_wake_texture_rid()),
+						_sampled_texture_uniform(5, _displacement_tex),
 					]
 					_uniform_sets[stage] = _rd.uniform_set_create(uniforms, _shaders["foam_near"], 0)
 					_pipelines[stage] = _rd.compute_pipeline_create(_shaders["foam_near"])
@@ -372,20 +477,21 @@ func init_render() -> void:
 
 	# GPU point queries: two tiny buffers plus one dispatch per submitted
 	# batch; results come back through buffer_get_data_async.
-	var query_spirv := ShaderCache.compile(_rd, "ocean_query", defines
-		+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_query.comp"))
-	if not query_spirv.compile_error_compute.is_empty():
-		push_error("Ocean stage 'query' compile error:\n%s" % query_spirv.compile_error_compute)
+	if not _compile_stage_render("query", defines + deformation
+			+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_query.comp")):
 		return
-	_shaders["query"] = _rd.shader_create_from_spirv(query_spirv)
-	_pipelines["query"] = _rd.compute_pipeline_create(_shaders["query"])
 	_buffers["query_in"] = _rd.storage_buffer_create(MAX_QUERY_POINTS * 8)
-	_buffers["query_out"] = _rd.storage_buffer_create(MAX_QUERY_POINTS * 16)
+	_buffers["query_out"] = _rd.storage_buffer_create(MAX_QUERY_POINTS * 32)
 	var query_uniforms: Array[RDUniform] = [
 		_buffer_uniform(0, _buffers["query_in"]),
 		_buffer_uniform(1, _buffers["query_out"]),
 		_image_uniform(2, _displacement_tex),
-		_image_uniform(3, _normal_tex),
+		_image_uniform(3, _derivative_tex),
+		_sampled_texture_uniform(4, velocity_solver.get_texture_rid()),
+		_sampled_texture_uniform(5, local_solver.get_coast_texture_rid()),
+		_sampled_texture_uniform(6, local_solver.get_wake_texture_rid()),
+		_sampled_texture_uniform(7, get_shore_texture_rid()),
+		_sampled_texture_uniform(8, get_shore_derivative_texture_rid()),
 	]
 	_uniform_sets["query"] = _rd.uniform_set_create(
 		query_uniforms, _shaders["query"], 0)
@@ -399,7 +505,7 @@ func init_render() -> void:
 	_foam_near_reset_pending = false
 
 	# Butterfly factors depend only on MAP_SIZE: dispatch once.
-	var pc := _pack_push_constant(0, 0.0, 0.0)
+	var pc := _pack_push_constant(0)
 	var cl := _rd.compute_list_begin()
 	_dispatch(cl, "fft_butterfly", pc, maxi(n / 128, 1), log2n, 1)
 	_rd.compute_list_end()
@@ -408,12 +514,24 @@ func init_render() -> void:
 	initialized = true
 
 
+func _compile_stage_render(stage: String, source: String) -> bool:
+	var spirv := ShaderCache.compile(_rd, "ocean_" + stage, source)
+	if not spirv.compile_error_compute.is_empty():
+		push_error("Ocean stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
+		free_render()
+		return false
+	_shaders[stage] = _rd.shader_create_from_spirv(spirv)
+	_pipelines[stage] = _rd.compute_pipeline_create(_shaders[stage])
+	return true
+
+
 func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = Vector2(INF, INF)) -> void:
 	if not initialized:
 		return
 	_render_time = sim_time if step_time < 0.0 else step_time
 	_render_center = near_center if not step_center.is_finite() else step_center
-	_read_timings()
+	if profiling:
+		_read_timings()
 	if _foam_reset_pending:
 		_clear_foam_fields()
 		_foam_near_read_index = 0
@@ -441,10 +559,25 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 					or _frame % 2 == 0 or _cascade_dirty[i]:
 				cascade_list.append(i)
 
-	_rd.capture_timestamp("ocean/start")
+	if profiling:
+		_rd.capture_timestamp("ocean/start")
+	if true in _cascade_dirty:
+		var swell_settings := PackedByteArray()
+		swell_settings.resize(16)
+		swell_settings.encode_float(0, TAU / effective_swell_period())
+		swell_settings.encode_float(4, SpectrumMetrics.compute_swell_alpha_scale(self)
+			* pow(effective_amplitude_scale(), 2.0))
+		swell_settings.encode_float(8, swell_direction_rad)
+		swell_settings.encode_float(12, swell_spread)
+		_rd.buffer_update(_buffers["swell_settings"], 0, 16, swell_settings)
+		_spectral_mutex.lock()
+		var breaking: Vector4 = _breaking_settings
+		_spectral_mutex.unlock()
+		var breaking_bytes := PackedFloat32Array([breaking.x, breaking.y, breaking.z, breaking.w]).to_byte_array()
+		_rd.buffer_update(_buffers["breaking_settings"], 0, breaking_bytes.size(), breaking_bytes)
 	var cl := _rd.compute_list_begin()
 	for i in cascade_list:
-		var pc := _pack_push_constant(i, 0.0, 0.0, _render_time)
+		var pc := _pack_push_constant(i, _render_time)
 		if _cascade_dirty[i]:
 			_dispatch(cl, "spectrum_init", pc, g16, g16, 1)
 			_cascade_dirty[i] = false
@@ -456,41 +589,81 @@ func step_render(delta: float, step_time: float = -1.0, step_center: Vector2 = V
 		cl = _mark(cl, "ocean/fft")
 		_dispatch(cl, "map_assemble", pc, g16, g16, 1)
 		cl = _mark(cl, "ocean/assemble")
-		cl = _mark(cl, "ocean/foam")
+	_rd.compute_list_end()
+	if physical_features_enabled:
+		velocity_solver.set_water_depth(water_depth)
+		local_solver.set_water_depth(water_depth)
+		velocity_solver.step_render(_render_time, current_velocity_m_s)
+		if profiling:
+			_rd.capture_timestamp("ocean/velocity")
+		_wake_mutex.lock()
+		var impulses := PackedVector4Array(_wake_impulses.values())
+		var pressures := PackedVector4Array(_body_pressures.values())
+		_wake_impulses.clear()
+		_wake_mutex.unlock()
+		if shore_enabled:
+			shore_solver.source_depth_m = OceanShoreSolver.RING_DEPTH_M
+			shore_solver.spectrum_depth_m = water_depth
+			shore_solver.whitecap_threshold = whitecap
+			shore_solver.profiling = profiling
+			var incident_angle := swell_direction_rad if _breaking_settings.w > 0.5 else wind_direction
+			shore_solver.incident_direction = Vector2(cos(incident_angle), sin(incident_angle))
+			shore_solver.step_render(delta, _render_time, current_velocity_m_s,
+				foam_amount if foam_feedback_enabled else 0.0,
+				0.693 / maxf(foam_persistence, 0.05),
+				impulses, pressures)
+		else:
+			local_solver.step_render(delta, _render_time, _render_center,
+				current_velocity_m_s, impulses, pressures)
+		if profiling:
+			_rd.capture_timestamp("ocean/coast" if shore_enabled else "ocean/local")
+	cl = _rd.compute_list_begin()
 	# Near-field feedback once per (stride) frames, on the accumulated dt.
 	_foam_near_dt += delta
-	if foam_near_enabled \
-			and _frame % maxi(foam_near_stride, 1) == 0:
-		var near_stage := "foam_near_ab" if _foam_near_read_index == 0 \
-			else "foam_near_ba"
-		for layer in 3:
-			var stage := near_stage if layer == 0 else near_stage + "_%d" % layer
-			_dispatch(cl, stage, _pack_near_push_constant(_foam_near_dt, layer),
-				foam_near_size / 16, foam_near_size / 16, 1)
-		_foam_near_read_index = 1 - _foam_near_read_index
-		_generate_foam_mips(cl, _foam_near_read_index)
-		_near_center_prev = _render_center
+	if foam_near_enabled:
+		if _frame % maxi(foam_near_stride, 1) == 0:
+			var near_stage := "foam_near_ab" if _foam_near_read_index == 0 \
+				else "foam_near_ba"
+			for layer in 3:
+				var stage := near_stage if layer == 0 else near_stage + "_%d" % layer
+				_dispatch(cl, stage, _pack_near_push_constant(_foam_near_dt, layer),
+					foam_near_size / 16, foam_near_size / 16, 1)
+			_foam_near_read_index = 1 - _foam_near_read_index
+			_generate_foam_mips(cl, _foam_near_read_index)
+			_near_center_prev = _render_center
+			_foam_near_dt = 0.0
+			cl = _mark(cl, "ocean/foam_near")
+	else:
+		# Keep the accumulator pinned while the field is off, so re-enabling
+		# never replays the whole off period as one giant decay/injection step.
 		_foam_near_dt = 0.0
-		cl = _mark(cl, "ocean/foam_near")
 	_rd.compute_list_end()
 	_dispatch_pending_queries()
-	_rd.capture_timestamp("ocean/end")
+	if profiling:
+		_rd.capture_timestamp("ocean/end")
 	_frame += 1
 	_foam_state_mutex.lock()
 	_published_foam_state = {"center": _near_center_prev, "index": _foam_near_read_index,
-		"time": _render_time, "step": _frame}
+		"time": _render_time, "step": _frame, "local_centers": Vector4(
+			local_solver.coast_center().x, local_solver.coast_center().y,
+			local_solver.wake_center().x, local_solver.wake_center().y)}
 	_foam_state_mutex.unlock()
 
 
 ## Render thread. Uploads the pending points, dispatches one query pass and
 ## kicks the async readback. buffer_update must run between compute lists.
 func _dispatch_pending_queries() -> void:
-	if not _query_has_pending:
-		return
+	_query_mutex.lock()
+	var batch := _query_pending_batch
+	_query_pending_batch = null
 	_query_has_pending = false
-	var points := _query_points_pending
+	_query_mutex.unlock()
+	if batch == null:
+		return
+	var points := batch.points
 	if points.is_empty():
 		return
+	batch.simulation_time_s = _render_time
 	_query_submitted_count = points.size()
 	var in_bytes := PackedByteArray()
 	in_bytes.resize(MAX_QUERY_POINTS * 8)
@@ -499,13 +672,31 @@ func _dispatch_pending_queries() -> void:
 		in_bytes.encode_float(i * 8 + 4, points[i].y)
 	_rd.buffer_update(_buffers["query_in"], 0, in_bytes.size(), in_bytes)
 	var pc := PackedByteArray()
-	pc.resize(32)
+	pc.resize(96)
 	pc.encode_float(0, tile_lengths[0])
 	pc.encode_float(4, tile_lengths[1])
 	pc.encode_float(8, tile_lengths[2])
 	pc.encode_float(12, float(map_size))
 	pc.encode_s32(16, num_cascades())
 	pc.encode_s32(20, points.size())
+	pc.encode_s32(24, 1 if physical_features_enabled else 0)
+	var coast_center: Vector2 = local_solver.coast_center()
+	var wake_center: Vector2 = local_solver.wake_center()
+	pc.encode_float(32, coast_center.x)
+	pc.encode_float(36, coast_center.y)
+	pc.encode_float(40, wake_center.x)
+	pc.encode_float(44, wake_center.y)
+	pc.encode_float(48, OceanLocalSolver.COAST_DOMAIN_M)
+	pc.encode_float(52, OceanLocalSolver.WAKE_DOMAIN_M)
+	pc.encode_float(64, current_velocity_m_s.x)
+	pc.encode_float(68, current_velocity_m_s.y)
+	var shore_depth_blend := shore_solver.config.surface_depth_blend_m()
+	pc.encode_float(72, shore_depth_blend.x)
+	pc.encode_float(76, shore_depth_blend.y)
+	pc.encode_float(80, 1.0 if shore_enabled else 0.0)
+	pc.encode_float(84, shore_solver.config.domain_m)
+	pc.encode_float(88, shore_solver.config.surface_blend_width_m())
+	pc.encode_float(92, 1.0 if shore_solver.config.visual_breakers_enabled else 0.0)
 	var cl := _rd.compute_list_begin()
 	_dispatch(cl, "query", pc, 1, 1, 1)
 	_rd.compute_list_end()
@@ -513,39 +704,107 @@ func _dispatch_pending_queries() -> void:
 	# before "ocean/end" is the query dispatch.
 	if profiling:
 		_rd.capture_timestamp("ocean/query")
+	var payload := {"id": batch.id, "revision": batch.revision,
+		"time": batch.simulation_time_s, "points": batch.points}
 	_rd.buffer_get_data_async(_buffers["query_out"],
-		_store_query_results.bind(_query_submitted_count, _query_generation),
-		0, MAX_QUERY_POINTS * 16)
+		_store_query_results.bind(payload),
+		0, MAX_QUERY_POINTS * 32)
 
 
 # Render thread: decode the readback, then hop to the main thread. Only the
 # submitted slots are meaningful; the rest of the buffer stays stale.
-func _store_query_results(data: PackedByteArray, submitted_count: int, generation: int) -> void:
+func _store_query_results(data: PackedByteArray, payload: Dictionary) -> void:
+	_query_mutex.lock()
+	var current: bool = payload.revision == _query_generation
+	if not current:
+		_query_replaced_ids.append(payload.id)
+	_query_mutex.unlock()
+	if not current:
+		return
+	var batch := OceanQueryBatch.new()
+	batch.id = payload.id
+	batch.revision = payload.revision
+	batch.simulation_time_s = payload.time
+	batch.points = payload.points
 	var floats := data.to_float32_array()
 	var results := PackedVector4Array()
-	var count := mini(submitted_count, MAX_QUERY_POINTS)
+	var count := mini(batch.points.size(), MAX_QUERY_POINTS)
 	results.resize(count)
+	batch.velocities.resize(count)
 	for i in count:
-		results[i] = Vector4(floats[i * 4], floats[i * 4 + 1],
-			floats[i * 4 + 2], floats[i * 4 + 3])
-	_apply_query_results.call_deferred(results, generation)
+		results[i] = Vector4(floats[i * 8], floats[i * 8 + 1],
+			floats[i * 8 + 2], floats[i * 8 + 3])
+		batch.velocities[i] = Vector3(floats[i * 8 + 4], floats[i * 8 + 5], floats[i * 8 + 6])
+	batch.results = results
+	_apply_query_results.call_deferred(batch)
 
 
 # Main thread.
-func _apply_query_results(results: PackedVector4Array, generation: int) -> void:
-	if generation != _query_generation:
+func _apply_query_results(batch: OceanQueryBatch) -> void:
+	_query_mutex.lock()
+	if batch.revision != _query_generation or batch.id <= _query_published_id:
+		_query_replaced_ids.append(batch.id)
+		_query_mutex.unlock()
 		return
-	_query_latest = results
+	if _query_completed_batch != null:
+		_query_replaced_ids.append(_query_completed_batch.id)
+	_query_completed_batch = batch
+	_query_published_id = batch.id
+	_query_latest = batch.results
 	_query_results_valid = true
+	_query_mutex.unlock()
+
+
+func query_render() -> void:
+	if initialized:
+		_dispatch_pending_queries()
+
+
+func local_centers() -> Vector4:
+	return foam_state().get("local_centers", Vector4(OceanLocalSolver.COAST_CENTER.x, OceanLocalSolver.COAST_CENTER.y, 0.0, 0.0))
+
+
+func add_wake_impulse(body_id: int, position: Vector2, impulse: Vector2) -> void:
+	_wake_mutex.lock()
+	var previous: Vector4 = _wake_impulses.get(body_id, Vector4.ZERO)
+	_wake_impulses[body_id] = Vector4(position.x, position.y,
+		previous.z + impulse.x, previous.w + impulse.y)
+	_wake_mutex.unlock()
+
+
+func set_body_pressure(body_id: int, position: Vector2, force_n: float) -> void:
+	_wake_mutex.lock()
+	if force_n > 0.0:
+		_body_pressures[body_id] = Vector4(position.x, position.y, force_n, 0.6)
+	else:
+		_body_pressures.erase(body_id)
+	_wake_mutex.unlock()
 
 
 func free_render() -> void:
 	initialized = false
+	_wake_mutex.lock()
+	_wake_impulses.clear()
+	_body_pressures.clear()
+	_wake_mutex.unlock()
+	_query_mutex.lock()
+	_query_generation += 1
+	if _query_pending_batch != null:
+		_query_replaced_ids.append(_query_pending_batch.id)
+	if _query_completed_batch != null:
+		_query_replaced_ids.append(_query_completed_batch.id)
+	_query_pending_batch = null
+	_query_completed_batch = null
+	_query_results_valid = false
+	_query_mutex.unlock()
 	if _rd == null:
 		return
 	for stage in _uniform_sets:
 		if _uniform_sets[stage].is_valid():
 			_rd.free_rid(_uniform_sets[stage])
+	shore_solver.free_render()
+	local_solver.free_render()
+	velocity_solver.free_render()
 	for key in _buffers:
 		if _buffers[key].is_valid():
 			_rd.free_rid(_buffers[key])
@@ -658,6 +917,7 @@ func _create_foam_sampler() -> RID:
 	var state := RDSamplerState.new()
 	state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
+	state.mip_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	state.repeat_u = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
 	state.repeat_v = RenderingDevice.SAMPLER_REPEAT_MODE_REPEAT
 	return _rd.sampler_create(state)
@@ -672,12 +932,18 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, gx: int, gy: int, gz
 
 
 func _jonswap_significant_height(scale: float) -> float:
-	var wind := maxf(wind_speed, 0.01)
-	var fetch_m := maxf(fetch_km * 1000.0, 1.0)
-	var alpha := 0.076 * pow(wind * wind / (fetch_m * GRAVITY), 0.22)
-	var omega_p := 22.0 * pow(GRAVITY * GRAVITY / (wind * fetch_m), 1.0 / 3.0)
-	return 2.20903 * sqrt(alpha) * GRAVITY \
-		/ maxf(omega_p * omega_p, 0.0001) * maxf(scale, 0.0)
+	return 4.0 * sqrt(maxf(physical_moments().get("m0", 0.0), 0.0)) * maxf(scale, 0.0)
+
+
+func physical_moments() -> Dictionary:
+	var key := PackedFloat64Array([wind_speed, fetch_km, water_depth, jonswap_gamma,
+		swell, spread, detail, wind_direction, swell_height_m, effective_swell_period(),
+		swell_direction_rad, swell_spread, map_size,
+		tile_lengths[0], tile_lengths[1], tile_lengths[2]])
+	if key != _moment_key:
+		_physical_moments = SpectrumMetrics.unscaled_moments(self)
+		_moment_key = key
+	return _physical_moments
 
 
 func _soft_limit(value: float, knee: float, limit: float) -> float:
@@ -685,6 +951,19 @@ func _soft_limit(value: float, knee: float, limit: float) -> float:
 		return value
 	var span := limit - knee
 	return knee + span * (1.0 - exp(-(value - knee) / span))
+
+
+func effective_swell_period() -> float:
+	var requested := maxf(swell_period_s, 0.1)
+	if swell_height_m <= 0.0:
+		return requested
+	var boosted_height := swell_height_m * maxf(amplitude_scale, 1.0) \
+		* maxf(clampf(height_gain, 0.0, JONSWAP_MAX_HEIGHT_GAIN), 1.0)
+	var bounded_height := minf(boosted_height, JONSWAP_TOTAL_HEIGHT_LIMIT_M)
+	var minimum_wavelength := bounded_height / SWELL_MAX_SIGNIFICANT_STEEPNESS
+	var k := TAU / minimum_wavelength
+	var omega := sqrt(GRAVITY * k * tanh(k * maxf(water_depth, 0.01)))
+	return maxf(requested, TAU / omega)
 
 
 func effective_amplitude_scale() -> float:
@@ -697,17 +976,22 @@ func effective_amplitude_scale() -> float:
 
 
 func effective_height_gain() -> float:
-	var base_height := _jonswap_significant_height(effective_amplitude_scale())
 	var input_gain := clampf(height_gain, 0.0, JONSWAP_MAX_HEIGHT_GAIN)
-	if base_height <= 0.0:
-		return input_gain
 	if input_gain <= 1.0:
 		return input_gain
-	var max_height := _soft_limit(base_height * JONSWAP_MAX_HEIGHT_GAIN,
+	var moments := physical_moments()
+	var m0: float = maxf(moments.get("m0", 0.0), 0.0)
+	var m1: float = maxf(moments.get("m1", 0.0), 0.0)
+	var m2: float = maxf(moments.get("m2", 0.0), 0.0)
+	var scale := effective_amplitude_scale()
+	var gain_delta := input_gain - 1.0
+	var raw_height := 4.0 * scale * sqrt(m0 + 2.0 * gain_delta * m1 + gain_delta * gain_delta * m2)
+	if m2 <= 1e-15 or scale <= 1e-10:
+		return input_gain
+	var safe_height := _soft_limit(raw_height,
 		JONSWAP_TOTAL_HEIGHT_KNEE_M, JONSWAP_TOTAL_HEIGHT_LIMIT_M)
-	var safe_height := lerpf(base_height, max_height,
-		(input_gain - 1.0) / (JONSWAP_MAX_HEIGHT_GAIN - 1.0))
-	return safe_height / base_height
+	var target_variance := pow(safe_height / (4.0 * scale), 2.0)
+	return minf(input_gain, 1.0 + (sqrt(maxf(m1 * m1 + m2 * (target_variance - m0), 0.0)) - m1) / m2)
 
 
 func effective_choppiness(cascade: int = 0) -> float:
@@ -727,7 +1011,7 @@ func effective_choppiness(cascade: int = 0) -> float:
 
 func _pack_near_push_constant(dt: float, layer: int = 0) -> PackedByteArray:
 	var pc := PackedByteArray()
-	pc.resize(96)
+	pc.resize(128)
 	var texel := foam_field_domains()[layer] / foam_near_size
 	var center := (_render_center / texel).floor() * texel
 	var previous_center := (_near_center_prev / texel).floor() * texel
@@ -735,51 +1019,86 @@ func _pack_near_push_constant(dt: float, layer: int = 0) -> PackedByteArray:
 	pc.encode_float(4, center.y)
 	pc.encode_float(8, previous_center.x)
 	pc.encode_float(12, previous_center.y)
-	var foam_gain := clampf(foam_amount / FOAM_AMOUNT_REFERENCE, 0.0, 1.0) \
+	var foam_growth := maxf(foam_amount, 0.0) * 7.5 \
 		if foam_feedback_enabled else 0.0
 	pc.encode_float(16, dt * 0.693 / maxf(foam_persistence, 0.05))
-	pc.encode_float(20, dt * 0.693 / maxf(foam_persistence * 0.167, 0.02))
-	pc.encode_float(24, dt * 0.693 / maxf(foam_persistence, 0.05) * 0.68)
-	pc.encode_float(28, dt * foam_gain * 6.0)
+	pc.encode_float(20, dt * maxf(0.693 / maxf(foam_persistence * 0.5, 0.02),
+		1.15 * maxf(0.5, 10.0 - foam_amount)))
+	pc.encode_float(24, dt * 0.693 / maxf(foam_persistence, 0.05) * 0.35)
+	pc.encode_float(28, dt * foam_growth)
 	pc.encode_float(32, foam_field_domains()[layer])
-	pc.encode_float(36, maxf(dt, 0.0001))
-	pc.encode_float(40, 0.15)
+	pc.encode_float(36, dt)
+	pc.encode_float(40, 1.0)
 	pc.encode_float(44, float(foam_near_size))
 	var enabled_mask := 0
 	for i in num_cascades():
 		enabled_mask |= 1 << i
 	pc.encode_s32(48, layer)
 	pc.encode_s32(52, enabled_mask)
-	pc.encode_s32(56, 0)
-	pc.encode_s32(60, 0)
+	pc.encode_float(56, current_velocity_m_s.x)
+	pc.encode_float(60, current_velocity_m_s.y)
 	pc.encode_float(64, tile_lengths[0])
 	pc.encode_float(68, tile_lengths[1])
 	pc.encode_float(72, tile_lengths[2])
 	pc.encode_float(76, clampf(whitecap, 0.05, 0.95))
-	pc.encode_float(80, 1.0)
-	pc.encode_float(84, 1.0)
-	var wind_dir := Vector2(sin(wind_direction), cos(wind_direction))
-	pc.encode_float(88, wind_dir.x)
-	pc.encode_float(92, wind_dir.y)
+	pc.encode_float(80, _render_time)
+	pc.encode_float(84, 0.0)
+	# Waves travel world (cos θ, sin θ): the FFT texture axes swap into world
+	# axes, the same convention the rain and spray layers already follow.
+	var drift := foam_drift_velocity()
+	pc.encode_float(88, drift.x)
+	pc.encode_float(92, drift.y)
+	var coast_center: Vector2 = local_solver.coast_center()
+	var wake_center: Vector2 = local_solver.wake_center()
+	pc.encode_float(96, coast_center.x)
+	pc.encode_float(100, coast_center.y)
+	pc.encode_float(104, wake_center.x)
+	pc.encode_float(108, wake_center.y)
+	pc.encode_float(112, OceanLocalSolver.COAST_DOMAIN_M)
+	pc.encode_float(116, OceanLocalSolver.WAKE_DOMAIN_M)
+	pc.encode_float(120, 1.0 if physical_features_enabled else 0.0)
 	return pc
+
+
+func foam_drift_velocity() -> Vector2:
+	var velocity := current_velocity_m_s
+	for reference in spectral_references():
+		velocity += reference.get("stokes_m_s", Vector2.ZERO)
+	return velocity
+
+
+func _update_breaking_settings() -> void:
+	var total_variance := 0.0
+	var swell_variance := 0.0
+	for reference in _spectral_references:
+		total_variance += float(reference.height_variance_m2)
+		swell_variance += float(reference.swell_variance_m2)
+	var dominance := clampf(swell_variance / maxf(total_variance, 1e-12), 0.0, 1.0) \
+		if wave_model == WaveModel.FFT else 0.0
+	var omega := TAU / effective_swell_period()
+	var k := maxf(omega * omega / GRAVITY, 1e-6)
+	for iteration in 8:
+		var dispersion: Vector2 = SpectrumMetrics._dispersion_and_derivative(k, maxf(water_depth, 0.01))
+		k = maxf(k - (dispersion.x - omega) / maxf(dispersion.y, 1e-8), 1e-6)
+	_breaking_settings = Vector4(swell_direction_rad, omega / k, 0.0, dominance)
 
 
 ## k-space boundary between cascade i and i+1: the finer cascade takes over at
 ## 6 of its tile wavelengths, where it has ~9 texels per wavelength.
 func _k_max(cascade: int) -> float:
 	if cascade >= num_cascades() - 1:
-		return 1e9
+		return TAU / MIN_WAVELENGTH_M
 	return TAU / tile_lengths[cascade + 1] * 6.0
 
 
-func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float, step_time: float = -1.0) -> PackedByteArray:
+func _pack_push_constant(cascade: int, step_time: float = -1.0) -> PackedByteArray:
 	var fetch_m := fetch_km * 1000.0
-	var alpha := 0.076 * pow(wind_speed * wind_speed / (fetch_m * GRAVITY), 0.22)
+	var amplitude := effective_amplitude_scale()
 	# amplitude_scale rides on alpha: the JONSWAP/TMA spectrum is linear in
 	# alpha, so the height amplitude scales with its square root exactly.
-	alpha *= pow(effective_amplitude_scale() / 0.25, 2.0)
-	var omega_p := 22.0 * pow(GRAVITY * GRAVITY / (wind_speed * fetch_m), 1.0 / 3.0)
-	var k_min := 0.0001 if cascade == 0 else _k_max(cascade - 1)
+	var alpha := SpectrumMetrics.jonswap_alpha(wind_speed, fetch_m) * pow(amplitude, 2.0)
+	var omega_p := SpectrumMetrics.jonswap_peak_frequency(wind_speed, fetch_m)
+	var k_min := TAU / tile_lengths[0] if cascade == 0 else _k_max(cascade - 1)
 	var eff_chop := effective_choppiness(cascade)
 
 	var pc := PackedByteArray()
@@ -797,8 +1116,7 @@ func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float, step
 	pc.encode_float(40, _k_max(cascade))
 	pc.encode_float(44, eff_chop)
 	pc.encode_float(48, whitecap)
-	pc.encode_float(52, foam_gain)
-	pc.encode_float(56, decay_rate)
+	pc.encode_float(52, amplitude)
 	pc.encode_float(60, sim_time if step_time < 0.0 else step_time)
 	pc.encode_s32(64, cascade)
 	pc.encode_s32(68, 1000 + cascade * 7919)
@@ -810,13 +1128,13 @@ func _pack_push_constant(cascade: int, foam_gain: float, decay_rate: float, step
 	pc.encode_float(88, reference.wavelength_m if wave_model == WaveModel.FFT else long_wave_length_m)
 	pc.encode_float(92, wind_wave_height_m)
 	pc.encode_float(96, wind_wave_length_m)
-	pc.encode_float(100, ripple_strength)
+	pc.encode_float(100, current_velocity_m_s.x)
 	pc.encode_float(104, jonswap_gamma)
 	pc.encode_float(108, crest_gain)
 	pc.encode_float(112, crest_bias)
 	pc.encode_float(116, mid_wave_height_m)
 	pc.encode_float(120, mid_wave_length_m)
-	pc.encode_float(124, mid_wave_spread)
+	pc.encode_float(124, current_velocity_m_s.y)
 	return pc
 
 
@@ -835,6 +1153,14 @@ func _read_timings() -> void:
 	var out := GpuTimings.read(_rd, "ocean/")
 	if out.is_empty():
 		return
+	var spray_timings := GpuTimings.read(_rd, "ocean_spray/")
+	var coast_timings := GpuTimings.read(_rd, "shore/")
+	for stage: String in coast_timings:
+		if stage != "total":
+			out["coast_" + stage] = coast_timings[stage]
+	out["spray"] = spray_timings.get("total", 0.0)
+	out["total"] += out.spray
+	out["frame"] = _rd.get_captured_timestamps_frame()
 	_timing_store.publish(out)
 
 

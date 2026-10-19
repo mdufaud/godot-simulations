@@ -1,0 +1,64 @@
+vec2 prepare_face(ivec3 face, int component, bool before_projection) {
+	ivec3 component_dims = params.grid_dims.xyz;
+	component_dims[component]++;
+	if (any(lessThan(face, ivec3(0))) || any(greaterThanEqual(face, component_dims))) {
+		return vec2(0.0, -1.0);
+	}
+	uint fi = face_index(face);
+	bool solid = face_solid(face, component);
+	float mass = component == 0 ? face_mass_u.data[fi]
+		: (component == 1 ? face_mass_v.data[fi] : face_mass_w.data[fi]);
+	float valid = (before_projection ? mass > 0.0 : fluid_face(face, component)) ? 1.0 : 0.0;
+	if (solid) {
+		ivec3 left = face;
+		left[component]--;
+		bool interior = all(greaterThanEqual(left, ivec3(0)))
+			&& all(lessThan(left, params.grid_dims.xyz))
+			&& all(lessThan(face, params.grid_dims.xyz));
+		if (interior) {
+			interior = cell_types.data[cell_index(left)] == CELL_SOLID
+				&& cell_types.data[cell_index(face)] == CELL_SOLID;
+		}
+		return vec2(0.0, interior ? 0.0 : 1.0);
+	}
+	if (valid <= 0.0) { return vec2(0.0, valid); }
+	float value = component == 0 ? face_u.data[fi]
+		: (component == 1 ? face_v.data[fi] : face_w.data[fi]);
+	return vec2(value, valid);
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	uint count = num_faces();
+	if (i >= count * 3u) { return; }
+	int component = int(i / count);
+	uint fi = i % count;
+	ivec3 face = face_coord(fi);
+	bool before_projection = int(params.solve.z) == 4;
+	vec2 prepared = prepare_face(face, component, before_projection);
+	face_extension_a.data[i] = prepared;
+	if (!before_projection || prepared.y != 0.0 || !fluid_face(face, component)) { return; }
+	atomicAdd(extension_control.dispatch_args.w, 1u);
+	float sum = 0.0;
+	float weight = 0.0;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 neighbor = face;
+			neighbor[axis] += side;
+			vec2 source = prepare_face(neighbor, component, true);
+			if (source.y > 0.0) { sum += source.x; weight += 1.0; }
+		}
+	}
+	if (weight > 0.0) {
+		float value = sum / weight;
+		if (component == 0) { face_u.data[fi] = value; }
+		else if (component == 1) { face_v.data[fi] = value; }
+		else { face_w.data[fi] = value; }
+		atomicAdd(extension_control.stats.y, 1u);
+	} else {
+		atomicAdd(extension_control.stats.x, 1u);
+		uint groups = (count * 3u + uint(APIC_WORKGROUP_SIZE) - 1u) / uint(APIC_WORKGROUP_SIZE);
+		atomicExchange(extension_control.dispatch_args.x, groups);
+		atomicExchange(extension_control.stats.w, groups);
+	}
+}

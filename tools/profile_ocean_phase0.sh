@@ -14,18 +14,27 @@ WIND_DIRECTION="${WIND_DIRECTION:-0.0}"
 LOOK="${LOOK:-1}"
 SUN_ELEVATION="${SUN_ELEVATION:-34.0}"
 SUN_AZIMUTH="${SUN_AZIMUTH:-160.0}"
+VIEW="${VIEW:-overhead}"
+INTERACTION="${INTERACTION:-1}"
+SPRAY="${SPRAY:-1}"
+FOAM_WARMUP="${FOAM_WARMUP:-8.0}"
+WATER_DEPTH="${WATER_DEPTH:-}"
+capture_params=()
+if [[ -n "$WATER_DEPTH" ]]; then
+	capture_params+=("param=water_depth:$WATER_DEPTH")
+fi
 
 mkdir -p "$OUT_DIR/raw"
-printf 'state\tprofile\tvram_mb\tsim_median_ms\tsim_p95_ms\tfoam_median_ms\tfoam_p95_ms\tfoam_near_gpu_ms\tquery_gpu_ms\tviewport_median_ms\tviewport_p95_ms\twater_coverage\twave_height_rms_m\tsimulation_source_mean\tpixel_foam_mean\n' \
+printf 'state\tprofile\tvram_mb\tsim_median_ms\tsim_p95_ms\tfoam_median_ms\tfoam_p95_ms\tfoam_near_gpu_ms\tquery_gpu_ms\tviewport_median_ms\tviewport_p95_ms\twater_coverage\twave_height_rms_m\tsimulation_source_mean\tpixel_foam_mean\tframe_median_ms\tframe_p95_ms\tsamples\n' \
 	> "$OUT_DIR/baseline.tsv"
 : > "$OUT_DIR/runs.log"
 
 state_names=(calm breeze swell storm)
 presets=(0 1 2 3)
 moods=(0 0 0 1)
-profile_names=(performance high ultra)
+profile_names=(low medium high ultra)
 IFS=',' read -r -a states <<< "${STATES:-calm,breeze,swell,storm}"
-IFS=',' read -r -a profiles <<< "${PROFILES:-high,performance,ultra}"
+IFS=',' read -r -a profiles <<< "${PROFILES:-low,medium,high,ultra}"
 IFS=',' read -r -a resolutions <<< "${RESOLUTIONS:-1280x720}"
 
 field() {
@@ -95,17 +104,29 @@ for resolution in "${resolutions[@]}"; do
 				"$SCRIPT_DIR/capture.sh" ocean_demo "$output" "$FRAMES" 0 \
 				profile=1 coverage=1 preset="$preset" look="$LOOK" \
 				quality="$profile" \
-				mood="$mood" mood_snap=1 lightning=0 view=overhead ui=0 \
+				mood="$mood" mood_snap=1 lightning=0 view="$VIEW" ui=0 \
 				time="$CAPTURE_TIME" dt="$DT" warmup="$WARMUP" wind="$WIND_DIRECTION" \
+				foam_warmup="$FOAM_WARMUP" \
 				sun_elevation="$SUN_ELEVATION" sun_azimuth="$SUN_AZIMUTH" \
-				foam=1 micro=1 reflection=1 rain=0 spray=0 interaction=0 2>&1) || {
+				foam=1 micro=1 reflection=1 rain=0 spray="$SPRAY" interaction="$INTERACTION" \
+				"${capture_params[@]}" 2>&1) || {
 				printf '%s\n' "$capture_output" | tee -a "$OUT_DIR/runs.log" >&2
 				exit 1
 			}
 			printf '%s\n' "$capture_output" >> "$OUT_DIR/runs.log"
 			meta=$(printf '%s\n' "$capture_output" | awk '/^CAPTURE META / { line = $0 } END { print line }')
+			samples=$(field profile_samples "$meta")
+			if [[ ! "$samples" =~ ^[0-9]+$ ]] || (( samples < FRAMES / 2 )); then
+				printf 'Insufficient profile samples for %s/%s: %s\n' "$state" "$profile" "$samples" >&2
+				exit 1
+			fi
+			python3 -c 'import math, sys; a, b = map(float, sys.argv[1:]); sys.exit(0 if math.isfinite(a) and math.isfinite(b) and 0 < a <= b else 1)' \
+				"$(field frame_ms "$meta")" "$(field frame_p95_ms "$meta")" || {
+				printf 'Invalid frame timings for %s/%s\n' "$state" "$profile" >&2
+				exit 1
+			}
 			coverage=$(printf '%s\n' "$capture_output" | awk '/^CAPTURE COVERAGE / { line = $0 } END { sub(/^.*water=/, "", line); print line }')
-			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+			printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
 				"$state" "$profile" "$(field vram_mb "$meta")" \
 				"$(field sim_gpu "$meta")" "$(field sim_gpu_p95 "$meta")" \
 				"$(field foam_gpu "$meta")" "$(field foam_gpu_p95 "$meta")" \
@@ -113,6 +134,7 @@ for resolution in "${resolutions[@]}"; do
 				"$(field viewport_gpu "$meta")" "$(field viewport_gpu_p95 "$meta")" \
 				"${coverage:--1}" "$(json_metric WAVES height_rms_m "$capture_output")" \
 				"$(json_metric WAVES source_mean "$capture_output")" "$(json_metric FOAM_PIXELS mean_coverage "$capture_output")" \
+				"$(field frame_ms "$meta")" "$(field frame_p95_ms "$meta")" "$(field profile_samples "$meta")" \
 				>> "$OUT_DIR/baseline.tsv"
 		done
 	done

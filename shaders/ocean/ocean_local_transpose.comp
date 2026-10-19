@@ -1,0 +1,15 @@
+layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
+
+shared vec2 tile[32][33];
+
+void main() {
+    uvec2 local_id = gl_LocalInvocationID.xy;
+    uvec2 global_id = gl_GlobalInvocationID.xy;
+    uint layer = gl_GlobalInvocationID.z;
+    tile[local_id.y][local_id.x] =
+        fft_data[FFT_IDX(global_id.x, global_id.y, layer, 1)];
+    barrier();
+    uvec2 output_id = gl_WorkGroupID.yx * 32u + local_id;
+    fft_data[FFT_IDX(output_id.x, output_id.y, layer, 0)] =
+        tile[local_id.x][local_id.y];
+}

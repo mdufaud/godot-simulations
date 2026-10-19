@@ -1,6 +1,7 @@
 [gd_resource type="ShaderMaterial" format=3 uid="uid://grass_material"]
 
 [ext_resource type="Shader" path="res://shaders/grass/grass.gdshader" id="1_shader"]
+[ext_resource type="Texture2D" path="res://resources/generated/grass_pampas_plume.png" id="2_plume"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_clump"]
 noise_type = 2
@@ -26,10 +27,15 @@ seamless = true
 [resource]
 render_priority = 0
 shader = ExtResource("1_shader")
-shader_parameter/clumping_factor = 0.5
+shader_parameter/demo_stage = 3
+shader_parameter/clumping_factor = 0.55
 shader_parameter/clump_noise = SubResource("NoiseTexture2D_clump")
 shader_parameter/wind_speed = 1.0
+shader_parameter/wind_direction = Vector2(0.819, 0.574)
+shader_parameter/gustiness = 0.65
+shader_parameter/gust_pulse = 0.0
 shader_parameter/wind_noise = SubResource("NoiseTexture2D_wind")
-shader_parameter/base_color = Color(0.05, 0.2, 0.01, 1)
-shader_parameter/tip_color = Color(0.5, 0.5, 0.1, 1)
-shader_parameter/subsurface_scattering_color = Color(1, 0.75, 0.1, 1)
+shader_parameter/plume_mask = ExtResource("2_plume")
+shader_parameter/base_color = Color(0.14, 0.23, 0.1, 1)
+shader_parameter/tip_color = Color(0.58, 0.54, 0.28, 1)
+shader_parameter/subsurface_scattering_color = Color(0.8, 0.69, 0.45, 1)

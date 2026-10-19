@@ -2,6 +2,9 @@ class_name RigidBodySpawner extends RefCounted
 
 enum MatCategory { MIRROR, BRUSHED, DIELECTRIC, EMISSIVE }
 
+const CRATE_MATERIAL := preload("res://resources/materials/props_crate.tres")
+const METAL_MATERIAL := preload("res://resources/materials/props_metal.tres")
+
 var roughness_override := -1.0
 var metallic_override := -1.0
 var color_palette: Array[Color] = [
@@ -26,8 +29,8 @@ func spawn(parent: Node3D, position: Vector3, rotation: Vector3,
 	body.angular_velocity = angular_velocity
 	var mesh_instance := MeshInstance3D.new()
 	var collision_shape := CollisionShape3D.new()
-	_configure_shape(mesh_instance, collision_shape, shape_type)
-	mesh_instance.material_override = _create_surface_material()
+	_configure_shape(body, mesh_instance, collision_shape, shape_type)
+	mesh_instance.material_override = _create_surface_material(mesh_instance.mesh)
 	body.add_child(mesh_instance)
 	body.add_child(collision_shape)
 	body.mass = _rng.randf_range(0.5, 2.5)
@@ -36,8 +39,8 @@ func spawn(parent: Node3D, position: Vector3, rotation: Vector3,
 	return body
 
 
-func _configure_shape(mesh_instance: MeshInstance3D, collision: CollisionShape3D,
-		requested_type: int) -> void:
+func _configure_shape(body: RigidBody3D, mesh_instance: MeshInstance3D,
+		collision: CollisionShape3D, requested_type: int) -> void:
 	var shape_type := _rng.randi_range(0, 4) if requested_type < 0 else requested_type
 	match shape_type:
 		0:
@@ -80,13 +83,23 @@ func _configure_shape(mesh_instance: MeshInstance3D, collision: CollisionShape3D
 			mesh.inner_radius = _rng.randf_range(0.15, 0.3)
 			mesh.outer_radius = mesh.inner_radius + _rng.randf_range(0.15, 0.35)
 			mesh_instance.mesh = mesh
-			var shape := SphereShape3D.new()
-			shape.radius = mesh.outer_radius
-			collision.shape = shape
+			# A sphere of the outer radius rests the body on thin air (the tube
+			# hangs low on the ring): rest it on four tube-radius spheres spaced
+			# around the ring instead.
+			var tube := (mesh.outer_radius - mesh.inner_radius) * 0.5
+			var ring := (mesh.inner_radius + mesh.outer_radius) * 0.5
+			for axis in 4:
+				var angle := TAU * float(axis) / 4.0
+				var tube_shape := CollisionShape3D.new()
+				var sphere := SphereShape3D.new()
+				sphere.radius = tube
+				tube_shape.shape = sphere
+				tube_shape.position = Vector3(cos(angle) * ring, 0.0, sin(angle) * ring)
+				body.add_child(tube_shape)
 
 
-func _create_surface_material() -> StandardMaterial3D:
-	var material := StandardMaterial3D.new()
+func _create_surface_material(mesh: Mesh) -> StandardMaterial3D:
+	var material := METAL_MATERIAL.duplicate() as StandardMaterial3D
 	var base_color := color_palette[_rng.randi_range(0, color_palette.size() - 1)]
 	var roll := _rng.randf()
 	var category := MatCategory.MIRROR
@@ -96,6 +109,11 @@ func _create_surface_material() -> StandardMaterial3D:
 		category = MatCategory.DIELECTRIC
 	elif roll >= 0.85:
 		category = MatCategory.EMISSIVE
+	var crate := mesh is BoxMesh and category == MatCategory.DIELECTRIC
+	if crate:
+		material = CRATE_MATERIAL.duplicate() as StandardMaterial3D
+		var size := (mesh as BoxMesh).size
+		material.uv1_scale = Vector3(1.0 / size.x, 1.0 / size.y, 1.0 / size.z)
 	match category:
 		MatCategory.MIRROR:
 			material.metallic = 1.0
@@ -115,6 +133,11 @@ func _create_surface_material() -> StandardMaterial3D:
 			material.emission_enabled = true
 			material.emission = base_color
 			material.emission_energy_multiplier = _rng.randf_range(1.2, 2.5)
+	if crate:
+		material.metallic = 0.0
+		material.roughness = 0.72
+	elif category != MatCategory.BRUSHED:
+		material.normal_scale = 0.08
 	if roughness_override >= 0.0:
 		material.roughness = roughness_override
 	if metallic_override >= 0.0:

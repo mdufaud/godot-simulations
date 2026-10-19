@@ -1,0 +1,50 @@
+void cas_add(uint index, bool momentum, float value) {
+	if (value == 0.0) { return; }
+	uint expected = momentum
+		? atomicCompSwap(face_accum.data[index].x, 0u, 0u)
+		: atomicCompSwap(face_accum.data[index].y, 0u, 0u);
+	while (true) {
+		uint desired = floatBitsToUint(uintBitsToFloat(expected) + value);
+		uint observed = momentum
+			? atomicCompSwap(face_accum.data[index].x, expected, desired)
+			: atomicCompSwap(face_accum.data[index].y, expected, desired);
+		if (observed == expected) { return; }
+		expected = observed;
+	}
+}
+
+void main() {
+	uint particle = gl_GlobalInvocationID.x;
+	if (particle >= uint(params.face_dims.w)) { return; }
+	vec3 p = positions.data[particle].xyz;
+	float dx = params.grid_origin_dx.w;
+	float particle_mass = params.sim.z * pow(params.particle_spacing_m, 3.0);
+	vec3 local = (p - params.grid_origin_dx.xyz) / dx;
+	for (int component = 0; component < 3; component++) {
+		vec3 offset = vec3(0.5);
+		offset[component] = 0.0;
+		ivec3 base = ivec3(floor(local - offset - vec3(0.5)));
+		vec3 affine = affine_rows.data[particle * 3u + uint(component)].xyz;
+		float velocity = velocities.data[particle][component];
+		for (int z = 0; z < 3; z++) {
+			for (int y = 0; y < 3; y++) {
+				for (int x = 0; x < 3; x++) {
+					ivec3 face = base + ivec3(x, y, z);
+					if (any(lessThan(face, ivec3(0)))
+						|| any(greaterThanEqual(face, params.face_dims.xyz))) { continue; }
+					if (face_solid(face, component)) { continue; }
+					vec3 fp = face_position(face, component);
+					vec3 d = (fp - p) / dx;
+					float weight = quadratic_weight(d.x) * quadratic_weight(d.y)
+						* quadratic_weight(d.z);
+					if (weight <= 0.0) { continue; }
+					float weighted_mass = weight * particle_mass;
+					float weighted_momentum = weighted_mass * (velocity + dot(affine, fp - p));
+					uint index = uint(component) * num_faces() + face_index(face);
+					cas_add(index, true, weighted_momentum);
+					cas_add(index, false, weighted_mass);
+				}
+			}
+		}
+	}
+}

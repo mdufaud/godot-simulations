@@ -8,6 +8,8 @@
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_dust.gdshader" id="6_dust_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_cloud.gdshader" id="7_cloud_shader"]
 [ext_resource type="Shader" path="res://shaders/tornado/tornado_ground.gdshader" id="8_ground_shader"]
+[ext_resource type="Shader" path="res://shaders/tornado/tornado_dust_draw.gdshader" id="9_dust_draw"]
+[ext_resource type="Texture2D" path="res://resources/generated/atmosphere/atmosphere_vfx_atlas.png" id="10_atmos_atlas"]
 
 [sub_resource type="FastNoiseLite" id="FastNoiseLite_funnel"]
 frequency = 0.06
@@ -46,26 +48,11 @@ size = Vector2(10000, 10000)
 subdivide_width = 48
 subdivide_depth = 48
 
-[sub_resource type="Gradient" id="Gradient_dust"]
-offsets = PackedFloat32Array(0, 0.45, 1)
-colors = PackedColorArray(1, 1, 1, 1, 1, 1, 1, 0.55, 1, 1, 1, 0)
-
-[sub_resource type="GradientTexture2D" id="GradientTexture2D_dust"]
-gradient = SubResource("Gradient_dust")
-width = 64
-height = 64
-fill = 1
-fill_from = Vector2(0.5, 0.5)
-fill_to = Vector2(0.5, 0)
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_dust_draw"]
-transparency = 1
-shading_mode = 0
-vertex_color_use_as_albedo = true
-albedo_texture = SubResource("GradientTexture2D_dust")
-disable_receive_shadows = true
-billboard_mode = 3
-billboard_keep_scale = true
+[sub_resource type="ShaderMaterial" id="StandardMaterial3D_dust_draw"]
+shader = ExtResource("9_dust_draw")
+shader_parameter/puff_atlas = ExtResource("10_atmos_atlas")
+shader_parameter/row_v = 0.5
+shader_parameter/frames = 4.0
 
 [sub_resource type="QuadMesh" id="QuadMesh_dust"]
 material = SubResource("StandardMaterial3D_dust_draw")

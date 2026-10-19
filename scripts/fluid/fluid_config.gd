@@ -16,6 +16,8 @@ class_name FluidConfig extends Resource
 func validate() -> String:
 	if default_particle_count <= 0:
 		return "default_particle_count must be positive"
+	if default_particle_count > texture_width * texture_width:
+		return "default_particle_count must fit the position texture (count <= texture_width * texture_width)"
 	if particle_counts.is_empty():
 		return "particle_counts must not be empty"
 	if flow_min <= 0.0 or flow_max < flow_min:
@@ -28,4 +30,8 @@ func validate() -> String:
 		return "cell_size_m and texture_width must be positive"
 	if domain_size_m.x <= 0.0 or domain_size_m.y <= 0.0 or domain_size_m.z <= 0.0:
 		return "domain_size_m must be positive"
+	var grid_span := Vector3(grid_dims) * cell_size_m
+	if grid_span.x < domain_size_m.x or grid_span.y < domain_size_m.y \
+			or grid_span.z < domain_size_m.z:
+		return "grid_dims * cell_size_m must cover domain_size_m"
 	return ""

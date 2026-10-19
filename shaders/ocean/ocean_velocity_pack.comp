@@ -1,0 +1,38 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    int source_n = params.misc.y;
+    ivec2 mode = id - ivec2(MAP_SIZE / 2);
+    ivec2 source_id = (mode + ivec2(source_n / 2) + ivec2(source_n)) % source_n;
+    vec4 h0 = imageLoad(spectrum_tex, ivec3(source_id, params.misc.x));
+
+    float dk = 2.0 * PI / params.wave.x;
+    vec2 texture_k = vec2(mode) * dk;
+    float k = length(texture_k);
+    vec2 packed_horizontal = vec2(0.0);
+    vec2 vertical_velocity = vec2(0.0);
+    if (k > 1.0e-10 && params.wave.y > 1.0e-8) {
+        vec2 world_k = vec2(texture_k.y, texture_k.x);
+        float kd = k * params.wave.y;
+        float omega = sqrt(G_GRAV * k * tanh(kd));
+        vec2 modulation = exp_complex(-omega * params.wave.z);
+        vec2 a = mul_complex(h0.xy, modulation);
+        vec2 b = mul_complex(h0.zw, conj_complex(modulation));
+        vec2 traveling_velocity = a - b;
+        float current_phase = -dot(world_k, vec2(params.wave.w, params.current.x))
+            * params.wave.z;
+        traveling_velocity = mul_complex(traveling_velocity, exp_complex(current_phase));
+
+        float horizontal_speed = omega / max(tanh(kd), 1.0e-10);
+        vec2 horizontal_x = traveling_velocity * (horizontal_speed * world_k.x / k);
+        vec2 horizontal_z = traveling_velocity * (horizontal_speed * world_k.y / k);
+        vec2 vertical = mul_complex(traveling_velocity, vec2(0.0, -omega));
+        packed_horizontal = vec2(horizontal_x.x - horizontal_z.y,
+            horizontal_x.y + horizontal_z.x);
+        vertical_velocity = vertical;
+    }
+
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = packed_horizontal;
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vertical_velocity;
+}

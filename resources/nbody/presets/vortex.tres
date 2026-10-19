@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="NBodyPreset" format=3 uid="uid://nbody_preset_vortex"]
+
+[ext_resource type="Script" path="res://scripts/nbody/nbody_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Tornado vortex"
+scene_type = 4
+star_size = 0.05
+brightness = 1.0

@@ -32,14 +32,14 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | SSR Physics Demo | Screen-space reflections + Jolt rigid bodies |
 | FFT Ocean | Tessendorf FFT — JONSWAP/TMA spectrum, Stockham IFFT, 3 cascades, Jacobian foam, clipmap mesh |
 | Fire Simulation | Sparse GPU Arrhenius combustion grid + volume raymarch |
-| N-Body Galaxy | GPU Verlet integration + additive point sprites |
+| N-Body Gallery | GPU DKD leapfrog gravity, test particles and analytic effects + additive point sprites |
 | Grass Simulation | Multimesh LOD + wind |
 | Parallax Mapping | Cone-relaxed parallax occlusion + per-light self-shadowing |
 | Fluid Simulation | 65K-particle GPU PBF/SPH fluid + screen-space surfacing |
 | 2D Fractal Explorer | 10 fractal types, deep-zoom perturbation, progressive refinement |
 | 3D Fractal Explorer | 7 distance-estimated fractals, sphere tracing |
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
-| Sand & Snow | Multi-material heightfield terrain: repose-angle sand, water with sediment transport, cohesive snow, weather (snowfall, melt, freeze); dig/pour/smooth/water/pack brushes, throwable balls |
+| Water & Stone | Multi-material heightfield: sediment transport, rainfall, snow, erosion and uplift; dig/pour/smooth/water/pack brushes, throwable balls |
 | Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
@@ -91,7 +91,7 @@ Vulkan-capable device; Compatibility does not provide `RenderingDevice`.
 | 2D Fractal | `scripts/fractal/` | — |
 | 3D Fractal | `scripts/fractal_3d/` | — |
 | Tornado | `scripts/tornado/` | — |
-| Sand & Snow (terrain) | `scripts/terrain/` | `shaders/terrain/*.comp` |
+| Water & Stone (terrain) | `scripts/terrain/` | `shaders/terrain/*.comp` |
 | Cloth | `scripts/cloth/` | `shaders/cloth/*.comp` |
 | Destruction | `scripts/destruction/` | — |
 | Non-Euclidean | `scripts/non_euclidean/` | — |

@@ -66,10 +66,15 @@ var _metrics := {
 }
 var _metrics_mutex := Mutex.new()
 var _state_mutex := Mutex.new()
+var _comparison_mutex := Mutex.new()
 var _snapshot_version := 0
 var _render_snapshot
 var _render_profiling := false
 var _diagnostics_enabled := false
+var _cached_snapshot
+var _cached_snapshot_key := {}
+## Total create_render_snapshot builds (cache misses); diagnostics only.
+var snapshot_build_count := 0
 
 
 func initialize(size: Vector2i, value: MixwellConfig = null,
@@ -87,7 +92,21 @@ func initialize(size: Vector2i, value: MixwellConfig = null,
 
 
 func create_render_snapshot(size_override := Vector2i.ZERO,
-		reference_override := Vector2i.ZERO):
+		reference_override := Vector2i.ZERO, use_cache := true):
+	# Serialized on the main thread once per state change, then shared read-only
+	# with the render thread: every snapshot consumer only reads fields. The key
+	# covers resize_render (which changes _size without a version bump) and the
+	# A/B rejection flip (which changes the active boundary outside the version).
+	if use_cache and size_override == Vector2i.ZERO and reference_override == Vector2i.ZERO:
+		var key := {
+			"version": _snapshot_version,
+			"size": _size,
+			"reference": _reference_size,
+			"active_boundary": get_active_boundary_mode(),
+		}
+		if _cached_snapshot != null and _cached_snapshot_key == key:
+			return _cached_snapshot
+	snapshot_build_count += 1
 	var result := Snapshot.new()
 	result.version = _snapshot_version
 	result.size = _size if size_override == Vector2i.ZERO else Vector2i(
@@ -128,6 +147,14 @@ func create_render_snapshot(size_override := Vector2i.ZERO,
 	var active_domain: Vector2i = result.size if active_plan.is_empty() else active_plan.back().current
 	result.period_fixed = Periodicity.quantize_period(_periodic_coordinate_period(active_domain,
 			result.reference_size, result.size))
+	if use_cache and size_override == Vector2i.ZERO and reference_override == Vector2i.ZERO:
+		_cached_snapshot = result
+		_cached_snapshot_key = {
+			"version": _snapshot_version,
+			"size": _size,
+			"reference": _reference_size,
+			"active_boundary": result.active_boundary_mode,
+		}
 	return result
 
 
@@ -181,11 +208,14 @@ func set_strokes(strokes: Array, base_preset := Gallery.FREEHAND_LAB) -> void:
 	var segment_limit := get_segment_limit()
 	var operations: Array[Dictionary] = _pattern.to_render_operations()
 	var segment_pass_index := 0
+	# Preset and user segments share one segment buffer: budget user strokes
+	# against what the preset left, so the upload never overflows it.
+	var budget := segment_limit - _preset_segments.size()
 	for item in strokes:
 		if item is MixwellStroke:
 			var stroke := item as MixwellStroke
 			if stroke.validate() == "":
-				for segment in stroke.to_segments(segment_limit - _segments_px.size()):
+				for segment in stroke.to_segments(maxi(budget - _segments_px.size(), 0)):
 					_segments_px.append(segment)
 					operations.append({"type": Gallery.SEGMENT, "segment": _normalize_segment(segment),
 						"period": Vector2.ZERO, "period_pixels": Vector2i.ZERO,
@@ -244,7 +274,10 @@ func get_active_boundary_mode() -> int:
 		return MixwellConfig.BoundaryMode.FULLSCREEN
 	if _force_periodic_validation:
 		return MixwellConfig.BoundaryMode.PERIODIC
-	return MixwellConfig.BoundaryMode.PERIODIC if _periodic_comparison.get("passes", true) \
+	_comparison_mutex.lock()
+	var passes: bool = _periodic_comparison.get("passes", true)
+	_comparison_mutex.unlock()
+	return MixwellConfig.BoundaryMode.PERIODIC if passes \
 			else MixwellConfig.BoundaryMode.FULLSCREEN
 
 
@@ -257,11 +290,17 @@ func get_period() -> Vector2:
 
 
 func get_periodic_comparison() -> Dictionary:
-	return _periodic_comparison.duplicate()
+	_comparison_mutex.lock()
+	var result := _periodic_comparison.duplicate()
+	_comparison_mutex.unlock()
+	return result
 
 
 func get_gpu_periodic_comparison() -> Dictionary:
-	return _gpu_periodic_comparison.duplicate()
+	_comparison_mutex.lock()
+	var result := _gpu_periodic_comparison.duplicate()
+	_comparison_mutex.unlock()
+	return result
 
 
 func get_periodic_dispatch_stats() -> Dictionary:
@@ -281,7 +320,10 @@ func get_periodic_dispatch_stats() -> Dictionary:
 
 
 func get_gpu_oracle_comparison() -> Dictionary:
-	return _gpu_oracle_comparison.duplicate()
+	_comparison_mutex.lock()
+	var result := _gpu_oracle_comparison.duplicate()
+	_comparison_mutex.unlock()
+	return result
 
 
 func get_wall_calibration() -> float:
@@ -311,6 +353,10 @@ func get_segment_limit() -> int:
 
 func get_segment_count() -> int:
 	return _segments_px.size() if _preset_id == Gallery.FREEHAND_LAB else _preset_segments.size()
+
+
+func get_preset_segment_count() -> int:
+	return _preset_segments.size()
 
 
 func get_operation_count() -> int:
@@ -486,10 +532,12 @@ func render_sample(index: int, snapshot = null) -> void:
 				active_snapshot.reference_size, active_snapshot.size), optimized, active_snapshot)
 		if stage == "rd_segment":
 			var dispatch_count := operation_count
-			if optimized:
-				dispatch_count = mini(dispatch_count,
-						maxi(int(operation.get("periodic_segment_count", 0)), 0) \
-							if operation.get("curve_group", -1) >= 0 else dispatch_count)
+			# Only gallery curves carrying a periodic head shrink to it; stroke
+			# groups have no periodic_segment_count and must dispatch full size,
+			# else their field silently vanishes in optimized mode.
+			var periodic_count := maxi(int(operation.get("periodic_segment_count", 0)), 0)
+			if optimized and operation.get("curve_group", -1) >= 0 and periodic_count > 0:
+				dispatch_count = mini(dispatch_count, periodic_count)
 			if dispatch_count <= 0:
 				operation_index += operation_count
 				segment_buffer_offset += operation_count
@@ -582,13 +630,16 @@ func readback_diagnostics() -> PackedFloat32Array:
 
 
 func verify_gpu_oracle() -> void:
-	_gpu_oracle_comparison = {}
+	_comparison_mutex.lock()
+	_gpu_oracle_comparison = _compute_gpu_oracle()
+	_comparison_mutex.unlock()
+
+
+func _compute_gpu_oracle() -> Dictionary:
 	if _rd == null or not initialized or _render_snapshot == null:
-		_gpu_oracle_comparison = {"passes": false, "reason": "renderer unavailable"}
-		return
+		return {"passes": false, "reason": "renderer unavailable"}
 	if _render_snapshot.operations.size() != 1:
-		_gpu_oracle_comparison = {"passes": false, "reason": "oracle expects one operation"}
-		return
+		return {"passes": false, "reason": "oracle expects one operation"}
 	var pixel := Vector2i(_size.x / 2, _size.y / 2)
 	var sample_index := maxi(get_sample_count() - 1, 0)
 	var jitter := Periodicity.r2_sample(sample_index)
@@ -605,11 +656,10 @@ func verify_gpu_oracle() -> void:
 	var values := readback_diagnostics()
 	var offset := (pixel.y * _size.x + pixel.x) * 4
 	if values.size() < offset + 2 or expected.size() != 2:
-		_gpu_oracle_comparison = {"passes": false, "reason": "diagnostic readback unavailable"}
-		return
+		return {"passes": false, "reason": "diagnostic readback unavailable"}
 	var actual := Vector2(values[offset], values[offset + 1])
 	var error := actual.distance_to(Vector2(expected[0], expected[1]))
-	_gpu_oracle_comparison = {
+	return {
 		"passes": error <= 8.0e-4,
 		"preset": _preset_id,
 		"sample": sample_index,
@@ -621,13 +671,12 @@ func verify_gpu_oracle() -> void:
 
 
 func verify_periodic_gpu_ab() -> void:
-	_gpu_periodic_comparison = {}
 	if _rd == null or not initialized:
-		_gpu_periodic_comparison = {"passes": false, "reason": "renderer unavailable"}
+		_publish_gpu_periodic_comparison({"passes": false, "reason": "renderer unavailable"})
 		return
 	var base_snapshot = _render_snapshot
 	if base_snapshot == null:
-		_gpu_periodic_comparison = {"passes": false, "reason": "render snapshot unavailable"}
+		_publish_gpu_periodic_comparison({"passes": false, "reason": "render snapshot unavailable"})
 		return
 	var periodic_snapshot = base_snapshot.boundary_copy(
 		MixwellConfig.BoundaryMode.PERIODIC, true)
@@ -649,32 +698,41 @@ func verify_periodic_gpu_ab() -> void:
 	var fullscreen_colours := _readback_rgba16f(_textures.sample)
 	var fullscreen_elapsed_ms := float(Time.get_ticks_usec() - fullscreen_start) / 1000.0
 	var fullscreen_gpu_timing := GpuTimings.read(_rd, "mixwell/", true)
-	_gpu_periodic_comparison = Diagnostics.compare_gpu_diagnostics(periodic_values,
+	var comparison := Diagnostics.compare_gpu_diagnostics(periodic_values,
 			fullscreen_values, periodic_colours, fullscreen_colours, _size,
 			_coordinate_period(_size))
-	_gpu_periodic_comparison["periodic_domain"] = periodic_snapshot.periodic_domain
-	_gpu_periodic_comparison["fullscreen_domain"] = fullscreen_snapshot.fullscreen_domain
-	_gpu_periodic_comparison["periodic_movement_pixels"] = \
+	comparison["periodic_domain"] = periodic_snapshot.periodic_domain
+	comparison["fullscreen_domain"] = fullscreen_snapshot.fullscreen_domain
+	comparison["periodic_movement_pixels"] = \
 			periodic_snapshot.periodic_movement_dispatch_pixels
-	_gpu_periodic_comparison["fullscreen_movement_pixels"] = \
+	comparison["fullscreen_movement_pixels"] = \
 			fullscreen_snapshot.fullscreen_movement_dispatch_pixels
-	_gpu_periodic_comparison["periodic_dispatch_pixels"] = periodic_snapshot.periodic_dispatch_pixels
-	_gpu_periodic_comparison["fullscreen_dispatch_pixels"] = fullscreen_snapshot.fullscreen_dispatch_pixels
-	_gpu_periodic_comparison["dispatch_reduction"] = 1.0 - float(
+	comparison["periodic_dispatch_pixels"] = periodic_snapshot.periodic_dispatch_pixels
+	comparison["fullscreen_dispatch_pixels"] = fullscreen_snapshot.fullscreen_dispatch_pixels
+	comparison["dispatch_reduction"] = 1.0 - float(
 			periodic_snapshot.periodic_dispatch_pixels) / float(maxi(
 			fullscreen_snapshot.fullscreen_dispatch_pixels, 1))
 	var periodic_measured_ms := float(periodic_gpu_timing.get("total", periodic_elapsed_ms))
 	var fullscreen_measured_ms := float(fullscreen_gpu_timing.get("total", fullscreen_elapsed_ms))
-	_gpu_periodic_comparison["periodic_elapsed_ms"] = periodic_measured_ms
-	_gpu_periodic_comparison["fullscreen_elapsed_ms"] = fullscreen_measured_ms
-	_gpu_periodic_comparison["measured_speedup"] = fullscreen_measured_ms / maxf(periodic_measured_ms, 1.0e-6)
-	_gpu_periodic_comparison["timing_source"] = "gpu_timestamp" \
+	comparison["periodic_elapsed_ms"] = periodic_measured_ms
+	comparison["fullscreen_elapsed_ms"] = fullscreen_measured_ms
+	comparison["measured_speedup"] = fullscreen_measured_ms / maxf(periodic_measured_ms, 1.0e-6)
+	comparison["timing_source"] = "gpu_timestamp" \
 			if periodic_gpu_timing.has("total") and fullscreen_gpu_timing.has("total") else "wall_sync"
-	if not _gpu_periodic_comparison.get("passes", false):
+	if not comparison.get("passes", false):
+		_comparison_mutex.lock()
 		_periodic_comparison["passes"] = false
 		_periodic_comparison["active"] = false
+		_comparison_mutex.unlock()
+	_publish_gpu_periodic_comparison(comparison)
 	reset_accumulation()
 	_render_snapshot = base_snapshot
+
+
+func _publish_gpu_periodic_comparison(result: Dictionary) -> void:
+	_comparison_mutex.lock()
+	_gpu_periodic_comparison = result
+	_comparison_mutex.unlock()
 
 
 func update_metrics(force := false) -> void:
@@ -685,7 +743,9 @@ func update_metrics(force := false) -> void:
 	if not _diagnostic_reduction_buffer.is_valid() or _diagnostic_group_count <= 0:
 		return
 	var sample_index := maxi(get_sample_count() - 1, 0)
-	var snapshot = _render_snapshot if _render_snapshot != null else create_render_snapshot()
+	# Render-thread fallback: build uncached so the cache stays main-thread-only.
+	var snapshot = _render_snapshot if _render_snapshot != null \
+			else create_render_snapshot(Vector2i.ZERO, Vector2i.ZERO, false)
 	var pc := _pack_push_constant(sample_index, Vector4.ZERO, -1.0, {}, _size, _size,
 			_periodic_coordinate_period(_size, snapshot.reference_size, _size),
 			snapshot.periodic_optimized, snapshot)
@@ -751,7 +811,7 @@ func init_render(snapshot = null) -> void:
 	_state_mutex.unlock()
 	_period_fixed = active_snapshot.period_fixed
 	_render_profiling = active_snapshot.profiling
-	if not is_initialized() and config.validate() != "" and snapshot == null:
+	if not is_initialized() and config.validate() != "":
 		push_error("Mixwell config: %s" % config.validate())
 		return
 	_rd = GpuPreflight.device("MixwellSolver")
@@ -963,6 +1023,8 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> void:
 	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
 		_render_snapshot.reference_size.y), 1))
 	for operation in operations:
+		if values.size() / 8 >= DESKTOP_SEGMENT_LIMIT:
+			break
 		if int(operation.get("type", Gallery.LINE)) != Gallery.SEGMENT:
 			continue
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
@@ -1270,7 +1332,9 @@ func _refresh_periodicity() -> void:
 	_refresh_wall_calibration()
 	_period_fixed = Periodicity.quantize_period(_periodic_coordinate_period(get_periodic_domain_size()))
 	if config.boundary_mode != MixwellConfig.BoundaryMode.PERIODIC:
+		_comparison_mutex.lock()
 		_periodic_comparison = {"passes": true, "active": false, "samples": 0}
+		_comparison_mutex.unlock()
 		return
 	var period := get_period()
 	var canonical := Periodicity.canonical_period(_reference_size)
@@ -1304,12 +1368,15 @@ func _refresh_periodicity() -> void:
 			for component in 3:
 				periodic_colours.append(periodic_colour[component])
 				fullscreen_colours.append(fullscreen_colour[component])
-	_periodic_comparison = Periodicity.compare_paths(periodic_values, fullscreen_values, period,
+	var comparison := Periodicity.compare_paths(periodic_values, fullscreen_values, period,
 			periodic_colours, fullscreen_colours)
-	_periodic_comparison["active"] = _periodic_comparison.get("passes", false)
-	_periodic_comparison["domain_pixels"] = get_periodic_domain_size()
+	comparison["active"] = comparison.get("passes", false)
+	comparison["domain_pixels"] = get_periodic_domain_size()
 	var dispatch_stats := get_periodic_dispatch_stats()
-	_periodic_comparison.merge(dispatch_stats)
+	comparison.merge(dispatch_stats)
+	_comparison_mutex.lock()
+	_periodic_comparison = comparison
+	_comparison_mutex.unlock()
 
 
 func _normalized_segments() -> Array[Vector4]:

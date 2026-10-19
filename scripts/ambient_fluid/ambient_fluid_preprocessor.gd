@@ -97,7 +97,8 @@ static func build_profile(mesh: ArrayMesh,
 			bem_psd_clamped = true
 			break
 	added_mass = projected_added_mass
-	var slip_matrix := _build_slip_matrix(vertices, triangles, face_normals)
+	var slip_matrix := _build_slip_matrix(vertices, triangles, face_normals,
+		potential_matrix)
 	if slip_matrix.size() != face_centers.size() * 18:
 		return _fail("BEM slip matrix construction failed")
 	var total_area := 0.0
@@ -256,9 +257,48 @@ static func _choose_sources(vertices: PackedVector3Array, triangles: Array,
 		minimum = minimum.min(vertex)
 		maximum = maximum.max(vertex)
 	var shape_extent := (maximum - minimum).length()
+	# Sources ride vertex normals inward. On a thin shape a deep offset pushes
+	# them past the opposite face, which corrupts the potentials (the demo
+	# plate once got an inverted broadside/edgewise added mass), so cap the
+	# offset at half the smallest face-centroid-to-opposite-plane distance.
+	var min_face_gap := INF
+	for triangle_index in triangles.size():
+		var ids: PackedInt32Array = triangles[triangle_index]
+		var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+		var normal: Vector3 = face_normals[triangle_index]
+		for other_index in triangles.size():
+			if other_index == triangle_index:
+				continue
+			var other_ids: PackedInt32Array = triangles[other_index]
+			# Facing pairs measure the shape's thinness; a triangle centroid
+			# hugging an edge would understate the gap to a perpendicular face.
+			if face_normals[other_index].dot(normal) >= -0.5:
+				continue
+			var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
+			if gap > 1.0e-9:
+				min_face_gap = minf(min_face_gap, gap)
+	if not is_finite(min_face_gap):
+		# No facing pair (nonconvex mesh): keep the conservative all-pairs bound.
+		for triangle_index in triangles.size():
+			var ids: PackedInt32Array = triangles[triangle_index]
+			var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+			for other_index in triangles.size():
+				if other_index == triangle_index:
+					continue
+				var other_ids: PackedInt32Array = triangles[other_index]
+				var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
+				if gap > 1.0e-9:
+					min_face_gap = minf(min_face_gap, gap)
+	if not is_finite(min_face_gap):
+		return _fail_dict("mesh interior is too thin to place BEM sources")
+	var max_offset := 0.5 * min_face_gap
 	var factors := [0.2, 0.15, 0.1, 0.075, 0.05, 0.025]
+	var previous_offset := -1.0
 	for factor in factors:
-		var offset := shape_extent * float(factor)
+		var offset := minf(shape_extent * float(factor), max_offset)
+		if is_equal_approx(offset, previous_offset):
+			continue
+		previous_offset = offset
 		var sources := PackedVector3Array()
 		var all_inside := true
 		for vertex_index in vertices.size():
@@ -377,23 +417,40 @@ static func _build_added_mass(vertices: PackedVector3Array, triangles: Array,
 
 
 static func _build_slip_matrix(vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array) -> PackedFloat64Array:
+		face_normals: PackedVector3Array,
+		potential_matrix: PackedFloat64Array) -> PackedFloat64Array:
 	var result := PackedFloat64Array()
 	result.resize(triangles.size() * 18)
 	for triangle_index in triangles.size():
 		var ids: PackedInt32Array = triangles[triangle_index]
 		var normal: Vector3 = face_normals[triangle_index]
-		var positions := [vertices[ids[0]], vertices[ids[1]], vertices[ids[2]]]
-		var center: Vector3 = (positions[0] + positions[1] + positions[2]) / 3.0
-		for row in 3:
-			for col in 6:
-				var geometric := 0.0
-				for projection_axis in 3:
-					var projected := (1.0 if row == projection_axis else 0.0) \
-						- normal[row] * normal[projection_axis]
-					geometric += projected * _rigid_motion_matrix_value(center,
-						projection_axis, col)
-				result[triangle_index * 18 + row * 6 + col] = -geometric
+		var a: Vector3 = vertices[ids[0]]
+		var edge_a: Vector3 = vertices[ids[1]] - a
+		var edge_b: Vector3 = vertices[ids[2]] - a
+		var edge_a_squared := edge_a.length_squared()
+		var edge_b_squared := edge_b.length_squared()
+		var edge_dot := edge_a.dot(edge_b)
+		var determinant := edge_a_squared * edge_b_squared - edge_dot * edge_dot
+		if determinant <= maxf(1.0e-24, edge_a_squared * edge_b_squared * 1.0e-12):
+			return _fail_array("BEM slip gradient encountered a degenerate face")
+		var center: Vector3 = (a + vertices[ids[1]] + vertices[ids[2]]) / 3.0
+		for col in 6:
+			var potential_a := potential_matrix[ids[0] * 6 + col]
+			var potential_delta_a := potential_matrix[ids[1] * 6 + col] - potential_a
+			var potential_delta_b := potential_matrix[ids[2] * 6 + col] - potential_a
+			var gradient := edge_a * ((potential_delta_a * edge_b_squared \
+				- potential_delta_b * edge_dot) / determinant) \
+				+ edge_b * ((potential_delta_b * edge_a_squared \
+				- potential_delta_a * edge_dot) / determinant)
+			var tangent_flow := gradient - normal * normal.dot(gradient)
+			var rigid_velocity := Vector3(
+				_rigid_motion_matrix_value(center, 0, col),
+				_rigid_motion_matrix_value(center, 1, col),
+				_rigid_motion_matrix_value(center, 2, col))
+			var tangent_body := rigid_velocity - normal * normal.dot(rigid_velocity)
+			var relative_tangent := tangent_flow - tangent_body
+			for row in 3:
+				result[triangle_index * 18 + row * 6 + col] = relative_tangent[row]
 	return result
 
 

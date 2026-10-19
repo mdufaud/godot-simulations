@@ -9,6 +9,7 @@ extends Control
 ## value widget persists to UserSettings and restores on load; actions never do.
 
 signal panel_toggled(open: bool)
+signal settings_reset
 
 @export var title: String = "":
 	set(value):
@@ -22,6 +23,7 @@ signal panel_toggled(open: bool)
 @onready var _action_lane: ScrollContainer = $BottomRight
 @onready var _action_bar: GridContainer = $BottomRight/ActionBar
 @onready var _panel: PanelContainer = $Panel
+@onready var _header: HBoxContainer = $Panel/VBox/Header
 @onready var _title_label: Label = $Panel/VBox/Header/TitleLabel
 @onready var _close_button: Button = $Panel/VBox/Header/CloseButton
 @onready var _fps_label: Label = $FPSLabel
@@ -51,8 +53,13 @@ var _reset_dialog: ConfirmationDialog = null
 var _actions: Array[Button] = []
 var _action_shortcuts: Dictionary = {}
 var _action_layout_key := ""
+var _layout_check_frame := 0
+var _panel_moved := false
+var _dragging_panel := false
+var _drag_offset := Vector2.ZERO
+var _mouse_controller: Node = null
 
-const ACTION_BUTTON_SIZE := Vector2(56.0, 52.0)
+const ACTION_BUTTON_SIZE := Vector2(56.0, 56.0)
 const AZERTY_ACTION_KEYS := "&é\"'(-è_ç"
 
 # Cached styleboxes so SimMenu's flat look doesn't inherit the chunky main-menu theme.
@@ -87,23 +94,27 @@ func _build_styles() -> void:
 	_sb_empty = StyleBoxEmpty.new()
 
 
-## Center the card in the free area left of the icon lane, capped so it never becomes a
-## full-bleed strip on wide/landscape screens.
 func _layout_panel() -> void:
 	var vp := get_viewport_rect().size
-	var lane := 76.0        # reserved right column: back / gear / debug icons
-	var margin := 20.0
-	var avail := vp.x - lane
-	var w: float = minf(560.0, avail - margin * 2.0)
-	var left: float = margin + maxf(0.0, (avail - margin * 2.0 - w) * 0.5)
-	_panel.anchor_left = 0.0
-	_panel.anchor_right = 0.0
-	_panel.offset_left = left
-	_panel.offset_right = left + w
-	_panel.anchor_top = 0.0
-	_panel.offset_top = 20.0
-	_panel.anchor_bottom = 1.0
-	_panel.offset_bottom = -20.0
+	_panel.set_anchors_preset(Control.PRESET_TOP_LEFT)
+	_panel.size = Vector2(minf(440.0, vp.x - 116.0), minf(600.0, vp.y - 80.0))
+	if not _panel_moved:
+		_panel.position = Vector2(20.0, 60.0)
+	_clamp_panel_position()
+
+
+func _clamp_panel_position() -> void:
+	var margin := Vector2(20.0, 20.0)
+	var limit := (get_viewport_rect().size - _panel.size - margin).max(margin)
+	_panel.position = _panel.position.clamp(margin, limit)
+
+
+func _on_header_gui_input(event: InputEvent) -> void:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_dragging_panel = event.pressed
+		_drag_offset = _panel.get_global_transform().affine_inverse() \
+			* (_header.get_global_transform() * event.position)
+		_header.accept_event()
 
 
 func _layout_action_lane() -> void:
@@ -147,10 +158,11 @@ func _ready() -> void:
 	_close_button.pressed.connect(_on_close_pressed)
 	_reset_button.pressed.connect(_on_reset_pressed)
 	_back_button.pressed.connect(_on_back_pressed)
+	_header.gui_input.connect(_on_header_gui_input)
+	_panel.resized.connect(_clamp_panel_position)
 	# Fat, grabbable scrollbar for touch; drag-to-scroll still works too. Content keeps a
 	# 30px right margin (tscn) so the bar sits in its own lane, not over the sliders.
 	($Panel/VBox/Scroll as ScrollContainer).get_v_scroll_bar().custom_minimum_size.x = 22
-	# Centered, width-capped card (reserves the right icon lane); re-run on rotation/resize.
 	_layout_panel()
 	_layout_action_lane.call_deferred()
 	get_viewport().size_changed.connect(_layout_panel)
@@ -176,24 +188,42 @@ func _restore_all() -> void:
 
 
 func _restore_one(key: String) -> void:
-	if _settings == null or not _settings.has_sim_value(persist_id, key):
+	# An anonymous menu (no GameManager demo, standalone scene) must not share one
+	# state bucket with every other anonymous menu, so it never persists.
+	if persist_id.is_empty() or _settings == null \
+			or not _settings.has_sim_value(persist_id, key):
 		return
 	var stored: Variant = _settings.get_sim_value(persist_id, key, null)
 	var entry: Dictionary = _entries[key]
 	_apply_value(entry, stored)
 
 
-# --- Persistence (no-ops without the UserSettings autoload) ---------------------
+# --- Persistence (no-ops without the UserSettings autoload or an identity) -----
 
 func _persist(key: String, value: Variant) -> void:
-	if _settings != null:
+	if _settings != null and not persist_id.is_empty():
 		_settings.set_sim_value(persist_id, key, value)
 
 
 func _persisted(key: String, default_val: Variant) -> Variant:
-	if _settings == null:
+	if _settings == null or persist_id.is_empty():
 		return default_val
 	return _settings.get_sim_value(persist_id, key, default_val)
+
+
+## Stored value the widget under [param section]/[param label] would restore to,
+## or [param default] when nothing was persisted. Owners of expensive launch
+## state (a rebuild-heavy setter behind a persisted slider) read this before
+## building, so the deferred restore finds the widget already at its value and
+## its change signal never fires.
+func stored_value(section: String, label: String, default: Variant) -> Variant:
+	return _persisted("%s/%s" % [section, label], default)
+
+
+## Persists [param value] under [param section]/[param label] with no widget behind it,
+## for scene-owned state the user should still find again on the next launch.
+func store_value(section: String, label: String, value: Variant) -> void:
+	_persist("%s/%s" % [section, label], value)
 
 
 ## Push a value into a widget, re-emitting so the callback runs (mirrors the kinds).
@@ -235,7 +265,14 @@ func _register(label_text: String, node: Control, cb: Callable, kind: String,
 
 
 func _process(_delta: float) -> void:
-	_fps_label.text = "%d" % Engine.get_frames_per_second()
+	var fps_text := "%d" % Engine.get_frames_per_second()
+	if _fps_label.text != fps_text:
+		_fps_label.text = fps_text
+	# The action lane only needs to react to viewport resizes and visibility
+	# flips; checking a few times per second is plenty and keeps _process cheap.
+	_layout_check_frame += 1
+	if _layout_check_frame % 4 != 0:
+		return
 	var vp_size := get_viewport_rect().size
 	var layout_key := "%d:%d:%s" % [int(vp_size.x), int(vp_size.y), _visible_action_signature()]
 	if layout_key != _action_layout_key:
@@ -270,6 +307,24 @@ func _update_action_shortcuts() -> void:
 			visible_index += 1
 		elif label != null:
 			label.visible = false
+
+
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel"):
+		toggle_panel()
+		get_viewport().set_input_as_handled()
+		return
+	if not _dragging_panel:
+		return
+	if event is InputEventMouseMotion:
+		_panel_moved = true
+		_panel.position = get_global_transform_with_canvas().affine_inverse() \
+			* event.position - _drag_offset
+		_clamp_panel_position()
+		get_viewport().set_input_as_handled()
+	elif event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
+		_dragging_panel = event.pressed
+		get_viewport().set_input_as_handled()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -317,7 +372,20 @@ func _on_close_pressed() -> void:
 
 ## Show/hide the options panel (also driven by the gear button). Emits panel_toggled.
 func toggle_panel() -> void:
+	_dragging_panel = false
 	_panel.visible = not _panel.visible
+	if _panel.visible:
+		move_to_front()
+		add_to_group("open_sim_menu")
+		_clamp_panel_position()
+		_mouse_controller = get_tree().get_first_node_in_group("captured_mouse")
+		if _mouse_controller != null:
+			_mouse_controller.release_mouse()
+	else:
+		remove_from_group("open_sim_menu")
+		if is_instance_valid(_mouse_controller):
+			_mouse_controller.capture_mouse()
+		_mouse_controller = null
 	panel_toggled.emit(_panel.visible)
 
 
@@ -352,8 +420,9 @@ func _do_reset() -> void:
 	for key in _entries:
 		var entry: Dictionary = _entries[key]
 		_apply_value(entry, entry.default)
+	settings_reset.emit()
 	# Wipe persisted values last, after the per-widget writes triggered above.
-	if _settings != null:
+	if _settings != null and not persist_id.is_empty():
 		_settings.clear_sim(persist_id)
 
 
@@ -448,16 +517,15 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	slider.add_theme_stylebox_override("grabber_area_highlight", _sb_fill)
 	hbox.add_child(slider)
 
-	var whole_steps := slider.step >= 1.0
 	var value_label := Label.new()
-	value_label.text = _slider_value_text(default_val, whole_steps)
+	value_label.text = _slider_value_text(slider.value, slider.step)
 	value_label.custom_minimum_size.x = 52
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hbox.add_child(value_label)
 
 	slider.value_changed.connect(func(value: float) -> void:
 		cb.call(value)
-		value_label.text = _slider_value_text(value, whole_steps)
+		value_label.text = _slider_value_text(value, slider.step)
 	)
 	var key := _register(label_text, slider, cb, "slider", default_val, persist)
 	if persist:
@@ -467,8 +535,16 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	return slider
 
 
-func _slider_value_text(value: float, whole_steps: bool) -> String:
-	return "%d" % int(round(value)) if whole_steps else "%.2f" % value
+func set_slider_value(slider: HSlider, value: float) -> void:
+	slider.set_value_no_signal(value)
+	var value_label := slider.get_parent().get_child(2) as Label
+	value_label.text = _slider_value_text(slider.value, slider.step)
+
+
+func _slider_value_text(value: float, step_val: float) -> String:
+	if step_val >= 1.0:
+		return "%d" % int(round(value))
+	return "%.3f" % value if step_val < 0.01 else "%.2f" % value
 
 
 func add_toggle(label_text: String, default_val: bool, cb: Callable, persist: bool = true) -> CheckButton:
@@ -490,7 +566,8 @@ func add_toggle(label_text: String, default_val: bool, cb: Callable, persist: bo
 
 ## Debug/visualisation toggle placed in the always-visible icon strip under the gear,
 ## outside the options panel (for on-device debugging). `icon` is a short glyph.
-func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Callable) -> Button:
+func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Callable,
+		persist: bool = true) -> Button:
 	var button := Button.new()
 	button.toggle_mode = true
 	button.text = icon
@@ -503,11 +580,12 @@ func add_debug_toggle(icon: String, tooltip: String, default_val: bool, cb: Call
 
 	var prev_section := _section
 	_section = "Debug"
-	var key := _register(tooltip, button, cb, "toggle", default_val)
+	var key := _register(tooltip, button, cb, "toggle", default_val, persist)
 	_section = prev_section
-	button.toggled.connect(func(on: bool) -> void:
-		_persist(key, on)
-	)
+	if persist:
+		button.toggled.connect(func(on: bool) -> void:
+			_persist(key, on)
+		)
 	_layout_action_lane.call_deferred()
 	return button
 
@@ -520,22 +598,31 @@ func _make_action_button(icon: String, label_text: String) -> Button:
 	button.tooltip_text = label_text
 	button.clip_contents = true
 
-	var box := VBoxContainer.new()
+	var box := Control.new()
 	box.set_anchors_preset(Control.PRESET_FULL_RECT)
 	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_theme_constant_override("separation", 0)
 	button.add_child(box)
 
 	var glyph := Label.new()
+	glyph.name = "ActionIcon"
 	glyph.text = icon
+	glyph.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	glyph.offset_top = 0.0
+	glyph.offset_bottom = 25.0
 	glyph.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	glyph.add_theme_font_size_override("font_size", 22)
+	glyph.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	glyph.add_theme_font_size_override("font_size", 18)
 	box.add_child(glyph)
 
 	var caption := Label.new()
+	caption.name = "ActionCaption"
 	caption.text = label_text
+	caption.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	caption.offset_top = 26.0
+	caption.offset_bottom = 54.0
+	caption.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	caption.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	caption.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	caption.add_theme_font_size_override("font_size", 10)
 	box.add_child(caption)
 
@@ -563,6 +650,20 @@ func add_action(icon: String, label_text: String, cb: Callable) -> Button:
 	return button
 
 
+func set_action_label(button: Button, label_text: String) -> void:
+	var caption := button.find_child("ActionCaption", true, false) as Label
+	if caption == null:
+		return
+	caption.text = label_text
+	button.tooltip_text = label_text
+
+
+func set_action_icon(button: Button, icon: String) -> void:
+	var glyph := button.find_child("ActionIcon", true, false) as Label
+	if glyph != null:
+		glyph.text = icon
+
+
 ## Sticky action (ignite, wind, water jet). Like add_action it lives outside the panel
 ## and is never persisted: it starts at default_val on every launch.
 func add_action_toggle(icon: String, label_text: String, default_val: bool, cb: Callable) -> Button:
@@ -582,7 +683,8 @@ func add_button(label_text: String, cb: Callable) -> Button:
 	return button
 
 
-func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> ColorPickerButton:
+func add_color_picker(label_text: String, default_val: Color, cb: Callable,
+		persist: bool = true) -> ColorPickerButton:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	hbox.custom_minimum_size.y = 40
@@ -600,10 +702,11 @@ func add_color_picker(label_text: String, default_val: Color, cb: Callable) -> C
 	hbox.add_child(picker)
 
 	picker.color_changed.connect(cb)
-	var key := _register(label_text, picker, cb, "color", default_val)
-	picker.color_changed.connect(func(color: Color) -> void:
-		_persist(key, color)
-	)
+	var key := _register(label_text, picker, cb, "color", default_val, persist)
+	if persist:
+		picker.color_changed.connect(func(color: Color) -> void:
+			_persist(key, color)
+		)
 	return picker
 
 
@@ -622,10 +725,13 @@ func add_progress_bar(label_text: String, max_val: float) -> ProgressBar:
 ## Begin a hideable group. Widgets added after this land inside the returned
 ## VBoxContainer until end_group(). Toggle the container's .visible to show/hide a
 ## whole param group (used for per-fractal / per-solver parameter scoping).
-func add_group() -> VBoxContainer:
+func add_group(parent_override: Control = null) -> VBoxContainer:
 	var group := VBoxContainer.new()
 	group.add_theme_constant_override("separation", 6)
-	_host().add_child(group)
+	if parent_override == null:
+		_host().add_child(group)
+	else:
+		parent_override.add_child(group)
 	_current = group
 	return group
 

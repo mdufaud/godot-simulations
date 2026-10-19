@@ -1,0 +1,35 @@
+[gd_resource type="Resource" script_class="PlanetPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/planet/planet_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Exposed Core"
+radius_m = 23.0
+layer_count = 6
+lacunarity = 1.65
+persistence = 0.52
+noise_scale = 2.8
+noise_strength = 0.7
+noise_offset = -0.15
+continent_strength = 0.35
+mountain_strength = 0.7
+warp_strength = 0.1
+opening_style = 1
+opening_strength = 1.0
+opening_count = 7
+fragment_separation_ratio = 0.18
+core_fraction = 0.38
+crust_fraction = 0.82
+core_emission = 4.0
+col_core = Color(1, 0.55, 0.06, 1)
+col_flat = Color(0.34, 0.27, 0.22, 1)
+col_flat_deep = Color(0.17, 0.11, 0.085, 1)
+col_steep = Color(0.28, 0.18, 0.13, 1)
+col_steep_deep = Color(0.11, 0.065, 0.05, 1)
+col_ambient = Color(0.32, 0.28, 0.26, 1)
+height_bands = 6.0
+height_min_m = 18.0
+height_max_m = 26.0
+wavelengths_nm = Vector3(700, 550, 480)
+scattering_strength = 3.0

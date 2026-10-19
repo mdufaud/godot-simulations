@@ -9,7 +9,7 @@ uniform sampler2D depth_tex : filter_nearest;
 uniform vec2 direction = vec2(1.0, 0.0);
 uniform float particle_radius = 0.12;
 uniform float proj_scale = 470.0;
-uniform float range_scale = 6.0;
+uniform float range_scale = 1.5;
 
 void fragment() {
 	vec3 c0 = texture(depth_tex, UV).rgb;

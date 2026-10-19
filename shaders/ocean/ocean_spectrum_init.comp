@@ -6,6 +6,10 @@
 
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
+layout(std430, set = 0, binding = 5) readonly buffer SwellSpectrumBuffer {
+    vec4 swell_spectrum; // peak angular frequency, alpha scale, direction, spread
+} swell_params;
+
 vec2 dispersion_and_derivative(float k, float depth) {
     float a = k * depth;
     float b = tanh(a);
@@ -57,7 +61,8 @@ vec2 spectrum_amplitude(ivec2 id) {
     vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * dk;
     float k = length(k_vec) + 1e-6;
     // Band-limit each cascade so overlapping wavelengths are not double-counted.
-    if (k < params.spectrum_c.y || k >= params.spectrum_c.z) {
+    float k_max = min(params.spectrum_c.z, 2.0 * PI / MIN_WAVELENGTH_M);
+    if (k < params.spectrum_c.y || k >= k_max) {
         return vec2(0.0);
     }
     float theta = atan(k_vec.x, k_vec.y);
@@ -84,14 +89,41 @@ vec2 spectrum_amplitude(ivec2 id) {
     // (H/lambda > 1/7) into angular micro-cliffs. The solver bounds the pushed
     // gain against both its JONSWAP limit and the complete wind/fetch sea state.
     float gain = 1.0 + (params.gains.x - 1.0) * exp(-k * 9.549);
-    // 0.25 calibrates 4*sigma of the height field to the empirical JONSWAP
-    // Hs(U, F) (measured 4.1x hot without it, from the +-k pair packing).
-    return gaussian_pair(u) * sqrt(2.0 * s * d * w_norm) * 0.25 * gain;
+    return gaussian_pair(u) * sqrt(2.0 * s * d * w_norm) * 0.3535533905932738 * gain;
+}
+
+vec2 swell_amplitude(ivec2 id) {
+    float dk = 2.0 * PI / params.spectrum_a.x;
+    vec2 k_vec = (vec2(id) - float(MAP_SIZE) * 0.5) * dk;
+    float k = length(k_vec) + 1e-6;
+    float k_max = min(params.spectrum_c.z, 2.0 * PI / MIN_WAVELENGTH_M);
+    if (k < params.spectrum_c.y || k >= k_max) {
+        return vec2(0.0);
+    }
+    float theta = atan(k_vec.x, k_vec.y);
+    vec2 disp = dispersion_and_derivative(k, params.spectrum_b.y);
+    float w_norm = disp.y / k * dk * dk;
+    float peak = max(swell_params.swell_spectrum.x, 1e-6);
+    float alpha = max(swell_params.swell_spectrum.y, 0.0);
+    float spectrum = tma_spectrum(disp.x, peak, alpha, params.spectrum_b.y,
+        clamp(params.art_a.z, 1.0, 7.0));
+    float spread = clamp(swell_params.swell_spectrum.w, 0.001, PI);
+    float spread_power = 1.0 / (spread * spread);
+    float direction = longuet_higgins_function(spread_power,
+        theta - swell_params.swell_spectrum.z);
+    ivec2 mode_id = id - ivec2(MAP_SIZE / 2);
+    vec2 u = hash2(uvec2(mode_id) + uvec2(params.misc.y, params.misc.z)
+        + uvec2(0x5bd1e995u, 0x27d4eb2du));
+    float gain = 1.0 + (params.gains.x - 1.0) * exp(-k * 9.549);
+    return gaussian_pair(u) * sqrt(2.0 * spectrum * direction * w_norm)
+        * 0.3535533905932738 * gain;
 }
 
 void main() {
     ivec2 id0 = ivec2(gl_GlobalInvocationID.xy);
     ivec2 id1 = (ivec2(MAP_SIZE_I) - id0) % ivec2(MAP_SIZE_I);
+    vec2 h0 = spectrum_amplitude(id0) + swell_amplitude(id0);
+    vec2 h0_neg = spectrum_amplitude(id1) + swell_amplitude(id1);
     imageStore(spectrum_tex, ivec3(id0, params.misc.x),
-        vec4(spectrum_amplitude(id0), conj_complex(spectrum_amplitude(id1))));
+        vec4(h0, conj_complex(h0_neg)));
 }

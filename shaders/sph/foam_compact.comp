@@ -1,11 +1,15 @@
 // Second half of the white-particle frame (SebLague: WhiteParticlePrepareNextFrame).
 // Copies the survivors foam_update appended back over the live pool, then adopts the
-// survivor count as the new live count. Runs over the previous live range so the tail
-// past the survivors is cleared without walking unused pool capacity.
+// survivor count as the new live count. Runs up to the published-texel high-water
+// mark: every texel in [survivors, high_water) may hold the frozen last sprite of
+// a particle that died when the pool shrank, so it is cleared here (data[6] is
+// maintained by foam_prepare and never written below, so the concurrent reads
+// see one consistent bound).
 void main() {
 	uint s = gl_GlobalInvocationID.x;
 	uint cap = uint(foam.cls.z);
-	if (s >= foam_count.data[5]) {
+	uint bound = max(foam_count.data[5], foam_count.data[6]);
+	if (s >= bound) {
 		return;
 	}
 	uint survivors = min(cap, foam_count.data[1]);

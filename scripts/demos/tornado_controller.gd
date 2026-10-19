@@ -520,9 +520,8 @@ func _setup_ui() -> void:
 
 	menu.add_section("Performance")
 	quality.attach_menu_option(menu)
-	var scale_slider: HSlider = menu.add_slider("Render scale", 0.4, 1.0,
+	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
-	quality.bind("render_scale", scale_slider, _set_render_scale)
 	var steps_slider: HSlider = menu.add_slider("Raymarch steps", 16.0, 160.0,
 		float(_raymarch_steps),
 		func(v: float) -> void:
@@ -558,7 +557,6 @@ func _set_dust_amount(n: int) -> void:
 ## cap lands on the pool directly (build_pool below picks it up); afterwards a
 ## cap change goes through the same debounced rebuild as the slider.
 func _apply_quality(values: Dictionary) -> void:
-	_set_render_scale(values.render_scale)
 	_raymarch_steps = int(values.raymarch_steps)
 	if _funnel_mat != null:
 		_funnel_mat.set_shader_parameter("steps", _raymarch_steps)

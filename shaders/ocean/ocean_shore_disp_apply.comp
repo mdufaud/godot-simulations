@@ -1,0 +1,23 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    uint target = (1u - control.flags.x) * pixel_count() + i;
+    float dt = control.clock.w;
+    vec4 next = water[target];
+    if (next.x <= params.domain.w || dt <= 0.0) {
+        return;
+    }
+    float weight = params.misc.z == 0 ? 1.0 : 0.5;
+    vec2 v = next.yz / next.x;
+    float froude2 = dot(v, v) / (params.domain.z * next.x);
+    float was = brk[i].x;
+    float flag = was > 0.5
+        ? (froude2 > SHORE_BREAK_FR_END * SHORE_BREAK_FR_END ? 1.0 : 0.0)
+        : (froude2 > SHORE_BREAK_FR_START * SHORE_BREAK_FR_START ? 1.0 : 0.0);
+    brk[i] = vec4(flag, brk[i].yzw);
+    next.yz += weight * dt * (brk[i].yz - accel[i].xy);
+    accel[i].zw = brk[i].yz;
+    water[target] = vec4(next.xyz, 0.0);
+}

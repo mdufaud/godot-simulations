@@ -1,0 +1,13 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec3 incoming = offshore(world_position(p));
+    float depth = max(incoming.x - bed[i], 0.0);
+    vec4 q = vec4(depth, depth > params.domain.w ? depth * incoming.yz : vec2(0.0), 0.0);
+    water[i] = q;
+    water[pixel_count() + i] = q;
+    completed[i] = q;
+    completed[pixel_count() + i] = q;
+}

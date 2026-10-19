@@ -1,0 +1,55 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.face_dims.w)) { return; }
+	vec3 old_position = positions.data[i].xyz;
+	bool outside_interface = false;
+	bool phase_known = true;
+	if (params.surface.x > 0.5 && cell_types.data[cell_index(particle_cell(old_position))] != CELL_FLUID) {
+		float phi;
+		phase_known = particle_phi(old_position, phi);
+		outside_interface = phase_known && phi > 0.0;
+	}
+	float u;
+	float v;
+	float w;
+	vec3 c0;
+	vec3 c1;
+	vec3 c2;
+	bool pressure_u;
+	bool pressure_v;
+	bool pressure_w;
+	float du, dv, dw;
+	gather_component(old_position, 0, outside_interface, u, c0, pressure_u, du);
+	gather_component(old_position, 1, outside_interface, v, c1, pressure_v, dv);
+	gather_component(old_position, 2, outside_interface, w, c2, pressure_w, dw);
+	vec3 velocity = vec3(u, v, w);
+	vec3 advection_velocity = velocity;
+	if (params.coupling.z > 0.0) {
+		velocity = mix(velocity, velocities.data[i].xyz + vec3(du, dv, dw), params.coupling.z);
+	}
+	bool ballistic = outside_interface && !pressure_u && !pressure_v && !pressure_w;
+	if (ballistic) {
+		velocity = velocities.data[i].xyz + vec3(0.0, params.sim.y * params.sim.x, 0.0);
+		advection_velocity = velocity;
+		c0 = affine_rows.data[i * 3u].xyz;
+		c1 = affine_rows.data[i * 3u + 1u].xyz;
+		c2 = affine_rows.data[i * 3u + 2u].xyz;
+	}
+	vec3 p = old_position + advection_velocity * params.sim.x;
+	if (ballistic) { p.y -= 0.5 * params.sim.y * params.sim.x * params.sim.x; }
+	resolve_obstacles(p, velocity, old_position);
+	vec3 lo = scene.domain_min.xyz + vec3(0.01);
+	vec3 hi = scene.domain_max.xyz - vec3(0.01);
+	for (int axis = 0; axis < 3; axis++) {
+		if (p[axis] < lo[axis]) { p[axis] = lo[axis]; velocity[axis] = max(velocity[axis], 0.0); }
+		if (p[axis] > hi[axis]) { p[axis] = hi[axis]; velocity[axis] = min(velocity[axis], 0.0); }
+	}
+	positions.data[i] = vec4(p, positions.data[i].w);
+	velocities.data[i] = vec4(velocity, velocities.data[i].w);
+	affine_rows.data[i * 3u] = vec4(c0, 0.0);
+	affine_rows.data[i * 3u + 1u] = vec4(c1, 0.0);
+	affine_rows.data[i * 3u + 2u] = vec4(c2, 0.0);
+	particle_motion_flags.data[i] = ballistic ? 1.0 : (phase_known ? 0.0 : -1.0);
+	ivec2 texel = ivec2(int(i) % params.misc.z, int(i) / params.misc.z);
+	imageStore(position_texture, texel, vec4(p, length(velocity)));
+}

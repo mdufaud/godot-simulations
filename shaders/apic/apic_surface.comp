@@ -1,0 +1,107 @@
+float sample_phi(vec3 q, vec3 origin, bool predicted, float fallback, out vec2 bounds, out bool valid) {
+	vec3 p = params.grid_origin_dx.xyz + (q + vec3(0.5)) * params.grid_origin_dx.w;
+	ivec3 base = ivec3(floor(q));
+	precise vec3 fraction = q - vec3(base);
+	float value = 0.0;
+	float weight_sum = 0.0;
+	vec3 weighted_offset = vec3(0.0);
+	uint obstacle_mask = nearby_phi_obstacles(origin, length(p - origin) + 1.732050808 * params.grid_origin_dx.w);
+	bounds = vec2(3.402823466e+38, -3.402823466e+38);
+	valid = all(greaterThanEqual(base, ivec3(1)))
+		&& all(lessThan(base + ivec3(1), params.grid_dims.xyz - ivec3(1)));
+	for (int z = 0; z < 2; z++) {
+		for (int y = 0; y < 2; y++) {
+			for (int x = 0; x < 2; x++) {
+				ivec3 corner = ivec3(x, y, z);
+				ivec3 cell = clamp(base + corner, ivec3(0), params.grid_dims.xyz - ivec3(1));
+				vec3 weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
+				uint index = cell_index(cell);
+				if (cell_types.data[index] == CELL_SOLID) { valid = false; continue; }
+				vec3 donor = cell_anchor(cell);
+				if (obstacle_mask != 0u && phi_segment_blocked(origin, donor, obstacle_mask)) { valid = false; continue; }
+				float phi = predicted ? cell_phi_next.data[index] : cell_phi.data[index];
+				float scalar_weight = weight.x * weight.y * weight.z;
+				value += scalar_weight * phi;
+				weight_sum += scalar_weight;
+				weighted_offset += scalar_weight * (vec3(base - cell) + fraction) * params.grid_origin_dx.w;
+				bounds = vec2(min(bounds.x, phi), max(bounds.y, phi));
+			}
+		}
+	}
+	bvec3 needed = greaterThan(abs(weighted_offset), vec3(1.0e-6 * params.grid_origin_dx.w * weight_sum));
+	if (!valid && params.surface.y > 0.5 && weight_sum > 1.0e-8 && any(needed)) {
+		vec3 weighted_gradient = vec3(0.0);
+		bool usable = true;
+		for (int z = 0; z < 2; z++) {
+			for (int y = 0; y < 2; y++) {
+				for (int x = 0; x < 2; x++) {
+					ivec3 corner = ivec3(x, y, z);
+					ivec3 cell = clamp(base + corner, ivec3(0), params.grid_dims.xyz - ivec3(1));
+					vec3 weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
+					float scalar_weight = weight.x * weight.y * weight.z;
+					if (scalar_weight <= 0.0 || !visible_phi_cell(origin, cell, obstacle_mask)) { continue; }
+					bvec3 available;
+					vec3 gradient = geometry_phi_gradient(cell, predicted, true, available);
+					if ((needed.x && !available.x) || (needed.y && !available.y)
+						|| (needed.z && !available.z) || any(isnan(gradient)) || any(isinf(gradient))) { usable = false; }
+					weighted_gradient += scalar_weight * gradient;
+				}
+			}
+		}
+		if (usable) { value += dot(weighted_gradient / weight_sum, weighted_offset); }
+	}
+	return weight_sum > 1.0e-8 ? value / weight_sum : fallback;
+}
+
+vec3 sample_velocity(vec3 p) {
+	vec3 value = vec3(0.0);
+	for (int component = 0; component < 3; component++) {
+		vec3 offset = vec3(0.5);
+		offset[component] = 0.0;
+		vec3 q = (p - params.grid_origin_dx.xyz) / params.grid_origin_dx.w - offset;
+		ivec3 base = ivec3(floor(q));
+		vec3 fraction = fract(q);
+		ivec3 dims = params.grid_dims.xyz;
+		dims[component]++;
+		for (int z = 0; z < 2; z++) {
+			for (int y = 0; y < 2; y++) {
+				for (int x = 0; x < 2; x++) {
+					ivec3 corner = ivec3(x, y, z);
+					ivec3 face = clamp(base + corner, ivec3(0), dims - ivec3(1));
+					vec3 weight = mix(vec3(1.0) - fraction, fraction, vec3(corner));
+					float velocity = face_extension_a.data[uint(component) * num_faces() + face_index(face)].x;
+					value[component] += weight.x * weight.y * weight.z * velocity;
+				}
+			}
+		}
+	}
+	return value;
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= num_cells()) { return; }
+	if (params.misc.w == -2) { cell_phi.data[i] = cell_phi_corrected.data[i]; return; }
+	if (cell_types.data[i] == CELL_SOLID) {
+		if (params.misc.w == -1) { cell_phi_next.data[i] = cell_phi.data[i]; }
+		else { cell_phi_corrected.data[i] = cell_phi.data[i]; }
+		return;
+	}
+	vec3 cell = vec3(cell_coord(i));
+	vec3 p = params.grid_origin_dx.xyz + (cell + vec3(0.5)) * params.grid_origin_dx.w;
+	vec3 anchor = cell_anchor(cell_coord(i));
+	vec3 midpoint = p - 0.5 * params.sim.x * sample_velocity(p);
+	precise vec3 departure = cell - params.sim.x * sample_velocity(midpoint) / params.grid_origin_dx.w;
+	vec2 bounds;
+	bool forward_valid;
+	float forward = sample_phi(departure, anchor, false, cell_phi.data[i], bounds, forward_valid);
+	if (params.misc.w == -1) { cell_phi_next.data[i] = forward; return; }
+	vec3 reverse_midpoint = p + 0.5 * params.sim.x * sample_velocity(p);
+	precise vec3 reverse_departure = cell + params.sim.x * sample_velocity(reverse_midpoint) / params.grid_origin_dx.w;
+	vec2 reverse_bounds;
+	bool reverse_valid;
+	float backward = sample_phi(reverse_departure, anchor, true, cell_phi_next.data[i], reverse_bounds, reverse_valid);
+	float corrected = cell_phi_next.data[i] + 0.5 * (cell_phi.data[i] - backward);
+	cell_phi_corrected.data[i] = forward_valid && reverse_valid
+		&& corrected >= bounds.x && corrected <= bounds.y ? corrected : forward;
+}

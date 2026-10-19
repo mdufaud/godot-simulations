@@ -24,9 +24,14 @@ uniform sampler3D visual_activity_tex : filter_nearest, repeat_disable;
 uniform sampler3D visual_activity_tex_prev : filter_nearest, repeat_disable;
 uniform float temporal_blend = 1.0;
 
-uniform vec3 atlas_cells = vec3(128.0, 64.0, 128.0);
-uniform ivec3 atlas_tiles = ivec3(16, 8, 16);
-uniform ivec3 virtual_tiles = ivec3(256, 64, 256);
+// Pool layout, all FireTilePool's and pushed by FirePresentation: a tile is
+// 1 << tile_shift cells on a side, and an indirection entry at or above
+// tile_slot_max is a sentinel, meaning no tile is resident there.
+uniform vec3 atlas_cells;
+uniform ivec3 atlas_tiles;
+uniform ivec3 virtual_tiles;
+uniform int tile_shift;
+uniform uint tile_slot_max;
 uniform float cell_size = 0.2;
 uniform vec3 virtual_origin = vec3(-204.8, 0.0, -204.8);
 uniform vec3 volume_origin = vec3(-6.4, 0.0, -6.4);
@@ -48,16 +53,15 @@ uniform float max_distance = 80.0;
 // fetch is enough to exhaust the machine's memory while linking the shader.
 uniform int march_budget : hint_range(64, 512) = 320;
 
-const int TILE = 8;
-// Mirrors fire_tile_pool.gd: at or above this an indirection entry is a sentinel,
-// meaning no tile is resident there.
-const uint SLOT_MAX = 0xFFFFFFF0u;
+int tile_cells() {
+	return 1 << tile_shift;
+}
 
 // Atlas texel of the low corner of a slot's 8^3 block.
 ivec3 slot_origin(uint slot) {
 	int s = int(slot);
 	return ivec3(s % atlas_tiles.x, (s / atlas_tiles.x) % atlas_tiles.y,
-		s / (atlas_tiles.x * atlas_tiles.y)) * TILE;
+		s / (atlas_tiles.x * atlas_tiles.y)) * tile_cells();
 }
 
 // Reassemble the stored uint. The +0.5 is the exact inverse of the UNORM encode:
@@ -82,14 +86,14 @@ uint tile_slot(ivec3 vt, bool previous) {
 // always clear air, and it is what the dense build's edge fade approximated.
 vec4 tap(ivec3 vc, ivec3 current_tile, uint current_slot, ivec3 current_atlas,
 	bool previous) {
-	ivec3 vt = vc >> 3;
+	ivec3 vt = vc >> ivec3(tile_shift);
 	uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt, previous);
-	if (slot >= SLOT_MAX) {
+	if (slot >= tile_slot_max) {
 		return vec4(0.0);
 	}
 	ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
-	return previous ? texelFetch(volume_tex_prev, atlas + (vc & ivec3(7)), 0)
-		: texelFetch(volume_tex, atlas + (vc & ivec3(7)), 0);
+	return previous ? texelFetch(volume_tex_prev, atlas + (vc & ivec3(tile_cells() - 1)), 0)
+		: texelFetch(volume_tex, atlas + (vc & ivec3(tile_cells() - 1)), 0);
 }
 
 // Trilinear fetch at a continuous virtual cell position (cell centres sit on
@@ -107,14 +111,14 @@ vec4 sample_virtual(vec3 vp, ivec3 current_tile, uint current_slot,
 	vec3 g = vp - vec3(0.5);
 	ivec3 c0 = ivec3(floor(g));
 	vec3 f = g - vec3(c0);
-	ivec3 vt = c0 >> 3;
-	if (all(equal(vt, (c0 + ivec3(1)) >> 3))) {
+	ivec3 vt = c0 >> ivec3(tile_shift);
+	if (all(equal(vt, (c0 + ivec3(1)) >> ivec3(tile_shift)))) {
 		uint slot = all(equal(vt, current_tile)) ? current_slot : tile_slot(vt, previous);
-		if (slot >= SLOT_MAX) {
+		if (slot >= tile_slot_max) {
 			return vec4(0.0);
 		}
 		ivec3 atlas = all(equal(vt, current_tile)) ? current_atlas : slot_origin(slot);
-		vec3 uvw = (vec3(atlas + (c0 & ivec3(7))) + vec3(0.5) + f) / atlas_cells;
+		vec3 uvw = (vec3(atlas + (c0 & ivec3(tile_cells() - 1))) + vec3(0.5) + f) / atlas_cells;
 		return previous ? texture(volume_tex_prev, uvw) : texture(volume_tex, uvw);
 	}
 	vec4 s000 = tap(c0, current_tile, current_slot, current_atlas, previous);
@@ -159,7 +163,7 @@ void fragment() {
 	vec3 inv_dir = 1.0 / (sgn * max(abs(ray_dir), vec3(1e-6)));
 
 	// ---- DDA setup, in tiles (Amanatides & Woo) ----
-	float tile_world = float(TILE) * cell_size;
+	float tile_world = float(tile_cells()) * cell_size;
 	vec3 entry = (cam_obj + ray_dir * t0 + volume_center - virtual_origin) / tile_world;
 	ivec3 ti = clamp(ivec3(floor(entry)), ivec3(0), virtual_tiles - ivec3(1));
 	ivec3 tstep = ivec3(sgn);
@@ -191,16 +195,16 @@ void fragment() {
 	// step for nothing. Hoisted out of the loop as a uniform-valued flag.
 	bool use_prev = temporal_blend < 0.999;
 	uint current_slot = indir_slot(ti, false);
-	ivec3 current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+	ivec3 current_atlas = current_slot < tile_slot_max ? slot_origin(current_slot) : ivec3(0);
 	uint previous_slot = 0xFFFFFFFFu;
 	ivec3 previous_atlas = ivec3(0);
 	if (use_prev) {
 		previous_slot = indir_slot(ti, true);
-		previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+		previous_atlas = previous_slot < tile_slot_max ? slot_origin(previous_slot) : ivec3(0);
 	}
-	bool resident = current_slot < SLOT_MAX
+	bool resident = current_slot < tile_slot_max
 		&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
-	resident = resident || (use_prev && previous_slot < SLOT_MAX
+	resident = resident || (use_prev && previous_slot < tile_slot_max
 		&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 
 	for (int i = 0; i < march_budget; i++) {
@@ -245,14 +249,14 @@ void fragment() {
 		t_exit = min(min(t_next.x, t_next.y), t_next.z);
 		seg_end = min(t_exit, t1);
 		current_slot = indir_slot(ti, false);
-		current_atlas = current_slot < SLOT_MAX ? slot_origin(current_slot) : ivec3(0);
+		current_atlas = current_slot < tile_slot_max ? slot_origin(current_slot) : ivec3(0);
 		if (use_prev) {
 			previous_slot = indir_slot(ti, true);
-			previous_atlas = previous_slot < SLOT_MAX ? slot_origin(previous_slot) : ivec3(0);
+			previous_atlas = previous_slot < tile_slot_max ? slot_origin(previous_slot) : ivec3(0);
 		}
-		resident = current_slot < SLOT_MAX
+		resident = current_slot < tile_slot_max
 			&& visual_tile_signal(current_atlas, false) >= visual_occupancy_threshold;
-		resident = resident || (use_prev && previous_slot < SLOT_MAX
+		resident = resident || (use_prev && previous_slot < tile_slot_max
 			&& visual_tile_signal(previous_atlas, true) >= visual_occupancy_threshold);
 		// Skipped tiles cost the sample lattice nothing: the cursor is snapped
 		// forward onto it rather than restarted, so the jitter pattern does not

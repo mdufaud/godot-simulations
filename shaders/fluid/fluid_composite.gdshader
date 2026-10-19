@@ -6,13 +6,15 @@
 shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_never, depth_test_disabled;
 
-uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear;
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_nearest;
 uniform sampler2D fluid_depth_tex : filter_nearest;
 uniform sampler2D thickness_tex : filter_linear;
-// White-particle prepass: R = coverage, G = linear eye depth of the sprite.
+// Foam-particle prepass: R = optical density, G = density-weighted eye depth.
 uniform sampler2D foam_tex : filter_linear;
 uniform bool foam_enabled = false;
+// Froth albedo; it is lit by the sky and the sun like any diffuse surface.
+uniform vec3 foam_color : source_color = vec3(0.9, 0.94, 0.96);
 
 uniform vec3 absorption = vec3(0.55, 0.18, 0.09);
 uniform float absorption_scale = 0.5;
@@ -28,7 +30,21 @@ uniform float sun_sharpness = 500.0;
 uniform float sun_intensity = 12.0;
 uniform float refraction_strength = 0.35;
 uniform float ior = 1.33;
-uniform float mode = 0.0;
+// Must match FluidSystem.FluidKind: values AND order.
+const int MATERIAL_WATER = 0;
+const int MATERIAL_LAVA = 1;
+const int MATERIAL_MERCURY = 2;
+const int MATERIAL_HONEY = 3;
+const int MATERIAL_OIL = 4;
+const int MATERIAL_ASTRAL = 5;
+const int MATERIAL_SPECTRAL_GEL = 6;
+const int MATERIAL_FLUID_LAVA = 7;
+const int MATERIAL_PRISMATIC_SLIME = 8;
+const int MATERIAL_LIQUID_NITROGEN = 10;
+// Nitrogen's white particles are cold fog, not sea froth.
+const vec3 NITROGEN_FOG = vec3(0.86, 0.91, 0.96);
+const float NITROGEN_FOG_MAX = 0.65;
+uniform int mode = 0;
 // Planet mode: this quad draws after the atmosphere quad and both read the same
 // pre-transparent screen copy, so the atmosphere cannot fog the water from the
 // outside -- the water has to apply the scattering to itself.
@@ -97,6 +113,23 @@ vec3 sample_sky(vec3 world_dir, vec3 to_sun, vec3 up_axis) {
 	return sky + vec3(sun);
 }
 
+// Froth scatters light diffusely: sky ambient plus a wrapped sun term, so
+// sheets facing away from the sun fall into a soft blue-grey.
+vec3 shade_froth(vec3 n_world) {
+	float sun = clamp(dot(n_world, normalize(-sun_direction)) * 0.6 + 0.4, 0.0, 1.0);
+	return foam_color * (0.5 * (sky_zenith + sky_horizon) + vec3(0.75 * sun));
+}
+
+float astral_noise(vec2 p) {
+	vec2 cell = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	vec4 corners = vec4(dot(cell, vec2(127.1, 311.7)), dot(cell + vec2(1.0, 0.0), vec2(127.1, 311.7)),
+		dot(cell + vec2(0.0, 1.0), vec2(127.1, 311.7)), dot(cell + vec2(1.0), vec2(127.1, 311.7)));
+	corners = fract(sin(corners) * 43758.5453);
+	return mix(mix(corners.x, corners.y, f.x), mix(corners.z, corners.w, f.x), f.y);
+}
+
 void fragment() {
 	float scene_d = scene_eye_depth(SCREEN_UV, INV_PROJECTION_MATRIX, DEPTH_TEXTURE);
 	vec2 fm = texture(foam_tex, SCREEN_UV).rg;
@@ -104,7 +137,14 @@ void fragment() {
 		fm = vec2(0.0);
 	}
 	float foam = fm.r;
-	float foam_d = fm.g;
+	float foam_d = fm.g / max(foam, 1e-5);
+	// Fog puffs add up to a capped haze, so even a tank full of nitrogen fog
+	// lets the liquid show through. Froth is thresholded like a metaball field:
+	// a lone particle stays a faint smudge while overlapping ones merge into an
+	// opaque white sheet.
+	foam = mode == MATERIAL_LIQUID_NITROGEN ? min(foam, NITROGEN_FOG_MAX)
+		: (1.0 - exp(-2.0 * foam)) * smoothstep(0.15, 0.6, foam);
+	vec3 froth = mode == MATERIAL_LIQUID_NITROGEN ? NITROGEN_FOG : shade_froth(normalize(sky_up_axis));
 	// Foam behind opaque scene geometry is hidden by it.
 	if (foam_d > scene_d) {
 		foam = 0.0;
@@ -117,13 +157,29 @@ void fragment() {
 		if (foam <= 0.002) {
 			discard;
 		}
-		ALBEDO = vec3(1.0);
+		ALBEDO = froth;
 		ALPHA = foam;
 	} else {
+		// Foam depth split: coverage in FRONT of the surface (foam_d < fd) is
+		// unattenuated white froth composited over everything at the end;
+		// coverage behind it is submerged and must ride the refracted
+		// background so the Beer-Lambert term attenuates it, instead of
+		// white-beading through the thin water near edges and walls.
+		float foam_front = foam * clamp((fd - foam_d) / 0.5, 0.0, 1.0);
+		float foam_under = foam - foam_front;
 
 		// View-space normal from filtered depth; pick the smaller one-sided
 		// difference on each axis so silhouette edges don't smear normals.
-		vec2 ts = 1.0 / vec2(textureSize(fluid_depth_tex, 0));
+		// The bigger-radius materials (mercury, honey) reconstruct their normals
+		// from a wider footprint. Listed explicitly: a future FluidKind must not
+		// inherit the grouping by accident of its enum position.
+		#ifdef LIGHT_PASTE
+		bool wide_normal_footprint = true;
+		#else
+		bool wide_normal_footprint = mode == MATERIAL_MERCURY || mode == MATERIAL_HONEY
+			|| mode == MATERIAL_OIL || mode == MATERIAL_ASTRAL || mode == MATERIAL_SPECTRAL_GEL || mode == MATERIAL_PRISMATIC_SLIME;
+		#endif
+		vec2 ts = (wide_normal_footprint ? 3.0 : 1.0) / vec2(textureSize(fluid_depth_tex, 0));
 		vec3 pc = eye_pos_from_depth(SCREEN_UV, fd, INV_PROJECTION_MATRIX);
 		float dr = fluid_depth(SCREEN_UV + vec2(ts.x, 0.0));
 		float dl = fluid_depth(SCREEN_UV - vec2(ts.x, 0.0));
@@ -145,7 +201,20 @@ void fragment() {
 		vec2 thick_rg = texture(thickness_tex, SCREEN_UV).rg;
 		float thickness = thick_rg.r;
 
-		if (mode > 0.5) {
+		#ifdef LIGHT_PASTE
+		vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
+		vec3 view = normalize(-pc);
+		float diffuse = max(dot(n, sun_view), 0.0);
+		float rim = pow(1.0 - max(dot(n, view), 0.0), 3.0);
+		float gloss = pow(max(dot(n, normalize(sun_view + view)), 0.0), 36.0);
+		float fold = smoothstep(0.012, 0.08, length(dFdx(n)) + length(dFdy(n)));
+		float yielding = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+		vec3 cream = mix(vec3(0.22, 0.18, 0.12), vec3(0.64, 0.57, 0.42), 0.3 + 0.7 * diffuse);
+		ALBEDO = cream * (0.45 + 0.55 * diffuse) + vec3(0.8, 0.9, 1.0) * gloss * 0.4
+			+ vec3(4.0, 0.5, 0.025) * (fold * (0.06 + 0.65 * yielding) + rim * 0.06);
+		ALPHA = 1.0;
+		#else
+		if (mode == MATERIAL_LAVA || mode == MATERIAL_FLUID_LAVA) {
 			// --- LAVA (preserved verbatim) ---
 			vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
 			float t_surf = texture(fluid_depth_tex, SCREEN_UV).b;
@@ -158,41 +227,159 @@ void fragment() {
 			float glow = smoothstep(0.06, 0.32, t_surf);
 			ALBEDO = mix(crust_col, emis, glow);
 			ALPHA = clamp(thickness * 12.0, 0.0, 1.0);
+		} else if (mode == MATERIAL_ASTRAL) {
+			vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+			float stress = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+			vec2 flow = world.xz * 1.4 + (world.y + TIME * 1.8) * vec2(0.35, 0.22);
+			vec2 warp = vec2(astral_noise(flow * 0.5 + TIME * 0.24),
+				astral_noise(flow * 0.5 + vec2(17.3, 4.1) - TIME * 0.2));
+			float field = astral_noise(flow + warp * 3.5) * 0.7
+				+ astral_noise(flow * 2.3 - warp) * 0.3;
+			float threads = 1.0 - smoothstep(0.003, 0.012, abs(field - 0.5));
+			threads *= smoothstep(0.35, 0.7, astral_noise(flow * 0.45 + 9.1));
+			float rim = pow(1.0 - max(dot(-normalize(pc), n), 0.0), 3.0);
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(normalize(pc), n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			vec3 body = vec3(0.004, 0.001, 0.009) + sky * vec3(0.14, 0.1, 0.23) * (0.2 + 0.8 * rim);
+			float activation = smoothstep(0.08, 0.6, stress);
+			vec3 filament = mix(vec3(0.38, 0.09, 0.85), vec3(0.65, 1.1, 2.0), activation);
+			ALBEDO = body + filament * (threads * (0.04 + 3.0 * activation) + 0.1 * activation * activation);
+			ALPHA = 1.0;
+		} else if (mode == MATERIAL_PRISMATIC_SLIME) {
+			vec3 incoming = normalize(pc);
+			float facing = clamp(dot(-incoming, n), 0.0, 1.0);
+			float rim = pow(1.0 - facing, 3.0);
+			float optical_depth = thickness * 0.04;
+			float fluidity = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+			vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+			float grain = astral_noise(world.xz * 0.45 + world.y * 0.2);
+			float phase = (1.0 - facing) * 9.0 + optical_depth * 1.4 + grain * 2.0;
+			vec3 film = 0.5 + 0.5 * cos(vec3(phase, phase + 2.094, phase + 4.189));
+			vec3 pearl = mix(vec3(0.55, 0.62, 0.68), 0.12 + film * 0.88, 0.65 + 0.2 * fluidity);
+			vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
+			vec3 body = pearl * (0.3 + 0.5 * max(dot(n, sun_view), 0.0));
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(incoming, n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			vec3 under = textureLod(SCREEN_TEXTURE, SCREEN_UV, 0.0).rgb;
+			ALBEDO = mix(body, under, exp(-optical_depth * 2.0) * 0.18)
+				+ sky * mix(vec3(0.75), film + 0.15, 0.6) * (0.12 + 0.55 * rim);
+			ALPHA = 1.0;
+		} else if (mode == MATERIAL_SPECTRAL_GEL) {
+			float optical_depth = thickness * 0.06;
+			vec3 incoming = normalize(pc);
+			float fresnel = dielectric_reflectance(incoming, n, 1.0, 1.4);
+			vec2 offset = n.xy * (0.12 * clamp(optical_depth, 0.0, 2.0) / max(fd, 0.5));
+			vec2 uv = clamp(SCREEN_UV + offset, vec2(0.001), vec2(0.999));
+			if (scene_eye_depth(uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
+				uv = SCREEN_UV;
+			}
+			vec3 transmission = exp(-vec3(1.8, 0.5, 0.3) * optical_depth * 0.6);
+			vec3 body = textureLod(SCREEN_TEXTURE, uv, 0.0).rgb * transmission
+				+ vec3(0.05, 0.23, 0.3) * (1.0 - transmission);
+			vec3 reflected = normalize((INV_VIEW_MATRIX * vec4(reflect(incoming, n), 0.0)).xyz);
+			vec3 sky = sample_sky(reflected, normalize(-sun_direction), normalize(sky_up_axis));
+			float core = 1.0 - exp(-max(optical_depth - 0.12, 0.0) * 1.3);
+			float rim = pow(1.0 - max(dot(-incoming, n), 0.0), 3.0);
+			ALBEDO = mix(body, sky * vec3(0.65, 0.8, 1.0), clamp(fresnel, 0.04, 0.8))
+				+ vec3(0.12, 0.9, 1.35) * core * core * (1.0 - fresnel) * 1.15
+				+ vec3(0.08, 0.35, 0.55) * rim * 0.5;
+			ALPHA = 1.0;
+		} else if (mode == MATERIAL_MERCURY) {
+			vec3 in_view = normalize(pc);
+			vec3 refl_view = reflect(in_view, n);
+			vec3 refl_world = normalize((INV_VIEW_MATRIX * vec4(refl_view, 0.0)).xyz);
+			vec3 sky = sample_sky(refl_world, normalize(-sun_direction), normalize(sky_up_axis));
+			float gray = dot(sky, vec3(0.2126, 0.7152, 0.0722));
+			vec3 chrome = vec3(0.04 + pow(max(gray, 0.0), 2.2) * 0.55) * vec3(0.96, 0.99, 1.02);
+			float panel = exp(-pow((refl_world.x + 0.3) * 8.0, 2.0))
+				* smoothstep(0.1, 0.35, refl_world.y);
+			chrome += vec3(0.3) * panel;
+			ALBEDO = chrome;
+			ALPHA = clamp(thickness * 14.0, 0.0, 1.0);
 		} else {
 			// --- WATER (SebLague-style dielectric surface) ---
 			vec3 in_view = normalize(pc); // camera -> surface, view space
-			float reflectance = dielectric_reflectance(in_view, n, 1.0, ior);
+			float oil_front = clamp(texture(fluid_depth_tex, SCREEN_UV).b, 0.0, 1.0);
+			float oil_fraction = clamp(thick_rg.g / max(thickness, 1e-4), 0.0, 1.0);
+			bool nitrogen = mode == MATERIAL_LIQUID_NITROGEN;
+			float local_ior = mode == MATERIAL_HONEY ? 1.49 : mode == MATERIAL_OIL ? mix(1.33, 1.47, oil_front)
+				: nitrogen ? 1.2 : ior;
+			vec3 local_absorption = mode == MATERIAL_HONEY ? vec3(0.5, 1.7, 4.0) :
+				mode == MATERIAL_OIL ? mix(absorption, vec3(0.3, 1.1, 2.1), oil_fraction) :
+				nitrogen ? vec3(0.22, 0.07, 0.03) : absorption;
+			vec3 local_tint = mode == MATERIAL_HONEY ? vec3(0.28, 0.085, 0.004) :
+				mode == MATERIAL_OIL ? mix(tint_color, vec3(0.16, 0.05, 0.006), oil_front) :
+				nitrogen ? vec3(0.1, 0.32, 0.5) : tint_color;
+			if (nitrogen) {
+				// Boiling keeps the surface shivering with fine ripples.
+				vec3 world = (INV_VIEW_MATRIX * vec4(pc, 1.0)).xyz;
+				vec2 q = world.xz * 6.0 + TIME * vec2(2.1, -1.7);
+				vec2 slope = vec2(astral_noise(q + vec2(0.1, 0.0)) - astral_noise(q - vec2(0.1, 0.0)),
+					astral_noise(q + vec2(0.0, 0.1)) - astral_noise(q - vec2(0.0, 0.1))) * 5.0;
+				n = normalize(n + (VIEW_MATRIX * vec4(slope.x, 0.0, slope.y, 0.0)).xyz * 0.12);
+			}
+			if (!nitrogen) {
+				froth = shade_froth(normalize((INV_VIEW_MATRIX * vec4(n, 0.0)).xyz));
+			}
+			float reflectance = dielectric_reflectance(in_view, n, 1.0, local_ior);
+			if (mode == MATERIAL_HONEY) {
+				reflectance = max(reflectance, 0.18);
+			} else if (mode == MATERIAL_OIL) {
+				reflectance = max(reflectance, 0.08 * oil_front);
+			} else if (nitrogen) {
+				reflectance = max(reflectance, 0.05);
+			}
+			// Foam is matte froth, not glass: fade the surface specular out as
+			// front coverage rises so the water does not glint through the
+			// sheet. Submerged coverage does not matte the surface above it.
+			reflectance *= 1.0 - foam_front * 0.85;
 
-			// Snell-bent refraction: offset the screen sample by the lateral bend,
-			// scaled by optical thickness; fall back if the sample is in front.
-			vec3 rdir = snell_refract(in_view, n, 1.0, ior);
-			vec2 refr_uv = SCREEN_UV + (rdir.xy - in_view.xy) * refraction_strength * clamp(thickness, 0.0, 2.0);
-			refr_uv = clamp(refr_uv, vec2(0.001), vec2(0.999));
+			// Snell-bent refraction: offset the screen sample by the lateral
+			// bend, scaled by optical thickness. The bend is divided by the eye
+			// depth so the on-screen shift stays world-constant — unbounded at
+			// grazing angles it used to sample the sky past the tank and paint
+			// a dark band across settled water. The length clamp is the last
+			// resort for extreme cases; fall back if the sample is in front.
+			vec3 rdir = snell_refract(in_view, n, 1.0, local_ior);
+			vec2 bend = (rdir.xy - in_view.xy)
+					* (refraction_strength * clamp(thickness, 0.0, 2.0) / max(fd, 0.5));
+			float bend_len = length(bend);
+			if (bend_len > 0.08) {
+				bend *= 0.08 / bend_len;
+			}
+			vec2 refr_uv = clamp(SCREEN_UV + bend, vec2(0.001), vec2(0.999));
 			if (scene_eye_depth(refr_uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
 				refr_uv = SCREEN_UV;
 			}
-			// Foam is opaque white coverage (SebLague): it goes into what is seen
-			// through the water BEFORE absorption, so froth deep in the body is
-			// attenuated by the water above it instead of showing as hard beads.
+			// Submerged froth is part of what the water tints and absorbs;
+			// front froth skips the water entirely and composites last.
 			vec3 scene_col = textureLod(SCREEN_TEXTURE, refr_uv, 0.0).rgb;
-			scene_col = scene_col * (1.0 - foam) + foam;
-			vec3 trans = exp(-absorption * thickness * absorption_scale);
-			vec3 refr_col = scene_col * trans + tint_color * (1.0 - trans);
+			scene_col = mix(scene_col, froth, foam_under);
+			vec3 trans = exp(-local_absorption * thickness * (mode == MATERIAL_HONEY ? 1.2 : mode == MATERIAL_OIL ? 0.9
+				: nitrogen ? 0.35 : absorption_scale));
+			vec3 refr_col = scene_col * trans + local_tint * (1.0 - trans);
+			if (mode == MATERIAL_HONEY) {
+				vec3 sun_view = normalize((VIEW_MATRIX * vec4(-normalize(sun_direction), 0.0)).xyz);
+				refr_col *= 0.58 + 0.42 * max(dot(n, sun_view), 0.0);
+			}
 
 			// Reflection samples the sky + sun disc (the clean glassy glint).
 			vec3 refl_view = reflect(in_view, n);
 			vec3 refl_world = normalize((INV_VIEW_MATRIX * vec4(refl_view, 0.0)).xyz);
 			vec3 to_sun = normalize(-sun_direction);
 			vec3 refl_col = sample_sky(refl_world, to_sun, normalize(sky_up_axis));
-
-			// Foam in front of the surface also takes over the reflection.
-			if (foam_d < fd) {
-				refl_col = refl_col * (1.0 - foam) + foam;
+			if (mode == MATERIAL_HONEY) {
+				refl_col += vec3(1.0, 0.55, 0.15) * 2.0
+					* pow(max(dot(refl_world, to_sun), 0.0), 16.0);
 			}
 
-			ALBEDO = mix(refr_col, refl_col, reflectance);
-			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam);
+			// Front froth takes over the sky reflection too (it is diffuse).
+			refl_col = mix(refl_col, froth, foam_front);
+
+			ALBEDO = mix(mix(refr_col, refl_col, reflectance), froth, foam_front);
+			ALPHA = max(clamp(thickness * 8.0, 0.0, 1.0), foam_front);
 		}
+		#endif
 	}
 
 	if (atmosphere_enabled) {

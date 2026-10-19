@@ -1,0 +1,26 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    vec2 world = world_at(id);
+    vec4 source_displacement = vec4(0.0);
+    vec4 source_velocity = vec4(0.0);
+    bool local_wake = lp.grid.x < 100.0;
+    if (!local_wake) {
+        for (int cascade = 0; cascade < 3; cascade++) {
+            source_displacement += sample_displacement(cascade,
+                lp.ocean[cascade], world);
+            source_velocity += sample_velocity(cascade,
+                lp.ocean[cascade], world);
+        }
+    }
+    vec4 state_value = sample_depth_blended_state(world, lp.domain.zw);
+    float eta = lp.cfg.w != 0 ? 0.0 : state_value.x - state_value.z;
+    float psi = lp.cfg.w != 0 ? 0.0 : state_value.y - state_value.w;
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = vec2(eta, 0.0);
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vec2(psi, 0.0);
+    fft_data[FFT_IDX(id.x, id.y, 2, 0)] =
+        vec2(local_wake ? 0.0 : source_displacement.y, 0.0);
+    fft_data[FFT_IDX(id.x, id.y, 3, 0)] =
+        vec2(local_wake ? 0.0 : source_velocity.y, 0.0);
+}

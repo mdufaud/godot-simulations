@@ -37,7 +37,10 @@ func _ready() -> void:
 
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED:
+	# EXIT_TREE covers get_tree().quit() from the Exit button, which delivers no
+	# WM close request: without it the debounced writes are lost.
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED \
+			or what == NOTIFICATION_EXIT_TREE:
 		_flush()
 
 
@@ -102,19 +105,29 @@ func _restore_window() -> void:
 
 	_restoring_window = true
 	var size: Vector2i = _config.get_value("window", "size", window.size)
-	window.size = size.max(Vector2i(320, 240))
-	if _config.has_section_key("window", "position"):
-		window.position = _config.get_value("window", "position")
-	if mode != DisplayServer.WINDOW_MODE_WINDOWED:
-		window.mode = mode as Window.Mode
+	# Clamp to the current desktop: a size saved on another monitor (or before a
+	# resolution change) must not push the title bar out of reach.
+	var screen := DisplayServer.screen_get_usable_rect(window.current_screen)
+	window.size = size.max(Vector2i(320, 240)).min(screen.size)
+	var position: Vector2i = _config.get_value("window", "position", window.position)
+	# Keep at least the top bar grabbable and most of the window visible.
+	window.position = Vector2i(
+			clampi(position.x, screen.position.x, screen.end.x - 160),
+			clampi(position.y, screen.position.y, screen.end.y - 80),
+	)
+	if mode != DisplayServer.WINDOW_MODE_WINDOWED and mode != DisplayServer.WINDOW_MODE_MINIMIZED:
+			window.mode = mode as Window.Mode
 	_restoring_window = false
+
+
 
 
 func _on_window_changed() -> void:
 	if _restoring_window:
 		return
 	var window := get_window()
-	_config.set_value("window", "mode", int(window.mode))
+	if window.mode != Window.MODE_MINIMIZED:
+		_config.set_value("window", "mode", int(window.mode))
 	if window.mode == Window.MODE_WINDOWED:
 		_config.set_value("window", "size", window.size)
 		_config.set_value("window", "position", window.position)

@@ -1,0 +1,295 @@
+#define PI 3.141592653589793
+
+layout(rgba32f, set = 0, binding = 0) readonly uniform image2DArray spectrum_tex;
+layout(std430, set = 0, binding = 1) readonly buffer BedBuffer { float bed[]; };
+layout(std430, set = 0, binding = 2) restrict buffer StateBuffer { vec4 water[]; };
+layout(std430, set = 0, binding = 3) restrict buffer FoamBuffer { vec4 foam[]; };
+layout(std430, set = 0, binding = 4) restrict buffer CompletedBuffer { vec4 completed[]; };
+layout(std430, set = 0, binding = 5) restrict buffer CompletedFoamBuffer { vec4 completed_foam[]; };
+layout(std430, set = 0, binding = 6) restrict buffer ControlBuffer {
+    vec4 clock;
+    uvec4 flags;
+    vec4 forcing;
+    uvec4 counts;
+    uvec4 cell_args;
+    uvec4 pack_args;
+    uvec4 fft_args;
+    uvec4 transpose_args;
+} control;
+layout(std430, set = 0, binding = 7) restrict buffer FFTBuffer { vec2 fft_data[]; };
+layout(std430, set = 0, binding = 8) restrict buffer ButterflyBuffer { vec4 butterfly[]; };
+layout(rgba32f, set = 0, binding = 9) uniform image2DArray boundary_map;
+layout(rgba32f, set = 0, binding = 10) writeonly uniform image2D surface_map;
+layout(rgba32f, set = 0, binding = 11) writeonly uniform image2D foam_map;
+layout(std430, set = 0, binding = 12) restrict buffer EventBuffer { vec4 events[]; };
+layout(std430, set = 0, binding = 13) readonly buffer PressureBuffer { vec4 pressures[]; };
+layout(rgba32f, set = 0, binding = 14) writeonly uniform image2D derivative_map;
+layout(std430, set = 0, binding = 15) restrict buffer BalanceBuffer { vec4 balance[]; };
+layout(std430, set = 0, binding = 16) restrict buffer SlopeBuffer { vec4 slopes[]; };
+layout(std430, set = 0, binding = 17) restrict buffer DispBuffer { vec4 disp[]; };
+layout(std430, set = 0, binding = 18) restrict buffer BrkBuffer { vec4 brk[]; };
+layout(rgba16f, set = 0, binding = 19) readonly uniform image2DArray fft_breaking_map;
+layout(std430, set = 0, binding = 20) restrict buffer AccelerationBuffer { vec4 accel[]; };
+layout(std430, set = 0, binding = 21) restrict buffer DispersionDiagnosticBuffer { vec4 dispersion_diagnostic[]; };
+layout(std430, set = 0, binding = 22) restrict buffer ContactBuffer { vec4 contact[]; };
+layout(std430, set = 0, binding = 23) restrict buffer CompletedContactBuffer { vec4 completed_contact[]; };
+layout(rgba16f, set = 0, binding = 24) writeonly uniform image2D breaker_map;
+layout(rgba16f, set = 0, binding = 25) writeonly uniform image2D contact_map;
+layout(rgba16f, set = 0, binding = 26) readonly uniform image2DArray offshore_displacement;
+layout(std430, set = 0, binding = 27) restrict buffer VisualHistoryBuffer { vec4 visual_history[]; };
+layout(rgba16f, set = 0, binding = 28) readonly uniform image2DArray offshore_velocity;
+
+layout(push_constant, std430) uniform Params {
+    vec4 domain;
+    vec4 step;
+    vec4 tiles;
+    vec4 current;
+    ivec4 sizes;
+    ivec4 misc;
+    vec4 physical;
+    vec4 boundary;
+} params;
+
+#define FFT_IDX(p_col, p_row, p_layer, p_half) \
+    (uint(p_half) * NUM_SPECTRA * MAP_SIZE * MAP_SIZE \
+    + uint(p_layer) * MAP_SIZE * MAP_SIZE + uint(p_row) * MAP_SIZE + uint(p_col))
+
+vec2 mul_complex(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+vec2 exp_complex(float x) { return vec2(cos(x), sin(x)); }
+vec2 conj_complex(vec2 a) { return vec2(a.x, -a.y); }
+int cell_index(ivec2 p) { return p.y * params.sizes.x + p.x; }
+uint pixel_count() { return uint(params.sizes.x * params.sizes.x); }
+vec2 world_position(ivec2 p) { return (vec2(p) + 0.5) * params.domain.y - params.domain.x * 0.5; }
+
+vec2 velocity(vec4 q) {
+    return q.x > params.domain.w ? q.yz / q.x : vec2(0.0);
+}
+
+vec3 boundary_sample(vec2 world, int offset) {
+    vec3 result = vec3(0.0);
+    for (int cascade = 0; cascade < 3; ++cascade) {
+        vec2 p = fract(world / params.tiles[cascade]) * float(MAP_SIZE) - 0.5;
+        ivec2 a = ivec2(floor(p));
+        vec2 f = fract(p);
+        ivec2 p0 = (a + ivec2(MAP_SIZE_I)) % MAP_SIZE_I;
+        ivec2 p1 = (p0 + 1) % MAP_SIZE_I;
+        vec3 v00 = imageLoad(boundary_map, ivec3(p0, cascade + offset)).xyz;
+        vec3 v10 = imageLoad(boundary_map, ivec3(p1.x, p0.y, cascade + offset)).xyz;
+        vec3 v01 = imageLoad(boundary_map, ivec3(p0.x, p1.y, cascade + offset)).xyz;
+        vec3 v11 = imageLoad(boundary_map, ivec3(p1, cascade + offset)).xyz;
+        result += mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    }
+    return result;
+}
+
+vec3 offshore(vec2 world) {
+    return boundary_sample(world, 0) + vec3(0.0, control.forcing.yz);
+}
+
+#if SHORE_FFT_SURFACE
+vec3 spectral_displacement(vec2 material) {
+    vec3 result = vec3(0.0);
+    ivec2 size = imageSize(offshore_displacement).xy;
+    for (int cascade = 0; cascade < 3; ++cascade) {
+        vec2 grid = fract(material / params.tiles[cascade]) * vec2(size) - 0.5;
+        ivec2 a = (ivec2(floor(grid)) + size) % size;
+        ivec2 b = (a + 1) % size;
+        vec2 f = fract(grid);
+        vec3 v00 = imageLoad(offshore_displacement, ivec3(a, cascade)).xyz;
+        vec3 v10 = imageLoad(offshore_displacement, ivec3(b.x, a.y, cascade)).xyz;
+        vec3 v01 = imageLoad(offshore_displacement, ivec3(a.x, b.y, cascade)).xyz;
+        vec3 v11 = imageLoad(offshore_displacement, ivec3(b, cascade)).xyz;
+        result += mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    }
+    return result;
+}
+
+vec2 spectral_material(vec2 world) {
+    vec2 material = world;
+    for (int iteration = 0; iteration < 3; ++iteration) {
+        material = world - spectral_displacement(material).xz;
+    }
+    return material;
+}
+
+float spectral_height(vec2 world) {
+    return spectral_displacement(spectral_material(world)).y;
+}
+
+vec2 spectral_velocity(vec2 material) {
+    vec2 result = params.current.xy;
+    ivec2 size = imageSize(offshore_velocity).xy;
+    for (int cascade = 0; cascade < 3; ++cascade) {
+        vec2 grid = fract(material / params.tiles[cascade]) * vec2(size) - 0.5;
+        ivec2 a = (ivec2(floor(grid)) + size) % size;
+        ivec2 b = (a + 1) % size;
+        vec2 f = fract(grid);
+        vec2 v00 = imageLoad(offshore_velocity, ivec3(a, cascade)).xz;
+        vec2 v10 = imageLoad(offshore_velocity, ivec3(b.x, a.y, cascade)).xz;
+        vec2 v01 = imageLoad(offshore_velocity, ivec3(a.x, b.y, cascade)).xz;
+        vec2 v11 = imageLoad(offshore_velocity, ivec3(b, cascade)).xz;
+        result += mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    }
+    return result;
+}
+#endif
+
+float fft_breaking(vec2 world) {
+    vec3 strain = vec3(0.0);
+    ivec2 size = imageSize(fft_breaking_map).xy;
+    for (int cascade = 0; cascade < 3; ++cascade) {
+        vec2 p = fract(world / params.tiles[cascade]) * vec2(size) - 0.5;
+        ivec2 a = (ivec2(floor(p)) + size) % size;
+        ivec2 b = (a + 1) % size;
+        vec2 f = fract(p);
+        vec3 v00 = imageLoad(fft_breaking_map, ivec3(a, cascade)).xyz;
+        vec3 v10 = imageLoad(fft_breaking_map, ivec3(b.x, a.y, cascade)).xyz;
+        vec3 v01 = imageLoad(fft_breaking_map, ivec3(a.x, b.y, cascade)).xyz;
+        vec3 v11 = imageLoad(fft_breaking_map, ivec3(b, cascade)).xyz;
+        strain += mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);
+    }
+#if SHORE_FFT_SURFACE
+    float minimum_stretch = 1.0 + 0.5 * (strain.x + strain.y
+        - sqrt(max(pow(strain.x - strain.y, 2.0) + 4.0 * strain.z * strain.z, 0.0)));
+    return clamp(1.0 - minimum_stretch / max(control.forcing.w, 0.0001), 0.0, 1.0);
+#else
+    float jacobian = (1.0 + strain.x) * (1.0 + strain.y) - strain.z * strain.z;
+    return max(control.forcing.w - jacobian, 0.0);
+#endif
+}
+
+vec2 foam_density(vec2 coverage) {
+    vec2 target = clamp(coverage, vec2(0.0), vec2(0.84375));
+    vec2 value = sqrt(target / 3.0);
+    for (int iteration = 0; iteration < 4; iteration++) {
+        value -= (value * value * (3.0 - 2.0 * value) - target)
+            / max(6.0 * value * (1.0 - value), vec2(1e-8));
+    }
+    return clamp(value / 0.75, vec2(0.0), vec2(1.0));
+}
+
+vec2 foam_coverage(vec2 density) {
+    vec2 value = clamp(density * 0.75, vec2(0.0), vec2(1.0));
+    return value * value * (3.0 - 2.0 * value);
+}
+
+vec4 read_water(ivec2 p) {
+    if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, ivec2(params.sizes.x)))) {
+        ivec2 edge = clamp(p, ivec2(0), ivec2(params.sizes.x - 1));
+        if (params.boundary.x < 0.5) {
+            vec4 q = water[control.flags.x * pixel_count() + uint(cell_index(edge))];
+            if (p.x != edge.x) q.y = -q.y;
+            if (p.y != edge.y) q.z = -q.z;
+            return q;
+        }
+        float floor_height = bed[cell_index(edge)];
+        vec3 incoming = offshore(world_position(p));
+        float h = max(incoming.x - floor_height, 0.0);
+        return vec4(h, h * incoming.yz, 0.0);
+    }
+    return water[control.flags.x * pixel_count() + uint(cell_index(p))];
+}
+
+float read_bed(ivec2 p) {
+    return bed[cell_index(clamp(p, ivec2(0), ivec2(params.sizes.x - 1)))];
+}
+
+float dispersive_depth(ivec2 p) {
+	vec4 q = read_water(p);
+	float still = max(-read_bed(p), 0.0);
+	float froude2 = dot(velocity(q), velocity(q)) / max(params.domain.z * q.x, 1.0e-8);
+	float active_limit = brk[cell_index(clamp(p, ivec2(0), ivec2(params.sizes.x - 1)))].x > 0.5
+		? SHORE_BREAK_FR_END : SHORE_BREAK_FR_START;
+	if (froude2 > active_limit * active_limit || q.x <= params.domain.w * 4.0) return 0.0;
+	return still * smoothstep(params.domain.w * 4.0, max(still * SHORE_DISP_RELATIVE_DEPTH, params.domain.w * 16.0), q.x);
+}
+
+vec2 offshore_acceleration(ivec2 p) {
+    vec2 world = world_position(p);
+    vec3 q = offshore(world);
+    vec3 rate = boundary_sample(world, 3);
+    float depth = max(q.x - read_bed(p), 0.0);
+    return depth * rate.yz + rate.x * q.yz;
+}
+
+float read_acceleration(ivec2 p, int axis) {
+    ivec2 edge = clamp(p, ivec2(0), ivec2(params.sizes.x - 1));
+    vec2 acceleration = brk[cell_index(edge)].yz;
+    float value = axis == 0 ? acceleration.x : acceleration.y;
+    if (params.boundary.x > 0.5 && any(notEqual(p, edge))) {
+        vec2 difference = offshore_acceleration(p) - offshore_acceleration(edge);
+        value += axis == 0 ? difference.x : difference.y;
+    }
+    return value;
+}
+
+vec4 read_foam(ivec2 p) {
+    if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, ivec2(params.sizes.x)))) return vec4(0.0);
+    return foam[control.flags.x * pixel_count() + uint(cell_index(p))];
+}
+
+vec4 read_slope(ivec2 p, int axis, bool tracer) {
+    if (any(lessThan(p, ivec2(0))) || any(greaterThanEqual(p, ivec2(params.sizes.x)))) return vec4(0.0);
+    return slopes[uint(axis + (tracer ? 2 : 0)) * pixel_count() + uint(cell_index(p))];
+}
+
+vec3 minmod(vec3 a, vec3 b) {
+    return 0.5 * (sign(a) + sign(b)) * min(abs(a), abs(b));
+}
+
+vec2 minmod(vec2 a, vec2 b) {
+    return 0.5 * (sign(a) + sign(b)) * min(abs(a), abs(b));
+}
+
+struct FaceFlux {
+    vec3 flow;
+    vec2 tracer;
+    float left_correction;
+    float right_correction;
+};
+
+FaceFlux face_flux(ivec2 left, ivec2 right, int axis) {
+    vec4 ql = read_water(left);
+    vec4 qr = read_water(right);
+    float zl = read_bed(left);
+    float zr = read_bed(right);
+    vec3 slope_l = read_slope(left, axis, false).xyz;
+    vec3 slope_r = read_slope(right, axis, false).xyz;
+    vec2 vl = velocity(ql) + 0.5 * slope_l.yz;
+    vec2 vr = velocity(qr) - 0.5 * slope_r.yz;
+    ql.x = max(ql.x + 0.5 * slope_l.x, 0.0);
+    qr.x = max(qr.x - 0.5 * slope_r.x, 0.0);
+    float zmax = max(zl, zr);
+    float hl = max(0.0, ql.x + zl - zmax);
+    float hr = max(0.0, qr.x + zr - zmax);
+    vec3 ul = vec3(hl, hl * vl);
+    vec3 ur = vec3(hr, hr * vr);
+    vec3 fl = ul * vl[axis];
+    vec3 fr = ur * vr[axis];
+    fl[axis + 1] += 0.5 * params.domain.z * hl * hl;
+    fr[axis + 1] += 0.5 * params.domain.z * hr * hr;
+    float cl = sqrt(params.domain.z * hl);
+    float cr = sqrt(params.domain.z * hr);
+    float sl = min(vl[axis] - cl, vr[axis] - cr);
+    float sr = max(vl[axis] + cl, vr[axis] + cr);
+    if (hl < params.domain.w && hr > params.domain.w) sl = min(sl, vr[axis] - 2.0 * cr);
+    if (hr < params.domain.w && hl > params.domain.w) sr = max(sr, vl[axis] + 2.0 * cl);
+    vec3 flux = vec3(0.0);
+    if (sl >= 0.0) flux = fl;
+    else if (sr <= 0.0) flux = fr;
+    else flux = (sr * fl - sl * fr + sl * sr * (ur - ul)) / max(sr - sl, 1.0e-8);
+    vec2 concentration_l = read_foam(left).xy / max(read_water(left).x, 1.0e-8)
+        + 0.5 * read_slope(left, axis, true).xy;
+    vec2 concentration_r = read_foam(right).xy / max(read_water(right).x, 1.0e-8)
+        - 0.5 * read_slope(right, axis, true).xy;
+    vec2 concentration = clamp(flux.x >= 0.0 ? concentration_l : concentration_r, vec2(0.0), vec2(1.0));
+    FaceFlux result;
+    result.flow = flux;
+    result.tracer = flux.x * concentration;
+    result.left_correction = 0.5 * params.domain.z * (ql.x * ql.x - hl * hl);
+    result.right_correction = 0.5 * params.domain.z * (qr.x * qr.x - hr * hr);
+    return result;
+}

@@ -1,0 +1,314 @@
+#version 450
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(rgba32f, set = 0, binding = 0) uniform image2D film_a;
+layout(rgba32f, set = 0, binding = 1) uniform image2D film_b;
+layout(rgba32f, set = 0, binding = 2) uniform writeonly image2D surface_out;
+layout(rgba32f, set = 0, binding = 3) uniform writeonly image2D velocity_out;
+layout(std430, set = 0, binding = 4) buffer Cascade {
+    vec4 lane_input[48];
+    vec4 packets[24576];
+    vec4 arrivals[96];
+    vec4 totals[48];
+} cascade;
+layout(std430, set = 0, binding = 5) buffer Control { uint words[]; } control;
+layout(rgba32f, set = 0, binding = 6) uniform readonly image2D pool_a;
+layout(rgba32f, set = 0, binding = 7) uniform readonly image2D terrain;
+layout(set = 0, binding = 8) uniform sampler2D source_terrain;
+layout(rgba32f, set = 0, binding = 9) uniform readonly image2D pool_b;
+layout(set = 0, binding = 10) uniform sampler2D ground_height;
+layout(rgba32f, set = 0, binding = 11) uniform writeonly image2D boundary_out;
+layout(push_constant, std430) uniform Params {
+    vec4 domain;
+    vec4 grid;
+    vec4 water;
+    vec4 source_domain;
+    vec4 control_params;
+    vec4 waterfall;
+    vec4 cascade_params;
+    vec4 relaxation;
+} params;
+float bed_depth_m() { return params.relaxation.z; }
+float theta() { return radians(params.waterfall.x); }
+float ds() { return params.waterfall.y / sin(theta()) / params.cascade_params.y; }
+float lane_width() { return params.waterfall.z / params.cascade_params.x; }
+vec3 tangent() { return vec3(0.0, -sin(theta()), -cos(theta())); }
+vec3 normal() { return vec3(0.0, cos(theta()), -sin(theta())); }
+float ground_at(vec2 point) {
+    ivec2 last = textureSize(ground_height, 0) - 1;
+    float x = clamp((point.x - params.source_domain.x) / params.source_domain.z * float(last.x), 0.0, float(last.x));
+    int row = 0;
+    float f_y = 0.0;
+    float first_z = texelFetch(ground_height, ivec2(0, 0), 0).g;
+    float last_z = texelFetch(ground_height, ivec2(0, last.y), 0).g;
+    if (point.y >= last_z) {
+        row = last.y;
+    } else if (point.y > first_z) {
+        int low = 0;
+        int high = last.y;
+        for (int i = 0; i < 9; i++) {
+            if (low < high) {
+                int mid = (low + high) / 2;
+                if (texelFetch(ground_height, ivec2(0, mid), 0).g < point.y) low = mid + 1;
+                else high = mid;
+            }
+        }
+        row = low - 1;
+        float z0 = texelFetch(ground_height, ivec2(0, row), 0).g;
+        float z1 = texelFetch(ground_height, ivec2(0, row + 1), 0).g;
+        f_y = clamp((point.y - z0) / max(z1 - z0, 1.0e-8), 0.0, 1.0);
+    }
+    ivec2 lo = ivec2(int(floor(x)), row);
+    vec2 f = vec2(fract(x), f_y);
+    if (params.waterfall.x >= 90.0 && point.y < params.waterfall.w
+            && texelFetch(ground_height, ivec2(0, min(row + 1, last.y)), 0).g >= params.waterfall.w) f.y = 0.0;
+    float a = texelFetch(ground_height, lo, 0).r;
+    float b = texelFetch(ground_height, min(lo + ivec2(1, 0), last), 0).r;
+    float c = texelFetch(ground_height, min(lo + ivec2(0, 1), last), 0).r;
+    float d = texelFetch(ground_height, min(lo + ivec2(1), last), 0).r;
+    return f.x + f.y <= 1.0 ? a + (b - a) * f.x + (c - a) * f.y
+        : d + (c - d) * (1.0 - f.x) + (b - d) * (1.0 - f.y);
+}
+vec3 crest(int lane) {
+    return vec3((float(lane) + 0.5) * lane_width() - params.waterfall.z * 0.5,
+        params.waterfall.y - bed_depth_m(), params.waterfall.w);
+}
+vec4 film_state(ivec2 p) {
+    p = clamp(p, ivec2(0), ivec2(params.cascade_params.xy) - 1);
+    return control.words[19] == 0u ? imageLoad(film_a, p) : imageLoad(film_b, p);
+}
+void store_film(ivec2 p, vec4 q, bool current) {
+    bool a = (control.words[19] == 0u) == current;
+    if (a) imageStore(film_a, p, q); else imageStore(film_b, p, q);
+}
+float pool_height(vec2 world, bool next) {
+    ivec2 p = clamp(ivec2(floor((world - params.domain.xy) / params.domain.z)),
+        ivec2(0), ivec2(params.grid.xy) - 1);
+    bool a = (control.words[19] == 0u) != next;
+    vec4 q = a ? imageLoad(pool_a, p) : imageLoad(pool_b, p);
+    return q.x > 0.02 ? imageLoad(terrain, p).x + q.x : params.water.x;
+}
+int last_film_row(int lane) {
+    vec3 bottom = crest(lane) + tangent() * (params.waterfall.y / sin(theta()));
+    float lower = pool_height(bottom.xz, false);
+    return clamp(int(floor((params.waterfall.y - bed_depth_m() - lower) / sin(theta()) / ds())), 1,
+        int(params.cascade_params.y) - 1);
+}
+vec2 physical_flux(vec4 q) {
+    float u = q.x > 0.00001 ? q.y / q.x : 0.0;
+    return vec2(q.y, q.y * u + 0.5 * params.domain.w * cos(theta()) * q.x * q.x);
+}
+vec2 hll_flux(vec4 left, vec4 right) {
+    float hl = max(left.x, 0.0), hr = max(right.x, 0.0);
+    float ul = hl > 0.00001 ? left.y / hl : 0.0;
+    float ur = hr > 0.00001 ? right.y / hr : 0.0;
+    float gn = params.domain.w * cos(theta());
+    float sl = min(ul - sqrt(gn * hl), ur - sqrt(gn * hr));
+    float sr = max(ul + sqrt(gn * hl), ur + sqrt(gn * hr));
+    vec2 fl = physical_flux(left), fr = physical_flux(right);
+    if (sl >= 0.0) return fl;
+    if (sr <= 0.0) return fr;
+    return (sr * fl - sl * fr + sl * sr * (right.xy - left.xy)) / max(sr - sl, 1.0e-8);
+}
+void initialize(ivec2 p) {
+    int lane = p.x;
+    if (lane >= 48) return;
+    if (p.y < 63) {
+        imageStore(film_a, p, vec4(0.0));
+        imageStore(film_b, p, vec4(0.0));
+    }
+    if (p.y == 0) {
+        imageStore(boundary_out, ivec2(lane, 0), vec4(0.0));
+        cascade.lane_input[lane] = vec4(0.0);
+        cascade.arrivals[lane * 2] = vec4(0.0);
+        cascade.arrivals[lane * 2 + 1] = vec4(0.0);
+        cascade.totals[lane] = vec4(0.0);
+        for (int i = 0; i < 256; ++i) {
+            cascade.packets[(lane * 256 + i) * 2] = vec4(0.0);
+            cascade.packets[(lane * 256 + i) * 2 + 1] = vec4(0.0);
+        }
+    }
+}
+void consume(ivec2 p) {
+    if (p.x >= 48 || p.y != 0) return;
+    int lane = p.x;
+    cascade.totals[lane].y += cascade.arrivals[lane * 2].x;
+    cascade.arrivals[lane * 2] = vec4(0.0);
+    cascade.arrivals[lane * 2 + 1] = vec4(0.0);
+    if (params.waterfall.x < 90.0) {
+        vec4 inlet = cascade.lane_input[lane];
+        vec4 q = film_state(p);
+        float h = inlet.x / (ds() * lane_width());
+        q.xy += vec2(h, h * inlet.y);
+        store_film(p, q, true);
+        cascade.lane_input[lane] = vec4(0.0);
+    }
+}
+void step_film(ivec2 p) {
+    if (p.x >= 48 || p.y >= 63) return;
+    int last = last_film_row(p.x);
+    if (p.y > last) { store_film(p, vec4(0.0), false); return; }
+    float dt = uintBitsToFloat(control.words[3]);
+    vec4 q = film_state(p);
+    vec2 left = p.y > 0 ? hll_flux(film_state(p - ivec2(0, 1)), q) : vec2(0.0);
+    vec2 right = p.y < last ? hll_flux(q, film_state(p + ivec2(0, 1))) : physical_flux(q);
+    if (p.y == last) right = vec2(max(q.y, 0.0), q.x > 0.00001 ? q.y * q.y / q.x : 0.0);
+    if (p.y == 0) {
+        vec4 exit = film_state(ivec2(p.x, last));
+        float volume = max(exit.y, 0.0) * lane_width() * dt;
+        float u = exit.x > 0.00001 ? exit.y / exit.x : 0.0;
+        float horizontal_momentum = -cos(theta()) * u * volume;
+        for (int row = last + 1; row < 63; ++row) {
+            vec4 tail = film_state(ivec2(p.x, row));
+            float v = tail.x * ds() * lane_width();
+            volume += v;
+            horizontal_momentum -= cos(theta()) * tail.y * ds() * lane_width();
+        }
+        vec3 point = crest(p.x) + tangent() * (float(last + 1) * ds());
+        float run = max(params.waterfall.y - bed_depth_m() - params.water.x, 0.0) / tan(theta());
+        float receiver = params.waterfall.w - max(run, params.domain.z);
+        float z = min(point.z, receiver - params.domain.z);
+        cascade.arrivals[p.x * 2] = vec4(volume, z, point.x, 1.0);
+        cascade.arrivals[p.x * 2 + 1] = vec4(0.0, horizontal_momentum / max(volume, 1.0e-12), clamp(u / 8.0, 0.0, 1.0), 0.0);
+    }
+    q.xy -= dt / ds() * (right - left);
+    q.x = max(q.x, 0.0);
+    q.y += dt * params.domain.w * sin(theta()) * q.x;
+    q.y /= 1.0 + dt * 0.08;
+    if (q.x < 0.000001) q.y = 0.0;
+    store_film(p, q, false);
+}
+void step_ballistic(ivec2 p) {
+    if (p.x >= 48 || p.y != 0) return;
+    int lane = p.x;
+    float dt = uintBitsToFloat(control.words[3]);
+    vec4 arrival = vec4(0.0);
+    vec2 momentum = vec2(0.0);
+    for (int i = 0; i < 256; ++i) {
+        int slot = (lane * 256 + i) * 2;
+        vec4 packet = cascade.packets[slot];
+        vec4 start = cascade.packets[slot + 1];
+        if (packet.x <= 0.0) continue;
+        float age = packet.y + dt;
+        vec3 point = vec3(start.x + start.w * age, packet.z - 0.5 * params.domain.w * age * age,
+            start.z + packet.w * age);
+        vec2 impact_xz = vec2(point.x, min(point.z, params.waterfall.w - params.domain.z * 1.5));
+        if (point.y <= max(pool_height(impact_xz, true), ground_at(point.xz) + 0.01)) {
+            arrival.x += packet.x;
+            arrival.yz += packet.x * impact_xz.yx;
+            momentum += packet.x * vec2(start.w, packet.w);
+            packet.x = 0.0;
+        }
+        packet.y = age;
+        cascade.packets[slot] = packet;
+    }
+    if (arrival.x > 0.0) {
+        arrival.yz /= arrival.x;
+        arrival.w = 1.0;
+        cascade.arrivals[lane * 2] = arrival;
+        cascade.arrivals[lane * 2 + 1] = vec4(momentum / arrival.x, 1.0, 0.0);
+    }
+    if (control.words[8] != 0u) {
+        int slot = (lane * 256 + int(control.words[4])) * 2;
+        vec4 inlet = cascade.lane_input[lane];
+        if (cascade.packets[slot].x <= 0.0) {
+            cascade.packets[slot] = vec4(inlet.x, 0.0, inlet.w, -inlet.y);
+            cascade.packets[slot + 1] = vec4(crest(lane).x, 0.0, params.waterfall.w, inlet.z);
+            cascade.lane_input[lane] = vec4(0.0);
+        } else if (inlet.x > 0.0) atomicAdd(control.words[17], 1u);
+    }
+}
+void publish(ivec2 p) {
+    int capacity = params.waterfall.x >= 90.0 ? 256 : 63;
+    if (p.x >= 48 || p.y >= capacity) return;
+    vec3 point, velocity;
+    float depth = 0.0, activity = 0.0;
+    if (params.waterfall.x < 90.0) {
+        vec4 q = film_state(p);
+        float u = q.x > 0.00001 ? q.y / q.x : 0.0;
+        point = crest(p.x) + tangent() * ((float(p.y) + 0.5) * ds());
+        point.y = ground_at(point.xz) + 0.01;
+        velocity = tangent() * u;
+        depth = q.x;
+        activity = step(0.000001, depth);
+    } else {
+        int slot = (p.x * 256 + p.y) * 2;
+        vec4 packet = cascade.packets[slot];
+        vec4 start = cascade.packets[slot + 1];
+        float age = packet.y;
+        point = vec3(start.x + start.w * age, packet.z - 0.5 * params.domain.w * age * age,
+            start.z + packet.w * age);
+        velocity = vec3(start.w, -params.domain.w * age, packet.w);
+        depth = packet.x / max(lane_width() * max(length(velocity), 0.2) / params.cascade_params.w, 1.0e-6);
+        activity = float(packet.x > 0.0);
+    }
+    imageStore(surface_out, p, vec4(point, depth));
+    imageStore(velocity_out, p, vec4(velocity, activity));
+    if (p.y == 0) {
+        int lane = p.x;
+        vec2 source = vec2(crest(lane).x, params.waterfall.w + 0.5 * params.domain.z);
+        ivec2 source_cell = clamp(ivec2(floor((source - params.domain.xy) / params.domain.z)),
+            ivec2(0), ivec2(params.grid.xy) - 1);
+        bool pool_is_a = control.words[19] == 0u;
+        vec4 source_state = pool_is_a ? imageLoad(pool_a, source_cell) : imageLoad(pool_b, source_cell);
+        float source_height = source_state.x > 0.02
+            ? imageLoad(terrain, source_cell).x + source_state.x : params.water.x;
+        vec2 source_velocity = source_state.x > 0.004 ? source_state.yz / source_state.x : vec2(0.0);
+        float receiver = params.waterfall.w - max((params.waterfall.y - bed_depth_m() - params.water.x)
+            / max(tan(theta()), 1.0e-8), params.domain.z);
+        vec2 receiver_point = vec2(source.x, receiver);
+        float film_end = params.waterfall.y;
+        if (params.waterfall.x < 90.0) {
+            int last = last_film_row(lane);
+            film_end = float(last + 1) * ds();
+            receiver = min(params.waterfall.w - film_end * cos(theta()), receiver - params.domain.z);
+            receiver_point.y = receiver;
+        } else {
+            float time = sqrt(2.0 * max(source_height - params.water.x, 0.0) / params.domain.w);
+            for (int i = 0; i < 4; ++i) {
+                receiver_point = vec2(source.x, params.waterfall.w) + source_velocity * time;
+                ivec2 target_cell = clamp(ivec2(floor((receiver_point - params.domain.xy) / params.domain.z)),
+                    ivec2(0), ivec2(params.grid.xy) - 1);
+                bool target_is_a = control.words[19] == 0u;
+                vec4 target_state = target_is_a ? imageLoad(pool_a, target_cell) : imageLoad(pool_b, target_cell);
+                float target_height = target_state.x > 0.02
+                    ? imageLoad(terrain, target_cell).x + target_state.x : params.water.x;
+                time = sqrt(2.0 * max(source_height - target_height, 0.0) / params.domain.w);
+            }
+            receiver_point = vec2(source.x, params.waterfall.w) + source_velocity * time;
+            receiver = min(receiver_point.y, params.waterfall.w - params.domain.z * 1.5);
+            receiver_point.y = receiver;
+        }
+        ivec2 receiver_cell = clamp(ivec2(floor((receiver_point - params.domain.xy) / params.domain.z)),
+            ivec2(0), ivec2(params.grid.xy) - 1);
+        bool receiver_is_a = control.words[19] == 0u;
+        vec4 receiver_state = receiver_is_a ? imageLoad(pool_a, receiver_cell) : imageLoad(pool_b, receiver_cell);
+        float receiver_height = receiver_state.x > 0.02
+            ? imageLoad(terrain, receiver_cell).x + receiver_state.x : params.water.x;
+        imageStore(boundary_out, ivec2(lane, 0), vec4(source_height, film_end, receiver, receiver_height));
+        float transported = cascade.lane_input[lane].x + cascade.arrivals[lane * 2].x;
+        if (params.waterfall.x < 90.0) {
+            for (int row = 0; row < 63; ++row) transported += film_state(ivec2(lane, row)).x * ds() * lane_width();
+        } else {
+            for (int i = 0; i < 256; ++i) transported += cascade.packets[(lane * 256 + i) * 2].x;
+        }
+        cascade.totals[lane].z = transported;
+    }
+}
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (params.control_params.x > 3.5) {
+        if (all(equal(p, ivec2(0)))) {
+            vec3 total = vec3(0.0);
+            for (int lane = 0; lane < 48; ++lane) total += cascade.totals[lane].xyz;
+            control.words[6] = floatBitsToUint(total.x);
+            control.words[7] = floatBitsToUint(total.y);
+            control.words[20] = floatBitsToUint(total.z);
+        }
+        return;
+    }
+    if (params.control_params.x < 0.5) initialize(p);
+    else if (params.control_params.x > 2.5) consume(p);
+    else if (params.control_params.x < 1.5) {
+        if (params.waterfall.x < 90.0) step_film(p); else step_ballistic(p);
+    } else publish(p);
+}

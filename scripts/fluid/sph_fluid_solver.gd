@@ -1,24 +1,29 @@
 class_name SphFluidSolver
 extends RefCounted
-## GPU dual-density SPH (SebLague / Clavet: density + near-density equation of
-## state). Shares the PBF solver's dense counting-sort grid, ping-pong reorder,
-## Texture2DRD bridge and capture_timestamp profiling, but replaces the physics.
-## Unlike PBF, velocity is physically reordered by the sort (SPH reads old
-## velocity after the sort), so velocities are ping-ponged too.
+## GPU dual-density SPH based on SebLague and Clavet's density equations. It uses
+## a dense counting-sort grid, a Texture2DRD position buffer and GPU profiling.
+## Particle velocity is reordered with position and preserved between frames.
 
 const SHADER_DIR := "res://shaders/sph/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"
 const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back"]
 const STAGES: Array[String] = [
 	"grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back", "grid_scatter",
-	"sph_external", "sph_density", "sph_pressure", "sph_viscosity", "sph_emit",
-	"foam_prepare", "foam_update", "foam_compact",
+	"sph_vel_snap", "sph_external", "sph_density", "sph_pressure", "sph_viscosity",
+	"sph_emit", "foam_prepare", "foam_update", "foam_compact",
 ]
 const WG := 256
-const FOAM_UBO_SIZE := 96
+const MATERIAL_SPECTRAL_GEL := 6
+const FOAM_UBO_SIZE := 112
 const PLANET_UBO_SIZE := 48
 const MAX_SCENE_OBSTACLES := 14
-const SCENE_UBO_SIZE := 1184
+const SCENE_UBO_SIZE := 1264
+
+# Tuning defaults; _configure_solver() restores them on every material/scene
+# switch so a preset change cannot inherit the previous liquid's slider state.
+const DEFAULT_PRESSURE_MULT := 180.0
+const DEFAULT_NEAR_PRESSURE_MULT := 12.0
+const DEFAULT_SUBSTEPS := 3
 
 var config: FluidConfig = FluidConfig.new()
 var particle_count := 65536
@@ -31,13 +36,30 @@ var grid_origin := Vector3(-8.0, 0.0, -8.0)
 var cell_size := 0.25
 var h := 0.25
 var spacing := 0.12
-var substeps := 3
 var gravity := Vector3(0.0, -9.8, 0.0)
-var pressure_mult := 180.0
-var near_pressure_mult := 12.0
+var pressure_mult := DEFAULT_PRESSURE_MULT
+var near_pressure_mult := DEFAULT_NEAR_PRESSURE_MULT
 var viscosity_strength := 0.14
+var extension_strength := 0.0
+var yield_stress := 0.0
+var material_density_kg_m3 := 1000.0
+# Derived kernel constants from FluidMaterial; packed into the SceneParams
+# block (density, stiffness, inflation) and the push constant (cohesion scale).
+var stiffness_scale := 1.0
+var cohesion_kernel_scale := 1.0
+var collision_inflation := 0.14
+var freeze_heat := 0.0
+# Akinci-style cohesion multiplier. 0 disables the term entirely (no kernel
+# work in the pressure pass); see sph_cohesion_k in sph_common.comp.
+var cohesion_strength := 0.0
 var collision_damping := 0.15
-var mode := 0.0
+## FluidSystem.FluidKind value (0 water, 1 lava, 2 mercury, 3 honey, 4 oil).
+## Plain int on purpose: the solver must not depend on FluidSystem.
+var material := 0
+## FluidSystem.Scenario value for the loaded tank (0 pool, 1 cascade, 2 basin);
+## the shaders use it for the cascade's soft chute walls.
+var scene_id := 0
+var substeps := DEFAULT_SUBSTEPS
 var hash_grid_enabled := false
 var hash_grid_load_factor := 2.0
 var adaptive_substeps := false
@@ -77,12 +99,24 @@ var foam_life_max := 15.0
 # Remaining lifetime at which a particle starts shrinking away.
 var foam_dissolve_time := 3.0
 var foam_spawn_radius_scale := 1.0
+# Surface gate: only particles below this fraction of rest density spawn foam
+# (0 disables). Interior particles carry full kernel support, so their trapped-air
+# comes from wall shear or bulk turbulence rather than free-surface churn — foam
+# spawned there reads as frost on the tank walls.
+var foam_surface_gate := 0.0
 var foam_bubble_buoyancy := 1.4
 var foam_spray_drag := 0.04
 var foam_bubble_scale := 0.3
 var foam_scale_speed := 7.0
 var foam_spray_max_neighbours := 5
 var foam_bubble_min_neighbours := 15
+# Lifetime consumption rate per class, in lifetimes per second. Every class
+# ages: particles trapped at a settled interface oscillate between the spray
+# and bubble classes, so any non-aging class crusts over permanently. Bubbles
+# are mostly hidden behind the surface, so they drain at half rate.
+var foam_spray_aging := 1.0
+var foam_foam_aging := 1.0
+var foam_bubble_aging := 0.5
 
 # Planet mode. Zero gravity leaves the solver on its flat-world path: constant
 # downward gravity and an axis-aligned box. Set planet_field to the density texture
@@ -94,14 +128,19 @@ var planet_field_world_size := 0.0
 var planet_skin := 0.1
 var planet_normal_offset := 0.5
 
-var cascade_enabled := false
-var cascade_flow := 1.0
-var cascade_cycle_seconds := 240.0
+var emitter_enabled := false
+var recycle_emission := true
+var emission_rate := 1.0
+var emission_cycle_seconds := 240.0
+var emitter_width := 6
 var emitter_origin := Vector3(-5.0, 13.6, 0.0)
 var emitter_velocity := Vector3(0.0, -2.0, 0.0)
 var scene_obstacles: Array[Dictionary] = []
 
 var initialized := false
+## Bumped on the render thread after each init_render returns — the main
+## thread's "this queued re-init has landed" signal (see FluidSystem).
+var init_generation := 0
 var profiling := false
 
 var _rd: RenderingDevice
@@ -115,6 +154,8 @@ var _foam_ubo := RID()
 var _planet_ubo := RID()
 var _planet_params_hash := 0
 var _scene_ubo := RID()
+var _scene_ubo_cache := PackedByteArray()
+var _scene_ubo_cache_hash := 0
 var _planet_sampler := RID()
 ## Bound at binding 18 when planet mode is off, since the shader declares the
 ## sampler unconditionally and every declared binding must be satisfied.
@@ -126,6 +167,7 @@ var _emit_fraction := 0.0
 var _target_density := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
+var _gel_cohort := 0
 var _timing_store := GpuTimingStore.new()
 
 
@@ -187,13 +229,30 @@ func respawn_range(from: int, data: PackedFloat32Array) -> void:
 	if from < 0 or count <= 0 or from + count > particle_count:
 		return
 	var bytes := data.to_byte_array()
-	var zero := PackedByteArray()
-	zero.resize(bytes.size())
+	var velocities := PackedFloat32Array()
+	velocities.resize(count * 4)
 	var off := from * 16
+	var previous := PackedFloat32Array()
+	var references := PackedFloat32Array()
+	if material == MATERIAL_SPECTRAL_GEL:
+		previous = _rd.buffer_get_data(parity_velocities_rid(_parity), off, count * 16).to_float32_array()
+		references = _rd.buffer_get_data(_buffers["gel_reference"]).to_float32_array()
+		_gel_cohort += 1
+	for i in count:
+		var id := int(previous[i * 4 + 3]) if not previous.is_empty() else from + i
+		velocities[i * 4 + 3] = float(id)
+		if not references.is_empty():
+			for axis in 3:
+				references[id * 4 + axis] = data[i * 4 + axis]
+			references[id * 4 + 3] = float(_gel_cohort)
+	if not references.is_empty():
+		var reference_bytes := references.to_byte_array()
+		_rd.buffer_update(_buffers["gel_reference"], 0, reference_bytes.size(), reference_bytes)
+	var velocity_bytes := velocities.to_byte_array()
 	for key in ["positions_a", "positions_b", "predicted_a", "predicted_b"]:
 		_rd.buffer_update(_buffers[key], off, bytes.size(), bytes)
 	for key in ["velocities_a", "velocities_b"]:
-		_rd.buffer_update(_buffers[key], off, zero.size(), zero)
+		_rd.buffer_update(_buffers[key], off, velocity_bytes.size(), velocity_bytes)
 
 
 func init_render() -> void:
@@ -206,7 +265,6 @@ func init_render() -> void:
 	cell_size = config.cell_size_m
 	h = config.cell_size_m
 	tex_width = config.texture_width
-	cascade_flow = config.default_flow
 	_rd = GpuPreflight.device("SphFluidSolver")
 	if _rd == null:
 		return
@@ -255,6 +313,11 @@ func init_render() -> void:
 	_buffers["predicted_b"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["densities"] = _rd.storage_buffer_create(n * 4, zero_f)
 	_buffers["near_densities"] = _rd.storage_buffer_create(n * 4, zero_f)
+	# Race-free neighbour reads: refreshed from `velocities` after grid_scatter
+	# each sub-step, read by sph_pressure (foam metric) and sph_viscosity (XSPH).
+	_buffers["velocities_snap"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["gel_reference"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
+	_gel_cohort = 0
 	_buffers["cell_count"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["cell_start"] = _rd.storage_buffer_create(cells * 4, zero_cells)
 	_buffers["block_sums"] = _rd.storage_buffer_create(num_blocks * 4, zero_blocks)
@@ -262,13 +325,17 @@ func init_render() -> void:
 	var foam_n := foam_cap()
 	var zero_foam := PackedByteArray()
 	zero_foam.resize(foam_n * 16)
+	# 8 ints: [0] spawn cursor, [1] survivor counter, [2..4] indirect dims,
+	# [5] previous live count, [6] published-texel high-water mark (see
+	# foam_compact.comp), [7] pad. The indirect dispatches read the dims at
+	# byte offset 8, so the extra words must not move them.
 	var zero_counter := PackedByteArray()
-	zero_counter.resize(24)
+	zero_counter.resize(32)
 	_buffers["foam_pos"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_vel"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_pos_c"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
 	_buffers["foam_vel_c"] = _rd.storage_buffer_create(foam_n * 16, zero_foam)
-	_buffers["foam_count"] = _rd.storage_buffer_create(24, zero_counter,
+	_buffers["foam_count"] = _rd.storage_buffer_create(32, zero_counter,
 		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
 	_foam_ubo = _rd.uniform_buffer_create(FOAM_UBO_SIZE, _pack_foam_ubo(1.0 / 60.0))
 	var planet_bytes := _pack_planet_ubo()
@@ -285,9 +352,12 @@ func init_render() -> void:
 	fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
 		| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
 		| RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT \
-		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_TO_BIT \
+		| RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
 	_tex_rid = _rd.texture_create(fmt, RDTextureView.new(), [])
-	_rd.texture_clear(_tex_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+	var texture_seed := seed_bytes.duplicate()
+	texture_seed.resize(tex_width * tex_width * 16)
+	_rd.texture_update(_tex_rid, 0, texture_seed)
 
 	var foam_fmt := RDTextureFormat.new()
 	foam_fmt.width = foam_tex_width
@@ -318,11 +388,11 @@ func _build_uniform_sets() -> void:
 		["positions_a", "velocities_a", "predicted_a", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_b", "velocities_b",
 			"", "predicted_b", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", ""],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
 		["positions_b", "velocities_b", "predicted_b", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_a", "velocities_a",
 			"", "predicted_a", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", ""],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
 	]
 	var field: RID = planet_field if planet_field.is_valid() else _dummy_field
 	for stage in _uniform_sets:
@@ -407,19 +477,24 @@ func step_render(dt: float) -> void:
 	_rd.buffer_update(_foam_ubo, 0, FOAM_UBO_SIZE, _pack_foam_ubo(dt))
 	var emit_count := 0
 	var emit_start := _emit_cursor
-	if cascade_enabled:
-		var cycle := maxf(cascade_cycle_seconds / maxf(cascade_flow, 0.01), 0.1)
+	if emitter_enabled:
+		var cycle := maxf(emission_cycle_seconds / maxf(emission_rate, 0.01), 0.1)
 		_emit_fraction += float(particle_count) * dt / cycle
 		emit_count = mini(int(_emit_fraction), particle_count)
-		_emit_fraction -= float(emit_count)
+		if emitter_width < 6:
+			emit_count = mini(emit_count, emitter_width * emitter_width)
+		_emit_fraction = minf(_emit_fraction - float(emit_count), 1.0)
 		if active_count >= 0 and active_count < particle_count:
 			emit_start = active_count
 			emit_count = mini(emit_count, particle_count - active_count)
 			active_count += emit_count
 			_emit_cursor = active_count % particle_count
-		else:
+		elif recycle_emission:
 			emit_count = mini(emit_count, live_count())
 			_emit_cursor = (_emit_cursor + emit_count) % maxi(live_count(), 1)
+		else:
+			emit_count = 0
+			_emit_fraction = 0.0
 	_rd.buffer_update(_scene_ubo, 0, SCENE_UBO_SIZE, _pack_scene_ubo(emit_start, emit_count))
 	var planet_hash := _current_planet_params_hash()
 	if planet_hash != _planet_params_hash:
@@ -433,9 +508,10 @@ func step_render(dt: float) -> void:
 	var cells := _grid_cell_count()
 	var cell_groups := ceili(float(cells) / WG)
 
-	_rd.capture_timestamp("sph/start")
+	if profiling:
+		_rd.capture_timestamp("sph/start")
 	var cl := _rd.compute_list_begin()
-	if cascade_enabled and emit_count > 0:
+	if emitter_enabled and emit_count > 0:
 		var emit_pc := _pack_push_constant(dt_sub, 0, _frame * step_count)
 		_dispatch(cl, "sph_emit", emit_pc, n_groups)
 		cl = _mark(cl, "sph/emit")
@@ -450,6 +526,9 @@ func step_render(dt: float) -> void:
 		_dispatch(cl, "grid_scan_blocks", pc, 1)
 		_dispatch(cl, "grid_add_back", pc, cell_groups)
 		_dispatch(cl, "grid_scatter", pc, n_groups)
+		# Snapshot velocities before any in-place writes this sub-step: the
+		# pressure foam metric and the XSPH sum read neighbours from it.
+		_dispatch(cl, "sph_vel_snap", pc, n_groups)
 		cl = _mark(cl, "sph/grid")
 		_dispatch(cl, "sph_density", pc, n_groups)
 		cl = _mark(cl, "sph/density")
@@ -468,7 +547,8 @@ func step_render(dt: float) -> void:
 			cl = _mark(cl, "sph/foam_compact")
 		_parity = 1 - _parity
 	_rd.compute_list_end()
-	_rd.capture_timestamp("sph/end")
+	if profiling:
+		_rd.capture_timestamp("sph/end")
 
 
 # Timestamps cannot be captured inside an open compute list; split the list at
@@ -492,6 +572,34 @@ func _read_timings() -> void:
 # Main thread. GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
 	return _timing_store.snapshot()
+
+
+func read_current_particle_state_render() -> Dictionary:
+	if not initialized:
+		return {}
+	var count := live_count()
+	var snapshot := {"positions_m": PackedFloat32Array(), "velocities_m_s": PackedFloat32Array(),
+		"kernel_density_m_inv3": PackedFloat32Array(), "particle_count": count,
+		"physical_time_s": _sim_time, "state_revision": _frame}
+	if count == 0:
+		return snapshot
+	var pc := _pack_push_constant(0.0, 0)
+	var particle_groups := ceili(float(live_count()) / WG)
+	var cell_groups := ceili(float(_grid_cell_count()) / WG)
+	var cl := _rd.compute_list_begin()
+	_dispatch(cl, "grid_clear", pc, cell_groups)
+	_dispatch(cl, "sph_external", pc, particle_groups)
+	_dispatch(cl, "grid_scan", pc, cell_groups)
+	_dispatch(cl, "grid_scan_blocks", pc, 1)
+	_dispatch(cl, "grid_add_back", pc, cell_groups)
+	_dispatch(cl, "grid_scatter", pc, particle_groups)
+	_dispatch(cl, "sph_density", pc, particle_groups)
+	_rd.compute_list_end()
+	var suffix := "b" if _parity == 0 else "a"
+	snapshot.positions_m = _rd.buffer_get_data(_buffers["positions_" + suffix], 0, count * 16).to_float32_array()
+	snapshot.velocities_m_s = _rd.buffer_get_data(_buffers["velocities_" + suffix], 0, count * 16).to_float32_array()
+	snapshot.kernel_density_m_inv3 = _rd.buffer_get_data(_buffers.densities, 0, count * 4).to_float32_array()
+	return snapshot
 
 
 func capture_validation_stats(result: Dictionary) -> void:
@@ -619,6 +727,7 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	var k_sp2_grad := 15.0 / (PI * pow(h, 5))
 	var k_sp3_grad := 45.0 / (PI * pow(h, 6))
 	var k_poly6 := 315.0 / (64.0 * PI * pow(h, 9))
+	var k_cohesion := 32.0 / (PI * pow(h, 9))
 
 	var pc := PackedByteArray()
 	pc.resize(128)
@@ -637,19 +746,21 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	pc.encode_float(48, k_sp2_grad)
 	pc.encode_float(52, k_sp3_grad)
 	pc.encode_float(56, k_poly6)
-	pc.encode_float(60, 0.0)
+	pc.encode_float(60, k_cohesion)
 	pc.encode_float(64, dt)
 	pc.encode_float(68, _target_density)
 	pc.encode_float(72, pressure_mult)
 	pc.encode_float(76, near_pressure_mult)
 	pc.encode_float(80, viscosity_strength)
 	pc.encode_float(84, collision_damping)
-	pc.encode_float(88, 0.0)
-	pc.encode_float(92, 0.0)
+	# The cohesion slider value is unscaled; the mercury kernel boost lives here,
+	# so the shader reads one plain strength with no per-material re-derivation.
+	pc.encode_float(88, cohesion_strength * cohesion_kernel_scale)
+	pc.encode_float(92, extension_strength)
 	pc.encode_float(96, gravity.x)
 	pc.encode_float(100, gravity.y)
 	pc.encode_float(104, gravity.z)
-	pc.encode_float(108, mode)
+	pc.encode_s32(108, material)
 	pc.encode_s32(112, tex_width)
 	pc.encode_s32(116, -num_blocks if hash_grid_enabled else num_blocks)
 	pc.encode_s32(120, last)
@@ -702,23 +813,49 @@ func planet_mode() -> bool:
 
 
 func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
-	var b := PackedByteArray()
-	b.resize(SCENE_UBO_SIZE)
-	b.encode_float(0, emitter_origin.x)
-	b.encode_float(4, emitter_origin.y)
-	b.encode_float(8, emitter_origin.z)
-	b.encode_float(12, mode)
-	b.encode_float(16, emitter_velocity.x)
-	b.encode_float(20, emitter_velocity.y)
-	b.encode_float(24, emitter_velocity.z)
-	b.encode_float(28, 1.0 if cascade_enabled else 0.0)
-	b.encode_float(32, spacing)
+	# Only the emit window and the live count change per step; the 1.2 KB pack
+	# (13 affine_inverse on the cascade) reruns only when a static input does.
+	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
+		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
+		stiffness_scale, collision_inflation, freeze_heat, yield_stress, scene_id, config.domain_origin,
+		config.domain_size_m])
+	if static_hash != _scene_ubo_cache_hash:
+		_scene_ubo_cache = _pack_scene_ubo_static()
+		_scene_ubo_cache_hash = static_hash
+	var b := _scene_ubo_cache.duplicate()
 	b.encode_s32(48, emit_start)
 	b.encode_s32(52, emit_count)
 	b.encode_s32(56, live_count())
-	var obstacle_count := mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES)
-	b.encode_s32(60, obstacle_count)
-	for i in obstacle_count:
+	return b
+
+
+func _pack_scene_ubo_static() -> PackedByteArray:
+	var b := PackedByteArray()
+	b.resize(SCENE_UBO_SIZE)
+	# emitter_origin.w stays pad: the material id used to be smuggled there.
+	b.encode_float(0, emitter_origin.x)
+	b.encode_float(4, emitter_origin.y)
+	b.encode_float(8, emitter_origin.z)
+	b.encode_float(16, emitter_velocity.x)
+	b.encode_float(20, emitter_velocity.y)
+	b.encode_float(24, emitter_velocity.z)
+	b.encode_float(28, 1.0 if emitter_enabled else 0.0)
+	b.encode_float(32, spacing)
+	b.encode_float(36, float(emitter_width))
+	# Tail of the block (after half_extents[14]): per-material kernel constants
+	# and the scene id the shaders key their scene-specific behavior on.
+	b.encode_float(1184, material_density_kg_m3)
+	b.encode_float(1188, stiffness_scale)
+	b.encode_float(1192, collision_inflation)
+	b.encode_float(1196, freeze_heat)
+	b.encode_float(1248, yield_stress)
+	b.encode_s32(1200, scene_id)
+	var upper := config.domain_origin + config.domain_size_m
+	for axis in 3:
+		b.encode_float(1216 + axis * 4, config.domain_origin[axis])
+		b.encode_float(1232 + axis * 4, upper[axis])
+	b.encode_s32(60, mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES))
+	for i in mini(scene_obstacles.size(), MAX_SCENE_OBSTACLES):
 		var obstacle: Dictionary = scene_obstacles[i]
 		var inverse: Transform3D = (obstacle.transform as Transform3D).affine_inverse()
 		var columns := [inverse.basis.x, inverse.basis.y, inverse.basis.z]
@@ -741,7 +878,7 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	return b
 
 
-# std140: six 16-byte rows. Mirrors the FoamParams block in sph_common.comp.
+# std140: seven 16-byte rows. Mirrors the FoamParams block in sph_common.comp.
 func _pack_foam_ubo(frame_dt: float) -> PackedByteArray:
 	var b := PackedByteArray()
 	b.resize(FOAM_UBO_SIZE)
@@ -760,13 +897,18 @@ func _pack_foam_ubo(frame_dt: float) -> PackedByteArray:
 	b.encode_float(36, foam_spray_drag)
 	b.encode_float(40, foam_bubble_scale)
 	b.encode_float(44, foam_scale_speed)
-	b.encode_float(48, foam_dissolve_time)
-	b.encode_float(52, foam_spawn_radius_scale)
-	b.encode_s32(64, foam_spray_max_neighbours)
-	b.encode_s32(68, foam_bubble_min_neighbours)
-	b.encode_s32(72, foam_cap())
-	b.encode_s32(76, foam_tex_width)
-	b.encode_s32(80, 1 if foam_enabled else 0)
+	b.encode_float(48, foam_spray_aging)
+	b.encode_float(52, foam_foam_aging)
+	b.encode_float(56, foam_bubble_aging)
+	b.encode_float(60, 0.0)
+	b.encode_float(64, foam_dissolve_time)
+	b.encode_float(68, foam_spawn_radius_scale)
+	b.encode_float(72, foam_surface_gate)
+	b.encode_s32(80, foam_spray_max_neighbours)
+	b.encode_s32(84, foam_bubble_min_neighbours)
+	b.encode_s32(88, foam_cap())
+	b.encode_s32(92, foam_tex_width)
+	b.encode_s32(96, 1 if foam_enabled else 0)
 	return b
 
 

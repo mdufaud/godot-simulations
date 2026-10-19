@@ -1,0 +1,10 @@
+[gd_resource type="Resource" script_class="NBodyPreset" format=3 uid="uid://nbody_preset_black_hole"]
+
+[ext_resource type="Script" path="res://scripts/nbody/nbody_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Black hole disk"
+scene_type = 0
+star_size = 0.09
+brightness = 1.0

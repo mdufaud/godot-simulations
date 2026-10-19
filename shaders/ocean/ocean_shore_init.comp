@@ -1,0 +1,21 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec4 q = vec4(max(-bed[i], 0.0), 0.0, 0.0, 0.0);
+    water[i] = q;
+    water[pixel_count() + i] = q;
+    completed[i] = q;
+    completed[pixel_count() + i] = q;
+    foam[i] = vec4(0.0);
+    foam[pixel_count() + i] = vec4(0.0);
+    completed_foam[i] = vec4(0.0);
+    completed_foam[pixel_count() + i] = vec4(0.0);
+    balance[i] = vec4(0.0);
+    brk[i] = vec4(0.0);
+    accel[i] = vec4(0.0);
+    contact[i] = vec4(0.0);
+    completed_contact[i] = vec4(0.0);
+    completed_contact[pixel_count() + i] = vec4(0.0);
+}

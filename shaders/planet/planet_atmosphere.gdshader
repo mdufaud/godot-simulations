@@ -42,13 +42,13 @@ void fragment() {
 	vec2 hit_info = ray_sphere(planet_centre, atmosphere_radius, ray_origin, ray_dir);
 	float dst_to_atmosphere = hit_info.x;
 	float dst_through_atmosphere = min(hit_info.y, scene_dist - dst_to_atmosphere);
+	vec3 color = original_col;
 
 	if (dst_through_atmosphere > 0.0) {
 		const float epsilon = 0.0001;
 		vec3 point_in_atmosphere = ray_origin + ray_dir * (dst_to_atmosphere + epsilon);
-		ALBEDO = calculate_light(point_in_atmosphere, ray_dir, dst_through_atmosphere - epsilon * 2.0,
+		color = calculate_light(point_in_atmosphere, ray_dir, dst_through_atmosphere - epsilon * 2.0,
 				original_col, SCREEN_UV, VIEWPORT_SIZE);
-	} else {
-		ALBEDO = original_col;
 	}
+	ALBEDO = color;
 }

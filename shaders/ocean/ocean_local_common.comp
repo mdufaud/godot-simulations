@@ -1,0 +1,133 @@
+#define PI 3.141592653589793
+#define GRAVITY 9.81
+
+layout(rgba16f, set = 0, binding = 0) readonly uniform image2DArray offshore_displacement;
+layout(rgba16f, set = 0, binding = 1) readonly uniform image2DArray offshore_velocity;
+layout(rgba32f, set = 0, binding = 2) readonly uniform image2DArray local_state_source;
+layout(rgba32f, set = 0, binding = 3) writeonly uniform image2DArray local_state_target;
+layout(rgba16f, set = 0, binding = 4) writeonly uniform image2D local_output;
+layout(rgba32f, set = 0, binding = 8) readonly uniform image2DArray local_state_previous;
+layout(rgba32f, set = 0, binding = 9) readonly uniform image2DArray local_state_current;
+
+layout(std430, set = 0, binding = 5) restrict buffer ButterflyBuffer {
+    vec4 butterfly[];
+};
+layout(std430, set = 0, binding = 6) restrict buffer FFTBuffer {
+    vec2 fft_data[];
+};
+layout(std430, set = 0, binding = 7) readonly restrict buffer WakeImpulseBuffer {
+    vec4 wake_impulses[MAX_IMPULSES];
+};
+layout(std430, set = 0, binding = 10) readonly restrict buffer PressureForceBuffer {
+    vec4 pressure_forces[MAX_IMPULSES];
+};
+
+layout(push_constant, std430) uniform LocalParams {
+    vec4 grid;
+    vec4 domain;
+    vec4 time;
+    vec4 ocean;
+    vec4 terrain;
+    vec4 render;
+    ivec4 cfg;
+} lp;
+
+#define FFT_IDX(p_x, p_y, p_layer, p_half) \
+    (((uint(lp.cfg.x) * 2u + uint(p_half)) * LOCAL_SPECTRA + uint(p_layer)) \
+        * LOCAL_N * LOCAL_N + uint(p_y) * LOCAL_N + uint(p_x))
+
+vec2 world_at(ivec2 id) {
+    return lp.render.xy + ((vec2(id) + 0.5) / float(LOCAL_N) - 0.5) * lp.grid.x;
+}
+
+vec4 sample_displacement(int cascade, float tile, vec2 world) {
+    float n = lp.grid.z;
+    vec2 uv = world / tile;
+    vec2 f = uv - floor(uv);
+    vec2 grid = f * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 dims = ivec2(int(n));
+    ivec2 w0 = (i0 + dims) % dims;
+    ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
+    vec4 c00 = imageLoad(offshore_displacement, ivec3(w0.x, w0.y, cascade));
+    vec4 c10 = imageLoad(offshore_displacement, ivec3(w1.x, w0.y, cascade));
+    vec4 c01 = imageLoad(offshore_displacement, ivec3(w0.x, w1.y, cascade));
+    vec4 c11 = imageLoad(offshore_displacement, ivec3(w1.x, w1.y, cascade));
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+vec4 sample_velocity(int cascade, float tile, vec2 world) {
+    float n = lp.grid.w;
+    vec2 uv = world / tile;
+    vec2 f = uv - floor(uv);
+    vec2 grid = f * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 dims = ivec2(int(n));
+    ivec2 w0 = (i0 + dims) % dims;
+    ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
+    vec4 c00 = imageLoad(offshore_velocity, ivec3(w0.x, w0.y, cascade));
+    vec4 c10 = imageLoad(offshore_velocity, ivec3(w1.x, w0.y, cascade));
+    vec4 c01 = imageLoad(offshore_velocity, ivec3(w0.x, w1.y, cascade));
+    vec4 c11 = imageLoad(offshore_velocity, ivec3(w1.x, w1.y, cascade));
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+vec4 sample_local_state(int bank, vec2 world, vec2 center) {
+    float n = float(LOCAL_N);
+    vec2 uv = (world - center) / lp.grid.x + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+        return vec4(0.0);
+    }
+    vec2 grid = uv * n - 0.5;
+    ivec2 i0 = ivec2(floor(grid));
+    vec2 t = grid - vec2(i0);
+    ivec2 max_index = ivec2(int(n) - 1);
+    ivec2 w0 = clamp(i0, ivec2(0), max_index);
+    ivec2 w1 = clamp(i0 + ivec2(1), ivec2(0), max_index);
+    vec4 c00 = imageLoad(local_state_source, ivec3(w0.x, w0.y, bank));
+    vec4 c10 = imageLoad(local_state_source, ivec3(w1.x, w0.y, bank));
+    vec4 c01 = imageLoad(local_state_source, ivec3(w0.x, w1.y, bank));
+    vec4 c11 = imageLoad(local_state_source, ivec3(w1.x, w1.y, bank));
+    return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+float bathymetry(vec2 world) {
+    if (lp.grid.x < 100.0) {
+        return lp.terrain.x;
+    }
+    float distance_squared = dot(world - lp.render.xy, world - lp.render.xy);
+    return clamp(lp.terrain.x - (lp.terrain.x - lp.terrain.z)
+        * exp(-distance_squared / (2.0 * lp.terrain.y * lp.terrain.y)),
+        lp.terrain.z, lp.terrain.x);
+}
+
+float depth_band(int index) {
+    const float bands[5] = float[5](1.0, 4.0, 16.0, 64.0, 80.0);
+    return index == 4 ? max(lp.terrain.x, 2.0)
+        : min(bands[index], max(lp.terrain.x, 2.0));
+}
+
+vec3 depth_selection(float depth) {
+    float h = clamp(depth, 1.0, max(lp.terrain.x, 2.0));
+    for (int i = 0; i < 4; i++) {
+        float lower_depth = depth_band(i);
+        float upper_depth = depth_band(i + 1);
+        if (upper_depth <= lower_depth) {
+            continue;
+        }
+        if (h <= upper_depth) {
+            float t = (h - lower_depth) / (upper_depth - lower_depth);
+            return vec3(float(i), float(i + 1), t);
+        }
+    }
+    return vec3(4.0, 4.0, 0.0);
+}
+
+vec4 sample_depth_blended_state(vec2 world, vec2 center) {
+    vec3 selection = depth_selection(bathymetry(world));
+    vec4 a = sample_local_state(int(selection.x), world, center);
+    vec4 b = sample_local_state(int(selection.y), world, center);
+    return mix(a, b, selection.z);
+}

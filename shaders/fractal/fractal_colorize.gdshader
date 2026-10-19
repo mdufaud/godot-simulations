@@ -15,6 +15,12 @@ uniform sampler2D tex_low : filter_linear, repeat_disable;
 uniform sampler2D tex_high : filter_linear, repeat_disable;
 uniform float refine_blend : hint_range(0.0, 1.0) = 0.0;
 
+// Each source viewport holds a render of an older view: xy rescales and zw
+// shifts its UVs into the current view, so while the camera moves the screen
+// keeps stretching the last completed render until a fresh one replaces it.
+uniform vec4 xform_low = vec4(1.0, 1.0, 0.0, 0.0);
+uniform vec4 xform_high = vec4(1.0, 1.0, 0.0, 0.0);
+
 uniform int color_mode : hint_range(0, 3) = 0;
 uniform float color_speed : hint_range(0.0, 5.0) = 0.3;
 uniform float color_offset : hint_range(0.0, 1.0) = 0.0;
@@ -51,7 +57,8 @@ vec3 hsv2rgb(vec3 c) {
 }
 
 vec4 fetch(vec2 uv) {
-	return mix(texture(tex_low, uv), texture(tex_high, uv), refine_blend);
+	return mix(texture(tex_low, xform_low.xy * uv + xform_low.zw),
+		texture(tex_high, xform_high.xy * uv + xform_high.zw), refine_blend);
 }
 
 float decode_mu(vec4 d) {

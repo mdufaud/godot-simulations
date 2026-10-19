@@ -81,11 +81,6 @@ func build(menu: SimMenu) -> void:
 		func(value: float) -> void: _view.aa_quality = int(value))
 	_quality.bind("aa_quality", aa_slider,
 		func(value: float) -> void: _view.aa_quality = int(value))
-	var cap_slider: HSlider = menu.add_slider("Interaction cap", 100.0, 10000.0,
-		float(_view.config.interaction_iteration_cap),
-		func(value: float) -> void: _view.config.interaction_iteration_cap = int(value))
-	_quality.bind("interaction_cap", cap_slider,
-		func(value: float) -> void: _view.config.interaction_iteration_cap = int(value))
 	var band_slider: HSlider = menu.add_slider("Refine band", 32.0, 4096.0,
 		float(_view.config.refine_band_rows),
 		func(value: float) -> void: _view.config.refine_band_rows = int(value))

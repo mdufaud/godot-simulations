@@ -33,9 +33,8 @@ func build(host, exhibit_names: Array) -> void:
 	)
 	_menu.add_separator()
 	_menu.add_section("Performance")
-	var scale_slider: HSlider = _menu.add_slider("Render scale", 0.4, 1.0,
+	_menu.add_slider("Render scale", 0.4, 1.0,
 		host._viewport.render_scale(), host._set_render_scale)
-	host.quality.bind("render_scale", scale_slider, host._set_render_scale)
 	var views_slider: HSlider = _menu.add_slider("Portal views", 1.0, 4.0,
 		float(host.render_manager.max_views),
 		func(v: float) -> void: host.render_manager.set_max_views(int(v)))
@@ -126,7 +125,12 @@ func _build_touch_controls(host) -> void:
 	_touch_controls.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_touch_controls.theme = load("res://resources/themes/main_theme.tres")
 	host.ui_layer.add_child(_touch_controls)
+	# The connection targets this RefCounted HUD: drop it with the controls
+	# instead of relying on engine teardown to clean it up.
 	host.get_viewport().size_changed.connect(_layout_touch_controls)
+	_touch_controls.tree_exiting.connect(func() -> void:
+		if host.get_viewport().size_changed.is_connected(_layout_touch_controls):
+			host.get_viewport().size_changed.disconnect(_layout_touch_controls))
 
 	_jump_button = Button.new()
 	_jump_button.text = "Jump"

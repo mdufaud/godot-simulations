@@ -1,0 +1,10 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+#if SHORE_VISUAL_BREAKERS
+    brk[cell_index(p)].w = 0.0;
+#else
+    brk[cell_index(p)].w = params.step.z > 0.0 ? fft_breaking(world_position(p)) : 0.0;
+#endif
+}

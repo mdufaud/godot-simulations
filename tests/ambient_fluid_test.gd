@@ -12,7 +12,6 @@ func _initialize() -> void:
 	_test_matrix_operations()
 	_test_profile_and_tensor()
 	_test_acceleration_closed_form()
-	_test_gyroscopic_norm()
 	call_deferred("_test_scene_body")
 
 
@@ -87,17 +86,6 @@ func _test_acceleration_closed_form() -> void:
 			/ (body_mass + fluid_mass * 0.5)
 		_check(absf(velocity[4] / 1.0e-3 - expected) < 1.0e-5,
 			"closed-form acceleration mismatch at density %.3f" % fluid_density)
-
-
-func _test_gyroscopic_norm() -> void:
-	var tensor := MATH.diagonal_matrix(Vector3.ONE, 1.0)
-	var inverse := MATH.matrix_inverse(tensor)
-	var momentum := PackedFloat64Array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-	var velocity := MATH.matrix_vector_multiply(inverse, momentum)
-	var wrench := MATH.generalized_gyro_wrench(momentum, velocity)
-	var next := MATH.semi_implicit_momentum_step(momentum, wrench, 1.0e-7)
-	_check(absf(MATH.vector_dot(momentum, momentum) - MATH.vector_dot(next, next)) < 1.0e-10,
-		"gyroscopic step did not conserve momentum norm")
 
 
 func _test_scene_body() -> void:

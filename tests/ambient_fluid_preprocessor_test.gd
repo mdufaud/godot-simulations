@@ -8,6 +8,7 @@ func _initialize() -> void:
 	_test_tetrahedron()
 	_test_cube()
 	_test_icosphere()
+	_test_plate()
 	_test_invalid_meshes()
 	_test_profile_validation()
 	_test_serialization()
@@ -117,6 +118,30 @@ func _test_icosphere() -> void:
 		_check(refined_error < 0.25, "refined icosphere added mass is not bounded")
 		_check(refined_error <= relative_error,
 			"icosphere added mass did not converge under refinement")
+		var slip_error := _sphere_translation_slip_error(refined_profile)
+		print("BEM sphere tangential-slip relative error=%.4f" % slip_error)
+		_check(slip_error < 0.3,
+			"icosphere tangent slip does not approach the analytic 1.5U sphere solution")
+
+
+func _test_plate() -> void:
+	# Regression: the demo plate once generated an inverted tensor (edgewise z
+	# larger than broadside y) because the source offset rode past the opposite
+	# face of the 0.18 m slab. The offset guard must keep broadside dominant.
+	var box := BoxMesh.new()
+	box.size = Vector3(2.4, 0.18, 1.2)
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, box.get_mesh_arrays())
+	var profile: AmbientFluidProfile3D = PREPROCESSOR.build_profile(mesh, 998.0)
+	_check(profile != null, "plate preprocessing failed: %s" % PREPROCESSOR.get_last_error())
+	if profile == null:
+		return
+	_check(profile.source_offset_m <= 0.091,
+		"plate source offset rode past half the plate thickness")
+	var tensor := profile.added_mass_tensor
+	_check(tensor[28] > tensor[21] and tensor[28] > tensor[35],
+		"plate broadside added mass is not dominant on y")
+	_check(_profile_invariants(profile), "plate BEM invariants failed")
 
 
 func _test_invalid_meshes() -> void:
@@ -183,7 +208,6 @@ func _profile_invariants(profile: AmbientFluidProfile3D) -> bool:
 	_check(profile.bem_max_residual <= 1.0e-7, "BEM residual exceeds tolerance")
 	for face_index in profile.face_centers_m.size():
 		var normal := profile.face_normals[face_index]
-		var center := profile.face_centers_m[face_index]
 		var base := face_index * 18
 		for sample in [PackedFloat64Array([1.0, 2.0, -0.5, 3.0, -1.0, 0.25]),
 			PackedFloat64Array([-0.2, 0.4, 1.5, -2.0, 0.5, 4.0])]:
@@ -195,13 +219,22 @@ func _profile_invariants(profile: AmbientFluidProfile3D) -> bool:
 				projected[row] = value
 			_check(absf(normal.dot(projected)) < 1.0e-6,
 				"slip matrix has a normal component")
-			var angular := Vector3(sample[0], sample[1], sample[2])
-			var linear := Vector3(sample[3], sample[4], sample[5])
-			var surface_velocity := linear + angular.cross(center)
-			var expected := -(surface_velocity - normal * normal.dot(surface_velocity))
-			_check(projected.distance_to(expected) < 1.0e-6,
-				"slip matrix does not implement -PnR")
 	return true
+
+
+func _sphere_translation_slip_error(profile: AmbientFluidProfile3D) -> float:
+	var squared_error := 0.0
+	var squared_reference := 0.0
+	for face_index in profile.face_centers_m.size():
+		var normal := profile.face_normals[face_index]
+		var expected := -1.5 * (Vector3.RIGHT - normal * normal.x)
+		var base := face_index * 18
+		var actual := Vector3(profile.slip_matrix[base + 3],
+			profile.slip_matrix[base + 9], profile.slip_matrix[base + 15])
+		var area := profile.face_areas_m2[face_index]
+		squared_error += area * actual.distance_squared_to(expected)
+		squared_reference += area * expected.length_squared()
+	return sqrt(squared_error / squared_reference) if squared_reference > 0.0 else INF
 
 
 func _positive_diagonal(matrix: PackedFloat64Array) -> bool:

@@ -6,12 +6,15 @@ class_name TerrainScenery extends RefCounted
 
 var sand_mat: ShaderMaterial
 var terrain: MeshInstance3D
+var water_mat: ShaderMaterial
+var water: MeshInstance3D
 var walls: Node3D
 var marker: MeshInstance3D
 var dust: GPUParticles3D
 var snowfall: GPUParticles3D
 
 var _world_size := 4.0
+var _ground: MeshInstance3D
 
 
 ## [param mesh_n] is the vertex grid of the displaced sheet, independent of the
@@ -19,16 +22,16 @@ var _world_size := 4.0
 func build(host: Node3D, world_size: float, mesh_n: int) -> void:
 	_world_size = world_size
 
-	var ground := MeshInstance3D.new()
+	_ground = MeshInstance3D.new()
 	var plane := PlaneMesh.new()
 	plane.size = Vector2(world_size * 3.0, world_size * 3.0)
 	var gm := StandardMaterial3D.new()
 	gm.albedo_color = Color(0.30, 0.28, 0.26)
 	gm.roughness = 1.0
 	plane.material = gm
-	ground.mesh = plane
-	ground.position.y = -0.002
-	host.add_child(ground)
+	_ground.mesh = plane
+	_ground.position.y = -0.002
+	host.add_child(_ground)
 
 	sand_mat = ShaderMaterial.new()
 	sand_mat.shader = load("res://shaders/terrain/terrain_surface.gdshader")
@@ -40,6 +43,15 @@ func build(host: Node3D, world_size: float, mesh_n: int) -> void:
 		Vector3(-world_size * 0.5, -0.1, -world_size * 0.5), Vector3(world_size, 3.0, world_size)
 	)
 	host.add_child(terrain)
+	water_mat = ShaderMaterial.new()
+	water_mat.shader = load("res://shaders/terrain/terrain_water.gdshader")
+	water_mat.set_shader_parameter("world_size", world_size)
+	water = MeshInstance3D.new()
+	water.mesh = terrain.mesh
+	water.material_override = water_mat
+	water.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	water.custom_aabb = terrain.custom_aabb
+	host.add_child(water)
 
 	walls = Node3D.new()
 	host.add_child(walls)
@@ -62,6 +74,7 @@ func set_marker_radius(radius_m: float) -> void:
 ## Preset ambience: sun direction/colour, procedural sky palette, optional
 ## distance fog and exposure. Written onto the scene's existing resources.
 func apply_ambience(env: Environment, sun: DirectionalLight3D, preset: TerrainPreset) -> void:
+	_ground.visible = not preset.landscape_materials
 	sun.rotation_degrees = Vector3(-preset.sun_elevation_deg, preset.sun_azimuth_deg, 0.0)
 	sun.light_color = preset.sun_color
 	sun.light_energy = preset.sun_energy
@@ -85,6 +98,31 @@ func set_snowfall(on: bool) -> void:
 ## height binding, walls and helpers stay untouched.
 func rebuild_terrain(mesh_n: int) -> void:
 	terrain.mesh = _build_terrain_mesh(mesh_n)
+	water.mesh = terrain.mesh
+
+
+func set_world_size(world_size: float, mesh_n: int) -> void:
+	if is_equal_approx(_world_size, world_size):
+		return
+	_world_size = world_size
+	(_ground.mesh as PlaneMesh).size = Vector2(world_size * 3.0, world_size * 3.0)
+	sand_mat.set_shader_parameter("world_size", world_size)
+	water_mat.set_shader_parameter("world_size", world_size)
+	rebuild_terrain(mesh_n)
+	for child in walls.get_children():
+		walls.remove_child(child)
+		child.queue_free()
+	_build_box_walls()
+	(snowfall.process_material as ParticleProcessMaterial).emission_box_extents = \
+		Vector3(world_size * 1.2, 0.1, world_size * 1.2)
+	snowfall.position.y = maxf(3.0, world_size * 0.3)
+
+
+func update_bounds(height_m: float) -> void:
+	var bounds := AABB(Vector3(-_world_size * 0.5, -0.1, -_world_size * 0.5),
+		Vector3(_world_size, height_m + 0.1, _world_size))
+	terrain.custom_aabb = bounds
+	water.custom_aabb = bounds
 
 
 # Flat vertex grid displaced by the shader. One extra ring around the border
@@ -240,7 +278,7 @@ func _build_snowfall() -> GPUParticles3D:
 	p.lifetime = 7.0
 	p.emitting = false
 	p.local_coords = false
-	p.position = Vector3(0.0, 3.0, 0.0)
+	p.position = Vector3(0.0, maxf(3.0, _world_size * 0.3), 0.0)
 	p.preprocess = 6.0
 	var pm := ParticleProcessMaterial.new()
 	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX

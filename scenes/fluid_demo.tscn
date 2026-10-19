@@ -5,8 +5,12 @@
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
-sky_horizon_color = Color(0.64, 0.66, 0.68, 1)
-ground_horizon_color = Color(0.64, 0.66, 0.68, 1)
+sky_top_color = Color(0.15, 0.27, 0.42, 1)
+sky_horizon_color = Color(0.58, 0.7, 0.8, 1)
+ground_bottom_color = Color(0.12, 0.16, 0.21, 1)
+ground_horizon_color = Color(0.33, 0.4, 0.48, 1)
+sun_angle_max = 18.0
+energy_multiplier = 1.35
 
 [sub_resource type="Sky" id="Sky_env"]
 sky_material = SubResource("ProceduralSkyMaterial_sky")
@@ -14,16 +18,22 @@ sky_material = SubResource("ProceduralSkyMaterial_sky")
 [sub_resource type="Environment" id="Environment_fluid"]
 background_mode = 2
 sky = SubResource("Sky_env")
+ambient_light_source = 2
+ambient_light_color = Color(0.58, 0.66, 0.76, 1)
+ambient_light_energy = 1.0
+reflected_light_source = 2
 tonemap_mode = 3
-glow_intensity = 0.6
-glow_bloom = 0.2
+tonemap_exposure = 1.05
+glow_intensity = 0.45
+glow_bloom = 0.08
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.35, 0.3, 0.25, 1)
-roughness = 1.0
+albedo_color = Color(0.12, 0.15, 0.19, 1)
+metallic = 0.1
+roughness = 0.82
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
-size = Vector2(16, 16)
+size = Vector2(200, 200)
 
 [node name="FluidDemo" type="Node3D"]
 script = ExtResource("1_controller")
@@ -45,9 +55,18 @@ environment = SubResource("Environment_fluid")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 10, 0)
+light_color = Color(1, 0.88, 0.72, 1)
+light_energy = 1.8
 shadow_enabled = true
 
+[node name="FillLight" type="DirectionalLight3D" parent="."]
+rotation_degrees = Vector3(-35, 145, 0)
+light_color = Color(0.52, 0.68, 1, 1)
+light_energy = 0.45
+shadow_enabled = false
+
 [node name="Ground" type="MeshInstance3D" parent="."]
+position = Vector3(0, -0.28, 0)
 mesh = SubResource("PlaneMesh_ground")
 surface_material_override/0 = SubResource("StandardMaterial3D_ground")
 

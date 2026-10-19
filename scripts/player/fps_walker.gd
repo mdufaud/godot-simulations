@@ -38,24 +38,21 @@ func _ready() -> void:
 
 
 func capture_mouse() -> void:
+	if get_tree().has_group("open_sim_menu"):
+		return
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	_captured = true
+	add_to_group("captured_mouse")
 
 
 func release_mouse() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	_captured = false
+	remove_from_group("captured_mouse")
 
 
 func _input(event: InputEvent) -> void:
 	if _touch_ui:
-		return
-	if event.is_action_pressed("ui_cancel"):
-		if _captured:
-			release_mouse()
-		else:
-			capture_mouse()
-		get_viewport().set_input_as_handled()
 		return
 	# Mouselook must run in _input: the GUI consumes motion events (the pinned
 	# cursor can sit over the menu panel) before _unhandled_input ever fires.
@@ -68,6 +65,13 @@ func _input(event: InputEvent) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event.is_action_pressed("ui_cancel") and not _touch_ui:
+		if _captured:
+			release_mouse()
+		else:
+			capture_mouse()
+		get_viewport().set_input_as_handled()
+		return
 	if _touch_ui:
 		if event is InputEventScreenDrag:
 			var drag := event as InputEventScreenDrag
@@ -103,7 +107,7 @@ func _physics_process(delta: float) -> void:
 	velocity.z = move_toward(velocity.z, target.z, acceleration * speed * delta)
 
 	if is_on_floor():
-		if _captured and Input.is_action_just_pressed("move_up"):
+		if (_captured or _touch_ui) and Input.is_action_just_pressed("move_up"):
 			velocity.y = jump_velocity
 	else:
 		velocity.y -= _gravity * delta

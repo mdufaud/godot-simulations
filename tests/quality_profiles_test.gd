@@ -7,6 +7,7 @@ extends "res://tests/test_case.gd"
 
 const QUALITY_KEYS := [
 	"ocean_quality_profile", "terrain_quality_profile", "nbody_quality_profile",
+	"river_quality_profile",
 	"planet_quality_profile", "fluid_quality_profile", "tornado_quality_profile",
 	"cloth_quality_profile", "destruction_quality_profile", "grass_quality_profile",
 	"mixwell_quality_profile", "fractal_quality_profile", "non_euclidean_quality_profile",
@@ -21,27 +22,27 @@ var _profiles := {}
 func _profile_table() -> void:
 	_profiles = {
 		OceanQualityProfile: ["fft_size", "foam_near_size", "foam_near_distance",
-			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate"],
-		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations", "render_scale"],
-		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max",
-			"render_scale"],
-		FluidQualityProfile: ["particle_count", "texture_width", "water_scale",
-			"render_scale"],
-		PlanetQualityProfile: ["resolution", "detail_octaves", "render_scale"],
-		TornadoQualityProfile: ["render_scale", "raymarch_steps", "dust_amount",
-			"debris_cap"],
-		ClothQualityProfile: ["iterations", "substeps", "render_scale"],
-		DestructionQualityProfile: ["chunk_count", "render_scale"],
-		GrassQualityProfile: ["density", "shadows", "shadow_distance_m", "render_scale"],
+			"detail_distance_m", "amortize", "foam_near_stride", "short_cascade_half_rate",
+			"surface_detail"],
+		TerrainQualityProfile: ["grid_n", "mesh_n", "iterations"],
+		NBodyQualityProfile: ["particle_count", "self_gravity", "self_gravity_max"],
+		FluidQualityProfile: ["particle_count", "texture_width", "water_scale"],
+		PlanetQualityProfile: ["resolution", "detail_octaves", "orbit_detail"],
+		TornadoQualityProfile: ["raymarch_steps", "dust_amount", "debris_cap"],
+		ClothQualityProfile: ["iterations", "substeps"],
+		DestructionQualityProfile: ["chunk_count"],
+		GrassQualityProfile: ["near_detail", "density", "shadows", "shadow_distance_m"],
 		MixwellQualityProfile: ["target_spp", "preview_scale", "final_scale",
 			"gpu_budget_ms"],
-		FractalQualityProfile: ["aa_quality", "interaction_cap", "refine_band_rows"],
-		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale", "render_scale"],
-		SsrQualityProfile: ["render_scale", "msaa", "ssr_steps", "max_objects",
+		FractalQualityProfile: ["aa_quality", "refine_band_rows"],
+		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale"],
+		SsrQualityProfile: ["msaa", "ssr_steps", "max_objects",
 			"ssao", "ssil", "glow"],
-		AmbientFluidQualityProfile: ["max_objects", "render_scale", "msaa"],
-		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow",
-			"render_scale"],
+		AmbientFluidQualityProfile: ["msaa"],
+		ParallaxQualityProfile: ["min_factor", "max_factor", "self_shadow"],
+		RiverQualityProfile: ["water_cell_size_m", "foam_size_px", "reflection_scale", "rapids_reflection",
+			"grass_density", "grass_distance_m", "grass_detail", "grass_shadows", "msaa", "ssao",
+			"reflection_planes", "surface_detail", "foam_detail", "volumetric_mist"],
 	}
 
 
@@ -49,6 +50,7 @@ func _initialize() -> void:
 	_profile_table()
 	_test_base_class()
 	_test_profile_tables()
+	_test_fire_render_scale_ownership()
 	_test_game_manager_seeds()
 	_test_state_machine()
 	_test_widget_pushes()
@@ -82,21 +84,20 @@ func _test_profile_tables() -> void:
 			for key in keys:
 				_check(values.has(key), "%s tier %d misses key '%s'" % [
 					profile_script.get_class(), tier, key])
-		# Render scale is a shared lever: within [0.4, 1] and never decreases
-		# with the tier (more quality = no smaller framebuffer).
-		if profile_script.values(0).has("render_scale"):
-			var previous := -1.0
-			for tier in 4:
-				var scale: float = profile_script.values(tier).render_scale
-				_check(scale >= 0.4 and scale <= 1.0,
-					"%s tier %d render scale %s out of [0.4, 1]" % [
-						profile_script.get_class(), tier, scale])
-				_check(scale >= previous,
-					"%s render scale shrinks at tier %d" % [
-						profile_script.get_class(), tier])
-				previous = scale
+			_check(not values.has("render_scale"),
+				"%s tier %d must preserve the manual viewport render scale" % [
+					profile_script.get_class(), tier])
 	_test_ocean_tables()
 	_test_lever_caps()
+
+
+func _test_fire_render_scale_ownership() -> void:
+	for preset in range(FireQuality.Preset.AUTO):
+		_check(not FireQuality.preset_values(preset).has("render_scale"),
+			"Fire fixed preset %d must preserve the manual viewport render scale" % preset)
+	for level in FireQuality.AUTO_MAX_LEVEL + 1:
+		_check(FireQuality.auto_values(level).has("render_scale"),
+			"Fire Auto level %d must retain adaptive render scale" % level)
 
 
 func _test_ocean_tables() -> void:
@@ -106,17 +107,26 @@ func _test_ocean_tables() -> void:
 			"ocean FFT %s exceeds the workgroup-size ceiling" % values.fft_size)
 		_check(values.foam_near_size in [512, 1024, 2048],
 			"ocean foam near size %s outside the calibrated set" % values.foam_near_size)
+	var ocean_config := OceanConfig.new()
+	for size in [256, 512, 1024]:
+		ocean_config.map_size = size
+		_check(ocean_config.validate() == "", "ocean FFT size %d should be valid" % size)
+	for size in [8, 16, 32, 48, 128, 2048]:
+		ocean_config.map_size = size
+		_check(ocean_config.validate() != "", "ocean FFT size %d should be rejected" % size)
 	_check(OceanQualityProfile.default_tier() == OceanQualityProfile.Tier.HIGH,
 		"ocean ships with High (its original configuration)")
-	# Ultra keeps High's calibrated foam pipeline (density, not size, is the
-	# contract) and distinguishes itself by full-rate short cascade + distance.
+	# Ultra keeps High's calibrated foam pipeline and FFT cadence, with
+	# additional surface detail and a longer detail distance.
 	var high: Dictionary = OceanQualityProfile.values(2)
 	var ultra: Dictionary = OceanQualityProfile.values(3)
 	_check(ultra.foam_near_size == high.foam_near_size
 		and ultra.foam_near_distance == high.foam_near_distance,
 		"Ultra foam near must stay on High's calibrated config")
-	_check(not ultra.short_cascade_half_rate and high.short_cascade_half_rate,
-		"Ultra runs the short cascade at full rate")
+	_check(ultra.short_cascade_half_rate == high.short_cascade_half_rate,
+		"Ultra keeps High's short-cascade cadence")
+	_check(ultra.surface_detail > high.surface_detail,
+		"Ultra adds surface detail")
 	_check(ultra.detail_distance_m > high.detail_distance_m,
 		"Ultra pushes the detail distance further")
 	_check(OceanQualityProfile.tier_supported(3),
@@ -150,8 +160,6 @@ func _test_lever_caps() -> void:
 	var fractal := FractalQualityProfile
 	for tier in 4:
 		var values: Dictionary = fractal.values(tier)
-		_check(values.interaction_cap <= 10000,
-			"fractal tier %d cap above FractalConfig range" % tier)
 		_check(values.refine_band_rows <= 4096,
 			"fractal tier %d band above FractalConfig range" % tier)
 		_check(values.aa_quality in [1, 2, 3], "fractal AA level out of shader range")
@@ -203,7 +211,7 @@ class TestProfile extends SimQualityProfile:
 			strength = float(tier + 1),
 			count = (tier + 1) * 16,
 			enabled = tier % 2 == 1,
-			render_scale = 1.0,
+			callback_value = 1.0,
 		}
 
 	static func tier_supported(tier: int) -> bool:
@@ -255,6 +263,13 @@ func _test_state_machine() -> void:
 	if manager != null:
 		_check(manager.settings.get("test_quality_profile") == 3,
 			"set_tier persists the requested tier")
+	state.reset_to_default()
+	_check(state.requested == TestProfile.default_tier()
+		and state.effective == TestProfile.default_tier(),
+		"factory reset returns to the profile-owned default tier")
+	if manager != null:
+		_check(manager.settings.get("test_quality_profile") == TestProfile.default_tier(),
+			"factory reset persists the profile default through GameManager")
 
 	var count := _apply_count
 	state.fallback_tier = SimQualityProfile.Tier.LOW
@@ -320,7 +335,7 @@ func _test_widget_pushes() -> void:
 
 	# Callback-only binding of the last unbound key: every key is now widget-
 	# routed, so the apply callable must be bypassed entirely.
-	state.bind("render_scale", null,
+	state.bind("callback_value", null,
 		func(value) -> void: pass)
 	var count := _apply_count
 	state.set_tier(SimQualityProfile.Tier.ULTRA)

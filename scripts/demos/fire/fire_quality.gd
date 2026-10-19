@@ -131,35 +131,35 @@ static func preset_values(index: int) -> Dictionary:
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				catchup = 3, water_substeps = 16, water_adaptive = true,
 				water_cap = 16384, march_step = 1.0, march_budget = 280,
-				march_distance = 72.0, water_scale = 0.8, render_scale = 1.0,
+				march_distance = 72.0, water_scale = 0.8,
 				msaa = 2, volume_half = false}
 		Preset.BALANCED:
 			return {pressure = 24, advection = 0, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 30, temporal = false,
 				catchup = 2, water_substeps = 14, water_adaptive = true,
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
-				march_distance = 56.0, water_scale = 0.55, render_scale = 0.8,
+				march_distance = 56.0, water_scale = 0.55,
 				msaa = 1, volume_half = true}
 		Preset.REALTIME_LITE:
 			return {pressure = 16, advection = 2, vorticity_mode = 1,
 				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
-				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65,
+				march_distance = 40.0, water_scale = 0.4,
 				msaa = 1, volume_half = true}
 		Preset.PERFORMANCE:
 			return {pressure = 16, advection = 1, vorticity_mode = 2,
 				vorticity_frequency = 4, simulation_hz = 30, temporal = false,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
-				march_distance = 40.0, water_scale = 0.4, render_scale = 0.65,
+				march_distance = 40.0, water_scale = 0.4,
 				msaa = 0, volume_half = true}
 		_:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
 				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
 				catchup = 4, water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.75, march_budget = 320,
-				march_distance = 80.0, water_scale = 1.0, render_scale = 1.0,
+			march_distance = 80.0, water_scale = 1.0,
 				msaa = 2, volume_half = false}
 
 
@@ -176,6 +176,7 @@ static func preset_values(index: int) -> Dictionary:
 ## single number.
 static func auto_values(level: int) -> Dictionary:
 	var values := preset_values(Preset.REFERENCE)
+	values.render_scale = 1.0
 	match level:
 		1:
 			values.merge({pressure = 32, march_step = 1.0, march_budget = 280,
@@ -197,6 +198,7 @@ static func auto_values(level: int) -> Dictionary:
 				render_scale = 0.75, msaa = 1, volume_half = true}, true)
 		5:
 			values = preset_values(Preset.PERFORMANCE)
+			values.render_scale = 0.65
 	return values
 
 
@@ -215,7 +217,8 @@ func _apply(values: Dictionary) -> void:
 	_push("march_budget", values.march_budget)
 	_push("march_distance", values.march_distance)
 	_push("water_scale", values.water_scale)
-	_push("render_scale", values.render_scale)
+	if values.has("render_scale"):
+		_push("render_scale", values.render_scale)
 	_push("msaa", values.msaa)
 	_push("volume_half", values.volume_half)
 

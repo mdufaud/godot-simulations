@@ -1,0 +1,37 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= num_cells()) { return; }
+	if (cell_types.data[i] != CELL_FLUID) { residual.data[i] = 0.0; return; }
+	ivec3 c = cell_coord(i);
+	ivec3 dims = params.grid_dims.xyz;
+	float sum = 0.0;
+	float degree = 0.0;
+	for (int axis = 0; axis < 3; axis++) {
+		for (int side = -1; side <= 1; side += 2) {
+			ivec3 n = c;
+			n[axis] += side;
+			if (any(lessThan(n, ivec3(0))) || any(greaterThanEqual(n, dims))) { continue; }
+			ivec3 face = side > 0 ? n : c;
+			if (face_pressure_blocked(face, axis)) { continue; }
+			uint ni = cell_index(n);
+			if (cell_types.data[ni] == CELL_SOLID) { continue; }
+			float aperture = face_open_fraction(face, axis);
+			degree += aperture * free_surface_inverse_fraction(i, ni);
+			if (cell_types.data[ni] == CELL_FLUID) { sum += aperture * pressure.data[ni]; }
+		}
+	}
+	float laplacian = (sum - degree * pressure.data[i])
+		/ (params.grid_origin_dx.w * params.grid_origin_dx.w * max(cell_open_fraction(i), 1.0e-12));
+	float error = abs(divergence.data[i] - params.sim.x * laplacian / params.sim.z);
+	float projected_error = abs(cell_velocity_divergence(c, true));
+	if (isnan(divergence.data[i]) || isinf(divergence.data[i]) || isnan(error) || isinf(error)
+			|| isnan(projected_error) || isinf(projected_error)) {
+		residual.data[i] = uintBitsToFloat(0x7f800000u);
+		atomicExchange(pressure_control.stats.z, 0u);
+		atomicMax(pressure_control.dispatch_args.w, 0x7f800000u);
+		return;
+	}
+	residual.data[i] = error;
+	atomicMax(pressure_control.stats.y, floatBitsToUint(error));
+	atomicMax(pressure_control.dispatch_args.w, floatBitsToUint(projected_error));
+}

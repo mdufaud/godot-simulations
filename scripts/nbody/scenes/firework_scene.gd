@@ -1,42 +1,48 @@
 class_name FireworkScene
 extends NBodySceneDef
-## Fireworks show. Fully analytic on the GPU: every star's position is a pure
-## function of (index, sim time) — see firework() in nbody_step_attractors.comp.
-## Particles are split across `rockets` staggered groups; each group bursts as
-## one synchronized shell, decelerates under air drag, droops under gravity,
-## fades quadratically with sparkle, then relaunches somewhere else.
+## Staggered launch, ascent and aerial shell bursts on the GPU.
 
-var period := 20.0
-var rockets := 8.0
-var burst_speed := 12.0
-var gravity_strength := 0.8
+var period := 40.0
+var rockets := 4.0
+var burst_speed := 17.0
+var gravity_strength := 1.0
 var spread := 24.0
+var air_drag := 1.1
 
 
 func title() -> String:
 	return "Fireworks"
 
 
-func star_size() -> float:
-	return 0.05
+func view_distance(_solver: NBodySolver) -> float:
+	var bounds := render_bounds(_solver, [])
+	var focus := view_target(_solver).y
+	var half_height := maxf(absf(bounds.position.y - focus),
+		absf(bounds.end.y - focus))
+	return maxf(80.0, 2.15 * maxf(half_height, bounds.end.x))
 
 
-func brightness() -> float:
-	return 0.6
-
-
-func view_distance() -> float:
-	return spread * 3.5
+func view_target(_solver: NBodySolver, _sim_time: float = 0.0) -> Vector3:
+	return Vector3(0.0, spread * 1.75, 0.0)
 
 
 func params() -> Array:
 	return [
-		{key = "period", label = "Burst period", min = 5.0, max = 40.0},
-		{key = "rockets", label = "Rockets", min = 1.0, max = 16.0},
+		{key = "period", label = "Burst period", min = 15.0, max = 70.0},
+		{key = "rockets", label = "Rockets", min = 1.0, max = 16.0, step = 1.0},
 		{key = "burst_speed", label = "Burst speed", min = 4.0, max = 20.0},
 		{key = "gravity_strength", label = "Gravity", min = 0.1, max = 3.0},
 		{key = "spread", label = "Spread", min = 5.0, max = 50.0},
 	]
+
+
+func advanced_params() -> Array:
+	return [{key = "air_drag", label = "Air drag", min = 0.1, max = 3.0}]
+
+
+func normalize_params() -> void:
+	rockets = clampf(roundf(rockets), 1.0, 16.0)
+	air_drag = clampf(air_drag, 0.1, 3.0)
 
 
 func apply_defaults(solver: NBodySolver) -> void:
@@ -47,7 +53,8 @@ func apply_defaults(solver: NBodySolver) -> void:
 	solver.firework_gravity_mps2 = gravity_strength
 	solver.firework_speed_max_mps = burst_speed
 	solver.firework_rocket_groups = floorf(maxf(rockets, 1.0))
-	solver.escape_radius = 1000.0
+	solver.firework_drag = air_drag
+	solver.escape_radius = 0.0
 	# Unused by the analytic path (it writes the glow channel directly), but keep
 	# them sane for the horizonless status displays.
 	solver.v_ref = burst_speed
@@ -57,9 +64,9 @@ func apply_defaults(solver: NBodySolver) -> void:
 
 # Positions are analytic, so the seed only carries mass + colour; park
 # everything at the origin, frame one overwrites it all.
-func seed(count: int, _solver: NBodySolver) -> Dictionary:
+func seed(count: int, _solver: NBodySolver, seed_value: int = 0) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
-	rng.seed = 0xF12E30
+	rng.seed = 0xF12E30 ^ seed_value
 	var pos := PackedFloat32Array()
 	var vel := PackedFloat32Array()
 	pos.resize(count * 4)
@@ -67,3 +74,16 @@ func seed(count: int, _solver: NBodySolver) -> Dictionary:
 	for i in count:
 		vel[i * 4 + 3] = rng.randf()
 	return {positions = pos, velocities = vel}
+
+
+func render_bounds(_solver: NBodySolver, _sources: Array) -> AABB:
+	var age := minf(period * 1.25 * 0.54, 23.0)
+	var drag := 0.04 + 0.08 * air_drag
+	var speed := burst_speed * 1.14 * 1.22
+	var radius := log(1.0 + drag * speed * age) / drag
+	var xz := spread * 1.175 + radius + 2.0
+	var bottom := minf(0.0, spread * 2.2 - radius
+		- 0.045 * gravity_strength * age * age) - 2.0
+	var top := spread * 2.6 + radius + 2.0
+	return AABB(Vector3(-xz, bottom, -xz),
+		Vector3(xz * 2.0, top - bottom, xz * 2.0))

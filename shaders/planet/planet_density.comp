@@ -12,6 +12,10 @@ layout(set = 0, binding = 0, std430) restrict writeonly buffer DensityBuffer {
 
 layout(r32f, set = 0, binding = 1) uniform restrict writeonly image3D density_tex;
 
+layout(set = 0, binding = 2, std430) restrict buffer ShapeBuffer {
+	vec4 values[];
+} shape;
+
 layout(push_constant, std430) uniform Params {
 	vec3 world_centre;
 	float radius;
@@ -24,25 +28,199 @@ layout(push_constant, std430) uniform Params {
 	float noise_offset;
 	int num_layers;
 	uint resolution;
-	uint pad0;
+	float iso_level;
 	uint pad1;
 	uint pad2;
 } pc;
 
+float base_density(vec3 pos) {
+	float reference_radius = shape.values[0].x;
+	float radius_scale = pc.radius / reference_radius;
+	vec3 reference_pos = pos / radius_scale;
+	bool continental = shape.values[27].x < 0.5;
+	float continent_strength = shape.values[0].y;
+	float mountain_strength = shape.values[0].z;
+	float warp_strength = shape.values[0].w;
+	vec3 terrain_pos = continental ? reference_pos / max(length(reference_pos), 1e-6) * reference_radius : reference_pos;
+	vec3 noise_pos = terrain_pos + pc.noise_pos_offset;
+	if (warp_strength > 0.0) {
+		vec3 normalized_ref = terrain_pos / reference_radius;
+		vec3 warp = vec3(
+			snoise(normalized_ref * 1.7 + vec3(17.1, 3.2, 8.4)),
+			snoise(normalized_ref * 1.7 + vec3(5.7, 19.3, 1.8)),
+			snoise(normalized_ref * 1.7 + vec3(11.4, 7.6, 23.2))
+		);
+		noise_pos += warp * (reference_radius * 0.035 * warp_strength);
+	}
+	if (continental) {
+		float continent = snoise(noise_pos / reference_radius * 1.6);
+		float mountain_mask = smoothstep(-0.25, 0.45,
+				snoise(noise_pos / reference_radius * 2.1 + vec3(11.2, 4.7, 19.3)));
+		float ridge = mountain_fbm(pc.num_layers, pc.lacunarity, pc.persistence, pc.noise_scale, noise_pos);
+		float height = continent * continent_strength * reference_radius * 0.16
+				+ (2.0 * (ridge - 0.35) * mountain_mask + pc.noise_offset)
+				* mountain_strength * pc.noise_strength;
+		return (length(reference_pos) - reference_radius - height) * radius_scale;
+	}
+	float macro = snoise(noise_pos * pc.noise_scale / 100.0 * 0.35);
+	float ridge_mask = mix(0.35, 1.0, smoothstep(-0.6, 0.6, macro));
+	float amplitude_sum = 0.0;
+	float amplitude = 1.0;
+	for (int i = 0; i < pc.num_layers; i++) {
+		amplitude_sum += amplitude;
+		amplitude *= pc.persistence;
+	}
+	float ridges = ridged_fbm(pc.num_layers, pc.lacunarity, pc.persistence,
+			pc.noise_scale, noise_pos);
+	float relief = amplitude_sum * tanh((ridges * ridge_mask - macro * 0.35) / amplitude_sum);
+	float continent = snoise(noise_pos / reference_radius * 2.4) * continent_strength * reference_radius * 0.16;
+	float density_ref = length(reference_pos) - reference_radius
+		+ (relief - pc.noise_offset) * mountain_strength * pc.noise_strength + continent;
+	return density_ref * radius_scale;
+}
+
+float fragmented_density(vec3 pos) {
+	float strength = shape.values[1].x;
+	if (strength <= 0.0 || shape.values[27].y < 0.5) {
+		return base_density(pos);
+	}
+	int count = int(shape.values[1].w + 0.5);
+	float inner_radius = mix(shape.values[1].y + 0.08, shape.values[1].z - 0.10, 0.75) * pc.radius * strength;
+	float separation = shape.values[27].z * pc.radius * strength;
+	float density = pc.world_size.x;
+	for (int i = 0; i < count; i++) {
+		vec3 axis = normalize(shape.values[2 + i * 2].xyz);
+		vec3 local_pos = pos - axis * separation;
+		float piece = max(base_density(local_pos), inner_radius - length(local_pos));
+		for (int j = 0; j < count; j++) {
+			if (i == j) { continue; }
+			vec3 other = normalize(shape.values[2 + j * 2].xyz);
+			vec3 plane = normalize(axis - other);
+			piece = max(piece, pc.radius * 0.025 * strength - dot(local_pos, plane));
+		}
+		if (i == 0) {
+			piece = max(piece, pc.radius * mix(-1.2, 1.8, strength) - dot(local_pos, axis));
+		}
+		density = min(density, piece);
+	}
+	vec3 belt_axis = normalize(shape.values[28].yzw);
+	vec3 direction = pos / max(length(pos), 1e-6);
+	float belt_warp = snoise(direction * 2.4 + pc.noise_pos_offset / shape.values[0].x) * pc.radius * 0.045 * strength;
+	float belt = abs(dot(pos, belt_axis) - belt_warp) - pc.radius * 0.11 * strength;
+	density = max(density, -belt);
+	return min(density, length(pos) - pc.radius * shape.values[1].y);
+}
+
+float cavity_density(vec3 pos, float density) {
+	float opening_strength = shape.values[1].x;
+	if (opening_strength <= 0.0 || shape.values[27].y > 0.5) { return density; }
+	vec3 normalized_pos = pos / pc.radius;
+	float core_fraction = shape.values[1].y;
+	float crust_fraction = shape.values[1].z;
+	int opening_count = int(shape.values[1].w + 0.5);
+	vec3 capsule_pos = normalized_pos;
+	vec3 opening_warp = vec3(
+		snoise(capsule_pos * 2.2 + vec3(2.1, 9.4, 4.8)),
+		snoise(capsule_pos * 2.2 + vec3(8.3, 1.7, 6.2)),
+		snoise(capsule_pos * 2.2 + vec3(4.6, 7.9, 1.3))
+	) * (0.075 * opening_strength);
+	capsule_pos += opening_warp;
+	for (int i = 0; i < opening_count; i++) {
+		vec4 endpoint_a = shape.values[2 + i * 2];
+		vec3 endpoint_b = shape.values[3 + i * 2].xyz;
+		vec3 segment = endpoint_b - endpoint_a.xyz;
+		float along = clamp(dot(capsule_pos - endpoint_a.xyz, segment) / max(dot(segment, segment), 1e-6), 0.0, 1.0);
+		float radial = length(capsule_pos - (endpoint_a.xyz + segment * along));
+		float width_scale = mix(0.68, 1.0, smoothstep(core_fraction, crust_fraction, length(normalized_pos)));
+		density = max(density, -(radial - endpoint_a.w * width_scale) * pc.radius);
+	}
+	return min(density, length(pos) - pc.radius * core_fraction);
+}
+
+float body_density(vec3 pos) {
+	return cavity_density(pos, fragmented_density(pos));
+}
+
 void main() {
 	uvec3 id = gl_GlobalInvocationID;
+	if (pc.pad1 == 1u) {
+		int volcano_count = int(shape.values[18].x + 0.5);
+		if (id.y != 0u || id.z != 0u || id.x >= uint(volcano_count)) {
+			return;
+		}
+		int shape_index = 19 + int(id.x);
+		vec3 axis = normalize(shape.values[shape_index].xyz);
+		float outer_radius = pc.world_size.x * 0.5;
+		float previous_radius = outer_radius;
+		float previous_value = body_density(axis * previous_radius) + pc.iso_level;
+		float inner_radius = previous_radius;
+		bool bracketed = false;
+		for (int step_index = 1; step_index <= 32; step_index++) {
+			float sample_radius = outer_radius * (1.0 - float(step_index) / 32.0);
+			float sample_value = body_density(axis * sample_radius) + pc.iso_level;
+			if (previous_value > 0.0 && sample_value <= 0.0) {
+				inner_radius = sample_radius;
+				bracketed = true;
+				break;
+			}
+			previous_radius = sample_radius;
+			previous_value = sample_value;
+		}
+		float anchor = 0.0;
+		if (bracketed) {
+			float low_radius = inner_radius;
+			float high_radius = previous_radius;
+			for (int iteration = 0; iteration < 20; iteration++) {
+				float middle_radius = (low_radius + high_radius) * 0.5;
+				float middle_value = body_density(axis * middle_radius) + pc.iso_level;
+				if (middle_value > 0.0) {
+					high_radius = middle_radius;
+				} else {
+					low_radius = middle_radius;
+				}
+			}
+			anchor = (low_radius + high_radius) * 0.5 / pc.radius;
+			if (shape.values[27].y > 0.5 && shape.values[1].x > 0.0 && anchor < shape.values[1].y + 0.1) {
+				anchor = 0.0;
+			}
+		}
+		shape.values[shape_index].w = anchor;
+		return;
+	}
 	if (any(greaterThanEqual(id, uvec3(pc.resolution)))) {
 		return;
 	}
 
 	vec3 uvw = vec3(id) / float(pc.resolution - 1u);
 	vec3 pos = pc.world_centre + (uvw - 0.5) * pc.world_size;
-
-	float density = length(pos) - pc.radius;
-	density += (ridged_fbm(pc.num_layers, pc.lacunarity, pc.persistence, pc.noise_scale,
-			pos + pc.noise_pos_offset) - pc.noise_offset) * pc.noise_strength;
+	float density = fragmented_density(pos);
+	int volcano_count = int(shape.values[18].x + 0.5);
+	if (volcano_count > 0) {
+		float radial = length(pos) / pc.radius;
+		vec3 radial_direction = pos / max(length(pos), 1e-6);
+		float volcano_size = shape.values[18].y;
+		float volcano_height = shape.values[18].z;
+		for (int volcano_index = 0; volcano_index < volcano_count; volcano_index++) {
+			vec4 volcano = shape.values[19 + volcano_index];
+			if (volcano.w <= 0.0) {
+				continue;
+			}
+			vec4 mountain = volcano_sample(radial_direction, volcano, volcano_size, volcano_height,
+					radial, shape.values[18].w, shape.values[27].w, shape.values[28].x);
+			if (mountain.y < 1.15) {
+				float mountain_sdf = max(radial - mountain.x,
+						(mountain.y - 1.0) * volcano_size) * pc.radius - pc.iso_level;
+				float blend = 0.025 * pc.radius;
+				float h = clamp(0.5 + 0.5 * (mountain_sdf - density) / blend, 0.0, 1.0);
+				density = mix(mountain_sdf, density, h) - blend * h * (1.0 - h);
+			}
+			float crater_sdf = max(mountain.w, mountain.z - radial) * pc.radius;
+			density = max(density, -crater_sdf - pc.iso_level);
+		}
+	}
+	density = cavity_density(pos, density);
 
 	uint index = id.z * pc.resolution * pc.resolution + id.y * pc.resolution + id.x;
 	density_buf.data[index] = density;
-	imageStore(density_tex, ivec3(id), vec4(density));
+	imageStore(density_tex, ivec3(id), vec4(density + pc.iso_level));
 }

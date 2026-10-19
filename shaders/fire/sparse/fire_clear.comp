@@ -15,12 +15,8 @@
 // on which parity the substep loop happens to start from.
 
 void main() {
-	invocation_vt = tile_of_index(new_list[gl_WorkGroupID.x]);
-	uint slot = imageLoad(tile_indir, invocation_vt).r;
-	int s = int(slot);
-	invocation_atlas_origin = ivec3(s % ATLAS_TILES.x,
-		(s / ATLAS_TILES.x) % ATLAS_TILES.y,
-		s / (ATLAS_TILES.x * ATLAS_TILES.y)) * 8;
+	invocation_vt = vti_to_vt(new_list[gl_WorkGroupID.x]);
+	invocation_atlas_origin = slot_atlas_origin(imageLoad(tile_indir, invocation_vt).r);
 	ivec3 c = invocation_vt * 8 + ivec3(gl_LocalInvocationID);
 
 	vec4 air = ambient_scal();

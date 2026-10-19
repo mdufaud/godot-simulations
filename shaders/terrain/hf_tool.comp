@@ -11,6 +11,7 @@ const int TOOL_SMOOTH = 3;
 const int TOOL_WATER = 4;
 const int TOOL_PACK = 5;
 const int TOOL_SNOW = 6;
+const int TOOL_MOUNTAIN = 7;
 
 // One tool against one cell; returns the cell updated in place.
 vec4 apply_tool(vec4 cell, ivec2 id, int n, vec4 toolp, int mode) {
@@ -18,23 +19,32 @@ vec4 apply_tool(vec4 cell, ivec2 id, int n, vec4 toolp, int mode) {
 		return cell;
 	}
 	float w = brush_weight(id, n, toolp);
+	if (mode == TOOL_MOUNTAIN) {
+		vec2 position = (vec2(id) + 0.5 - float(n) * 0.5) * params.flow.z;
+		vec2 d = (position - toolp.xy) / toolp.z;
+		float distance_sq = dot(d, d);
+		w = exp(-3.0 * distance_sq) * (1.0 - smoothstep(0.64, 1.0, distance_sq));
+	}
 	if (w < 0.004) {
 		return cell;
 	}
 	float amount = toolp.w * params.flow.w * w;
+	if (mode == TOOL_MOUNTAIN) {
+		amount *= 5.0;
+	}
 	if (mode == TOOL_DIG) {
 		// The shovel lifts snow before it bites into sand.
 		float lifted = min(cell.b, amount);
 		cell.b -= lifted;
 		cell.r = max(cell.r - (amount - lifted), 0.0);
-	} else if (mode == TOOL_POUR) {
+	} else if (mode == TOOL_POUR || mode == TOOL_MOUNTAIN) {
 		cell.r += amount;
 	} else if (mode == TOOL_SMOOTH) {
 		// Pull sand and snow toward their values under the brush centre — a
 		// trowel, not a bulldozer.
 		ivec2 c = clamp(ivec2((toolp.xy + 0.5 * float(n) * params.flow.z) / params.flow.z), ivec2(0), ivec2(n - 1));
 		vec4 cc = imageLoad(field_src, c);
-		float k = min(2.0 * amount, 1.0);
+		float k = 1.0 - exp(-12.0 * amount);
 		cell.r = mix(cell.r, cc.r, k);
 		cell.b = mix(cell.b, cc.b, k);
 	} else if (mode == TOOL_WATER) {
@@ -58,6 +68,14 @@ void main() {
 	ivec2 id = ivec2(gl_GlobalInvocationID.xy);
 	int n = params.misc.x;
 	if (id.x >= n || id.y >= n) {
+		return;
+	}
+	ivec2 centre = clamp(ivec2((params.tool.xy + 0.5 * float(n) * params.flow.z)
+		/ params.flow.z), ivec2(0), ivec2(n - 1));
+	ivec2 contact_centre = clamp(ivec2((params.tool2.xy + 0.5 * float(n) * params.flow.z)
+		/ params.flow.z), ivec2(0), ivec2(n - 1));
+	if ((params.misc.y == TOOL_SMOOTH && all(equal(id, centre)))
+			|| (params.misc.z == TOOL_SMOOTH && all(equal(id, contact_centre)))) {
 		return;
 	}
 	vec4 cell = imageLoad(field_src, id);

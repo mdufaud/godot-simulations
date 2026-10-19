@@ -3,15 +3,11 @@
 // inner loop needs a bounds check.
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 
-// Wood emitter slots, in step with FireGpuSolver.MAX_LOGS. The stats buffer is
-// eleven reduced scalars followed by one probed gas temperature per slot, and
-// fire_advect clears the whole run at the head of every substep.
-#define MAX_LOGS 12
-// Then six more: the cell-space bounding box of the resident set, reduced by
-// fire_display so the raymarcher can clip its ray to the fire rather than to the
-// whole virtual domain.
-#define STAT_BOUNDS (11 + MAX_LOGS)
-#define STATS_WORDS (STAT_BOUNDS + 6)
+// MAX_LOGS (wood emitter slots), the stats buffer word names STAT_* with
+// STAT_BOUNDS / STATS_WORDS, the stats fixed-point STAT_SCALE, the Config block
+// fields FIRE_CONFIG_FIELDS and the physical constants R_GAS and SIGMA_SB are
+// owned by FireGpuSolver and prepended as defines (FireGpuSolver.glsl_defines),
+// together with the tile-pool layout of FireTilePool.glsl_header.
 
 // Field textures ping-pong: *_src is the current state, *_dst receives the
 // advected result, after which the solver flips parity.
@@ -83,30 +79,8 @@ layout(FMT_NU_T, set = 0, binding = 24) uniform restrict image3D nu_t_tex;
 // Physical constants, uploaded once per frame. Kept out of the push constant
 // block because the fuel table alone exceeds the 128-byte guaranteed limit.
 layout(std430, set = 0, binding = 15) restrict readonly buffer Config {
-	vec4 kinetics; // A (SI), Ea/R [K], a, b            Fire-X Eq. 5 / WD Tab. I
-	vec4 fuel; // dcH [J/mol], M_f [kg/mol], Cp, k      Fire-X Tab. 1
-	vec4 stoich; // q_f, q_o, q_CO2, q_H2O              Fire-X Tab. 1
-	vec4 coeffs; // D_f, phi, residual_coeff, co2_coeff Fire-X Tab. 1 / Tab. 3
-	vec4 thermo; // T_amb, radiation_coeff, p_amb, T_clamp
-	vec4 transport; // buoyancy, vorticity_eps, drag, nu
-	vec4 vort; // vel_lo, vel_hi, temp_lo, h2o_coeff    Fire-X Tab. 3
-	vec4 wind; // wind.xyz, residual_dissipation
-	vec4 molar; // M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
-	vec4 misc; // o2_replenish, display_temperature, reaction_reference, emitter_T
-	vec4 liquid; // T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
-	vec4 liquid2; // d_d [m], h_conv [W/(m^2.K)], wet_suppression, unused  Tab. 3 / INFERRED
-	// Wood emitters (campfire room). One slot per log: where it is and how wide
-	// its gas release is, then how much it releases. A radius of zero is a free
-	// slot. NON-PAPER: Fire-X only has the gas grid emitter of Tab. 3; the solid
-	// fuel bed that feeds it lives on the CPU (see wood_pile.gd), and these are
-	// the two directions that couple the two — the release goes down through
-	// fire_inject (mode 5), the gas temperature that drives it comes back up
-	// through fire_display's probes.
-	vec4 wood[MAX_LOGS]; // pos.xyz, radius [m]
-	vec4 wood_rate[MAX_LOGS]; // Y_fuel per simulated second, unused.yzw
-	vec4 torch; // pos.xyz, nozzle radius
-	vec4 torch2; // direction * length, fuel rate
-	vec4 torch3; // tip radius, temperature, speed, pilot fraction
+	// One vec4 per FireGpuSolver.CONFIG_LAYOUT entry, in that order.
+	FIRE_CONFIG_FIELDS
 }
 cfg;
 
@@ -117,9 +91,6 @@ layout(push_constant, std430) uniform Params {
 	vec4 event2; // x = amount, y = SOR omega, z = inner sweeps, w = coarse omega
 }
 params;
-
-const float R_GAS = 8.314; // J/(mol.K)   Fire-X nomenclature
-const float SIGMA_SB = 5.67e-8; // W/(m^2.K^4)
 
 // NON-PAPER: the wind setting is the free stream at the standard 10 m reference
 // height, and what reaches the fire is the atmospheric boundary layer under it —
@@ -157,11 +128,6 @@ vec3 ambient_wind(int cy) {
 // other.
 // =========================================================================
 
-// Mirrors fire_tile_pool.gd, which owns these numbers, and tile_common.comp.
-const ivec3 VTILES = ivec3(256, 64, 256); // 409.6 x 102.4 x 409.6 m at 0.2 m
-const ivec3 ATLAS_TILES = ivec3(16, 8, 16); // 16*8*16 = 2048 slots
-const uint TILE_SLOT_MAX = 0xFFFFFFF0u; // at or above this is a sentinel
-
 layout(r32ui, set = 0, binding = 25) uniform restrict readonly uimage3D tile_indir;
 layout(std430, set = 0, binding = 26) restrict readonly buffer ActiveList {
 	uint active_list[]; // virtual tile indices, one per resident tile
@@ -196,12 +162,11 @@ layout(std430, set = 0, binding = 33) restrict buffer CoarseIdx {
 	uint coarse_idx[];
 };
 
-const uint COARSE_SLOTS = uint(ATLAS_TILES.x * ATLAS_TILES.y * ATLAS_TILES.z);
+const uint COARSE_SLOTS = NSLOTS;
 const uint COARSE_P_BASE = COARSE_SLOTS;
 const uint COARSE_SLOT_BASE = COARSE_SLOTS;
 const uint COARSE_NB_BASE = 2u * COARSE_SLOTS;
 const uint COARSE_NONE = 0xFFFFFFFFu;
-const uint C_ACTIVE_WORD = 6u; // C_ACTIVE in tile_common.comp
 // A tile is a coarse unknown only when all six of its faces are coupled. Then
 // every one of its 512 cells is solved (solved_cell only ever tests those six
 // faces), which is what makes the aggregated stencil below exact.
@@ -209,11 +174,6 @@ const uint COARSE_INTERIOR = 63u;
 
 ivec3 invocation_vt;
 ivec3 invocation_atlas_origin;
-
-ivec3 tile_of_index(uint vti) {
-	int v = int(vti);
-	return ivec3(v % VTILES.x, (v / VTILES.x) % VTILES.y, v / (VTILES.x * VTILES.y));
-}
 
 // Virtual cell -> atlas texel, or a negative marker when the tile holding it is
 // not resident. This one function is the whole of the mapping; nothing else in
@@ -227,14 +187,10 @@ ivec3 sparse_texel(ivec3 vc) {
 		return ivec3(-1);
 	}
 	uint slot = imageLoad(tile_indir, vt).r;
-	if (slot >= TILE_SLOT_MAX) {
+	if (slot >= SLOT_MAX) {
 		return ivec3(-1);
 	}
-	int s = int(slot);
-	ivec3 org = ivec3(s % ATLAS_TILES.x, (s / ATLAS_TILES.x) % ATLAS_TILES.y,
-			s / (ATLAS_TILES.x * ATLAS_TILES.y))
-		* 8;
-	return org + (vc & ivec3(7));
+	return slot_atlas_origin(slot) + (vc & ivec3(7));
 }
 
 ivec3 field_texel(ivec3 vc) {
@@ -347,12 +303,8 @@ bool solved_cell_masked(ivec3 vc, uint mask) {
 // so it is this workgroup's tile origin plus the local id.
 ivec3 cell_coord() {
 	uint active_index = gl_WorkGroupID.x;
-	invocation_vt = tile_of_index(active_list[active_index]);
-	uint slot = active_slots[active_index];
-	int s = int(slot);
-	invocation_atlas_origin = ivec3(s % ATLAS_TILES.x,
-		(s / ATLAS_TILES.x) % ATLAS_TILES.y,
-		s / (ATLAS_TILES.x * ATLAS_TILES.y)) * 8;
+	invocation_vt = vti_to_vt(active_list[active_index]);
+	invocation_atlas_origin = slot_atlas_origin(active_slots[active_index]);
 	return invocation_vt * 8 + ivec3(gl_LocalInvocationID);
 }
 

@@ -1,0 +1,187 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+float alpha() {
+    float unfinished = control.clock.y > 0.0 ? params.current.z - control.clock.y : 0.0;
+    return clamp((control.clock.z + unfinished) / params.current.z, 0.0, 1.0);
+}
+
+vec4 interpolated(ivec2 p) {
+    uint i = uint(cell_index(clamp(p, ivec2(0), ivec2(params.sizes.x - 1))));
+    return mix(completed[i], completed[pixel_count() + i], alpha());
+}
+
+float wet_height(ivec2 p, float center) {
+    vec4 q = interpolated(p);
+    return q.x > params.domain.w ? q.x + read_bed(p) : center;
+}
+
+float sampled_height(vec2 world, float center) {
+    vec2 grid = (world + params.domain.x * 0.5) / params.domain.y - 0.5;
+    ivec2 p = ivec2(floor(grid));
+    vec2 f = fract(grid);
+    return mix(mix(wet_height(p, center), wet_height(p + ivec2(1, 0), center), f.x),
+        mix(wet_height(p + ivec2(0, 1), center), wet_height(p + ivec2(1, 1), center), f.x), f.y);
+}
+
+vec2 body_height(ivec2 p) {
+    vec4 q = interpolated(p);
+    float weight = smoothstep(0.03, 0.3, q.x);
+    return vec2((q.x + read_bed(p)) * weight, weight);
+}
+
+#if SHORE_FFT_SURFACE
+vec4 transported_foam(vec2 world, uint source) {
+    vec2 grid = (world + params.domain.x * 0.5) / params.domain.y - 0.5;
+    if (any(lessThan(grid, vec2(0.0))) || any(greaterThan(grid, vec2(params.sizes.x - 1)))) {
+        return vec4(0.0);
+    }
+    ivec2 a = ivec2(floor(grid));
+    ivec2 b = min(a + 1, ivec2(params.sizes.x - 1));
+    vec2 f = fract(grid);
+    return mix(mix(visual_history[source + uint(2 * cell_index(a))],
+        visual_history[source + uint(2 * cell_index(ivec2(b.x, a.y)))], f.x),
+        mix(visual_history[source + uint(2 * cell_index(ivec2(a.x, b.y)))],
+        visual_history[source + uint(2 * cell_index(b))], f.x), f.y);
+}
+
+void output_visual_history(ivec2 p, uint i) {
+    uint source = uint(params.misc.y) * pixel_count() * 2u;
+    uint target = (1u - uint(params.misc.y)) * pixel_count() * 2u;
+    vec4 previous = visual_history[source + i * 2u];
+    vec4 past = visual_history[source + i * 2u + 1u];
+    vec2 world = world_position(p);
+    vec2 material = spectral_material(world);
+    float height = spectral_displacement(material).y;
+    float depth = max(height - bed[i], 0.0);
+    vec2 flow = spectral_velocity(material);
+    vec2 bed_gradient = vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+        read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1))) / (2.0 * params.domain.y);
+    float slope = length(bed_gradient);
+    vec2 normal = bed_gradient / max(slope, 0.0001);
+    float incoming = smoothstep(0.1, 0.8, max(dot(flow, normal), 0.0));
+    float dt = params.step.x;
+    float rising = past.w > 0.0 && dt > 0.0 ? max((height - past.x) / dt, 0.0) : 0.0;
+    float runup = smoothstep(0.03, 0.3, rising) * incoming
+        * smoothstep(0.04, 0.15, slope) * (1.0 - smoothstep(0.15, 0.9, depth));
+    float wet = smoothstep(0.003, 0.05, depth);
+    float activity = max(fft_breaking(material) * (1.0 - smoothstep(2.0, 6.0, depth)), runup * 0.35) * wet;
+    flow -= normal * max(dot(flow, normal), 0.0) * (1.0 - smoothstep(0.03, 0.4, depth));
+    vec4 state = previous;
+    vec4 memory = past;
+    if (dt > 0.0) {
+        vec2 transported = transported_foam(world - flow * dt, source).xy;
+        float fresh_decay = exp(-max(params.step.w * 2.0, 1.0) * dt);
+        float persistent = transported.y * exp(-max(params.step.w * 0.35, 0.1) * dt)
+            + 0.35 * transported.x * (1.0 - fresh_decay);
+        float fresh = transported.x * fresh_decay;
+        fresh += (1.0 - fresh) * (1.0 - exp(-activity * params.step.z * 0.75 * dt));
+        vec2 density = clamp(vec2(fresh, persistent), vec2(0.0), vec2(1.0)) * step(0.003, depth);
+        float retreat = smoothstep(0.0, 0.5, (past.y - depth) / dt);
+        float deposit = previous.z * exp(-dt / SHORE_FOAM_RETENTION_S);
+        vec2 previous_coverage = foam_coverage(previous.xy);
+        float exposed_contact = max(1.0 - smoothstep(0.0, 0.05, depth), smoothstep(0.25, 0.8, slope));
+        float stranded = max(previous_coverage.x, previous_coverage.y) * retreat
+            * exposed_contact * 0.5;
+        deposit = max(deposit, stranded);
+        float wetness = max(previous.w * exp(-dt / SHORE_SAND_DRYING_S), wet);
+        float contact_strength = max(past.w * exp(-dt / SHORE_CONTACT_RETENTION_S), wet);
+        float reached_height = past.w > 0.001
+            ? max(height, mix(past.z, height, 1.0 - exp(-dt / SHORE_CONTACT_RETENTION_S))) : height;
+        state = vec4(density, clamp(deposit, 0.0, 1.0), wetness);
+        memory = vec4(height, depth, reached_height, contact_strength);
+    }
+    visual_history[target + i * 2u] = state;
+    visual_history[target + i * 2u + 1u] = memory;
+    imageStore(foam_map, p, vec4(foam_coverage(state.xy) * wet, state.zw));
+    imageStore(breaker_map, p, vec4(flow.x, height, flow.y, activity));
+    imageStore(contact_map, p, vec4(memory.z, memory.w,
+        runup * smoothstep(0.25, 0.8, slope) * wet, state.x * runup));
+}
+#endif
+
+vec4 breaker_at(ivec2 p, vec4 q, float eta, vec2 v) {
+#if SHORE_VISUAL_BREAKERS
+    float bed_jump = max(max(abs(read_bed(p + ivec2(2, 0)) - read_bed(p)),
+        abs(read_bed(p - ivec2(2, 0)) - read_bed(p))),
+        max(abs(read_bed(p + ivec2(0, 2)) - read_bed(p)),
+        abs(read_bed(p - ivec2(0, 2)) - read_bed(p)))) / (2.0 * params.domain.y);
+    vec2 filtered_height = body_height(p) * 4.0;
+    filtered_height += 2.0 * (body_height(p + ivec2(2, 0)) + body_height(p - ivec2(2, 0))
+        + body_height(p + ivec2(0, 2)) + body_height(p - ivec2(0, 2)));
+    filtered_height += body_height(p + ivec2(2, 2)) + body_height(p + ivec2(-2, 2))
+        + body_height(p + ivec2(2, -2)) + body_height(p + ivec2(-2, -2));
+    float filtered_eta = mix(min(eta, 0.0), filtered_height.x / max(filtered_height.y, 0.0001),
+        smoothstep(0.25, 2.0, filtered_height.y));
+    float reconstruction = (filtered_eta - eta) * max(smoothstep(0.4, 1.2, bed_jump),
+        1.0 - smoothstep(0.03, 0.3, q.x));
+    vec4 correction = vec4(0.0, eta + reconstruction, 0.0, 0.0);
+    if (q.x <= params.domain.w) return correction;
+    float still_depth = max(-read_bed(p), 0.0);
+    float shoal = smoothstep(0.35, 1.0, still_depth) * (1.0 - smoothstep(4.0, 8.0, still_depth))
+        * smoothstep(0.04, 0.3, q.x);
+    vec2 incident = normalize(params.boundary.yz);
+    float incoming = smoothstep(0.15, 0.8, dot(v, incident));
+    if (shoal * incoming < 0.001 || eta < 0.05) return correction;
+    vec2 direction = normalize(mix(incident, v / max(length(v), 0.01), 0.55 * incoming));
+    vec2 world = world_position(p);
+    float center = 0.25 * (sampled_height(world - direction * params.domain.y, eta)
+        + 2.0 * eta + sampled_height(world + direction * params.domain.y, eta));
+    float epsilon = max(4.0 * params.domain.y, 2.5);
+    float back = sampled_height(world - direction * epsilon, center);
+    float front = sampled_height(world + direction * epsilon, center);
+    float curvature = max((2.0 * center - back - front) / (epsilon * epsilon), 0.0);
+    float wave_number = clamp(sqrt(curvature / max(abs(center), 0.1)), 0.025, 2.0);
+    float slope = (front - back) / (2.0 * epsilon);
+    float amplitude = length(vec2(center, slope / wave_number));
+    float radius = min(amplitude * 0.6, params.boundary.w) * shoal * incoming
+        * smoothstep(0.15, 0.6, amplitude) * smoothstep(0.0005, 0.003, curvature);
+    float coordinate = atan(-slope / wave_number, center) / wave_number;
+    float width = max(radius, SHORE_BREAKER_MIN_PROFILE_CELLS * params.domain.y);
+    float fold = radius * exp(-pow(coordinate / width, 2.0));
+    float clearance = eta + fold + reconstruction - read_bed(p);
+    float visible = smoothstep(0.0, params.domain.y * 0.6, clearance);
+    return vec4(0.0, fold, 0.0,
+        clamp(radius * exp(-pow(coordinate / max(radius * 0.6, params.domain.y), 2.0)), 0.0, 1.0)) * visible + correction;
+#else
+    return vec4(0.0);
+#endif
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec4 q = interpolated(p);
+    float eta = q.x + bed[i];
+    vec4 f = mix(completed_foam[i], completed_foam[pixel_count() + i], alpha());
+    vec2 v = velocity(q);
+    vec2 gradient = vec2(0.0);
+    float eta_t = 0.0;
+    if (q.x > params.domain.w) {
+        gradient = vec2(wet_height(p + ivec2(1, 0), eta) - wet_height(p - ivec2(1, 0), eta),
+            wet_height(p + ivec2(0, 1), eta) - wet_height(p - ivec2(0, 1), eta)) / (2.0 * params.domain.y);
+        eta_t = (completed[pixel_count() + i].x - completed[i].x) / params.current.z;
+    } else {
+        float wet_sum = 0.0;
+        float wet_count = 0.0;
+        const ivec2 neighbors[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+        for (int side = 0; side < 4; ++side) {
+            ivec2 neighbor = p + neighbors[side];
+            vec4 nq = interpolated(neighbor);
+            if (nq.x > params.domain.w) {
+                wet_sum += nq.x + read_bed(neighbor);
+                wet_count += 1.0;
+            }
+        }
+        eta = wet_count > 0.0 ? wet_sum / wet_count : 0.0;
+    }
+    vec2 coverage = q.x > params.domain.w ? clamp(f.xy / q.x, vec2(0.0), vec2(1.0)) : vec2(0.0);
+    imageStore(surface_map, p, vec4(eta, v, q.x));
+    imageStore(derivative_map, p, vec4(gradient, eta_t, bed[i]));
+#if SHORE_FFT_SURFACE
+    output_visual_history(p, i);
+#else
+    imageStore(foam_map, p, vec4(coverage, f.zw));
+    imageStore(breaker_map, p, breaker_at(p, q, eta, v));
+    imageStore(contact_map, p, mix(completed_contact[i], completed_contact[pixel_count() + i], alpha()));
+#endif
+}

@@ -22,8 +22,6 @@
 
 layout(local_size_x = 256) in;
 
-const uint NSLOTS = 2048u;
-
 // [0 .. NSLOTS)          touched by this frame's scatter
 // [NSLOTS .. 2*NSLOTS)   was in last frame's list
 layout(std430, set = 0, binding = 0) coherent buffer TileFlags {

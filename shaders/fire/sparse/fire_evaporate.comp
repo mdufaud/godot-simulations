@@ -152,9 +152,8 @@ void main() {
 	// budget of ~1e3 J in total, so the per-cell residual is far below the 1 J of
 	// an integer step and every measurement read as a clean zero. 1e3 J at this
 	// scale is 1e6 fixed, three orders below the 4.29e9 an atomic uint holds.
-	const float SCALE_E = 1000.0;
-	atomicAdd(stats.data[9],
-		uint(clamp(abs(dE_gas + dE_liq + latent) * SCALE_E, 0.0, 4.2e9)));
-	atomicAdd(stats.data[10],
-		uint(clamp((abs(dE_gas) + abs(dE_liq) + latent) * SCALE_E, 0.0, 4.2e9)));
+	atomicAdd(stats.data[STAT_ENERGY_RESIDUAL],
+		uint(clamp(abs(dE_gas + dE_liq + latent) * STAT_SCALE, 0.0, 4.2e9)));
+	atomicAdd(stats.data[STAT_ENERGY_BUDGET],
+		uint(clamp((abs(dE_gas) + abs(dE_liq) + latent) * STAT_SCALE, 0.0, 4.2e9)));
 }

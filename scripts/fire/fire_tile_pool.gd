@@ -16,19 +16,26 @@ extends RefCounted
 const SHADER_DIR := "res://shaders/fire/"
 const PASSES: Array[String] = ["mark", "seed", "dilate", "free", "alloc", "compact"]
 
-## Resident tiles. 16 x 8 x 16 atlas layout = 128 x 64 x 128 atlas cells.
-const NSLOTS := 2048
+## Every number below is the one source of the pool layout: the shaders get it
+## through [method glsl_header], the raymarcher through its uniforms.
+const TILE_SHIFT := 3
+const TILE := 1 << TILE_SHIFT
 ## Virtual tile grid: 256 x 64 x 256 tiles of 8 cells = 409.6 x 102.4 x 409.6 m.
 const VTILES := Vector3i(256, 64, 256)
+## Resident tiles, laid out 16 x 8 x 16 in the atlas.
 const ATLAS_TILES := Vector3i(16, 8, 16)
-const ATLAS_CELLS := Vector3i(128, 64, 128)
-const TILE := 8
+const ATLAS_CELLS := ATLAS_TILES * TILE
+const NSLOTS := ATLAS_TILES.x * ATLAS_TILES.y * ATLAS_TILES.z
 
-const INACTIVE := 0xFFFFFFFF
+# Sentinels stored in the indirection volume. Real slot indices are < NSLOTS, so
+# any value at or above SLOT_MAX is a marker, not a slot.
+const INACTIVE := 0xFFFFFFFF ## no tile here
+const RESERVED := 0xFFFFFFFE ## requested this frame, not yet allocated
+const SLOT_MAX := 0xFFFFFFF0
 
-# counts[] words, mirroring tile_common.comp. C_ACTIVE and C_NEW each head a
-# three-word dispatch-indirect triple whose y and z are pinned to 1 at bootstrap,
-# so the counts buffer doubles as the args buffer for both indirect dispatches.
+# counts[] words. C_ACTIVE and C_NEW each head a three-word dispatch-indirect
+# triple whose y and z are pinned to 1 at bootstrap, so the counts buffer doubles
+# as the args buffer for both indirect dispatches (see tile_common.comp).
 const C_FREE := 0
 const C_REQUEST := 1
 const C_FRAME := 2
@@ -42,6 +49,7 @@ const COUNTS_WORDS := 12
 ## buffer, for [method RenderingDevice.compute_list_dispatch_indirect].
 const ACTIVE_ARGS_OFFSET := C_ACTIVE * 4
 const NEW_ARGS_OFFSET := C_NEW * 4
+const LAYOUT_HEADER := "res://shaders/fire/tile_layout.comp"
 
 var initialized := false
 
@@ -85,7 +93,7 @@ func init_render(rd: RenderingDevice, activity_tex := RID(), budget := NSLOTS) -
 		push_error("FireTilePool needs maxComputeWorkGroupInvocations >= 512.")
 		return false
 
-	var common := FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
+	var common := glsl_header() + FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
 	for pass_name in PASSES:
 		var src := FileAccess.get_file_as_string(SHADER_DIR + "tile_" + pass_name + ".comp")
 		var spirv := ShaderCache.compile(_rd, "tile_" + pass_name, "#version 450\n\n" + common + "\n" + src)
@@ -391,6 +399,28 @@ func atlas_origin(slot: int) -> Vector3i:
 	return Vector3i(slot % ATLAS_TILES.x,
 		(slot / ATLAS_TILES.x) % ATLAS_TILES.y,
 		slot / (ATLAS_TILES.x * ATLAS_TILES.y)) * TILE
+
+
+## The pool layout as GLSL: the defines every fire compute shader shares, followed
+## by tile_layout.comp, which maps slots and tiles with them. Prepend it to any
+## shader that touches the indirection, the atlas or the counts buffer.
+static func glsl_header() -> String:
+	var defines := PackedStringArray([
+		"#define TILE %d" % TILE,
+		"#define VTILES ivec3(%d, %d, %d)" % [VTILES.x, VTILES.y, VTILES.z],
+		"#define ATLAS_TILES ivec3(%d, %d, %d)" % [ATLAS_TILES.x, ATLAS_TILES.y, ATLAS_TILES.z],
+		"#define ATLAS_CELLS ivec3(%d, %d, %d)" % [ATLAS_CELLS.x, ATLAS_CELLS.y, ATLAS_CELLS.z],
+		"#define NSLOTS %du" % NSLOTS,
+		"#define INACTIVE 0x%Xu" % INACTIVE,
+		"#define RESERVED 0x%Xu" % RESERVED,
+		"#define SLOT_MAX 0x%Xu" % SLOT_MAX,
+	])
+	var counters := {"C_FREE": C_FREE, "C_REQUEST": C_REQUEST, "C_FRAME": C_FRAME,
+		"C_EXHAUST": C_EXHAUST, "C_PEAK": C_PEAK, "C_KEEP": C_KEEP, "C_ACTIVE": C_ACTIVE,
+		"C_NEW": C_NEW}
+	for counter in counters:
+		defines.append("#define %s %du" % [counter, counters[counter]])
+	return "\n".join(defines) + "\n" + FileAccess.get_file_as_string(LAYOUT_HEADER) + "\n"
 
 
 static func vti_of(vt: Vector3i) -> int:

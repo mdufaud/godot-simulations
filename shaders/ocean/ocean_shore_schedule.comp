@@ -1,0 +1,75 @@
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    if (params.misc.x == 0) {
+        if (control.flags.w == 0u) {
+            control.clock.x = params.step.y - params.step.x;
+            control.flags.w = 1u;
+        }
+        control.clock.z += params.step.x;
+        control.forcing.yz = params.current.xy;
+        for (int i = 0; i < params.sizes.z; ++i) {
+            vec4 e = events[i];
+            if (control.counts.x < uint(params.misc.w)) {
+                events[uint(params.misc.w) + control.counts.x] = e;
+                control.counts.x++;
+            } else {
+                uint nearest = 0u;
+                float best = 1.0e20;
+                for (uint j = 0u; j < control.counts.x; ++j) {
+                    float d = distance(e.xy, events[uint(params.misc.w) + j].xy);
+                    if (d < best) { nearest = j; best = d; }
+                }
+                events[uint(params.misc.w) + nearest].zw += e.zw;
+            }
+        }
+    } else if (params.misc.x == 1) {
+        if (control.clock.y <= 1.0e-6 && control.clock.z + 1.0e-6 >= params.current.z) {
+            control.clock.y = params.current.z;
+            control.clock.z = max(control.clock.z - params.current.z, 0.0);
+            control.forcing.x = control.clock.x + params.current.z;
+            control.flags.y = 1u;
+        }
+        bool is_active = control.clock.y > 1.0e-6;
+        control.cell_args = uvec4(is_active ? uint(params.sizes.x / 8) : 0u, uint(params.sizes.x / 8), 1u, 0u);
+        bool boundary = is_active && control.flags.y != 0u;
+        control.pack_args = uvec4(boundary ? MAP_SIZE / 16u : 0u, MAP_SIZE / 16u, 1u, control.pack_args.w);
+        control.fft_args = uvec4(boundary ? 1u : 0u, MAP_SIZE, NUM_SPECTRA, 0u);
+        control.transpose_args = uvec4(boundary ? MAP_SIZE / 32u : 0u, MAP_SIZE / 32u, NUM_SPECTRA, 0u);
+        if (is_active) control.counts.y = 0u;
+    } else if (params.misc.x == 2) {
+        if (control.clock.y > 1.0e-6) control.counts.w = 0u;
+        float speed = uintBitsToFloat(control.counts.y);
+        control.clock.w = control.clock.y > 1.0e-6
+            ? min(control.clock.y, 0.40 * params.domain.y / max(speed, 1.0e-6)) : 0.0;
+        control.counts.z = control.clock.y > 1.0e-6
+            && control.clock.y - control.clock.w <= 1.0e-6 ? 1u : 0u;
+        control.fft_args = uvec4(control.clock.w > 0.0 ? uint(params.sizes.x) : 0u, 1u, 1u, 0u);
+        control.transpose_args = control.cell_args;
+    } else if (params.misc.x == 4 && control.clock.w > 0.0) {
+        control.flags.x = 1u - control.flags.x;
+        control.fft_args.x = uint(params.sizes.x);
+        control.transpose_args.x = control.cell_args.x;
+    } else if (params.misc.x == 5) {
+        if (control.fft_args.x != 0u) control.cell_args.w = 0u;
+    } else if (params.misc.x == 6) {
+        if (control.fft_args.x != 0u) control.counts.w++;
+        control.fft_args.x = uintBitsToFloat(control.cell_args.w) > SHORE_DISP_TOLERANCE
+            ? uint(params.sizes.x) : 0u;
+        if (control.fft_args.x == 0u) control.transpose_args.x = 0u;
+    } else if (params.misc.x == 7) {
+        control.fft_args.x = control.clock.w > 0.0 ? uint(params.sizes.x) : 0u;
+    } else if (params.misc.x == 3 && control.clock.w > 0.0) {
+        control.flags.w = (control.counts.w << 8u) | 1u;
+        control.pack_args.w = control.cell_args.w;
+        control.clock.x += control.clock.w;
+        control.clock.y = max(control.clock.y - control.clock.w, 0.0);
+        control.flags.x = 1u - control.flags.x;
+        control.flags.y = 0u;
+        control.counts.x = 0u;
+        if (control.counts.z != 0u) {
+            control.clock.y = 0.0;
+            control.flags.z++;
+        }
+    }
+}

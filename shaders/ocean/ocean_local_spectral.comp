@@ -1,0 +1,64 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    int n = int(LOCAL_N);
+    ivec2 mode = ivec2(id.x <= n / 2 ? id.x : id.x - n,
+        id.y <= n / 2 ? id.y : id.y - n);
+    vec2 wave_vector = vec2(mode) * (2.0 * PI / lp.grid.x);
+    float k = length(wave_vector);
+    vec2 eta_residual = fft_data[FFT_IDX(id.x, id.y, 0, 1)];
+    vec2 psi_residual = fft_data[FFT_IDX(id.x, id.y, 1, 1)];
+    vec2 eta_offshore = fft_data[FFT_IDX(id.x, id.y, 2, 1)];
+    vec2 eta_t_offshore = fft_data[FFT_IDX(id.x, id.y, 3, 1)];
+    if (lp.ocean.w > 0.0 && k > 2.0 * PI / lp.ocean.w) {
+        eta_residual = vec2(0.0);
+        psi_residual = vec2(0.0);
+        eta_offshore = vec2(0.0);
+        eta_t_offshore = vec2(0.0);
+    }
+    float depth = depth_band(lp.cfg.x);
+    float g_operator = k * tanh(k * depth);
+    float offshore_operator = k * tanh(k * max(lp.terrain.x, 2.0));
+    vec2 psi_offshore = offshore_operator > 1.0e-8
+        ? eta_t_offshore / offshore_operator : vec2(0.0);
+    vec2 eta_residual_next = lp.cfg.w != 0 ? vec2(0.0) : eta_residual;
+    vec2 psi_residual_next = lp.cfg.w != 0 ? vec2(0.0) : psi_residual;
+    if (g_operator > 1.0e-8 && offshore_operator > 1.0e-8) {
+        float omega = sqrt(GRAVITY * g_operator);
+        float offshore_omega = sqrt(GRAVITY * offshore_operator);
+        float phase = omega * lp.time.y;
+        float offshore_phase = offshore_omega * lp.time.y;
+        float cosine = cos(phase);
+        float sine = sin(phase);
+        float offshore_cosine = cos(offshore_phase);
+        float offshore_sine = sin(offshore_phase);
+        float eta_psi_transfer = g_operator / omega * sine;
+        float offshore_eta_psi_transfer = offshore_operator / offshore_omega
+            * offshore_sine;
+        if (lp.cfg.w == 0) {
+            eta_residual_next = eta_residual * cosine
+                + psi_residual * eta_psi_transfer
+                + eta_offshore * (cosine - offshore_cosine)
+                + psi_offshore * (eta_psi_transfer - offshore_eta_psi_transfer);
+            psi_residual_next = psi_residual * cosine
+                - eta_residual * (GRAVITY / omega * sine)
+                + psi_offshore * (cosine - offshore_cosine)
+                - eta_offshore * GRAVITY
+                    * (sine / omega - offshore_sine / offshore_omega);
+        }
+        float current_phase = -dot(wave_vector.yx, lp.time.zw) * lp.time.y;
+        vec2 advection = vec2(cos(current_phase), sin(current_phase));
+        eta_residual_next = vec2(
+            eta_residual_next.x * advection.x - eta_residual_next.y * advection.y,
+            eta_residual_next.x * advection.y + eta_residual_next.y * advection.x);
+        psi_residual_next = vec2(
+            psi_residual_next.x * advection.x - psi_residual_next.y * advection.y,
+            psi_residual_next.x * advection.y + psi_residual_next.y * advection.x);
+    }
+    float normalization = 1.0 / float(LOCAL_N * LOCAL_N);
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = eta_residual_next * normalization;
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = psi_residual_next * normalization;
+    fft_data[FFT_IDX(id.x, id.y, 2, 0)] = eta_offshore * normalization;
+    fft_data[FFT_IDX(id.x, id.y, 3, 0)] = psi_offshore * normalization;
+}

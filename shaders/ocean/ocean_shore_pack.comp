@@ -1,0 +1,62 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+float ring_group_velocity(float k, float depth) {
+    float omega = sqrt(params.domain.z * k * tanh(k * depth));
+    float n = 0.5 * (1.0 + 2.0 * k * depth / max(sinh(2.0 * k * depth), 1.0e-6));
+    return n * omega / max(k, 1.0e-8);
+}
+
+float local_wave_number(float omega, float depth, float initial_k) {
+    float k = initial_k;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        float th = tanh(k * depth);
+        float derivative = params.domain.z * (th + k * depth * (1.0 - th * th));
+        k = max(k - (params.domain.z * k * th - omega * omega) / max(derivative, 1.0e-8), 1.0e-8);
+    }
+    return k;
+}
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 mode = id - ivec2(MAP_SIZE / 2u);
+    ivec2 source_id = (mode + ivec2(params.sizes.y / 2) + ivec2(params.sizes.y)) % params.sizes.y;
+    vec4 h0 = imageLoad(spectrum_tex, ivec3(source_id, params.misc.y));
+    vec2 texture_k = vec2(mode) * (2.0 * PI / params.tiles[params.misc.y]);
+    float k = length(texture_k);
+    vec2 height = vec2(0.0);
+    vec2 horizontal = vec2(0.0);
+    vec2 vertical_z = vec2(0.0);
+    vec2 height_rate = vec2(0.0);
+    vec2 velocity_rate_x = vec2(0.0);
+    vec2 velocity_rate_z = vec2(0.0);
+    bool source_mode = all(lessThan(abs(mode), ivec2(params.sizes.y / 2)));
+    if (k > 1.0e-8 && k <= 2.0 * PI / params.current.w && source_mode) {
+        vec2 world_k = texture_k.yx;
+        float omega = sqrt(params.domain.z * k * tanh(k * params.physical.z));
+        vec2 phase = exp_complex(-omega * control.forcing.x);
+        vec2 a = mul_complex(h0.xy, phase);
+        vec2 b = mul_complex(h0.zw, conj_complex(phase));
+        float texel_phase = 0.5 * (world_k.x + world_k.y) * params.tiles[params.misc.y]
+            * (1.0 / float(MAP_SIZE) - 1.0 / float(params.sizes.y));
+        vec2 current_phase = exp_complex(-dot(world_k, control.forcing.yz) * control.forcing.x + texel_phase);
+        float local_k = local_wave_number(omega, params.physical.x, k);
+        float shoal = sqrt(ring_group_velocity(k, params.physical.z)
+            / max(ring_group_velocity(local_k, params.physical.x), 1.0e-6));
+        height = mul_complex(a + b, current_phase) * shoal;
+        vec2 traveling = mul_complex(a - b, current_phase) * shoal;
+        float depth_average = omega / max(local_k * params.tiles.w, 1.0e-8);
+        horizontal = traveling * (depth_average * world_k.x / k);
+        vertical_z = traveling * (depth_average * world_k.y / k);
+        float current_frequency = dot(world_k, control.forcing.yz);
+        height_rate = mul_complex(traveling, vec2(0.0, -omega))
+            + mul_complex(height, vec2(0.0, -current_frequency));
+        vec2 traveling_rate = mul_complex(height, vec2(0.0, -omega))
+            + mul_complex(traveling, vec2(0.0, -current_frequency));
+        velocity_rate_x = traveling_rate * (depth_average * world_k.x / k);
+        velocity_rate_z = traveling_rate * (depth_average * world_k.y / k);
+    }
+    fft_data[FFT_IDX(id.x, id.y, 0, 0)] = vec2(height.x - horizontal.y, height.y + horizontal.x);
+    fft_data[FFT_IDX(id.x, id.y, 1, 0)] = vec2(vertical_z.x - height_rate.y, vertical_z.y + height_rate.x);
+    fft_data[FFT_IDX(id.x, id.y, 2, 0)] = vec2(velocity_rate_x.x - velocity_rate_z.y,
+        velocity_rate_x.y + velocity_rate_z.x);
+}

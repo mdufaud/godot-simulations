@@ -1,8 +1,8 @@
 layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 // Multi-material heightfield cell: sand height, water depth, snow depth and
-// suspended sediment. All are metres of column except the sediment, a mass
-// load the water carries. Every stage of a frame shares this layout.
+// suspended sediment. All are equivalent metres of column, including the
+// erodible solid carried as sediment. Every stage shares this layout.
 layout(set = 0, binding = 0, rgba32f) uniform restrict image2D field_src;
 layout(set = 0, binding = 1, rgba32f) uniform restrict image2D field_dst;
 
@@ -11,11 +11,27 @@ layout(push_constant, std430) uniform Params {
 	vec4 tool2;     // contact brush (props): world x, world z, radius, strength
 	vec4 flow;      // sand slope threshold per cell, sand flow rate, cell size, dt
 	vec4 climate;   // melt rate m/s, evap rate m/s, wet cohesion gain, saturation depth
-	vec4 waterflow; // water flow rate, erosion rate, sediment capacity, stochasticity
-	vec4 snowflow;  // snow slope threshold per cell, snow flow rate, unused, unused
+	vec4 waterflow; // pipe conductance, erosion gain /s, sediment capacity, stochasticity
+	vec4 snowflow;  // snow slope threshold per cell, snow flow rate, shed cap, unused
 	ivec4 misc;     // grid n, user tool mode, contact tool mode, frame seed
-	vec4 misc2;     // snowfall rate m/s, freeze rate m/s, unused, unused
+	vec4 misc2;     // snowfall rate m/s, freeze rate m/s, snowline m, uplift radius fraction
 } params;
+
+layout(set = 0, binding = 4, std140) uniform HydroParams {
+	vec4 hydro;
+} weather;
+
+const ivec2 RIVER_OFFSETS[4] = ivec2[4](
+	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)
+);
+const float RIVER_DRY_M = 1e-5;
+
+float river_component(vec4 value, int direction) {
+	if (direction == 0) { return value.x; }
+	if (direction == 1) { return value.y; }
+	if (direction == 2) { return value.z; }
+	return value.w;
+}
 
 // World-space centre of a cell's column.
 vec2 cell_world(ivec2 id, int n) {
@@ -30,8 +46,8 @@ float brush_weight(ivec2 id, int n, vec4 toolp) {
 }
 
 // Deterministic pair hash in [0, 1): both endpoints of a transfer derive the
-// same jitter from the canonical (min, max) ordering of the pair, so the
-// bit-exact mass conservation of the gather exchange survives stochasticity.
+// same jitter from the canonical (min, max) ordering of the pair. River
+// gathering reads stored donor fluxes; roundoff is the only mass discrepancy.
 float pair_hash(ivec2 a, ivec2 b, int frame) {
 	ivec2 lo = min(a, b);
 	ivec2 hi = max(a, b);

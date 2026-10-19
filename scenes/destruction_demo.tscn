@@ -5,10 +5,10 @@
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
-sky_top_color = Color(0.33, 0.4, 0.5, 1)
-sky_horizon_color = Color(0.66, 0.67, 0.66, 1)
-ground_bottom_color = Color(0.2, 0.2, 0.19, 1)
-ground_horizon_color = Color(0.66, 0.67, 0.66, 1)
+sky_top_color = Color(0.12, 0.2, 0.32, 1)
+sky_horizon_color = Color(0.54, 0.62, 0.7, 1)
+ground_bottom_color = Color(0.08, 0.1, 0.14, 1)
+ground_horizon_color = Color(0.34, 0.4, 0.48, 1)
 
 [sub_resource type="Sky" id="Sky_env"]
 sky_material = SubResource("ProceduralSkyMaterial_sky")
@@ -16,13 +16,16 @@ sky_material = SubResource("ProceduralSkyMaterial_sky")
 [sub_resource type="Environment" id="Environment_destruction"]
 background_mode = 2
 sky = SubResource("Sky_env")
-ambient_light_source = 3
+ambient_light_source = 2
+ambient_light_color = Color(0.52, 0.61, 0.72, 1)
+ambient_light_energy = 0.85
+reflected_light_source = 2
 tonemap_mode = 3
 ssao_enabled = true
 ssao_intensity = 2.0
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
-albedo_color = Color(0.33, 0.32, 0.3, 1)
+albedo_color = Color(0.14, 0.17, 0.21, 1)
 roughness = 1.0
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
@@ -38,7 +41,7 @@ environment = SubResource("Environment_destruction")
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
 transform = Transform3D(0.866025, 0.25, -0.433013, 0, 0.866025, 0.5, 0.5, -0.433013, 0.75, 0, 12, 0)
-light_energy = 1.3
+light_energy = 1.6
 shadow_enabled = true
 
 [node name="Ground" type="StaticBody3D" parent="."]

@@ -54,6 +54,19 @@ const SPH_H := 0.1
 ## *hotter*. Fig. 8 makes the same point — a stream aimed at the top of a flame
 ## has "a limited extinguishing effect".
 const DROPLET_MASS := 0.025
+## A droplet drained below this fraction of a fresh parcel has soaked away and is
+## banished by water_return. Relative, because an absolute cutoff would banish
+## healthy droplets once the parcel mass shrank.
+const DRAIN_CUTOFF_FRACTION := 0.04
+## Fixed-point scales of the scatter accumulators, decoded by water_gather. Set as
+## large as the worst-case sum allows, because the round trip runs every frame and
+## any quantisation error accumulates over the run:
+##   SCALE_M  m*w_hat <= 0.1/particle -> 1e6 fixed; 1024 particles -> 1.0e9 < uint32 4.29e9
+##   SCALE_W  w_hat <= 1/particle/cell -> 2e6 fixed; 1024 particles -> 2.0e9
+##   SCALE_T  T*m*w_hat <= 300*0.1 = 30 -> 3e6 fixed; 1024 particles -> 3.1e9
+##   SCALE_V  |u*w_hat| <= 20 m/s -> 2e6 fixed; 1024 particles -> 2.0e9 < int32 2.15e9
+const FIXED_POINT_SCALES := {"SCALE_M": 1.0e7, "SCALE_W": 2.0e6, "SCALE_T": 1.0e5,
+	"SCALE_V": 1.0e5}
 const AMBIENT_T := 300.0
 
 var particle_count := 1024
@@ -117,6 +130,7 @@ var _cached_scal_rid := RID()
 
 var _grid_dims := Vector3i.ZERO
 var _cell_size := 0.1
+var _ambient_temperature := 0.0
 var _h_liquid := 0.15  # 1.5 * cell_size: one particle covers a 3³ block of cells
 ## World position of cell (0,0,0)'s corner. The fire domain is centred on the origin
 ## in x/z with the floor at y = 0 (fire_common.comp cell_to_world), so particle
@@ -168,8 +182,9 @@ const MEASURE_INTERVAL := 30
 ## [param indir_tex] is the tile pool's indirection volume, which the two particle
 ## passes resolve every cell through. [param sph_box] is the world-space extent the
 ## droplets themselves are simulated in; leave it zero to use the fire domain,
-## which is only sensible when that domain is a box.
-func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
+## which is only sensible when that domain is a box. [param ambient_temperature] is
+## the fire solver's, the temperature an empty cell's liquid reads as.
+func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temperature: float,
 		indir_tex := RID(), sph_box := Vector3.ZERO) -> void:
 	if _rd != null:
 		return
@@ -180,6 +195,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float,
 	_grid_dims = fire_grid_dims
 	particle_cap = particle_count
 	_cell_size = fire_cell_size
+	_ambient_temperature = ambient_temperature
 	_h_liquid = fire_cell_size * 1.5
 	_indir_tex = indir_tex
 	var domain := Vector3(fire_grid_dims) * fire_cell_size
@@ -306,6 +322,9 @@ func sph_tex_width() -> int:
 ## declared-but-unused resource and the uniform set would then have to provide it.
 func _compile(name: String, with_common: bool) -> RID:
 	var src: String = "#version 460\n" + str(FireGpuSolver.scratch_formats(_rd)["preamble"])
+	for scale in FIXED_POINT_SCALES:
+		src += "#define %s %s\n" % [scale, FireGpuSolver.glsl_float(FIXED_POINT_SCALES[scale])]
+	src += FireTilePool.glsl_header()
 	if with_common:
 		src += FileAccess.get_file_as_string("res://shaders/fire/sparse/water_common.comp") + "\n"
 	src += FileAccess.get_file_as_string("res://shaders/fire/sparse/%s.comp" % name)
@@ -601,7 +620,7 @@ func _return_push() -> PackedByteArray:
 		PackedInt32Array([particles_active, _grid_dims.x, _grid_dims.y, _grid_dims.z]),
 		PackedFloat32Array([_cell_size, _h_liquid,
 			_grid_origin.x, _grid_origin.y, _grid_origin.z,
-			drain_rate, step_dt]))
+			drain_rate, step_dt, DRAIN_CUTOFF_FRACTION * DROPLET_MASS]))
 
 
 ## Advances the droplets themselves (Eq. 12-17). Runs before the scatter, so the
@@ -665,7 +684,7 @@ func gather_render(liquid_scal_rid: RID, liquid_vel_rid: RID) -> void:
 	# coincide here.
 	var push := _push_bytes(
 		PackedInt32Array([_accum_dims.x, _accum_dims.y, _accum_dims.z]),
-		PackedFloat32Array([_cell_size]))
+		PackedFloat32Array([_cell_size, _ambient_temperature]))
 
 	var cl := _rd.compute_list_begin()
 	_rd.compute_list_bind_compute_pipeline(cl, _pipeline_gather)

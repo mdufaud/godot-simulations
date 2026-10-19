@@ -1,0 +1,23 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+void main() {
+    uint col = gl_GlobalInvocationID.x;
+    uint stage = gl_GlobalInvocationID.y;
+    if (col >= LOCAL_N / 2u) {
+        return;
+    }
+    uint stride = 1u << stage;
+    uint mid = LOCAL_N >> (stage + 1u);
+    uint i = col >> stage;
+    uint j = col % stride;
+    float angle = PI / float(stride) * float(j);
+    vec2 twiddle = vec2(cos(angle), sin(angle));
+    uint read0 = stride * i + j;
+    uint read1 = stride * (i + mid) + j;
+    uint write0 = stride * (2u * i) + j;
+    uint write1 = stride * (2u * i + 1u) + j;
+    butterfly[stage * LOCAL_N + write0] =
+        vec4(uintBitsToFloat(read0), uintBitsToFloat(read1), twiddle);
+    butterfly[stage * LOCAL_N + write1] =
+        vec4(uintBitsToFloat(read0), uintBitsToFloat(read1), -twiddle);
+}

@@ -273,6 +273,8 @@ func _setup_volume_material() -> void:
 	volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
 	volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
 	volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
+	volume_material.set_shader_parameter("tile_shift", FireTilePool.TILE_SHIFT)
+	volume_material.set_shader_parameter("tile_slot_max", FireTilePool.SLOT_MAX)
 	volume_material.set_shader_parameter("virtual_origin",
 		Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
 	_set_volume_proxy(solver.display_clip_box())
@@ -309,7 +311,7 @@ func _setup_fluid_renderer() -> void:
 	fluid_renderer.particle_count = water.particle_count
 	fluid_renderer.tex_width = water.sph_tex_width()
 	fluid_renderer.radius = 0.05
-	fluid_renderer.mode = 0.0
+	fluid_renderer.mode = 0
 	fluid_renderer.render_scale = 1.0
 	# Matches the fire grid box so the surface MultiMesh is not frustum-culled.
 	var domain_size := solver.dense_domain_size_m()

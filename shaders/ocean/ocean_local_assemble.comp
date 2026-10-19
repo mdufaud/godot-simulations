@@ -1,0 +1,61 @@
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    vec2 world = world_at(id);
+    float eta = fft_data[FFT_IDX(id.x, id.y, 0, 1)].x;
+    float psi = fft_data[FFT_IDX(id.x, id.y, 1, 1)].x;
+    float eta_offshore = fft_data[FFT_IDX(id.x, id.y, 2, 1)].x;
+    float psi_offshore = fft_data[FFT_IDX(id.x, id.y, 3, 1)].x;
+    float total_eta = eta + eta_offshore;
+    float total_psi = psi + psi_offshore;
+    float cell_size = lp.grid.x / float(LOCAL_N);
+    float edge_distance = min(min(float(id.x) + 0.5, float(id.y) + 0.5),
+        min(float(LOCAL_N - id.x) - 0.5, float(LOCAL_N - id.y) - 0.5)) * cell_size;
+    float sponge_width = lp.grid.x * 0.16;
+    float sponge = 1.0 - smoothstep(0.0, sponge_width, edge_distance);
+    float depth = bathymetry(world);
+    float depth_breaking = smoothstep(0.78, 1.0, 2.0 * abs(total_eta) / depth);
+    ivec2 left = ivec2((id.x + LOCAL_N - 1) % LOCAL_N, id.y);
+    ivec2 right = ivec2((id.x + 1) % LOCAL_N, id.y);
+    ivec2 down = ivec2(id.x, (id.y + LOCAL_N - 1) % LOCAL_N);
+    ivec2 up = ivec2(id.x, (id.y + 1) % LOCAL_N);
+    float slope_x = (fft_data[FFT_IDX(right.x, right.y, 0, 1)].x
+        + fft_data[FFT_IDX(right.x, right.y, 2, 1)].x
+        - fft_data[FFT_IDX(left.x, left.y, 0, 1)].x
+        - fft_data[FFT_IDX(left.x, left.y, 2, 1)].x) / (2.0 * cell_size);
+    float slope_z = (fft_data[FFT_IDX(up.x, up.y, 0, 1)].x
+        + fft_data[FFT_IDX(up.x, up.y, 2, 1)].x
+        - fft_data[FFT_IDX(down.x, down.y, 0, 1)].x
+        - fft_data[FFT_IDX(down.x, down.y, 2, 1)].x) / (2.0 * cell_size);
+    float steepness_breaking = smoothstep(0.7, 1.0, length(vec2(slope_x, slope_z)));
+    float shallow_mask = 1.0 - smoothstep(20.0, 64.0, depth);
+    float breaking = max(depth_breaking, steepness_breaking)
+        * shallow_mask * (1.0 - sponge);
+    float damping = exp(-1.5 * breaking * lp.time.y);
+    total_eta *= damping;
+    total_psi *= damping;
+    total_eta = mix(total_eta, eta_offshore, sponge);
+    total_psi = mix(total_psi, psi_offshore, sponge);
+    if (lp.grid.x < 100.0) {
+        float sigma = max(2.0, lp.grid.x / float(LOCAL_N));
+        for (int i = 0; i < lp.cfg.y; i++) {
+            vec4 impulse = wake_impulses[i];
+            vec2 delta = world - impulse.xy;
+            float kernel = exp(-dot(delta, delta) / (2.0 * sigma * sigma))
+                / (2.0 * PI * sigma * sigma);
+            total_psi += dot(impulse.zw, delta) * kernel
+                / (WATER_DENSITY * depth);
+        }
+        for (int i = 0; i < int(lp.render.z); i++) {
+            vec4 force = pressure_forces[i];
+            float radius = max(force.w, 0.6);
+            vec2 delta = world - force.xy;
+            float kernel = exp(-dot(delta, delta) / (2.0 * radius * radius))
+                / (2.0 * PI * radius * radius);
+            total_psi -= lp.time.y * force.z * kernel / WATER_DENSITY;
+        }
+    }
+    imageStore(local_state_target, ivec3(id, lp.cfg.x),
+        vec4(total_eta, total_psi, eta_offshore, psi_offshore));
+}

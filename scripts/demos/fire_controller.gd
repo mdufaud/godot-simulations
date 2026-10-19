@@ -100,7 +100,7 @@ func _ready() -> void:
 	# box as their own SPH domain either way — only the fire grid became the map.
 	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
 	RenderingServer.call_on_render_thread(func() -> void:
-		water.init_render(solver.sim_dims(), solver.cell_size,
+		water.init_render(solver.sim_dims(), solver.cell_size, solver.ambient_temperature,
 			solver.indirection_rid(), sph_box))
 
 	presentation = FirePresentation.new()

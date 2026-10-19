@@ -6,12 +6,25 @@ void main() {
 	vec3 pos = predicted.data[i].xyz;
 	float density = densities.data[i];
 	float near_density = near_densities.data[i];
-	float pressure = (density - params.sim.y) * params.sim.z;
-	float near_pressure = near_density * params.sim.w;
+	float stiffness_scale = scene.fluid_material.y;
+	float pressure = (density - params.sim.y) * params.sim.z * stiffness_scale;
+	float near_pressure = near_density * params.sim.w * stiffness_scale;
 	vec3 vel_i = velocities.data[i].xyz;
 	vec3 force = vec3(0.0);
+	vec3 near_force = vec3(0.0);
+	vec3 surface_force = vec3(0.0);
+	float cohesion = params.sim2.z;
+	float phase = positions.data[i].w;
+	vec3 extension = vec3(0.0);
+	vec3 elastic_force = vec3(0.0);
+	vec4 reference = vec4(0.0);
+	if (params.material == MATERIAL_SPECTRAL_GEL) {
+		reference = gel_reference.data[uint(round(velocities_snap.data[i].w))];
+	}
+	float interface_weight = 0.0;
 	int neighbours = 0;
-	bool spawn_foam = foam.flags.x == 1 && params.gravity.w <= 0.5;
+	bool nitrogen = params.material == MATERIAL_LIQUID_NITROGEN;
+	bool spawn_foam = foam.flags.x == 1 && (params.material == MATERIAL_WATER || nitrogen);
 	// Trapped-air metric (Ihmsen et al. / SebLague): how strongly this particle
 	// converges with its neighbours. High only where fluid slams into itself,
 	// which is exactly where air is entrained and foam is born.
@@ -30,15 +43,37 @@ void main() {
 		vec3 dir = dst > 1e-6 ? off / dst : vec3(0.0, 1.0, 0.0);
 		float dj = densities.data[j];
 		float nj = near_densities.data[j];
-		float pj = (dj - params.sim.y) * params.sim.z;
-		float npj = nj * params.sim.w;
+		float pj = (dj - params.sim.y) * params.sim.z * stiffness_scale;
+		float npj = nj * params.sim.w * stiffness_scale;
 		float shared_p = (pressure + pj) * 0.5;
 		float shared_np = (near_pressure + npj) * 0.5;
 		force += dir * sph_density_deriv(dst) * shared_p / dj;
-		force += dir * sph_near_density_deriv(dst) * shared_np / nj;
+		near_force += dir * sph_near_density_deriv(dst) * shared_np / nj;
+		// Akinci-style cohesion (surface tension lite): attracts within h/2,
+		// mildly repels beyond, so free particles bead up without clumping.
+		bool unlike = params.material == MATERIAL_OIL && abs(phase - positions.data[j].w) > 0.5;
+		if (cohesion > 0.0 && !unlike) {
+			surface_force += dir * sph_cohesion_k(dst) / dj * cohesion;
+		}
+		if (unlike) {
+			interface_weight += 1.0 - dst / params.kernel.x;
+		}
+		if (params.material == MATERIAL_HONEY) {
+			float separation = max(dot(velocities_snap.data[j].xyz - vel_i, dir), 0.0);
+			extension += dir * separation * smoothstep(0.2, 0.65, dst / params.kernel.x)
+				* (1.0 - smoothstep(0.8, 1.0, dst / params.kernel.x));
+		}
+		if (params.material == MATERIAL_SPECTRAL_GEL) {
+			vec4 other = gel_reference.data[uint(round(velocities_snap.data[j].w))];
+			float rest_length = length(other.xyz - reference.xyz);
+			if (other.w == reference.w && dst > 1e-6 && rest_length > 1e-6 && rest_length < params.kernel.x) {
+				float fade = (1.0 - rest_length / params.kernel.x) * (1.0 - dst / params.kernel.x);
+				elastic_force += dir * (dst - rest_length) * fade / 16.0;
+			}
+		}
 
 		if (spawn_foam) {
-			vec3 rel_v = vel_i - velocities.data[j].xyz;
+			vec3 rel_v = vel_i - velocities_snap.data[j].xyz;
 			float rel_mag = length(rel_v);
 			vec3 rel_dir = rel_v / max(rel_mag, 1e-6);
 			// 0 when moving apart, up to 2 when moving straight at each other.
@@ -48,10 +83,24 @@ void main() {
 		}
 	)
 	vec3 accel = force / max(density, 1e-6);
+	accel += near_force / max(near_density, 1e-6);
+	accel += surface_force / max(density, 1e-6);
+	if (params.material == MATERIAL_HONEY) {
+		accel += extension * params.sim2.w / max(float(neighbours), 1.0);
+	}
+	if (params.material == MATERIAL_SPECTRAL_GEL) {
+		accel += elastic_force * params.sim2.w;
+	}
+	if (params.material == MATERIAL_OIL) {
+		float buoyancy = 9.8 * (1000.0 / scene.fluid_material.x - 1.0);
+		float contact = min(interface_weight / 4.0, 1.0);
+		accel.y += phase > 0.5 ? buoyancy * smoothstep(0.3, 0.8, density / params.sim.y) : 0.0;
+		accel.y += (phase > 0.5 ? 1.0 : -1.0) * buoyancy * 4.0 * contact;
+	}
 	vec3 v = vel_i + accel * params.sim.x;
 	// Airborne particles (few neighbors) get drag so spray doesn't fling away.
 	if (neighbours < 8) {
-		v -= v * params.sim.x * 0.75;
+		v -= v * params.sim.x * (params.material == MATERIAL_MERCURY ? 0.75 * 1000.0 / scene.fluid_material.x : 0.75);
 	}
 	velocities.data[i] = vec4(v, velocities.data[i].w);
 
@@ -60,9 +109,27 @@ void main() {
 	if (!spawn_foam) {
 		return;
 	}
+	// Surface gate: interior particles (density near rest) have full kernel
+	// support, so their trapped-air metric comes from wall shear or bulk churn
+	// rather than the free surface — foam born there sticks to the walls. The
+	// gate fades spawning out as density approaches the rest value.
 	float air_factor = foam.spawn.x * remap01(trapped_air, foam.spawn.y, foam.spawn.z);
+	if (foam.render.z > 0.0) {
+		air_factor *= remap01(params.sim.y * foam.render.z - density, 0.0, params.sim.y * 0.1);
+	}
 	float ke_factor = remap01(dot(vel_i, vel_i), foam.spawn.w, foam.spawn2.x);
 	float spawn_factor = air_factor * ke_factor * params.sim.x;
+	if (nitrogen) {
+		// Boiling: the heat picked up touching a warm surface (phase) boils off,
+		// and the free surface steams a little on its own.
+		float exposed = remap01(params.sim.y * 0.9 - density, 0.0, params.sim.y * 0.2);
+		spawn_factor = foam.spawn.x * (phase + NITROGEN_SURFACE_BOIL * exposed) * params.sim.x;
+	}
+	// Fresh emitter layers are packed into the ones ahead of them: that
+	// convergence is the nozzle's, not air entrained by the flow.
+	if (scene.emitter_velocity.w > 0.5 && distance(pos, scene.emitter_origin.xyz) < NOZZLE_FOAM_CLEARANCE) {
+		return;
+	}
 	if (spawn_factor <= 0.0) {
 		return;
 	}
@@ -72,8 +139,10 @@ void main() {
 	if (rand01(rng) < spawn_factor - float(spawn_count)) {
 		spawn_count++;
 	}
+	// Vapour rises off still liquid, so its spawn cylinder stands upright.
+	vec3 axis = nitrogen ? vec3(0.0, 1.0, 0.0) : v;
 	// A zero-length axis would produce NaN spawn positions.
-	if (spawn_count <= 0 || dot(v, v) < 1e-6) {
+	if (spawn_count <= 0 || dot(axis, axis) < 1e-6) {
 		return;
 	}
 	// Reserve a contiguous run at the end of the live pool. The counter takes the
@@ -86,8 +155,8 @@ void main() {
 	}
 	spawn_count = min(spawn_count, int(cap - base - 1u));
 	// Spawn inside a cylinder whose axis is the particle's motion this sub-step.
-	vec3 axis_a = orthonormal(v);
-	vec3 axis_b = normalize(cross(axis_a, v));
+	vec3 axis_a = orthonormal(axis);
+	vec3 axis_b = normalize(cross(axis_a, axis));
 	float radius = params.kernel.x * foam.render.y;
 	for (int k = 0; k < spawn_count; k++) {
 		uint slot = base + uint(k);
@@ -97,6 +166,11 @@ void main() {
 		vec3 spawn_pos = pos + base_off + v * params.sim.x * rand01(rng);
 		float life = mix(foam.spawn2.y, foam.spawn2.z, rand01(rng));
 		foam_pos.data[slot] = vec4(spawn_pos, life);
-		foam_vel.data[slot] = vec4(v + base_off, (foam.motion.z + 1.0) * 0.5);
+		// Spawn small (and varied) and let the update pass grow the scale in:
+		// a full-size sprite popping into existence reads as a blink. Staggered
+		// lifetimes then keep the sheet's sizes spread as it dissolves.
+		float variance = mix(0.75, 1.25, rand01(rng));
+		vec3 spawn_v = nitrogen ? v + base_off * 4.0 + vec3(0.0, NITROGEN_PUFF_SPEED, 0.0) : v + base_off;
+		foam_vel.data[slot] = vec4(spawn_v, (foam.motion.z + 1.0) * 0.5 * variance * 0.3);
 	}
 }

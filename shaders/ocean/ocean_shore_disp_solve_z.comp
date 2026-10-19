@@ -1,0 +1,55 @@
+layout(local_size_x = SHORE_LINE_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+shared vec4 line_coeff[SHORE_LINE_SIZE];
+
+void main() {
+    int col = int(gl_WorkGroupID.x);
+    int row = int(gl_LocalInvocationID.x);
+    int n = params.sizes.x;
+    bool in_range = row < n;
+    if (in_range) {
+        float dx2 = params.domain.y * params.domain.y;
+        ivec2 p = ivec2(col, row);
+        float dx = params.domain.y;
+        float still = dispersive_depth(p);
+        vec2 dg = -vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),
+            read_bed(p + ivec2(0, 1)) - read_bed(p - ivec2(0, 1))) / (2.0 * dx);
+        float cd = SHORE_DISP_CD * still * still / dx2;
+        float bias = still * dg.y / (6.0 * dx);
+        float a = row > 0 ? -cd + bias : 0.0;
+        float c = row < n - 1 ? -cd - bias : 0.0;
+        float mixed = (read_acceleration(p + ivec2(1, 1), 0) - read_acceleration(p + ivec2(-1, 1), 0)
+            - read_acceleration(p + ivec2(1, -1), 0) + read_acceleration(p + ivec2(-1, -1), 0)) / (4.0 * dx2);
+        vec2 cross_gradient = vec2(read_acceleration(p + ivec2(1, 0), 0) - read_acceleration(p - ivec2(1, 0), 0),
+            read_acceleration(p + ivec2(0, 1), 0) - read_acceleration(p - ivec2(0, 1), 0)) / (2.0 * dx);
+        float rhs = disp[uint(row * n + col)].w + SHORE_DISP_CD * still * still * mixed
+            + still / 6.0 * (dg.y * cross_gradient.x + dg.x * cross_gradient.y);
+        if (params.boundary.x > 0.5 && row == 0) rhs += (cd - bias) * (offshore_acceleration(p - ivec2(0, 1)).y - offshore_acceleration(p).y);
+        if (params.boundary.x > 0.5 && row == n - 1) rhs += (cd + bias) * (offshore_acceleration(p + ivec2(0, 1)).y - offshore_acceleration(p).y);
+        line_coeff[row] = vec4(a, 1.0 - a - c, c, rhs);
+    } else line_coeff[row] = vec4(0.0, 1.0, 0.0, 0.0);
+    barrier();
+    for (int stride = 1; stride < n; stride *= 2) {
+        vec4 center = line_coeff[row];
+        if (in_range && row >= stride) {
+            vec4 left = line_coeff[row - stride];
+            float scale = -center.x / left.y;
+            center.y += scale * left.z;
+            center.w += scale * left.w;
+            center.x = scale * left.x;
+        } else center.x = 0.0;
+        if (in_range && row + stride < n) {
+            vec4 right = line_coeff[row + stride];
+            float scale = -center.z / right.y;
+            center.y += scale * right.x;
+            center.w += scale * right.w;
+            center.z = scale * right.z;
+        } else center.z = 0.0;
+        barrier();
+        line_coeff[row] = center;
+        barrier();
+    }
+    if (in_range) {
+        brk[uint(row * n + col)].z = line_coeff[row].w / line_coeff[row].y;
+    }
+}

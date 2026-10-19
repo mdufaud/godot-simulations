@@ -1,0 +1,21 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    vec4 q = read_water(p);
+    float eta_c = q.x + read_bed(p);
+    float eta_e = read_water(p + ivec2(1, 0)).x + read_bed(p + ivec2(1, 0));
+    float eta_w = read_water(p - ivec2(1, 0)).x + read_bed(p - ivec2(1, 0));
+    float eta_n = read_water(p + ivec2(0, 1)).x + read_bed(p + ivec2(0, 1));
+    float eta_s = read_water(p - ivec2(0, 1)).x + read_bed(p - ivec2(0, 1));
+    if (q.x <= params.domain.w) {
+        eta_e = eta_c; eta_w = eta_c; eta_n = eta_c; eta_s = eta_c;
+    } else {
+        eta_e = read_water(p + ivec2(1, 0)).x > params.domain.w ? eta_e : eta_c;
+        eta_w = read_water(p - ivec2(1, 0)).x > params.domain.w ? eta_w : eta_c;
+        eta_n = read_water(p + ivec2(0, 1)).x > params.domain.w ? eta_n : eta_c;
+        eta_s = read_water(p - ivec2(0, 1)).x > params.domain.w ? eta_s : eta_c;
+    }
+    vec2 grad = vec2(eta_e - eta_w, eta_n - eta_s) / (2.0 * params.domain.y);
+    disp[uint(cell_index(p))] = vec4(params.domain.z * grad, vec2(0.0));
+}

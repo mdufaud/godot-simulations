@@ -1,0 +1,37 @@
+#define PI 3.141592653589793
+#define G_GRAV 9.81
+
+layout(rgba32f, set = 0, binding = 0) readonly uniform image2DArray spectrum_tex;
+
+layout(std430, set = 0, binding = 1) restrict buffer ButterflyBuffer {
+    vec4 butterfly[];
+};
+
+layout(std430, set = 0, binding = 2) restrict buffer FFTBuffer {
+    vec2 fft_data[];
+};
+
+layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray velocity_map;
+
+layout(push_constant, std430) uniform Params {
+    vec4 wave;
+    vec4 current;
+    ivec4 misc;
+} params;
+
+#define FFT_IDX(p_col, p_row, p_layer, p_half) \
+    (uint(p_half) * NUM_SPECTRA * MAP_SIZE * MAP_SIZE \
+        + uint(p_layer) * MAP_SIZE * MAP_SIZE \
+        + uint(p_row) * MAP_SIZE + uint(p_col))
+
+vec2 mul_complex(vec2 a, vec2 b) {
+    return vec2(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+vec2 exp_complex(float x) {
+    return vec2(cos(x), sin(x));
+}
+
+vec2 conj_complex(vec2 x) {
+    return vec2(x.x, -x.y);
+}

@@ -5,9 +5,10 @@ uniform sampler2D previous_foam : filter_linear, repeat_disable;
 uniform sampler2D injection_mask : filter_linear, repeat_disable;
 uniform vec2 texel_size = vec2(0.001953125);
 uniform vec2 scroll_uv = vec2(0.0);
-uniform float decay = 0.98;
-uniform float blur_amount = 0.1;
-uniform float injection_strength = 0.2;
+uniform float delta = 0.0166667;
+uniform float decay_rate = 0.45;
+uniform float diffusion_rate = 0.0;
+uniform float injection_rate = 8.0;
 
 float previous_at(vec2 uv) {
 	vec2 inside = step(vec2(0.0), uv) * step(uv, vec2(1.0));
@@ -22,7 +23,8 @@ void fragment() {
 		+ previous_at(previous_uv + vec2(0.0, texel_size.y))
 		+ previous_at(previous_uv - vec2(0.0, texel_size.y));
 	spread *= 0.25;
-	history = mix(history, spread, blur_amount) * decay;
+	float blur_amount = 1.0 - exp(-delta * diffusion_rate);
+	history = mix(history, spread, blur_amount) * exp(-delta * decay_rate);
 
 	vec2 ring_texel = texel_size * 2.5;
 	float mask_center = texture(injection_mask, UV).r;
@@ -37,6 +39,6 @@ void fragment() {
 		}
 	}
 	float ring = smoothstep(0.04, 0.65, mask_max - mask_min);
-	float foam = max(history, ring * injection_strength);
+	float foam = 1.0 - (1.0 - history) * exp(-ring * injection_rate * delta);
 	COLOR = vec4(foam, foam, foam, foam);
 }

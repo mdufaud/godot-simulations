@@ -1,0 +1,56 @@
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(rgba32f, set = 0, binding = 0) uniform readonly image2D state_in;
+layout(rgba32f, set = 0, binding = 1) uniform readonly image2D film_state;
+layout(rgba32f, set = 0, binding = 4) uniform readonly image2D state_b;
+layout(rgba32f, set = 0, binding = 5) uniform readonly image2D film_b;
+layout(std430, set = 0, binding = 2) buffer Control { uint words[]; } control;
+layout(std430, set = 0, binding = 3) readonly buffer Cascade {
+    vec4 lane_input[48];
+    vec4 packets[24576];
+    vec4 arrivals[96];
+    vec4 totals[48];
+} cascade;
+layout(push_constant, std430) uniform Params {
+    vec4 domain;
+    vec4 grid;
+    vec4 water;
+    vec4 source_domain;
+    vec4 control_params;
+    vec4 waterfall;
+    vec4 cascade;
+    vec4 relaxation;
+} params;
+
+shared float signals[64];
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    float signal = 0.0;
+    if (all(lessThan(p, ivec2(params.grid.xy)))) {
+        vec4 q = control.words[19] == 0u ? imageLoad(state_in, p) : imageLoad(state_b, p);
+        vec2 velocity = q.x > 0.004 ? q.yz / q.x : vec2(0.0);
+        float depth = max(q.x, 0.0);
+        signal = abs(velocity.x) + abs(velocity.y)
+            + 2.0 * sqrt(params.domain.w * depth);
+    }
+    ivec2 film_size = ivec2(params.cascade.xy);
+    if (all(lessThan(p, film_size)) && params.waterfall.x > 0.5
+            && params.waterfall.x < 90.0) {
+        vec4 q = control.words[19] == 0u ? imageLoad(film_state, p) : imageLoad(film_b, p);
+        float depth = max(q.x, 0.0);
+        float speed = depth > 0.00001 ? abs(q.y / depth) : 0.0;
+        float ds = params.waterfall.y / sin(radians(params.waterfall.x)) / params.cascade.y;
+        signal = max(signal, (speed + sqrt(params.domain.w * cos(radians(params.waterfall.x)) * depth)
+            + params.domain.w * params.water.z) * params.domain.z / ds);
+    }
+    uint lane = gl_LocalInvocationIndex;
+    signals[lane] = signal;
+    barrier();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+        if (lane < stride) signals[lane] = max(signals[lane], signals[lane + stride]);
+        barrier();
+    }
+    if (lane == 0u) atomicMax(control.words[0], floatBitsToUint(signals[0]));
+}

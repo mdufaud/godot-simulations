@@ -1,0 +1,31 @@
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uint i = uint(cell_index(p));
+    vec4 q = read_water(p);
+    float z = read_bed(p);
+    vec3 primitive = vec3(q.x + z, velocity(q));
+    vec2 concentration = read_foam(p).xy / max(q.x, 1.0e-8);
+    for (int axis = 0; axis < 2; ++axis) {
+        ivec2 direction = axis == 0 ? ivec2(1, 0) : ivec2(0, 1);
+        ivec2 left = p - direction;
+        ivec2 right = p + direction;
+        vec4 ql = read_water(left);
+        vec4 qr = read_water(right);
+        vec3 pl = vec3(ql.x + read_bed(left), velocity(ql));
+        vec3 pr = vec3(qr.x + read_bed(right), velocity(qr));
+        bool smooth_wet = min(q.x, min(ql.x, qr.x)) > params.domain.w * 4.0
+            && abs(read_bed(left) - z) < params.domain.y * 0.75
+            && abs(read_bed(right) - z) < params.domain.y * 0.75;
+        vec3 gradient = smooth_wet ? minmod(2.0 * (primitive - pl),
+            minmod(0.5 * (pr - pl), 2.0 * (pr - primitive))) : vec3(0.0);
+        gradient.x = clamp(gradient.x, -2.0 * q.x, 2.0 * q.x);
+        vec2 cl = read_foam(left).xy / max(ql.x, 1.0e-8);
+        vec2 cr = read_foam(right).xy / max(qr.x, 1.0e-8);
+        vec2 tracer_gradient = smooth_wet ? minmod(2.0 * (concentration - cl),
+            minmod(0.5 * (cr - cl), 2.0 * (cr - concentration))) : vec2(0.0);
+        slopes[uint(axis) * pixel_count() + i] = vec4(gradient, 0.0);
+        slopes[uint(axis + 2) * pixel_count() + i] = vec4(tracer_gradient, 0.0, 0.0);
+    }
+}

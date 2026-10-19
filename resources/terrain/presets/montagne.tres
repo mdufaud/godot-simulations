@@ -1,0 +1,46 @@
+[gd_resource type="Resource" script_class="TerrainPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/terrain/terrain_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Mountain"
+default_tool = 7
+walls_visible = false
+terrain = 2
+world_size_m = 64.0
+base_height_m = 0.25
+mountain_height_m = 12.0
+water_level_m = 0.0
+snow_depth_m = 0.0
+snow_enabled = false
+camera_target_m = Vector3(0, 3, 0)
+camera_distance_m = 60.8
+auto_pour_radius_m = 0.0
+auto_water_radius_m = 0.0
+repose_angle_deg = 55.0
+erosion_rate = 1.2
+sediment_capacity = 2.4
+rain_rate_m_s = 0.0
+deposition_gain = 0.6
+uplift_rate_m_s = 0.0
+uplift_mode = 0
+uplift_radius_fraction = 0.3
+snowline_m = -1.0
+melt_rate_m_s = 0.0
+evap_rate_m_s = 0.001
+snowfall_rate_m_s = 0.0
+freeze_rate_m_s = 0.0
+landscape_materials = true
+balls_enabled = false
+sun_elevation_deg = 38.0
+sun_azimuth_deg = 150.0
+sun_color = Color(0.94, 0.96, 1, 1)
+sun_energy = 1.3
+sky_top = Color(0.27, 0.34, 0.40, 1)
+sky_horizon = Color(0.52, 0.58, 0.62, 1)
+fog_color = Color(0.52, 0.58, 0.62, 1)
+fog_density = 0.002
+exposure = 1.0
+snowfall = false
+hint = "Rain feeds water across the massif. Erosion enables carving. Drying drains surface water. Right-click to sculpt."

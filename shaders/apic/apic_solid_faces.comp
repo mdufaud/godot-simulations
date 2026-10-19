@@ -1,0 +1,47 @@
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	uint count = num_faces();
+	if (i >= count * 3u) { return; }
+	int component = int(i / count);
+	ivec3 right = face_coord(i % count);
+	ivec3 left = right;
+	left[component]--;
+	bool blocked = any(lessThan(left, ivec3(0))) || any(greaterThanEqual(left, params.grid_dims.xyz))
+		|| any(lessThan(right, ivec3(0))) || any(greaterThanEqual(right, params.grid_dims.xyz));
+	if (!blocked) {
+		blocked = cell_types.data[cell_index(left)] == CELL_SOLID
+			|| cell_types.data[cell_index(right)] == CELL_SOLID;
+		if (params.surface.y > 0.5 && face_area.data[i] <= 0.0) { blocked = true; }
+		vec3 a = cell_anchor(left);
+		vec3 b = cell_anchor(right);
+		for (int obstacle = 0; obstacle < scene.counts.x && !blocked; obstacle++) {
+			vec3 from = (scene.world_to_local[obstacle] * vec4(a, 1.0)).xyz;
+			vec3 delta = (scene.world_to_local[obstacle] * vec4(b, 1.0)).xyz - from;
+			vec3 half_size = scene.half_extents[obstacle].xyz;
+			float enter = 0.0;
+			float leave = 1.0;
+			bool hit = true;
+			for (int axis = 0; axis < 3; axis++) {
+				if (abs(delta[axis]) < 1.0e-8) {
+					if (abs(from[axis]) > half_size[axis]) { hit = false; }
+				} else {
+					float near_t = (-half_size[axis] - from[axis]) / delta[axis];
+					float far_t = (half_size[axis] - from[axis]) / delta[axis];
+					enter = max(enter, min(near_t, far_t));
+					leave = min(leave, max(near_t, far_t));
+				}
+			}
+			blocked = hit && enter <= leave;
+		}
+	}
+	uint flags = blocked ? 1u : 0u;
+	if (!blocked && params.surface.y > 0.5) {
+		uint li = cell_index(left);
+		uint ri = cell_index(right);
+		bool dry_left = cell_types.data[li] == CELL_AIR && cell_phi.data[li] < 0.0;
+		bool dry_right = cell_types.data[ri] == CELL_AIR && cell_phi.data[ri] < 0.0;
+		if ((dry_left && cell_types.data[ri] == CELL_FLUID)
+			|| (dry_right && cell_types.data[li] == CELL_FLUID)) { flags = 2u; }
+	}
+	solid_faces.data[i] = flags;
+}

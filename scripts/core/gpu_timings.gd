@@ -5,7 +5,7 @@ extends RefCounted
 ## Solvers bracket their dispatches with capture_timestamp(prefix + "start") and
 ## capture_timestamp(prefix + "end"), and mark stage boundaries in between. Each
 ## marker closes the segment opened by the previous one; a name repeated across
-## substeps sums. Timestamps are captured in nanoseconds and lag one to two frames.
+## substeps sums. Vulkan timestamps are captured in nanoseconds and lag one to two frames.
 ##
 ## Call from the render thread, after the frame whose timestamps you want to read.
 
@@ -31,7 +31,7 @@ static func read(rd: RenderingDevice, prefix: String, include_post: bool = false
 			continue
 		var segment := name.trim_prefix(prefix)
 		if segment == "end":
-			out["total"] = float(timestamp - start_time) / 1e6
+			out["total"] = out.get("total", 0.0) + float(timestamp - start_time) / 1e6
 			if include_post:
 				out["post"] = out.get("post", 0.0) + float(timestamp - prev_time) / 1e6
 			in_chain = false

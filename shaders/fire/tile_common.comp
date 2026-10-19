@@ -10,18 +10,10 @@
 // the same slot layout as the field textures, written by fire_display at the end
 // of each substep (Phase 4) or painted by the standalone driver (Phase 3).
 
-const uint NSLOTS = 2048u;
-const ivec3 VTILES = ivec3(256, 64, 256); // 409.6 x 102.4 x 409.6 m at 0.2 m
-const ivec3 ATLAS_TILES = ivec3(16, 8, 16); // 16*8*16 = 2048 slots
-const uint TILE = 8u;
-
-// Sentinels stored in the indirection volume. Real slot indices are < NSLOTS,
-// so any value at or above SLOT_MAX is a marker, not a slot.
-const uint INACTIVE = 0xFFFFFFFFu; // no tile here
-const uint RESERVED = 0xFFFFFFFEu; // requested this frame, not yet allocated
-const uint SLOT_MAX = 0xFFFFFFF0u;
-
-// counts[] words. Persistent across frames: C_FREE, C_EXHAUST, C_PEAK. Reset by
+// Pool geometry, the INACTIVE / RESERVED / SLOT_MAX sentinels and the counts[]
+// word indices C_* come from FireTilePool.glsl_header(), prepended to this file.
+//
+// counts[] words persistent across frames: C_FREE, C_EXHAUST, C_PEAK. Reset by
 // the CPU before each topology run: C_ACTIVE, C_REQUEST, C_NEW.
 //
 // The two counters the fire stages dispatch over are laid out so that each is
@@ -30,14 +22,6 @@ const uint SLOT_MAX = 0xFFFFFFF0u;
 // byte offset 24 (all active tiles) and 36 (tiles allocated this frame), so no
 // separate args pass and no separate args buffer are needed. The two trailing 1s
 // of each triple are written once at bootstrap and never touched again.
-const uint C_FREE = 0u;    // free-list stack top (number of free slots)
-const uint C_REQUEST = 1u; // alloc requests appended this frame
-const uint C_FRAME = 2u;   // last frame number, for readback only
-const uint C_EXHAUST = 3u; // cumulative dropped requests
-const uint C_PEAK = 4u;    // reserved for CPU-side peak tracking
-const uint C_KEEP = 5u;    // resident tiles that cleared the keep threshold (cores)
-const uint C_ACTIVE = 6u;  // resident tiles; .x of the active dispatch args
-const uint C_NEW = 9u;     // tiles allocated this frame; .x of the clear args
 
 layout(set = 0, binding = 0, r32ui) uniform restrict uimage3D indir;
 layout(std430, set = 0, binding = 1) restrict buffer SlotMeta { uint slot_meta[]; };
@@ -105,22 +89,3 @@ uint sm_vti(uint s) { return slot_meta[s * 4u + 0u]; }
 uint sm_wanted(uint s) { return slot_meta[s * 4u + 1u]; }
 uint sm_used(uint s) { return slot_meta[s * 4u + 2u]; }
 uint sm_keep(uint s) { return slot_meta[s * 4u + 3u]; }
-
-ivec3 vti_to_vt(uint vti) {
-	uint xy = uint(VTILES.x) * uint(VTILES.y);
-	return ivec3(int(vti % uint(VTILES.x)),
-		int((vti / uint(VTILES.x)) % uint(VTILES.y)),
-		int(vti / xy));
-}
-
-uint vt_to_vti(ivec3 vt) {
-	return uint(vt.x) + uint(vt.y) * uint(VTILES.x)
-		+ uint(vt.z) * uint(VTILES.x) * uint(VTILES.y);
-}
-
-// Slot -> origin of its 8^3 block in the atlas, laid out 16 x 8 x 16 tiles.
-ivec3 slot_atlas_origin(uint s) {
-	return ivec3(int(s % uint(ATLAS_TILES.x)),
-		int((s / uint(ATLAS_TILES.x)) % uint(ATLAS_TILES.y)),
-		int(s / uint(ATLAS_TILES.x * ATLAS_TILES.y))) * int(TILE);
-}

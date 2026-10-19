@@ -1,9 +1,7 @@
-// GPU point queries against the rendered surface: inverts the horizontal
-// choppy displacement (4 fixed-point iterations), bilinearly samples the three
-// cascades and sums height + gradient. Results are read back asynchronously
-// (max one frame of latency); nothing on the CPU samples wave textures anymore.
+// GPU point queries against the ocean field. Results are read back
+// asynchronously; nothing on the CPU samples wave textures anymore.
 //
-// Result layout: vec4(height, normal_x, normal_z, valid).
+// Result layout: vec4(height, height_gradient_x, height_gradient_z, valid).
 // Standalone shader: own bindings and push constant.
 
 layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
@@ -15,15 +13,29 @@ layout(std430, set = 0, binding = 1) restrict buffer QueryOut {
     vec4 query_results[];
 };
 layout(rgba16f, set = 0, binding = 2) restrict uniform image2DArray displacement_map;
-layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray normal_map;
+layout(rgba16f, set = 0, binding = 3) restrict uniform image2DArray derivative_map;
+layout(set = 0, binding = 4) uniform sampler2DArray velocity_map;
+layout(set = 0, binding = 5) uniform sampler2D coast_map;
+layout(set = 0, binding = 6) uniform sampler2D wake_map;
+layout(set = 0, binding = 7) uniform sampler2D shore_map;
+layout(set = 0, binding = 8) uniform sampler2D shore_derivative_map;
 
 layout(push_constant, std430) uniform QueryParams {
     vec4 tiles;   // tile length cascade 0, 1, 2, map_size
     ivec4 cfg;    // num_cascades, point_count, unused, unused
+    vec4 centers;
+    vec4 domains;
+    vec4 current;
+    vec4 shore;
 } qp;
 
+vec4 local_surface(vec2 world) {
+    return ocean_local_sample(coast_map, qp.centers.xy, qp.domains.x, world)
+        + ocean_local_sample(wake_map, qp.centers.zw, qp.domains.y, world);
+}
+
 // Bilinear fetch on the cascade torus; wraps any world distance.
-vec3 sample_displacement(int cascade, float tile, vec2 world) {
+vec4 sample_displacement(int cascade, float tile, vec2 world) {
     float n = qp.tiles.w;
     vec2 uv = world / tile;
     vec2 f = uv - floor(uv);
@@ -33,14 +45,14 @@ vec3 sample_displacement(int cascade, float tile, vec2 world) {
     ivec2 dims = ivec2(int(n));
     ivec2 w0 = (i0 + dims) % dims;
     ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
-    vec3 c00 = imageLoad(displacement_map, ivec3(w0.x, w0.y, cascade)).xyz;
-    vec3 c10 = imageLoad(displacement_map, ivec3(w1.x, w0.y, cascade)).xyz;
-    vec3 c01 = imageLoad(displacement_map, ivec3(w0.x, w1.y, cascade)).xyz;
-    vec3 c11 = imageLoad(displacement_map, ivec3(w1.x, w1.y, cascade)).xyz;
+    vec4 c00 = imageLoad(displacement_map, ivec3(w0.x, w0.y, cascade));
+    vec4 c10 = imageLoad(displacement_map, ivec3(w1.x, w0.y, cascade));
+    vec4 c01 = imageLoad(displacement_map, ivec3(w0.x, w1.y, cascade));
+    vec4 c11 = imageLoad(displacement_map, ivec3(w1.x, w1.y, cascade));
     return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
 }
 
-vec2 sample_gradient(int cascade, float tile, vec2 world) {
+vec4 sample_derivative(int cascade, float tile, vec2 world) {
     float n = qp.tiles.w;
     vec2 uv = world / tile;
     vec2 f = uv - floor(uv);
@@ -50,11 +62,74 @@ vec2 sample_gradient(int cascade, float tile, vec2 world) {
     ivec2 dims = ivec2(int(n));
     ivec2 w0 = (i0 + dims) % dims;
     ivec2 w1 = (i0 + dims + ivec2(1)) % dims;
-    vec2 c00 = imageLoad(normal_map, ivec3(w0.x, w0.y, cascade)).xy;
-    vec2 c10 = imageLoad(normal_map, ivec3(w1.x, w0.y, cascade)).xy;
-    vec2 c01 = imageLoad(normal_map, ivec3(w0.x, w1.y, cascade)).xy;
-    vec2 c11 = imageLoad(normal_map, ivec3(w1.x, w1.y, cascade)).xy;
+    vec4 c00 = imageLoad(derivative_map, ivec3(w0.x, w0.y, cascade));
+    vec4 c10 = imageLoad(derivative_map, ivec3(w1.x, w0.y, cascade));
+    vec4 c01 = imageLoad(derivative_map, ivec3(w0.x, w1.y, cascade));
+    vec4 c11 = imageLoad(derivative_map, ivec3(w1.x, w1.y, cascade));
     return mix(mix(c00, c10, t.x), mix(c01, c11, t.x), t.y);
+}
+
+void sample_surface(vec2 world, out vec2 displacement, out float height,
+        out vec4 deformation, out vec2 height_gradient) {
+    displacement = vec2(0.0);
+    height = 0.0;
+    deformation = vec4(0.0);
+    height_gradient = vec2(0.0);
+    for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
+        vec4 map_value = sample_displacement(cascade, qp.tiles[cascade], world);
+        vec4 differential = sample_derivative(cascade, qp.tiles[cascade], world);
+        displacement += map_value.xz;
+        height += map_value.y;
+        deformation += differential;
+        height_gradient += vec2(differential.w, map_value.w);
+    }
+    deformation.w = deformation.z;
+    if (qp.shore.x > 0.5 && qp.shore.w < 0.5) {
+        float width = qp.shore.z > 0.0 ? qp.shore.z : 12.0;
+        float weight = ocean_shore_surface_weight(shore_map, world, qp.shore.y, width, qp.current.zw);
+        vec2 weight_gradient = ocean_shore_surface_weight_gradient(shore_map, world, qp.shore.y, width, qp.current.zw);
+        float lateral_weight = qp.shore.w > 0.5 ? 0.0 : weight;
+        mat2 jacobian = ocean_shore_jacobian(deformation.xyz, displacement, lateral_weight,
+            qp.shore.w > 0.5 ? vec2(0.0) : weight_gradient);
+        displacement *= 1.0 - lateral_weight;
+        vec2 position = world + displacement;
+        vec4 shore = ocean_local_sample(shore_map, vec2(0.0), qp.shore.y, position);
+        vec2 shore_gradient = ocean_shore_gradient(shore_map, position, qp.shore.y);
+        height_gradient = (1.0 - weight) * height_gradient
+            + weight * vec2(dot(jacobian[0], shore_gradient), dot(jacobian[1], shore_gradient))
+            + (shore.x - height) * weight_gradient;
+        height = mix(height, shore.x, weight);
+        deformation = vec4(jacobian[0].x - 1.0, jacobian[1].y - 1.0,
+            jacobian[0].y, jacobian[1].x);
+    }
+}
+
+bool finite_vec2(vec2 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+bool finite_vec4(vec4 value) {
+    return !any(isnan(value)) && !any(isinf(value));
+}
+
+bool finite_float(float value) {
+    return !isnan(value) && !isinf(value);
+}
+
+bool usable_jacobian(vec4 deformation, out float a, out float b,
+        out float c, out float determinant) {
+    a = 1.0 + deformation.x;
+    b = 1.0 + deformation.y;
+    c = deformation.z;
+    determinant = a * b - c * deformation.w;
+    float trace = a * a + b * b + c * c + deformation.w * deformation.w;
+    float discriminant = sqrt(max(trace * trace - 4.0 * determinant * determinant, 0.0));
+    float minimum_eigenvalue = sqrt(max(0.5 * (trace - discriminant), 0.0));
+    float maximum_eigenvalue = sqrt(max(0.5 * (trace + discriminant), 0.0));
+    return finite_vec4(vec4(a, b, c, determinant))
+        && determinant > 0.0001 && a > 0.0 && b > 0.0
+        && minimum_eigenvalue > 0.02
+        && maximum_eigenvalue / minimum_eigenvalue <= 50.0;
 }
 
 void main() {
@@ -63,27 +138,126 @@ void main() {
         return;
     }
     vec2 p = query_points[index];
+    query_results[index * 2 + 1] = vec4(0.0);
 
-    // Invert the summed horizontal choppy displacement: find grid position g
-    // with g + D_xz(g) = p. |D| is far smaller than every tile, so the
-    // fixed-point iteration converges in a few steps.
+    // Invert the summed horizontal displacement with damped Newton steps.
     vec2 g = p;
-    for (int iteration = 0; iteration < 4; iteration++) {
-        vec2 disp = vec2(0.0);
-        for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
-            disp += sample_displacement(cascade, qp.tiles[cascade], g).xz;
-        }
-        g = p - disp;
-    }
-
     float height = 0.0;
-    vec2 gradient = vec2(0.0);
-    for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
-        height += sample_displacement(cascade, qp.tiles[cascade], g).y;
-        gradient += sample_gradient(cascade, qp.tiles[cascade], g);
+    vec2 height_gradient = vec2(0.0);
+    for (int iteration = 0; iteration < 8; iteration++) {
+        vec2 displacement;
+        vec4 deformation;
+        sample_surface(g, displacement, height, deformation, height_gradient);
+        vec2 residual = g + displacement - p;
+        float residual_length = length(residual);
+        float a;
+        float b;
+        float c;
+        float determinant;
+        if (!finite_vec2(residual) || !finite_vec4(deformation)
+                || !finite_float(height) || !finite_float(residual_length)
+                || !usable_jacobian(deformation, a, b, c, determinant)) {
+            break;
+        }
+        if (residual_length < 0.001) {
+            break;
+        }
+        vec2 correction = vec2(
+            (b * residual.x - deformation.w * residual.y) / determinant,
+            (a * residual.y - c * residual.x) / determinant);
+        if (!finite_vec2(correction)) {
+            break;
+        }
+        bool accepted = false;
+        float damping = 1.0;
+        for (int search = 0; search < 7; search++) {
+            vec2 candidate = g - correction * damping;
+            vec2 candidate_displacement;
+            float candidate_height;
+            vec4 candidate_deformation;
+            vec2 candidate_height_gradient;
+            sample_surface(candidate, candidate_displacement, candidate_height,
+                candidate_deformation, candidate_height_gradient);
+            float candidate_a;
+            float candidate_b;
+            float candidate_c;
+            float candidate_determinant;
+            vec2 candidate_residual = candidate + candidate_displacement - p;
+            float candidate_error = length(candidate_residual);
+            if (finite_vec2(candidate_residual) && finite_float(candidate_height)
+                    && finite_float(candidate_error)
+                    && usable_jacobian(candidate_deformation, candidate_a,
+                        candidate_b, candidate_c, candidate_determinant)
+                    && candidate_error < residual_length) {
+                g = candidate;
+                accepted = true;
+                break;
+            }
+            damping *= 0.5;
+        }
+        if (!accepted) {
+            break;
+        }
     }
-    vec3 normal = normalize(vec3(-gradient.x, 1.0, -gradient.y));
-    float valid = (isnan(height) || isnan(normal.x) || isnan(normal.z)
-        || isinf(height)) ? 0.0 : 1.0;
-    query_results[index] = vec4(height, normal.x, normal.z, valid);
+    vec2 displacement;
+    vec4 deformation;
+    sample_surface(g, displacement, height, deformation, height_gradient);
+    vec2 residual = g + displacement - p;
+    float a;
+    float b;
+    float c;
+    float determinant;
+    bool valid = finite_vec2(residual) && finite_vec2(height_gradient)
+        && finite_float(height) && length(residual) < 0.001
+        && usable_jacobian(deformation, a, b, c, determinant);
+    if (!valid) {
+        query_results[index * 2] = vec4(0.0);
+        return;
+    }
+    mat2 jacobian = mat2(vec2(a, c), vec2(deformation.w, b));
+    vec2 gradient = ocean_shore_world_gradient(jacobian, height_gradient);
+    float shore_weight = qp.shore.x > 0.5 ? ocean_shore_surface_weight(shore_map, g, qp.shore.y,
+        qp.shore.z > 0.0 ? qp.shore.z : 12.0, qp.current.zw) : 0.0;
+    vec4 shore = vec4(0.0);
+    if (shore_weight > 0.0) {
+        shore = ocean_local_sample(shore_map, vec2(0.0), qp.shore.y, p);
+        float bed_height = ocean_local_sample(shore_derivative_map, vec2(0.0), qp.shore.y, p).w;
+        bool dry = qp.shore.w > 0.5 ? height <= bed_height + 0.002 : shore.w <= 0.002;
+        if (shore_weight > 0.999 && dry) {
+            query_results[index * 2] = vec4(0.0);
+            return;
+        }
+    }
+    if (qp.cfg.z != 0 && qp.shore.x < 0.5) {
+        vec4 local = local_surface(p);
+        float epsilon = 0.25;
+        gradient += vec2(local_surface(p + vec2(epsilon, 0.0)).x
+                - local_surface(p - vec2(epsilon, 0.0)).x,
+            local_surface(p + vec2(0.0, epsilon)).x
+                - local_surface(p - vec2(0.0, epsilon)).x) / (2.0 * epsilon);
+        height += local.x;
+        vec3 velocity = vec3(qp.current.x, 0.0, qp.current.y)
+            + vec3(local.y, 0.0, local.z);
+        for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
+            velocity += textureLod(velocity_map, vec3(g / qp.tiles[cascade], float(cascade)), 0.0).xyz;
+        }
+        query_results[index * 2 + 1] = vec4(velocity, 1.0);
+    } else if (qp.cfg.z != 0) {
+        vec3 velocity = vec3(qp.current.x, 0.0, qp.current.y);
+        for (int cascade = 0; cascade < qp.cfg.x; cascade++) {
+            velocity += textureLod(velocity_map, vec3(g / qp.tiles[cascade], float(cascade)), 0.0).xyz;
+        }
+        if (qp.shore.w < 0.5) {
+            vec2 shore_gradient = ocean_shore_gradient(shore_map, p, qp.shore.y);
+            float height_rate = ocean_local_sample(shore_derivative_map, vec2(0.0), qp.shore.y, p).z;
+            vec3 shore_velocity = vec3(shore.y, height_rate + dot(shore.yz, shore_gradient), shore.z);
+            velocity = mix(velocity, shore_velocity, shore_weight);
+        }
+        query_results[index * 2 + 1] = vec4(velocity, 1.0);
+    }
+    if (!finite_vec2(gradient)) {
+        query_results[index * 2] = vec4(0.0);
+        return;
+    }
+    query_results[index * 2] = vec4(height, gradient.x, gradient.y, 1.0);
 }

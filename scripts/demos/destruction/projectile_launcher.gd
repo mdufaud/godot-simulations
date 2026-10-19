@@ -6,6 +6,9 @@ class_name ProjectileLauncher extends RefCounted
 signal impact(origin: Vector3, radius_m: float, impulse: float)
 
 const DESPAWN_Y := -8.0
+## The floor is an infinite WorldBoundary: a spent round rests on it forever
+## instead of falling out of the world, so age is the real despawn bound.
+const ROUND_LIFETIME_S := 20.0
 
 var camera: Camera3D
 ## Projectiles are parented here, so clearing them is one subtree.
@@ -61,6 +64,7 @@ func fire(screen_pos: Vector2) -> void:
 	mi.mesh = sphere
 	ball.add_child(mi)
 	ball.body_entered.connect(_on_hit.bind(ball, preset), CONNECT_ONE_SHOT)
+	ball.set_meta("fired_at_msec", Time.get_ticks_msec())
 	container.add_child(ball)
 
 
@@ -69,10 +73,13 @@ func clear() -> void:
 		p.queue_free()
 
 
-## Retires the rounds that missed everything.
+## Retires the rounds that missed everything or have lived out their blast
+## window on the floor.
 func despawn_fallen() -> void:
+	var now := Time.get_ticks_msec()
 	for p in container.get_children():
-		if p is Node3D and p.global_position.y < DESPAWN_Y:
+		if p is Node3D and (p.global_position.y < DESPAWN_Y
+				or now - int(p.get_meta("fired_at_msec", now)) > ROUND_LIFETIME_S * 1000.0):
 			p.queue_free()
 
 

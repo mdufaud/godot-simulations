@@ -9,6 +9,10 @@ class_name ParallaxTextureFactory extends RefCounted
 ## [/codeblock]
 
 const TEX_SIZE := 1024
+const ROCK_ALBEDO := preload("res://resources/parallax/parallax_rock.png")
+const ROCK_HEIGHT := preload("res://resources/parallax/parallax_rock_height.png")
+const COBBLE_ALBEDO := preload("res://resources/parallax/parallax_cobble.png")
+const COBBLE_HEIGHT := preload("res://resources/parallax/parallax_cobble_height.png")
 
 
 ## One surface, named rather than an [code][albedo, normal, height][/code] array.
@@ -37,11 +41,25 @@ func _build(surface: ParallaxConfig.Surface) -> Maps:
 		ParallaxConfig.Surface.BRICKS:
 			return _build_bricks()
 		ParallaxConfig.Surface.COBBLESTONE:
-			return _from_noise(_cobble_albedo(), _cobble_height_noise(), true, 12.0)
+			return _from_images(COBBLE_ALBEDO, COBBLE_HEIGHT, 6.0)
 		ParallaxConfig.Surface.DUNES:
 			return _from_noise(_dune_albedo(), _dune_height_noise(), false, 8.0)
 		_:
-			return _from_noise(_rock_albedo(), _rock_height_noise(), true, 10.0)
+			return _from_images(ROCK_ALBEDO, ROCK_HEIGHT, 6.0)
+
+
+func _from_images(albedo: Texture2D, height: Texture2D, bump: float) -> Maps:
+	var height_image := height.get_image()
+	if height_image.is_compressed():
+		height_image.decompress()
+	height_image.adjust_bcs(1.0, 0.55, 0.0)
+	height_image.convert(Image.FORMAT_L8)
+	var normal_image: Image = height_image.duplicate()
+	normal_image.bump_map_to_normal_map(bump)
+	normal_image.generate_mipmaps(true)
+	height_image.generate_mipmaps()
+	return Maps.new(albedo, ImageTexture.create_from_image(normal_image),
+		ImageTexture.create_from_image(height_image))
 
 
 # Normal map is derived from the SAME noise (and same invert) as the height map,
@@ -65,46 +83,6 @@ func _from_noise(albedo: Texture2D, height_noise: FastNoiseLite, inv: bool,
 	normal_tex.bump_strength = bump
 
 	return Maps.new(albedo, normal_tex, height_tex)
-
-
-# ─── Rock ─────────────────────────────────────────
-
-func _rock_albedo() -> NoiseTexture2D:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
-	noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
-	noise.frequency = 0.02
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 3
-	noise.fractal_lacunarity = 2.0
-	noise.fractal_gain = 0.5
-
-	var tex := NoiseTexture2D.new()
-	tex.noise = noise
-	tex.width = TEX_SIZE
-	tex.height = TEX_SIZE
-	tex.seamless = true
-	tex.color_ramp = _gradient([0.0, 0.25, 0.5, 0.7, 1.0], [
-		Color(0.2, 0.18, 0.16),
-		Color(0.3, 0.27, 0.24),
-		Color(0.42, 0.38, 0.34),
-		Color(0.36, 0.32, 0.28),
-		Color(0.48, 0.45, 0.42),
-	])
-	return tex
-
-
-func _rock_height_noise() -> FastNoiseLite:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_EUCLIDEAN
-	noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
-	noise.frequency = 0.018
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.4
-	return noise
 
 
 # ─── Bricks ───────────────────────────────────────
@@ -171,45 +149,6 @@ func _build_bricks() -> Maps:
 		ImageTexture.create_from_image(albedo_img),
 		ImageTexture.create_from_image(normal_img),
 		ImageTexture.create_from_image(height_img))
-
-
-# ─── Cobblestone ──────────────────────────────────
-
-func _cobble_albedo() -> NoiseTexture2D:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_HYBRID
-	noise.cellular_return_type = FastNoiseLite.RETURN_CELL_VALUE
-	noise.frequency = 0.025
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.4
-
-	var tex := NoiseTexture2D.new()
-	tex.noise = noise
-	tex.width = TEX_SIZE
-	tex.height = TEX_SIZE
-	tex.seamless = true
-	tex.color_ramp = _gradient([0.0, 0.3, 0.55, 0.75, 1.0], [
-		Color(0.3, 0.3, 0.3),
-		Color(0.4, 0.39, 0.38),
-		Color(0.5, 0.49, 0.47),
-		Color(0.45, 0.44, 0.42),
-		Color(0.55, 0.54, 0.52),
-	])
-	return tex
-
-
-func _cobble_height_noise() -> FastNoiseLite:
-	var noise := FastNoiseLite.new()
-	noise.noise_type = FastNoiseLite.TYPE_CELLULAR
-	noise.cellular_distance_function = FastNoiseLite.DISTANCE_HYBRID
-	noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE
-	noise.frequency = 0.025
-	noise.fractal_type = FastNoiseLite.FRACTAL_FBM
-	noise.fractal_octaves = 2
-	noise.fractal_gain = 0.3
-	return noise
 
 
 # ─── Dunes ────────────────────────────────────────
