@@ -118,9 +118,13 @@ func _channel_sums(field: PackedFloat32Array) -> Vector4:
 
 
 func _step(demo: Node, steps: int, dt: float = DT) -> void:
+	# Like the demo's SimStepClock: as many DT steps per frame as the frame spans,
+	# so the step sequence and its wall time do not depend on the frame rate.
+	var per_frame := maxi(1, roundi(root.get_process_delta_time() / DT))
 	for i in steps:
 		RenderingServer.call_on_render_thread(demo.solver.step_render.bind(dt))
-		await _frames(1)
+		if (i + 1) % per_frame == 0 or i + 1 == steps:
+			await _frames(1)
 
 
 ## Every pass conserves Σ(R+G+B+A) when melt and evaporation are off: tool is

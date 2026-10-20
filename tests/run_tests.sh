@@ -6,7 +6,7 @@
 #   GPU=1 tests/run_tests.sh           # + ocean FFT/physics, portal views, scene cycle, fluid foam, UI smoke
 #   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
 #
-# JOBS caps the concurrently running suites in both phases (default 2). All
+# JOBS caps the concurrently running suites in both phases (default 1). All
 # gate runners hold a shared lock on .godot/import.lock so an import rebuild
 # (tools/import.sh) cannot race a running suite's script parsing.
 #
@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GODOT="${GODOT:-godot}"
 TIMEOUT="${TIMEOUT:-180}"
-JOBS="${JOBS:-2}"
+JOBS="${JOBS:-1}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-logs-$$}"
 
 if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
@@ -49,7 +49,7 @@ cpu_names=()
 cleanup() {
 	local status=$?
 	local pid
-	for pid in "${cpu_pids[@]:-}" "${ocean_fft_pid:-}"; do
+	for pid in "${cpu_pids[@]:-}"; do
 		physics_test_process_stop "$pid"
 	done
 	physics_test_display_stop
@@ -65,11 +65,12 @@ run_cpu_suite() {
 	local godot_log="$LOG_DIR/cpu-${name}.godot.log"
 	local status=0
 
-	# --fixed-fps: suites await frames, which otherwise tick at wall-clock 60 Hz
-	# (vsync on the GPU phase); fixed steps keep the same delta without the wait.
+	# Every Godot process renders 30 frames per simulated second, each frame
+	# advancing exactly 1/30 s, and at most 30 per wall second, so a gate leaves
+	# the machine usable. Suites wait in simulated seconds, never frame counts.
 	physics_test_run_process "$TIMEOUT" "^TEST PASS $name$" "$output_file" \
 		"$GODOT" --path "$PROJECT_DIR" \
-			--log-file "$godot_log" --headless --audio-driver Dummy --fixed-fps 60 \
+			--log-file "$godot_log" --headless --audio-driver Dummy --fixed-fps 30 --max-fps 30 \
 			-s "$script"
 }
 
@@ -178,22 +179,6 @@ fi
 	export PHYSICS_TEST_RENDERING_DRIVER
 	export PHYSICS_TEST_AUDIO_DRIVER
 
-	# ocean_fft is the longest suite and mostly CPU-bound (readback analysis):
-	# it runs beside the rest of the GPU phase and is reaped last.
-	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
-	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
-	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
-		env -u DISPLAY \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
-			--log-file "$ocean_fft_log" \
-			-s res://tests/ocean_fft_test.gd &
-	ocean_fft_pid=$!
-
 	non_euclidean_output="$LOG_DIR/gpu-non_euclidean.stdout.log"
 	non_euclidean_log="$LOG_DIR/gpu-non_euclidean.godot.log"
 	non_euclidean_status=0
@@ -204,7 +189,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$non_euclidean_log" \
 			-s res://tests/non_euclidean_runner.gd || non_euclidean_status=$?
 	if (( non_euclidean_status == 0 )) && grep -q '^TEST PASS non_euclidean$' "$non_euclidean_output"; then
@@ -213,6 +198,27 @@ fi
 		printf 'TEST FAIL non_euclidean: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$non_euclidean_output" >&2
 		failed+=(non_euclidean)
+	fi
+
+	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
+	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
+	ocean_fft_status=0
+	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
+			--log-file "$ocean_fft_log" \
+			-s res://tests/ocean_fft_test.gd || ocean_fft_status=$?
+	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
+		printf 'TEST PASS ocean_fft\n'
+	else
+		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$ocean_fft_output" >&2
+		failed+=(ocean_fft)
 	fi
 
 	ocean_physics_output="$LOG_DIR/gpu-ocean_physics.stdout.log"
@@ -225,7 +231,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$ocean_physics_log" \
 			-s res://tests/ocean_physics_test.gd || ocean_physics_status=$?
 	if (( ocean_physics_status == 0 )) && grep -q '^TEST PASS ocean_physics$' "$ocean_physics_output"; then
@@ -246,7 +252,7 @@ fi
 			"$GODOT" --path "$PROJECT_DIR" \
 				--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 				--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 				--log-file "$LOG_DIR/gpu-${ocean_suite}.godot.log" \
 				-s "res://tests/${ocean_suite}_test.gd" || ocean_status=$?
 		if (( ocean_status == 0 )); then
@@ -267,7 +273,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$scene_cycle_log" \
 			-s res://tests/scene_cycle_test.gd || scene_cycle_status=$?
 	if (( scene_cycle_status == 0 )) && grep -q '^TEST PASS scene_cycle$' "$scene_cycle_output"; then
@@ -288,7 +294,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$tornado_look_log" \
 			-s res://tests/probe.gd -- tornado_boot_look || tornado_look_status=$?
 	if (( tornado_look_status == 0 )) && grep -q '^TEST PASS tornado_boot_look$' "$tornado_look_output"; then
@@ -309,7 +315,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$terrain_log" \
 			-s res://tests/terrain_test.gd || terrain_status=$?
 	if (( terrain_status == 0 )) && grep -q '^TEST PASS terrain$' "$terrain_output"; then
@@ -330,7 +336,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$fluid_foam_log" \
 			-s res://tests/probe.gd -- fluid_foam || fluid_foam_status=$?
 	if (( fluid_foam_status == 0 )) && grep -q '^TEST PASS fluid_foam$' "$fluid_foam_output"; then
@@ -351,7 +357,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--log-file "$fluid_tier_log" \
 			-s res://tests/probe.gd -- fluid_tier || fluid_tier_status=$?
 	if (( fluid_tier_status == 0 )) && grep -q '^TEST PASS fluid_tier$' "$fluid_tier_output"; then
@@ -370,16 +376,6 @@ fi
 		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \
 		"$SCRIPT_DIR/run_ui_smoke.sh"; then
 		failed+=(ui_smoke)
-	fi
-
-	ocean_fft_status=0
-	wait "$ocean_fft_pid" || ocean_fft_status=$?
-	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
-		printf 'TEST PASS ocean_fft\n'
-	else
-		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$ocean_fft_output" >&2
-		failed+=(ocean_fft)
 	fi
 fi
 

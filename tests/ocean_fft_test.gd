@@ -201,7 +201,7 @@ func _run() -> void:
 		demo._sim_time = 12.0
 		demo.solver.sim_time = 12.0
 		demo.set_frozen(false)
-		await _frames(45)
+		await _sim_seconds(0.75)
 		demo.set_frozen(true)
 		states.append(await _state_metrics(demo, preset_index == 0))
 
@@ -265,13 +265,13 @@ func _run() -> void:
 	demo.solver.crest_gain = 1.0
 	demo.solver.mark_spectrum_dirty()
 	demo.set_frozen(false)
-	await _frames(45)
+	await _sim_seconds(0.75)
 	demo.set_frozen(true)
 	var unshaped_breeze := await _state_metrics(demo, false, false, false, false)
 	demo.solver.crest_gain = breeze.crest_gain
 	demo.solver.mark_spectrum_dirty()
 	demo.set_frozen(false)
-	await _frames(45)
+	await _sim_seconds(0.75)
 	demo.set_frozen(true)
 	var shaped_breeze := await _state_metrics(demo, false, false, false, false)
 	_check(shaped_breeze.primary_crest_coverage
@@ -284,7 +284,7 @@ func _run() -> void:
 	demo.apply_preset(3)
 
 	demo.set_frozen(false)
-	await _frames(240)
+	await _sim_seconds(4.0)
 	demo.set_frozen(true)
 	var settled_storm := await _state_metrics(demo, true, true)
 	var storm_short_displacement := await _read_texture(
@@ -340,7 +340,7 @@ func _run() -> void:
 	var fresh_before_decay: float = settled_storm.fresh_mean
 	demo.solver.foam_amount = 0.0
 	demo.set_frozen(false)
-	await _frames(60)
+	await _sim_seconds(1.0)
 	demo.set_frozen(true)
 	var decayed_storm := await _state_metrics(demo, true, false, false, false)
 	var foam_drop: float = (foam_before_decay - decayed_storm.foam_mean) \
@@ -360,7 +360,7 @@ func _run() -> void:
 	# The near field starts empty and takes a few seconds to fill, so settle
 	# it as long as the far histories above.
 	demo.set_frozen(false)
-	await _frames(240)
+	await _sim_seconds(4.0)
 	demo.set_frozen(true)
 	var near_size: int = demo.solver.foam_near_size
 	var near_domain: float = demo.solver.foam_near_domain
@@ -453,7 +453,7 @@ func _run() -> void:
 	# Storm runs live long enough to seed the far histories with real foam;
 	# the quality switch below only proves anything if there is foam to clear.
 	demo.set_frozen(false)
-	await _frames(240)
+	await _sim_seconds(4.0)
 	demo.set_frozen(true)
 	# Low tier: cascades rotate, near feedback every other frame, and
 	# every GPU resource is recreated (which also clears the foam history).
@@ -475,7 +475,7 @@ func _run() -> void:
 		and demo.solver._foam_near_dt == 0.0,
 		"performance profile switch kept stale near-foam state")
 	demo.set_frozen(false)
-	await _frames(24)
+	await _sim_seconds(0.4)
 	demo.set_frozen(true)
 	var reduced_map := await _state_metrics(demo, false, false, false, false, true)
 	_check(reduced_map.foam_mean < pre_switch.foam_mean * 0.5,
@@ -585,7 +585,7 @@ func _run() -> void:
 		< OceanQualityProfile.estimate_vram_bytes(OceanQualityProfile.Tier.ULTRA),
 		"VRAM estimates do not increase with quality")
 	demo.set_frozen(false)
-	await _frames(12)
+	await _sim_seconds(0.2)
 	demo.set_frozen(true)
 	var ultra_short := await _read_texture(demo.solver.get_displacement_tex_rid(), 2)
 	_check(_height_rms(ultra_short).rms > 0.01, "Ultra 1024 pipeline produced no waves")

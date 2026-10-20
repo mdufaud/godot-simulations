@@ -13,6 +13,14 @@ func _check(condition: bool, message: String) -> void:
 	push_error(message)
 
 
+## Waits until `seconds` of simulated time have elapsed, whatever the frame rate.
+func _sim_seconds(seconds: float) -> void:
+	var elapsed := 0.0
+	while elapsed < seconds - 0.000001:
+		await process_frame
+		elapsed += root.get_process_delta_time()
+
+
 func _basis_error(a: Basis, b: Basis) -> float:
 	return maxf(maxf(a.x.distance_to(b.x), a.y.distance_to(b.y)), a.z.distance_to(b.z))
 

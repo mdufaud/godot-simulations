@@ -15,6 +15,10 @@ var _last_pump_ms := 0
 var _stage_item := RID()
 var _stage_text := ""
 var _stage_started_ms := 0
+# A --max-fps given on the command line (0 when absent) is a ceiling the
+# fps_limit setting cannot raise: the test runners cap every process with it.
+var _cli_fps_cap := Engine.max_fps
+var _frame_cap_usec := 0
 
 # Global settings
 var settings: Dictionary = {
@@ -102,6 +106,8 @@ const DEMOS: Array[Dictionary] = [
 func _ready() -> void:
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	apply_fps_limit()
+	if _cli_fps_cap > 0:
+		get_tree().process_frame.connect(_hold_frame_cap)
 	_create_loading_overlay()
 	LoadingPump.set_hook(pump_loading)
 	set_process(false)
@@ -215,12 +221,25 @@ func _pump_loading_on_node(_node: Node) -> void:
 	pump_loading()
 
 
-## Push settings["fps_limit"] into the engine. Headless runs (tests, CI) rely on
-## uncapped frames, so they keep spinning as fast as the CPU allows.
+## Push settings["fps_limit"] into the engine. Headless runs (tests, CI) keep
+## the command-line cap, uncapped without one.
 func apply_fps_limit() -> void:
 	if DisplayServer.get_name() == "headless":
 		return
-	Engine.max_fps = int(settings["fps_limit"])
+	var limit := int(settings["fps_limit"])
+	if _cli_fps_cap > 0:
+		limit = _cli_fps_cap if limit <= 0 else mini(limit, _cli_fps_cap)
+	Engine.max_fps = limit
+
+
+# --fixed-fps bypasses the engine frame limiter, so the gates' --max-fps would
+# be ignored; hold each frame to the Engine.max_fps budget here instead.
+func _hold_frame_cap() -> void:
+	if Engine.max_fps > 0:
+		var remaining := 1_000_000 / Engine.max_fps - (Time.get_ticks_usec() - _frame_cap_usec)
+		if remaining > 0:
+			OS.delay_usec(remaining)
+	_frame_cap_usec = Time.get_ticks_usec()
 
 
 ## Scene path for a demo key, or "" when the key is not registered.
