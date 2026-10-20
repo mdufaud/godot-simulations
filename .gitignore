@@ -57,8 +57,7 @@ resources/river/*
 !resources/river/presets/*.tres
 
 .codex
-.claude/*
-!.claude/settings.json
+.claude
 .reasonix/
 __pycache__/
 tmp/
