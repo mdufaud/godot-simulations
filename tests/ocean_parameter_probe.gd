@@ -95,6 +95,11 @@ static func _run_parameters(tree: SceneTree, demo: Node, check: Callable) -> voi
 		check.call(preset.validate().is_empty(), "%s preset validation failed" % scenario.name)
 		check.call(bool(demo.apply_sea_state(preset)), "%s was rejected by runtime application" % scenario.name)
 		var applied := _verify_bindings(demo, preset, scenario.name, check, covered)
+		# Presets and wave models render; range bounds stop at validation and
+		# bindings, their GPU response comes from the merged control passes below.
+		if not (scenario.tags.has("preset") or scenario.tags.has("enum")):
+			checked += 1
+			continue
 		var camera_position: Vector3 = demo.main_camera.global_position
 		var center := Vector2(camera_position.x, camera_position.z)
 		demo.solver.near_center = center

@@ -28,9 +28,10 @@ fi
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 export LOG_DIR
-# A script error kills the suite coroutine without quitting: fail on it instead
-# of waiting out the timeout (inherited by run_ui_smoke.sh).
-export PHYSICS_TEST_FAIL_PATTERN='^SCRIPT ERROR'
+# A script error kills the suite coroutine without quitting, and a failed suite
+# can hang in quit(): fail on either line instead of waiting out the timeout
+# (inherited by run_ui_smoke.sh).
+export PHYSICS_TEST_FAIL_PATTERN='^\(SCRIPT ERROR\|TEST FAIL\)'
 
 # Shared mode: hold this for the whole run so tools/import.sh waits instead of
 # rewriting the script class cache under our feet. Shared locks between runners
