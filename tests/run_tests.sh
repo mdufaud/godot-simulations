@@ -126,8 +126,14 @@ declare -a CPU_SUITES=(
 	"holonomy_state|res://tests/holonomy_state_test.gd"
 	"grab_controller|res://tests/grab_controller_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
+	"fire_vorticity|res://tests/fire_vorticity_test.gd"
 	"cell_propagation|res://tests/cell_propagation_test.gd"
 	"fire_ssot|res://tests/fire_ssot_test.gd"
+	"fire_fuels|res://tests/fire_fuels_test.gd"
+	"wood_pyrolysis|res://tests/wood_pyrolysis_test.gd"
+	"fire_auto_ladder|res://tests/fire_auto_ladder_test.gd"
+	"fire_display_box|res://tests/fire_display_box_test.gd"
+	"fire_atlas|res://tests/fire_atlas_test.gd"
 	"fractal_math|res://tests/fractal_math_test.gd"
 	"fractal_de|res://tests/fractal_de_test.gd"
 	"mixwell|res://tests/mixwell_test.gd"
@@ -368,6 +374,69 @@ fi
 		printf 'TEST FAIL fluid_tier: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$fluid_tier_output" >&2
 		failed+=(fluid_tier)
+	fi
+
+	fire_cp_output="$LOG_DIR/gpu-fire_cp_probe.stdout.log"
+	fire_cp_log="$LOG_DIR/gpu-fire_cp_probe.godot.log"
+	fire_cp_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_cp_probe$' "$fire_cp_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$fire_cp_log" \
+			-s res://tests/fire_cp_probe_test.gd || fire_cp_status=$?
+	if (( fire_cp_status == 0 )) && grep -q '^TEST PASS fire_cp_probe$' "$fire_cp_output"; then
+		printf 'TEST PASS fire_cp_probe\n'
+	else
+		printf 'TEST FAIL fire_cp_probe: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$fire_cp_output" >&2
+		failed+=(fire_cp_probe)
+	fi
+
+	fire_balance_output="$LOG_DIR/gpu-fire_combustion_balance.stdout.log"
+	fire_balance_log="$LOG_DIR/gpu-fire_combustion_balance.godot.log"
+	fire_balance_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_combustion_balance$' "$fire_balance_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$fire_balance_log" \
+			-s res://tests/fire_combustion_balance_test.gd || fire_balance_status=$?
+	if (( fire_balance_status == 0 )) && grep -q '^TEST PASS fire_combustion_balance$' "$fire_balance_output"; then
+		printf 'TEST PASS fire_combustion_balance\n'
+	else
+		printf 'TEST FAIL fire_combustion_balance: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$fire_balance_output" >&2
+		failed+=(fire_combustion_balance)
+	fi
+
+	fire_water_output="$LOG_DIR/gpu-fire_water_balance.stdout.log"
+	fire_water_log="$LOG_DIR/gpu-fire_water_balance.godot.log"
+	fire_water_status=0
+	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_water_balance$' "$fire_water_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--log-file "$fire_water_log" \
+			-s res://tests/fire_water_balance_test.gd || fire_water_status=$?
+	if (( fire_water_status == 0 )) && grep -q '^TEST PASS fire_water_balance$' "$fire_water_output"; then
+		printf 'TEST PASS fire_water_balance\n'
+	else
+		printf 'TEST FAIL fire_water_balance: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$fire_water_output" >&2
+		failed+=(fire_water_balance)
 	fi
 
 	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \

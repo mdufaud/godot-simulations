@@ -20,6 +20,7 @@ class_name FirePresentation extends Node3D
 ## ScreenSpaceFluidRenderer's prepasses.
 const LAYER_FIRE_VOLUME := 16
 const VOLUME_UPSAMPLE_SHADER := "res://shaders/fire/fire_volume_upsample.gdshader"
+const SPARK_WIND_DRAG := 2.0 ## 1/s
 
 const FireSceneDistance = preload("res://scripts/fire/fire_scene_distance.gd")
 
@@ -34,6 +35,15 @@ var volume_material: ShaderMaterial
 var fluid_renderer: ScreenSpaceFluidRenderer
 var texture_bound := false
 var temporal_interpolation := false
+
+## Lot H kill switch: when false the raymarcher ignores the water plane again
+## and fire behind the water draws unattenuated (the pre-lot behaviour).
+var water_depth_composite := true
+## Lot J: hearth-light scatter into smoke. The gain scales colour*energy into
+## the term; taps (0/1/2) live on the material. 0 gain = exactly the legacy look.
+var smoke_light_gain := 0.06
+## Fraction of the hearth light the omni dips by (multi-sine, lot J).
+var flicker_amount := 0.12
 
 var _volume_texture: Texture3DRD
 var _previous_volume_texture: Texture3DRD
@@ -54,6 +64,7 @@ var _external_depth_bound := false
 var _released := false
 var _smooth_light_energy := 0.0
 var _smooth_light_range := 8.0
+var _water_surface_active := false
 
 
 func start() -> void:
@@ -76,14 +87,43 @@ func update_volume() -> void:
 
 
 func update_water_surface() -> void:
+	var active := water.initialized and water.particles_active
+	if active != _water_surface_active:
+		_water_surface_active = active
+		_push_water_composite_flag()
 	if water.initialized:
 		fluid_renderer.update(water.sph_position_tex_rid(), water.particles_active)
+
+
+func _push_water_composite_flag() -> void:
+	set_volume_parameter("water_composite_on",
+		_water_surface_active and water_depth_composite)
+
+
+func set_water_depth_composite(on: bool) -> void:
+	water_depth_composite = on
+	_push_water_composite_flag()
+
+
+func set_upsample_parameter(name: String, value: Variant) -> void:
+	if _volume_composite_mat != null:
+		_volume_composite_mat.set_shader_parameter(name, value)
+
+
+## Debug views of the volume marcher: 1 = peak temperature, 2 = reaction field,
+## 3 = blue contribution (see the shader's debug_mode).
+func set_debug_view(mode: int) -> void:
+	set_volume_parameter("debug_mode", mode)
 
 
 ## Drives the hearth light and the sparks off the solver's reduced stats.
 func update_effects(stats: Dictionary, delta: float) -> void:
 	if sparks != null:
 		sparks.emitting = stats["max_reaction"] > 0.1
+		# Drag toward the wind as a constant acceleration, so sparks leave with the
+		# blown flame instead of hanging over an empty burner.
+		(sparks.process_material as ParticleProcessMaterial).gravity = \
+			Vector3(0.0, -3.0, 0.0) + solver.wind * SPARK_WIND_DRAG
 	if fire_light == null:
 		return
 
@@ -108,8 +148,20 @@ func update_effects(stats: Dictionary, delta: float) -> void:
 		light_color = light_color.lerp(Color(0.8, 0.3, 0.1), 1.0 - temp_norm / 0.3)
 	fire_light.light_color = light_color
 
-	var flicker := 1.0 - 0.02 * sin(Time.get_ticks_msec() * 0.01) * cos(Time.get_ticks_msec() * 0.017)
-	fire_light.light_energy *= flicker
+	# Multi-sine dip (lot J): three incommensurate frequencies beat into the
+	# 8-15 Hz band a campfire flickers at, dipping only (a flame brightens
+	# smoothly and gutters suddenly).
+	var t := Time.get_ticks_msec() * 0.001
+	var sines := 0.55 * sin(t * 7.3) + 0.3 * sin(t * 13.7 + 1.7) \
+		+ 0.15 * sin(t * 23.1 + 0.4)
+	var flicker := 1.0 - flicker_amount * clampf(0.5 + 0.5 * sines, 0.0, 1.0)
+	var energy := _smooth_light_energy * flicker
+	fire_light.light_energy = energy
+
+	# The volumetric smoke sees the same flickering light the scene does.
+	set_volume_parameter("fire_light_pos", fire_light.global_position)
+	set_volume_parameter("fire_light_rgb",
+		light_color * (energy * smoke_light_gain))
 
 
 ## Puts the hearth light back where a fresh fire starts, so a fuel switch or a
@@ -230,6 +282,16 @@ func _exit_tree() -> void:
 	release()
 
 
+## Tile indirection constants the raymarcher needs. Re-pushed on every bind: the
+## atlas can change under a pool-budget switch, which rebuilds the solver.
+func _push_grid_params() -> void:
+	volume_material.set_shader_parameter("atlas_cells", Vector3(solver.atlas_cells()))
+	volume_material.set_shader_parameter("atlas_tiles", solver.atlas_tiles())
+	volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
+	volume_material.set_shader_parameter("tile_shift", FireTilePool.TILE_SHIFT)
+	volume_material.set_shader_parameter("tile_slot_max", FireTilePool.SLOT_MAX)
+
+
 func _bind_textures() -> void:
 	_volume_texture = Texture3DRD.new()
 	_volume_texture.texture_rd_rid = solver.get_display_tex_rid()
@@ -254,6 +316,7 @@ func _bind_textures() -> void:
 			solver.get_previous_visual_activity_tex_rid()
 		volume_material.set_shader_parameter("visual_activity_tex_prev",
 			_previous_visual_activity_texture)
+		_push_grid_params()
 	fire_volume.visible = true
 	texture_bound = true
 
@@ -270,11 +333,7 @@ func _clear_volume_rids() -> void:
 func _setup_volume_material() -> void:
 	var box := Vector3(solver.sim_dims()) * solver.cell_size
 	volume_material.set_shader_parameter("cell_size", solver.cell_size)
-	volume_material.set_shader_parameter("atlas_cells", Vector3(FireTilePool.ATLAS_CELLS))
-	volume_material.set_shader_parameter("atlas_tiles", FireTilePool.ATLAS_TILES)
-	volume_material.set_shader_parameter("virtual_tiles", FireTilePool.VTILES)
-	volume_material.set_shader_parameter("tile_shift", FireTilePool.TILE_SHIFT)
-	volume_material.set_shader_parameter("tile_slot_max", FireTilePool.SLOT_MAX)
+	_push_grid_params()
 	volume_material.set_shader_parameter("virtual_origin",
 		Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
 	_set_volume_proxy(solver.display_clip_box())
@@ -285,6 +344,8 @@ func _setup_volume_material() -> void:
 	# needs them to turn the red channel back into kelvins.
 	volume_material.set_shader_parameter("ambient_temperature", solver.ambient_temperature)
 	volume_material.set_shader_parameter("display_temperature", solver.display_temperature)
+	# Matches the menu's "Smoke light taps" default (uniform defaults to 0).
+	volume_material.set_shader_parameter("smoke_light_taps", 1)
 	# Nothing to march until the solver's textures exist: an unbound sampler falls
 	# back to Godot's default texture, which for the indirection volume is not even
 	# the right format to read.
@@ -328,6 +389,16 @@ func _setup_fluid_renderer() -> void:
 	cm.set_shader_parameter("sun_intensity", 0.0)
 	cm.set_shader_parameter("tint_color", Color(0.06, 0.38, 0.68))
 	cm.set_shader_parameter("absorption_scale", 0.25)
+
+	# Lot H: the raymarcher composes against this very surface — same filtered
+	# depth and thickness the water composite consumes, same absorption constants
+	# so the extinction the fire sees behind the water matches what the scene
+	# behind it gets. The flag waits for live data (see update_water_surface).
+	volume_material.set_shader_parameter("water_depth_tex",
+		fluid_renderer.filtered_depth_texture())
+	volume_material.set_shader_parameter("water_thickness_tex",
+		fluid_renderer.thickness_texture())
+	volume_material.set_shader_parameter("water_absorption_scale", 0.25)
 
 
 ## Phase 6 item 1: march the volume at half the linear resolution — a quarter of

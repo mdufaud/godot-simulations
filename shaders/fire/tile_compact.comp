@@ -16,7 +16,7 @@ void main() {
 	if (slot == 0u) {
 		uint fstart = counts[C_FREE];
 		uint nreq = min(counts[C_REQUEST], NSLOTS);
-		uint succ = min(nreq, fstart);
+		uint succ = min(nreq, claimable_free());
 		counts[C_EXHAUST] += nreq - succ;
 		counts[C_FREE] = fstart - succ;
 	}

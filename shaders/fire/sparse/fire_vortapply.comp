@@ -9,7 +9,7 @@
 
 void main() {
 	ivec3 c = cell_coord();
-	float dt = params.cell.y;
+	float dt = params.cell.y * cfg.misc.x;
 	ivec3 gmax = grid_max();
 
 	if (in_u(c)) {

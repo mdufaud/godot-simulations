@@ -22,10 +22,17 @@ const TILE_SHIFT := 3
 const TILE := 1 << TILE_SHIFT
 ## Virtual tile grid: 256 x 64 x 256 tiles of 8 cells = 409.6 x 102.4 x 409.6 m.
 const VTILES := Vector3i(256, 64, 256)
-## Resident tiles, laid out 16 x 8 x 16 in the atlas.
+## Resident tiles. Two atlas layouts, chosen per instance at init_render:
+## 2048 = 16 x 8 x 16 (the base atlas, 128 x 64 x 128 atlas cells) and
+## 4096 = 16 x 16 x 16 (128 x 128 x 128), which needs 16 KB of compute shared
+## memory for the coarse pressure solve — the solver validates the device limit
+## and falls back to the base atlas before ever asking this class for the large
+## one. The constants below are the base layout and stay for legacy references;
+## every live pool reads its geometry from [method atlas_tiles] and friends.
 const ATLAS_TILES := Vector3i(16, 8, 16)
 const ATLAS_CELLS := ATLAS_TILES * TILE
 const NSLOTS := ATLAS_TILES.x * ATLAS_TILES.y * ATLAS_TILES.z
+const NSLOTS_LARGE := 4096
 
 # Sentinels stored in the indirection volume. Real slot indices are < NSLOTS, so
 # any value at or above SLOT_MAX is a marker, not a slot.
@@ -51,9 +58,23 @@ const ACTIVE_ARGS_OFFSET := C_ACTIVE * 4
 const NEW_ARGS_OFFSET := C_NEW * 4
 const LAYOUT_HEADER := "res://shaders/fire/tile_layout.comp"
 
+## Atlas geometry for a slot count. Both layouts keep 16 slots across x, so a
+## slot's atlas origin never changes meaning for slots < 2048.
+static func atlas_tiles_for(slots: int) -> Vector3i:
+	return Vector3i(16, 16, 16) if slots > NSLOTS else ATLAS_TILES
+
+
+static func atlas_cells_for(slots: int) -> Vector3i:
+	return atlas_tiles_for(slots) * TILE
+
+
 var initialized := false
 
 var _rd: RenderingDevice
+## Live atlas geometry, fixed by init_render.
+var _nslots := NSLOTS
+var _atlas_tiles := ATLAS_TILES
+var _atlas_cells := ATLAS_CELLS
 var _shaders := {}
 var _pipelines := {}
 var _sets := {}
@@ -78,9 +99,16 @@ var _seed_radius := 0.0
 ## [param activity_tex] is the R32F atlas tile_mark reduces. The solver passes its
 ## own field texture so fire_display can write the keep signal straight into it;
 ## an invalid RID makes the pool allocate a private one (standalone driver).
-func init_render(rd: RenderingDevice, activity_tex := RID(), budget := NSLOTS) -> bool:
+##
+## [param slots] fixes the atlas layout (2048 or 4096); [param budget] caps how
+## many of the slots may be resident.
+func init_render(rd: RenderingDevice, activity_tex := RID(), budget := NSLOTS,
+		slots := NSLOTS) -> bool:
 	_rd = rd
-	_budget = clampi(budget, 1, NSLOTS)
+	_nslots = slots if slots in [NSLOTS, NSLOTS_LARGE] else NSLOTS
+	_atlas_tiles = atlas_tiles_for(_nslots)
+	_atlas_cells = _atlas_tiles * TILE
+	_budget = clampi(budget, 1, _nslots)
 	if activity_tex.is_valid():
 		_tex["activity"] = activity_tex
 		_owns_activity = false
@@ -93,7 +121,7 @@ func init_render(rd: RenderingDevice, activity_tex := RID(), budget := NSLOTS) -
 		push_error("FireTilePool needs maxComputeWorkGroupInvocations >= 512.")
 		return false
 
-	var common := glsl_header() + FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
+	var common := glsl_header(_nslots) + FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
 	for pass_name in PASSES:
 		var src := FileAccess.get_file_as_string(SHADER_DIR + "tile_" + pass_name + ".comp")
 		var spirv := ShaderCache.compile(_rd, "tile_" + pass_name, "#version 450\n\n" + common + "\n" + src)
@@ -145,15 +173,15 @@ func _create_resources() -> void:
 	_tex["indir_storage"] = _rd.texture_create_shared(uint_view, _tex["indir"])
 	if _owns_activity:
 		_tex["activity"] = _rd.texture_create(
-			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, img_usage, ATLAS_CELLS),
+			_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, img_usage, _atlas_cells),
 			RDTextureView.new(), [])
 
-	_buf["slot_meta"] = _new_buffer(NSLOTS * 4)
-	_buf["free_list"] = _new_buffer(NSLOTS)
-	_buf["active_list"] = _new_buffer(NSLOTS)
-	_buf["active_slots"] = _new_buffer(NSLOTS)
-	_buf["alloc_request"] = _new_buffer(NSLOTS)
-	_buf["new_list"] = _new_buffer(NSLOTS)
+	_buf["slot_meta"] = _new_buffer(_nslots * 4)
+	_buf["free_list"] = _new_buffer(_nslots)
+	_buf["active_list"] = _new_buffer(_nslots)
+	_buf["active_slots"] = _new_buffer(_nslots)
+	_buf["alloc_request"] = _new_buffer(_nslots)
+	_buf["new_list"] = _new_buffer(_nslots)
 	# The counts buffer is also the source of both indirect dispatches.
 	_buf["counts"] = _new_buffer(COUNTS_WORDS,
 		RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT)
@@ -231,12 +259,12 @@ func bootstrap(vtis: PackedInt32Array, pin_lo := Vector3i(1, 1, 1),
 	# them) when it owns the activity image, so only touch a private one.
 	if _owns_activity:
 		var act_bytes := PackedByteArray()
-		act_bytes.resize(ATLAS_CELLS.x * ATLAS_CELLS.y * ATLAS_CELLS.z * 4)
+		act_bytes.resize(_atlas_cells.x * _atlas_cells.y * _atlas_cells.z * 4)
 		_rd.texture_update(_tex["activity"], 0, act_bytes)
 
 	# Slot metadata: seeded slots used, the rest free.
 	var meta := PackedByteArray()
-	meta.resize(NSLOTS * 4 * 4)
+	meta.resize(_nslots * 4 * 4)
 	meta.fill(0)
 	for i in n:
 		meta.encode_u32((i * 4 + 0) * 4, vtis[i])  # vti
@@ -244,13 +272,13 @@ func bootstrap(vtis: PackedInt32Array, pin_lo := Vector3i(1, 1, 1),
 		meta.encode_u32((i * 4 + 2) * 4, 1)         # used
 		meta.encode_u32((i * 4 + 3) * 4, 0)         # keep
 	# Free slots carry INACTIVE as their vti for readback clarity.
-	for i in range(n, NSLOTS):
+	for i in range(n, _nslots):
 		meta.encode_u32((i * 4 + 0) * 4, INACTIVE)
 	_rd.buffer_update(_buf["slot_meta"], 0, meta.size(), meta)
 
 	# Free list: the remaining budgeted slots, stack top = budget - n.
 	var free := PackedByteArray()
-	free.resize(NSLOTS * 4)
+	free.resize(_nslots * 4)
 	for i in range(n, _budget):
 		free.encode_u32((i - n) * 4, i)
 	_rd.buffer_update(_buf["free_list"], 0, free.size(), free)
@@ -307,7 +335,7 @@ func clear_seed_capsule() -> void:
 ## passes make each one see the previous one's writes.
 func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		dilate_radius: int, wind := Vector3.ZERO, relief_slots := 0.0,
-		relief_max := 1.0) -> void:
+		relief_max := 1.0, reserve_slots := 0.0) -> void:
 	var pc := PackedByteArray()
 	pc.resize(128)
 	pc.encode_u32(0, frame)
@@ -320,6 +348,7 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		pc.encode_float(48 + i * 4, wind[i])
 	pc.encode_float(64, relief_slots)
 	pc.encode_float(68, relief_max)
+	pc.encode_float(72, reserve_slots)
 	for i in 3:
 		pc.encode_s32(80 + i * 4, _seed_lo[i])
 		pc.encode_float(96 + i * 4, _seed_p0[i])
@@ -335,7 +364,7 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int,
 			ceili(float(seed_size.y) / 4.0), ceili(float(seed_size.z) / 4.0), pc)
 	_pass(cl, "dilate", _budget, 1, 1, pc)   # one workgroup per slot
 	_pass(cl, "free", per_slot, 1, 1, pc)
-	_pass(cl, "alloc", NSLOTS, 1, 1, pc)    # one workgroup per possible request
+	_pass(cl, "alloc", _nslots, 1, 1, pc)   # one workgroup per possible request
 	_pass(cl, "compact", per_slot, 1, 1, pc)
 
 
@@ -395,22 +424,34 @@ func budget() -> int:
 	return _budget
 
 
+## Live atlas layout, fixed by init_render.
+func atlas_tiles() -> Vector3i:
+	return _atlas_tiles
+
+
+func atlas_cells() -> Vector3i:
+	return _atlas_cells
+
+
 func atlas_origin(slot: int) -> Vector3i:
-	return Vector3i(slot % ATLAS_TILES.x,
-		(slot / ATLAS_TILES.x) % ATLAS_TILES.y,
-		slot / (ATLAS_TILES.x * ATLAS_TILES.y)) * TILE
+	return Vector3i(slot % _atlas_tiles.x,
+		(slot / _atlas_tiles.x) % _atlas_tiles.y,
+		slot / (_atlas_tiles.x * _atlas_tiles.y)) * TILE
 
 
 ## The pool layout as GLSL: the defines every fire compute shader shares, followed
 ## by tile_layout.comp, which maps slots and tiles with them. Prepend it to any
 ## shader that touches the indirection, the atlas or the counts buffer.
-static func glsl_header() -> String:
+## [param slots] picks the atlas layout (see [method atlas_tiles_for]).
+static func glsl_header(slots := NSLOTS) -> String:
+	var tiles := atlas_tiles_for(slots)
+	var cells := tiles * TILE
 	var defines := PackedStringArray([
 		"#define TILE %d" % TILE,
 		"#define VTILES ivec3(%d, %d, %d)" % [VTILES.x, VTILES.y, VTILES.z],
-		"#define ATLAS_TILES ivec3(%d, %d, %d)" % [ATLAS_TILES.x, ATLAS_TILES.y, ATLAS_TILES.z],
-		"#define ATLAS_CELLS ivec3(%d, %d, %d)" % [ATLAS_CELLS.x, ATLAS_CELLS.y, ATLAS_CELLS.z],
-		"#define NSLOTS %du" % NSLOTS,
+		"#define ATLAS_TILES ivec3(%d, %d, %d)" % [tiles.x, tiles.y, tiles.z],
+		"#define ATLAS_CELLS ivec3(%d, %d, %d)" % [cells.x, cells.y, cells.z],
+		"#define NSLOTS %du" % (tiles.x * tiles.y * tiles.z),
 		"#define INACTIVE 0x%Xu" % INACTIVE,
 		"#define RESERVED 0x%Xu" % RESERVED,
 		"#define SLOT_MAX 0x%Xu" % SLOT_MAX,
@@ -442,19 +483,19 @@ func read_counts() -> PackedInt32Array:
 
 
 func read_slot_meta() -> PackedInt32Array:
-	var bytes := _rd.buffer_get_data(_buf["slot_meta"], 0, NSLOTS * 4 * 4)
+	var bytes := _rd.buffer_get_data(_buf["slot_meta"], 0, _nslots * 4 * 4)
 	var out := PackedInt32Array()
-	out.resize(NSLOTS * 4)
-	for i in NSLOTS * 4:
+	out.resize(_nslots * 4)
+	for i in _nslots * 4:
 		out[i] = bytes.decode_u32(i * 4)
 	return out
 
 
 func read_free_list() -> PackedInt32Array:
-	var bytes := _rd.buffer_get_data(_buf["free_list"], 0, NSLOTS * 4)
+	var bytes := _rd.buffer_get_data(_buf["free_list"], 0, _nslots * 4)
 	var out := PackedInt32Array()
-	out.resize(NSLOTS)
-	for i in NSLOTS:
+	out.resize(_nslots)
+	for i in _nslots:
 		out[i] = bytes.decode_u32(i * 4)
 	return out
 
@@ -466,7 +507,7 @@ func read_active_list(count: int) -> PackedInt32Array:
 
 
 func _read_words(buf: RID, count: int) -> PackedInt32Array:
-	var n := clampi(count, 0, NSLOTS)
+	var n := clampi(count, 0, _nslots)
 	var out := PackedInt32Array()
 	if n == 0:
 		return out

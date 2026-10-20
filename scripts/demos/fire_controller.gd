@@ -33,8 +33,10 @@ var quality: FireQuality
 var hud: FireHud
 var menu_builder: FireMenu
 
-var debug_info := true
+var debug_info := false
 var _frame_ms := 0.0
+var _frozen := false
+var _capture_fixed_delta := -1.0
 
 # --- Fuel mode ---
 var gas_mode := true
@@ -101,7 +103,7 @@ func _ready() -> void:
 	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
 	RenderingServer.call_on_render_thread(func() -> void:
 		water.init_render(solver.sim_dims(), solver.cell_size, solver.ambient_temperature,
-			solver.indirection_rid(), sph_box))
+			solver.indirection_rid(), sph_box, solver.atlas_tiles()))
 
 	presentation = FirePresentation.new()
 	presentation.solver = solver
@@ -135,22 +137,33 @@ func _ready() -> void:
 
 
 func _process(delta: float) -> void:
-	_frame_ms = delta * 1000.0 if _frame_ms == 0.0 else lerpf(
-		_frame_ms, delta * 1000.0, 0.1)
+	var frame_delta := _capture_fixed_delta if _capture_fixed_delta >= 0.0 else delta
+	_frame_ms = frame_delta * 1000.0 if _frame_ms == 0.0 else lerpf(
+		_frame_ms, frame_delta * 1000.0, 0.1)
 	quality.frame_ms = _frame_ms
-	quality.update(delta)
+	quality.update(frame_delta)
 	menu_builder.preset_status_label.text = quality.status_text()
 	if not solver.initialized:
 		hud.update(_frame_ms, quality.status_text(), presentation.temporal_interpolation)
 		return
 	presentation.update_volume()
+	if _frozen:
+		# The frozen draw still renders the volume and the water surface every
+		# frame, so their per-frame upkeep — half-res camera sync, the
+		# scene-distance texture rebinding a render-scale change forces — has to
+		# keep running with it. What freezing stops is the simulation, not the
+		# sampling.
+		presentation.update_half_res()
+		presentation.update_water_surface()
+		hud.update(_frame_ms, quality.status_text(), presentation.temporal_interpolation)
+		return
 
 	# Last frame's reduction, read up front: the wood bed is driven by the per-log
 	# gas temperatures in it, and its emitters have to be uploaded before the
 	# solver steps.
 	var stats := solver.get_stats()
-	interaction.update(delta, gas_mode)
-	var step_count := solver.schedule_steps(delta)
+	interaction.update(frame_delta, gas_mode)
+	var step_count := solver.schedule_steps(frame_delta)
 	var run_fire := step_count > 0
 	var sim_dt := float(step_count) * solver.timestep
 	presentation.refresh_temporal_blend()
@@ -183,9 +196,15 @@ func _process(delta: float) -> void:
 	var water_steps := water_substeps
 	var water_adaptive := water_adaptive_substeps
 	var emit_water := interaction.jet_enabled
+	var temporal := presentation.temporal_interpolation
 	RenderingServer.call_on_render_thread(func() -> void:
 		if run_fire:
-			solver.capture_interpolation_state_render()
+			# The *_prev snapshot only feeds the temporal blend; when the toggle
+			# is off the shader samples it with a blend of 1.0 and the ~24 MB of
+			# copies per frame bought nothing. set_temporal_interpolation(true)
+			# re-seeds the history on enable, so no stale frame survives.
+			if temporal:
+				solver.capture_interpolation_state_render()
 			solver.prepare_topology_render()
 		else:
 			solver.poll_render()
@@ -196,8 +215,8 @@ func _process(delta: float) -> void:
 			water.step_dt = sim_dt
 			water.set_particle_cap(water_cap)
 			if emit_water:
-				water.emit_jet(sim_dt, delta)
-			water.step_droplets(delta)
+				water.emit_jet(sim_dt, frame_delta)
+			water.step_droplets(frame_delta)
 			water.scatter_render()
 			water.gather_render(liquid_scal, liquid_vel)
 		if run_fire:
@@ -207,7 +226,7 @@ func _process(delta: float) -> void:
 
 	presentation.update_water_surface()
 	presentation.update_half_res()
-	presentation.update_effects(stats, delta)
+	presentation.update_effects(stats, frame_delta)
 	_update_ui_stats(stats)
 	hud.update(_frame_ms, quality.status_text(), presentation.temporal_interpolation)
 
@@ -269,8 +288,11 @@ func set_fuel_mode(use_gas: bool) -> void:
 
 func _build_wood_bed() -> void:
 	# 1.1 m floor so the per-log spheres overlap into one broad flame body that
-	# wraps the whole bed rather than a thin core over each log (GAME LOOK, see
-	# FLAME_BOOST). Width comes from this; FLAME_BOOST fills it.
+	# wraps the whole bed rather than a thin core over each log. The injection
+	# kernel is normalized on this radius at the solver's resolution, so the
+	# flame size now tracks the volatile mass handoff (boost is a menu look
+	# multiplier, default 1.0).
+	wood_pile.cell_size = solver.cell_size
 	wood_pile.emit_radius = maxf(1.3, solver.cell_size * 2.0)
 	for entry in STARTING_LOGS:
 		var radius: float = entry[0]
@@ -358,6 +380,14 @@ func set_smothering(on: bool) -> void:
 	interaction.is_smothering = on
 
 
+func set_wood_flame_boost(value: float) -> void:
+	wood_pile.set_flame_boost(value)
+
+
+func set_target_fps(value: float) -> void:
+	quality.set_target_fps(value)
+
+
 func set_wind_enabled(on: bool) -> void:
 	_wind_enabled = on
 	_apply_wind()
@@ -378,6 +408,32 @@ func set_debug_info(on: bool) -> void:
 	solver.profiling = on
 	water.profiling = on
 	hud.overlay.visible = on
+
+
+# --- Volume render knobs (lots H/I/J) ---
+
+func set_water_depth_composite(on: bool) -> void:
+	presentation.set_water_depth_composite(on)
+
+
+func set_smoke_light_gain(value: float) -> void:
+	presentation.smoke_light_gain = value
+
+
+func set_smoke_light_taps(index: int) -> void:
+	presentation.set_volume_parameter("smoke_light_taps", clampi(index, 0, 2))
+
+
+func set_light_flicker(value: float) -> void:
+	presentation.flicker_amount = value
+
+
+func set_animated_jitter(on: bool) -> void:
+	presentation.set_volume_parameter("animated_jitter", on)
+
+
+func set_depth_tolerance(value: float) -> void:
+	presentation.set_upsample_parameter("depth_tolerance", value)
 
 
 func set_advection_mode(index: int) -> void:
@@ -431,23 +487,47 @@ func set_msaa(index: int) -> void:
 		FireQuality.MSAA_MODES[clampi(index, 0, FireQuality.MSAA_MODES.size() - 1)])
 
 
-## Swap the tile pool budget.
+## Swap the tile pool budget. The 4096-tile rung also grows the atlas, and the
+## atlas sizes every field texture and water accumulator — that path rebuilds
+## the whole GPU side, teardown order mirroring _exit_tree (water's uniform sets
+## bind the solver's liquid textures).
 ##
 ## The display texture is freed on the render thread, so the binding is dropped
 ## and stepping suspended here, on the main thread, before the rebuild is queued.
 ## [member FireGpuSolver.initialized] comes back true at the end of the rebuild
 ## and [method _process] picks the new texture up on the next frame.
 func set_pool_budget(index: int) -> void:
-	var budget: int = FireGpuSolver.POOL_BUDGETS[index]
+	var idx := clampi(index, 0, FireGpuSolver.POOL_BUDGETS.size() - 1)
+	var budget: int = FireGpuSolver.POOL_BUDGETS[idx]
 	if budget == solver.pool_budget:
 		return
 
 	solver.initialized = false
 	presentation.unbind_textures()
-	RenderingServer.call_on_render_thread(func() -> void:
-		water.set_indirection_rid(RID())
-		solver.set_pool_budget(budget)
-		water.set_indirection_rid(solver.indirection_rid()))
+	var slots := FireGpuSolver.atlas_slots_for_budget(budget)
+	if slots != solver.atlas_slots:
+		# The atlas rebuild re-creates the water side too, including the droplet
+		# position texture the screen-space surface holds; drop it so the fresh
+		# RID rebinds on the next update (same contract as fluid_system).
+		presentation.fluid_renderer.rebind()
+	if slots == solver.atlas_slots:
+		RenderingServer.call_on_render_thread(func() -> void:
+			water.set_indirection_rid(RID())
+			solver.set_pool_budget(budget)
+			water.set_indirection_rid(solver.indirection_rid()))
+	else:
+		var sph_box := Vector3(solver.grid_dims) * solver.cell_size
+		RenderingServer.call_on_render_thread(func() -> void:
+			water.set_indirection_rid(RID())
+			water.free_render()
+			solver.free_render()
+			solver.atlas_slots = slots
+			solver.pool_budget = budget
+			solver.init_render()
+			if solver.initialized:
+				water.init_render(solver.sim_dims(), solver.cell_size,
+					solver.ambient_temperature, solver.indirection_rid(), sph_box,
+					solver.atlas_tiles()))
 	solver.reset_clock()
 	_light_fire()
 
@@ -463,3 +543,92 @@ func _update_ui_stats(stats: Dictionary) -> void:
 	menu_builder.update_stats(stats, temp_norm)
 	if not gas_mode:
 		menu_builder.refresh_wood(wood_pile)
+
+
+# =========================================================================
+#  CAPTURE HARNESS
+# =========================================================================
+
+## Hooks for tools/capture_demo.gd and tools/fps_probe.gd, same contract as the
+## other demos. Presets go through FireQuality.set_preset, so a captured run
+## boots exactly the way a menu-driven run does.
+
+func capture_ready() -> bool:
+	return solver.initialized and presentation.texture_bound
+
+
+func apply_preset(index: int) -> void:
+	quality.set_preset(clampi(index, 0, FireQuality.PRESET_NAMES.size() - 1))
+
+
+## Shared-tool tier (0 Low .. 3 Ultra) mapped onto the fire ladder. Ultra is the
+## real preset (paper iteration counts, 4096-slot atlas), not a Reference alias.
+func set_quality_profile(tier: int) -> void:
+	match clampi(tier, 0, 3):
+		0: quality.set_preset(FireQuality.Preset.PERFORMANCE)
+		1: quality.set_preset(FireQuality.Preset.BALANCED)
+		2: quality.set_preset(FireQuality.Preset.QUALITY)
+		3: quality.set_preset(FireQuality.Preset.ULTRA)
+
+
+func set_frozen(on: bool) -> void:
+	_frozen = on
+
+
+func set_capture_fixed_delta(value: float) -> void:
+	_capture_fixed_delta = maxf(value, 0.0)
+
+
+func set_capture_ui(visible: bool) -> void:
+	$UI.visible = visible
+
+
+## Harness dolly: slides the player rig sideways so close-up captures can put
+## the flame against a dark background instead of its own glow.
+func move_capture_camera(offset: Vector3) -> void:
+	player.set_pose(CAMPFIRE_SPAWN + Vector3(offset.x, 0.0, 0.0), 0.0, -14.0)
+
+
+## Capture hooks for the water composition (lot H): level 1-3 opens the jet at
+## that intensity (the fixed -14 deg pose aims it at the hearth, so the stream
+## crosses the flame and pools in front of it), 0 closes it.
+func set_capture_jet(level: int) -> void:
+	interaction.set_water_level(clampi(level, 0, 3), level > 0)
+
+
+## Volume debug views (1 temperature, 2 reaction, 3 blue) for diagnostic captures.
+func set_capture_debug(mode: int) -> void:
+	presentation.set_debug_view(mode)
+
+
+## Capture fuel switch for the blue-mask comparisons (lot I): the demo boots on
+## wood, but the reaction core of a clean gas flame is the control case.
+func set_capture_fuel(gas: bool) -> void:
+	set_fuel_mode(gas)
+	# set_fuel_mode re-poses the player; captures want the harness's own framing.
+	player.set_pose(CAMPFIRE_SPAWN, 0.0, -14.0)
+
+
+## Torch lit from the capture pose — the blue core of a flame carried at eye
+## height is the third case of the blue-mask comparison.
+func set_capture_torch(on: bool) -> void:
+	set_flamethrower(on)
+
+
+func set_capture_wind_x(value: float) -> void:
+	set_wind_enabled(true)
+	set_wind_x(value)
+
+
+func capture_metadata(path: String) -> String:
+	var stats := solver.get_stats()
+	var pool := solver.get_debug_pool_stats()
+	var clock := solver.get_clock_stats()
+	return "CAPTURE META preset=%s mode=%s pressure=%d sim_hz=%d frame_ms=%.1f temp=%d reaction=%.3f div=%.4f tiles=%d/%d ratio=%.3f path=%s" % [
+		FireQuality.PRESET_NAMES[quality.preset],
+		"gas" if gas_mode else "wood",
+		solver.pressure_iterations, solver.simulation_hz,
+		_frame_ms, int(stats["max_temperature"]), stats["total_reaction"],
+		stats["max_divergence"],
+		int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
+		float(clock["ratio"]), path]

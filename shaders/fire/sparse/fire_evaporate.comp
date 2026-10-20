@@ -54,6 +54,20 @@
 // projection downstream. Absolute values are summed rather than signed ones, so
 // two cells cannot cancel each other's error into a clean number.
 
+// NON-PAPER A/B (cfg.diag.w): Ranz-Marshall droplet convection,
+// Nu = 2 + 0.6 Re^1/2 Pr^1/3 with Re = rho.|u_g - u_l|.d/mu, carrier properties at
+// the film temperature (OpenFOAM RanzMarshall convention). mu: Sutherland, and k:
+// the US Standard Atmosphere 1976 form, both for air.
+float ranz_marshall_h(vec4 s, vec4 s2, float T_l, float slip, float d_d) {
+	float T = max(0.5 * (s.x + T_l), 200.0);
+	float t15 = T * sqrt(T);
+	float mu = 1.458e-6 * t15 / (T + 110.4);
+	float k = 2.64638e-3 * t15 / (T + 245.4 * pow(10.0, -12.0 / T));
+	float re = gas_density(s, s2) * slip * d_d / mu;
+	float pr = mixture_cp(s, s2) * mu / k;
+	return (2.0 + 0.6 * sqrt(re) * pow(pr, 1.0 / 3.0)) * k / d_d;
+}
+
 void main() {
 	ivec3 c = cell_coord();
 	if (out_of_grid(c)) {
@@ -81,6 +95,15 @@ void main() {
 	float rho_d = cfg.liquid.w;
 	float d_d = max(cfg.liquid2.x, 1e-6);
 	float h_conv = cfg.liquid2.y;
+	float slip = length(vel_at_cell(c) - load_liquid_vel(c).xyz);
+	if (cfg.diag.w > 0.5) {
+		h_conv = ranz_marshall_h(s, s2, T_l, slip, d_d);
+	}
+	if ((uint(cfg.diag.x) & 1u) != 0u) {
+		atomicAdd(stats.data[STAT_DIAG + 13], uint(clamp(h_conv, 0.0, 1e6)));
+		atomicAdd(stats.data[STAT_DIAG + 14], 1u);
+		atomicAdd(stats.data[STAT_DIAG + 15], uint(clamp(slip * STAT_SCALE, 0.0, 1e6)));
+	}
 
 	float T0 = s.x;
 	float T_l0 = T_l;
@@ -105,7 +128,11 @@ void main() {
 
 	// Eq. 26-28. Everything the liquid holds above ambient is spent boiling off
 	// whatever mass that energy covers, capped by the mass actually present.
-	float e_per_kg = cp_g * (T_B - t_amb) + dvH; // Eq. 27 / (rho_d.V_d)
+	// cfg.diag.z (diagnostic A/B) selects the phase of the Eq. 27 Cp: the shipped
+	// convention charges the gas Cp, the paper leaves it ambiguous — see the
+	// header note above and tests/fire_water_balance_test.gd for the comparison.
+	float cp_b = (cfg.diag.z > 0.5) ? cp_l : cp_g;
+	float e_per_kg = cp_b * (T_B - t_amb) + dvH; // Eq. 27 / (rho_d.V_d)
 	float available = heat_liq * (T_l - t_amb); // Eq. 26 / V_c
 	float d_rho = clamp(available / e_per_kg, 0.0, rho_l);
 	float remaining = rho_l - d_rho;
@@ -119,6 +146,7 @@ void main() {
 	// built-in, but not in a file anyone has to read.
 	float rho_prime = rho / (rho + d_rho); // Eq. 29
 	float T_new = clamp((1.0 - rho_prime) * T_B + rho_prime * T, t_amb, cfg.thermo.w); // Eq. 30
+	float h2o_mass_old = rho * s2.x; // gas-phase H2O mass per volume, before Eq. 31
 	s.yzw *= rho_prime; // Eq. 31: fuel, O2, CO2
 	s2.x = rho_prime * s2.x + (1.0 - rho_prime); // Eq. 11 + 31: H2O
 	s2.y *= rho_prime; // residuals
@@ -156,4 +184,18 @@ void main() {
 		uint(clamp(abs(dE_gas + dE_liq + latent) * STAT_SCALE, 0.0, 4.2e9)));
 	atomicAdd(stats.data[STAT_ENERGY_BUDGET],
 		uint(clamp((abs(dE_gas) + abs(dE_liq) + latent) * STAT_SCALE, 0.0, 4.2e9)));
+
+	// Mass ledger, gated like the rest of the diagnostic block: what this stage
+	// evaporates, and the H2O mass the mixture actually gained. Eq. 31 makes the
+	// two identical by algebra ((rho + d_rho).Y'_H2O = rho.Y_H2O + d_rho), so the
+	// pair is a wiring check, not a physics claim — it catches any future edit
+	// that applies less vapour than it boiled off.
+	if ((uint(cfg.diag.x) & 1u) != 0u) {
+		float vol = params.cell.x * params.cell.x * params.cell.x;
+		float h2o_gained = (rho + d_rho) * s2.x - h2o_mass_old;
+		atomicAdd(stats.data[STAT_DIAG + 11],
+			uint(clamp(d_rho * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+		atomicAdd(stats.data[STAT_DIAG + 12],
+			uint(clamp(max(h2o_gained, 0.0) * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+	}
 }

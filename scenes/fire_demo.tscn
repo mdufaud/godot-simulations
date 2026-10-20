@@ -6,7 +6,6 @@
 [ext_resource type="Script" path="res://scripts/fire/wood_pile.gd" id="4_wood_pile"]
 [ext_resource type="Script" path="res://scripts/fire/fire_weapons.gd" id="5_weapons"]
 [ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="6_sim_menu"]
-[ext_resource type="Texture2D" path="res://resources/generated/fire/fire_vfx_atlas.png" id="7_fire_atlas"]
 
 [ext_resource type="Texture2D" path="res://resources/fire/fire_scorched_ground.png" id="7_ground"]
 
@@ -38,6 +37,13 @@ shader_parameter/noise_tex = SubResource("NoiseTexture3D_volume")
 [sub_resource type="BoxMesh" id="BoxMesh_volume"]
 size = Vector3(12.8, 19.2, 12.8)
 
+[sub_resource type="Gradient" id="Gradient_spark_life"]
+offsets = PackedFloat32Array(0, 0.6, 1)
+colors = PackedColorArray(1, 0.85, 0.5, 1, 1, 0.45, 0.1, 1, 0.6, 0.1, 0.02, 0)
+
+[sub_resource type="GradientTexture1D" id="GradientTexture1D_spark_life"]
+gradient = SubResource("Gradient_spark_life")
+
 [sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_sparks"]
 emission_shape = 2
 emission_sphere_radius = 0.4
@@ -46,22 +52,29 @@ spread = 45.0
 initial_velocity_min = 2.0
 initial_velocity_max = 5.0
 gravity = Vector3(0, -3.0, 0)
-scale_min = 0.06
-scale_max = 0.22
-color = Color(1.0, 0.85, 0.65, 1)
-anim_offset_min = 0.0
-anim_offset_max = 1.0
+scale_min = 0.02
+scale_max = 0.06
+color_ramp = SubResource("GradientTexture1D_spark_life")
+
+[sub_resource type="Gradient" id="Gradient_spark_dot"]
+colors = PackedColorArray(1, 1, 1, 1, 1, 1, 1, 0)
+
+[sub_resource type="GradientTexture2D" id="GradientTexture2D_spark_dot"]
+gradient = SubResource("Gradient_spark_dot")
+width = 32
+height = 32
+fill = 1
+fill_from = Vector2(0.5, 0.5)
+fill_to = Vector2(1, 0.5)
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_spark_draw"]
 transparency = 1
+blend_mode = 1
 shading_mode = 0
 vertex_color_use_as_albedo = true
 billboard_mode = 3
 billboard_keep_scale = true
-albedo_texture = ExtResource("7_fire_atlas")
-particles_anim_h_frames = 4
-particles_anim_v_frames = 4
-particles_anim_loop = false
+albedo_texture = SubResource("GradientTexture2D_spark_dot")
 
 [sub_resource type="QuadMesh" id="QuadMesh_spark"]
 material = SubResource("StandardMaterial3D_spark_draw")

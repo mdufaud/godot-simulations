@@ -21,6 +21,7 @@ var _size := Vector2i(1280, 720)
 var _scene_path := ""
 var _demo: Node = null
 var _preset := -1
+var _pool := -1
 var _height_gain := -1.0
 var _height_after_frame := -1
 var _height_after_gain := 0.0
@@ -28,6 +29,7 @@ var _look := -1
 var _mood := -1.0
 var _profile := false
 var _quality := -1
+var _render_scale := -1.0
 var _features := true
 var _clouds := true
 var _view := ""
@@ -43,6 +45,12 @@ var _wind_direction := -1.0
 var _sun_elevation := -1.0
 var _sun_azimuth := -1.0
 var _debug_view := -1
+var _jet := -1
+var _wcomp := -1
+var _fuel := ""
+var _torch := false
+var _windx := 1e9
+var _smoketaps := -1
 var _cascade := -1
 var _scene := -1
 var _scenario := -1
@@ -96,6 +104,7 @@ func _initialize() -> void:
 			"nbody_time_scale": _nbody_time_scale = float(value)
 			"out": _out = value
 			"preset": _preset = int(value)
+			"pool": _pool = int(value)
 			"height": _height_gain = float(value)
 			"height_after":
 				var change := value.split(":", true, 1)
@@ -109,6 +118,7 @@ func _initialize() -> void:
 			"mood": _mood = float(value)
 			"profile": _profile = value == "1" or value.to_lower() == "true"
 			"quality": _quality = _quality_tier(value)
+			"render_scale": _render_scale = float(value)
 			"features": _features = value != "0" and value.to_lower() != "false"
 			"clouds": _clouds = value != "0" and value.to_lower() != "false"
 			"view": _view = value
@@ -122,6 +132,12 @@ func _initialize() -> void:
 			"sun_elevation": _sun_elevation = float(value)
 			"sun_azimuth": _sun_azimuth = float(value)
 			"debug": _debug_view = int(value)
+			"jet": _jet = int(value)
+			"wcomp": _wcomp = int(value)
+			"fuel": _fuel = value
+			"torch": _torch = value == "1" or value.to_lower() == "true"
+			"windx": _windx = float(value)
+			"smoketaps": _smoketaps = int(value)
 			"cascade": _cascade = int(value)
 			"scene": _scene = int(value)
 			"scenario": _scenario = clampi(int(value), 0, 4)
@@ -194,6 +210,12 @@ func _run() -> void:
 		_demo.set_capture_medium(_medium)
 	if _preset >= 0 and _demo.has_method("apply_preset"):
 		_demo.apply_preset(_preset)
+	# Pool last: it is the explicit atlas override and wins over a preset's own
+	# pool key.
+	if _pool >= 0 and _demo.has_method("set_pool_budget"):
+		_demo.set_pool_budget(_pool)
+	if _render_scale > 0.0 and _demo.has_method("set_render_scale"):
+		_demo.set_render_scale(_render_scale)
 	ready_deadline = Time.get_ticks_msec() + 20000
 	while _demo.has_method("capture_ready") and not _demo.capture_ready() and Time.get_ticks_msec() < ready_deadline:
 		await process_frame
@@ -269,6 +291,18 @@ func _run() -> void:
 		_demo.set_capture_reflection(_reflection)
 	if _demo.has_method("set_capture_debug"):
 		_demo.set_capture_debug(_debug_view if _debug_view >= 0 else 0)
+	if _jet >= 0 and _demo.has_method("set_capture_jet"):
+		_demo.set_capture_jet(_jet)
+	if _wcomp >= 0 and _demo.has_method("set_water_depth_composite"):
+		_demo.set_water_depth_composite(_wcomp == 1)
+	if not _fuel.is_empty() and _demo.has_method("set_capture_fuel"):
+		_demo.set_capture_fuel(_fuel == "gas")
+	if _torch and _demo.has_method("set_flamethrower"):
+		_demo.set_flamethrower(true)
+	if _windx < 1e8 and _demo.has_method("set_capture_wind_x"):
+		_demo.set_capture_wind_x(_windx)
+	if _smoketaps >= 0 and _demo.has_method("set_smoke_light_taps"):
+		_demo.set_smoke_light_taps(_smoketaps)
 	if _demo.has_method("set_capture_cascade"):
 		_demo.set_capture_cascade(_cascade)
 	elif _cascade >= 0:
@@ -335,13 +369,13 @@ func _run() -> void:
 			return
 		if not capture_menu.is_panel_open():
 			capture_menu.toggle_panel()
-	print("CAPTURE CONFIG preset=%d look=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f foam_distance=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d scene=%d cascade=%d" % [
+	print("CAPTURE CONFIG preset=%d look=%d view=%s quality=%s time=%.6f dt=%.6f warmup=%d foam_warmup=%.1f foam_distance=%.1f wind=%.6f sun_elevation=%.3f sun_azimuth=%.3f frames=%d every=%d size=%dx%d foam=%s micro=%s reflection=%s debug=%d scene=%d cascade=%d jet=%d" % [
 		_preset, _look, _view,
 		OceanQualityProfile.tier_name(_quality) if _quality >= 0 else "default",
 		_capture_time, _fixed_delta, _warmup,
 		_foam_warmup, _foam_distance, _wind_direction, _sun_elevation, _sun_azimuth, _frames,
 		_every, _size.x, _size.y, _foam_feedback, _micro_normals, _reflection,
-		_debug_view, _scene, _cascade])
+		_debug_view, _scene, _cascade, _jet])
 	var waited := 0
 	var toss_frame := maxi(1, int(_frames / 3))
 	while waited < _frames:

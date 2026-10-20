@@ -27,6 +27,7 @@ void combustion_body(ivec3 c) {
 	vec4 s2 = load_scal2_src(c);
 	float dt = params.cell.y;
 	float temp = max(s.x, 1.0);
+	bool counters = (uint(cfg.diag.x) & 1u) != 0u;
 
 	float rho = gas_density(s, s2);
 	float v_c = 0.0;
@@ -54,7 +55,11 @@ void combustion_body(ivec3 c) {
 		// rather than bolted on afterwards.
 		float max_by_fuel = c_f / (abs(cfg.stoich.x) * dt);
 		float max_by_o2 = c_o / (abs(cfg.stoich.y) * dt);
+		float v_c_raw = v_c;
 		v_c = min(v_c, min(max_by_fuel, max_by_o2));
+		if (counters && v_c < v_c_raw) {
+			atomicAdd(stats.data[STAT_DIAG + 0], 1u);
+		}
 
 		// Liquid water blankets the reaction: it wets the fuel and, as it flashes
 		// to steam, drives the surrounding air out of the cell. Fire-X does not
@@ -91,9 +96,27 @@ void combustion_body(ivec3 c) {
 		// efficiency, so J_c is positive and heats the cell.
 		float j_c = -cfg.coeffs.y * v_c * cfg.fuel.x;
 		temp += j_c * inv_rho / mixture_cp(s, s2) * dt;
+
+		// Diagnostic ledger: the chemical heat released and the fuel mass
+		// consumed, per cell per substep. Heat equals |dcH|/M_f times mass at
+		// phi = 1 — that identity, read back over a live run, is the check that
+		// the energy release is actually paid for by the fuel bookkeeping.
+		// Mass is booked in nanograms: milligram resolution zeroed out the cold
+		// flame-margin cells and biased the heat/mass ratio high by ~40%.
+		if (counters) {
+			float vol = params.cell.x * params.cell.x * params.cell.x;
+			atomicAdd(stats.data[STAT_DIAG + 3],
+				uint(clamp(j_c * vol * dt * STAT_SCALE, 0.0, 4.2e9)));
+			atomicAdd(stats.data[STAT_DIAG + 4],
+				uint(clamp(v_c * dt * cfg.fuel.y * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+		}
 	}
 
-	s.x = clamp(temp, cfg.thermo.x, cfg.thermo.w);
+	float t_clamped = clamp(temp, cfg.thermo.x, cfg.thermo.w);
+	if (counters && t_clamped != temp) {
+		atomicAdd(stats.data[STAT_DIAG + 1], 1u);
+	}
+	s.x = t_clamped;
 	s.y = clamp(s.y, 0.0, 1.0);
 	s.z = clamp(s.z, 0.0, 1.0);
 	s.w = clamp(s.w, 0.0, 1.0);

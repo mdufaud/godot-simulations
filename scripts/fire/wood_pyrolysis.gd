@@ -18,11 +18,18 @@ const TAU_CHAR_HEAT := 5.0
 const TAU_CHAR_COOL := 15.0
 const T_CHAR_OUT := 700.0
 const RHO_EMIT := 0.6
-const FLAME_BOOST := 80.0
+
+## Look multiplier on the energy the bed hands to the gas. 1.0 pays the flame
+## strictly from the volatiles the solid has gasified — measured, that never
+## reaches stoichiometric fuel at 0.2 m cells and the bed smolders without a
+## flame. 8 barely holds; the default 16 reproduces the pre-fix flame (the old
+## hard-coded 80 rode an unnormalized kernel worth roughly 5x). Anything above
+## the physical budget is a game-look choice; the menu slider mirrors it.
+var flame_boost := 16.0
 
 
 func step(entry: Dictionary, delta: float, t_gas: float, ambient: float,
-		emit_radius: float) -> void:
+		kernel_weight: float, cell_volume: float) -> void:
 	var t_s: float = entry["t_solid"]
 	var area: float = entry["area"]
 	var q := VIEW_FACTOR * EMISSIVITY * FIRE_GPU_SOLVER.SIGMA_SB \
@@ -38,9 +45,13 @@ func step(entry: Dictionary, delta: float, t_gas: float, ambient: float,
 		else:
 			t_s = T_PYROLYSIS
 			var mdot := area * maxf(q, 0.0) / DH_GAS
+			# The final step of a log must never gasify more than it still
+			# holds: the emission below is derived from what is actually
+			# released, not from the uncapped flux.
+			mdot = minf(mdot, entry["m_volatile"] / delta)
 			if mdot > 0.0:
 				entry["m_volatile"] = maxf(entry["m_volatile"] - mdot * delta, 0.0)
-				entry["rate"] = mass_flow_to_fraction(mdot, emit_radius)
+				entry["rate"] = mass_flow_to_fraction(mdot, kernel_weight, cell_volume)
 				alight = true
 			else:
 				t_s += q * area / capacity * delta
@@ -59,13 +70,25 @@ func step(entry: Dictionary, delta: float, t_gas: float, ambient: float,
 	else:
 		t_char = lerpf(t_char, minf(t_gas, T_GLOW), 1.0 - exp(-delta / TAU_CHAR_COOL))
 	entry["t_char"] = t_char
-	entry["pilot"] = t_char if t_char > T_CHAR_OUT else 0.0
+	# Ash holds no pilot: with no volatiles and no char there is no reservoir to
+	# glow, so a burnt-out log cannot re-light its surroundings even while the
+	# neighbouring flame keeps its ghost of a char temperature up.
+	if entry["m_volatile"] <= 0.0 and entry["m_char"] <= 0.0:
+		entry["pilot"] = 0.0
+	else:
+		entry["pilot"] = t_char if t_char > T_CHAR_OUT else 0.0
 	entry["t_solid"] = clampf(t_s, ambient, 2000.0)
 
 
-func mass_flow_to_fraction(mdot: float, emit_radius: float) -> float:
+## Converts a gasified volatile mass flow into the per-cell fuel-fraction rate
+## fire_inject mode 5 applies (rate * dt * falloff per cell). Normalized on the
+## DISCRETE sum of falloff weights the shader evaluates across the sphere, so
+## the injected total tracks the prescribed flow at any cell size — the old
+## sphere-volume formula ignored the kernel's shape, whose continuous mean is
+## only 1/4 of the peak the denominator assumed.
+func mass_flow_to_fraction(mdot: float, kernel_weight: float,
+		cell_volume: float) -> float:
 	var fuel: Dictionary = FIRE_GPU_SOLVER.FUELS[FUEL_INDEX_METHANE]
 	var hc_methane: float = -float(fuel["dch"]) / float(fuel["m_f"])
-	var volume := 4.0 / 3.0 * PI * pow(emit_radius, 3.0)
-	return FLAME_BOOST * mdot * HC_VOLATILES / hc_methane \
-		/ maxf(RHO_EMIT * volume, 1e-4)
+	var mdot_equiv := flame_boost * mdot * HC_VOLATILES / hc_methane
+	return mdot_equiv / maxf(RHO_EMIT * cell_volume * kernel_weight, 1e-9)
