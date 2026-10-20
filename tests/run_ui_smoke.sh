@@ -93,7 +93,7 @@ run_demo() {
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--resolution "$RESOLUTION" \
 			--log-file "$godot_log" \
 			res://tests/ui_smoke.tscn -- "$demo"

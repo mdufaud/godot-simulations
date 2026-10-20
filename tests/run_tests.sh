@@ -28,6 +28,9 @@ fi
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 export LOG_DIR
+# A script error kills the suite coroutine without quitting: fail on it instead
+# of waiting out the timeout (inherited by run_ui_smoke.sh).
+export PHYSICS_TEST_FAIL_PATTERN='^SCRIPT ERROR'
 
 # Shared mode: hold this for the whole run so tools/import.sh waits instead of
 # rewriting the script class cache under our feet. Shared locks between runners
@@ -46,7 +49,7 @@ cpu_names=()
 cleanup() {
 	local status=$?
 	local pid
-	for pid in "${cpu_pids[@]:-}"; do
+	for pid in "${cpu_pids[@]:-}" "${ocean_fft_pid:-}"; do
 		physics_test_process_stop "$pid"
 	done
 	physics_test_display_stop
@@ -62,9 +65,11 @@ run_cpu_suite() {
 	local godot_log="$LOG_DIR/cpu-${name}.godot.log"
 	local status=0
 
+	# --fixed-fps: suites await frames, which otherwise tick at wall-clock 60 Hz
+	# (vsync on the GPU phase); fixed steps keep the same delta without the wait.
 	physics_test_run_process "$TIMEOUT" "^TEST PASS $name$" "$output_file" \
 		"$GODOT" --path "$PROJECT_DIR" \
-			--log-file "$godot_log" --headless --audio-driver Dummy \
+			--log-file "$godot_log" --headless --audio-driver Dummy --fixed-fps 60 \
 			-s "$script"
 }
 
@@ -79,6 +84,8 @@ report_cpu_suite() {
 	fi
 	if grep -q '^TEST FAIL' "$output_file"; then
 		grep '^TEST FAIL' "$output_file" || true
+	elif grep -q '^SCRIPT ERROR' "$output_file"; then
+		printf 'TEST FAIL %s: %s\n' "$name" "$(grep -m1 '^SCRIPT ERROR' "$output_file")" >&2
 	else
 		printf 'TEST FAIL %s: crashed, timed out, or missing pass sentinel\n' "$name" >&2
 	fi
@@ -171,6 +178,22 @@ fi
 	export PHYSICS_TEST_RENDERING_DRIVER
 	export PHYSICS_TEST_AUDIO_DRIVER
 
+	# ocean_fft is the longest suite and mostly CPU-bound (readback analysis):
+	# it runs beside the rest of the GPU phase and is reaped last.
+	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
+	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
+	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
+		env -u DISPLAY \
+		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
+		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		"$GODOT" --path "$PROJECT_DIR" \
+			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
+			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
+			--log-file "$ocean_fft_log" \
+			-s res://tests/ocean_fft_test.gd &
+	ocean_fft_pid=$!
+
 	non_euclidean_output="$LOG_DIR/gpu-non_euclidean.stdout.log"
 	non_euclidean_log="$LOG_DIR/gpu-non_euclidean.godot.log"
 	non_euclidean_status=0
@@ -181,7 +204,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$non_euclidean_log" \
 			-s res://tests/non_euclidean_runner.gd || non_euclidean_status=$?
 	if (( non_euclidean_status == 0 )) && grep -q '^TEST PASS non_euclidean$' "$non_euclidean_output"; then
@@ -190,27 +213,6 @@ fi
 		printf 'TEST FAIL non_euclidean: crashed, timed out, or missing pass sentinel\n' >&2
 		printf 'Log: %s\n' "$non_euclidean_output" >&2
 		failed+=(non_euclidean)
-	fi
-
-	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
-	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
-	ocean_fft_status=0
-	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
-		env -u DISPLAY \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
-			--log-file "$ocean_fft_log" \
-			-s res://tests/ocean_fft_test.gd || ocean_fft_status=$?
-	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
-		printf 'TEST PASS ocean_fft\n'
-	else
-		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$ocean_fft_output" >&2
-		failed+=(ocean_fft)
 	fi
 
 	ocean_physics_output="$LOG_DIR/gpu-ocean_physics.stdout.log"
@@ -223,7 +225,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$ocean_physics_log" \
 			-s res://tests/ocean_physics_test.gd || ocean_physics_status=$?
 	if (( ocean_physics_status == 0 )) && grep -q '^TEST PASS ocean_physics$' "$ocean_physics_output"; then
@@ -244,7 +246,7 @@ fi
 			"$GODOT" --path "$PROJECT_DIR" \
 				--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 				--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 				--log-file "$LOG_DIR/gpu-${ocean_suite}.godot.log" \
 				-s "res://tests/${ocean_suite}_test.gd" || ocean_status=$?
 		if (( ocean_status == 0 )); then
@@ -265,7 +267,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$scene_cycle_log" \
 			-s res://tests/scene_cycle_test.gd || scene_cycle_status=$?
 	if (( scene_cycle_status == 0 )) && grep -q '^TEST PASS scene_cycle$' "$scene_cycle_output"; then
@@ -286,7 +288,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$tornado_look_log" \
 			-s res://tests/probe.gd -- tornado_boot_look || tornado_look_status=$?
 	if (( tornado_look_status == 0 )) && grep -q '^TEST PASS tornado_boot_look$' "$tornado_look_output"; then
@@ -307,7 +309,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$terrain_log" \
 			-s res://tests/terrain_test.gd || terrain_status=$?
 	if (( terrain_status == 0 )) && grep -q '^TEST PASS terrain$' "$terrain_output"; then
@@ -328,7 +330,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$fluid_foam_log" \
 			-s res://tests/probe.gd -- fluid_foam || fluid_foam_status=$?
 	if (( fluid_foam_status == 0 )) && grep -q '^TEST PASS fluid_foam$' "$fluid_foam_output"; then
@@ -349,7 +351,7 @@ fi
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 60 --disable-vsync \
 			--log-file "$fluid_tier_log" \
 			-s res://tests/probe.gd -- fluid_tier || fluid_tier_status=$?
 	if (( fluid_tier_status == 0 )) && grep -q '^TEST PASS fluid_tier$' "$fluid_tier_output"; then
@@ -368,6 +370,16 @@ fi
 		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \
 		"$SCRIPT_DIR/run_ui_smoke.sh"; then
 		failed+=(ui_smoke)
+	fi
+
+	ocean_fft_status=0
+	wait "$ocean_fft_pid" || ocean_fft_status=$?
+	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
+		printf 'TEST PASS ocean_fft\n'
+	else
+		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
+		printf 'Log: %s\n' "$ocean_fft_output" >&2
+		failed+=(ocean_fft)
 	fi
 fi
 
