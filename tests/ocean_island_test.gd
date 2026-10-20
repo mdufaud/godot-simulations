@@ -2,6 +2,7 @@ extends "res://tests/test_case.gd"
 
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const Island := preload("res://scripts/demos/ocean/ocean_island.gd")
+const STEPS_PER_FRAME := 8
 var _demo
 
 
@@ -56,7 +57,9 @@ func _run() -> void:
 	for frame in 60:
 		RenderingServer.call_on_render_thread(_demo.solver.step_render.bind(
 			1.0 / 30.0, float(frame + 1) / 30.0, Vector2(0.0, 30.0)))
-		await RenderingServer.frame_post_draw
+		# Steps carry their own dt, so several share one rendered frame.
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == 59:
+			await RenderingServer.frame_post_draw
 	var surface := await _read(_demo.solver.get_shore_texture_rid(), 128)
 	var foam := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 	var max_foam := 0.0
@@ -212,7 +215,8 @@ func _check_sand_history() -> void:
 	for frame in 30:
 		RenderingServer.call_on_render_thread(shore.step_render.bind(
 			1.0 / 30.0, float(frame + 1) / 30.0, Vector2(0.5, 0.0), 8.0, 0.5, PackedVector4Array()))
-		await RenderingServer.frame_post_draw
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == 29:
+			await RenderingServer.frame_post_draw
 	var static_foam := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 	var maximum := 0.0
 	for offset in range(0, static_foam.size(), 4):
@@ -222,7 +226,8 @@ func _check_sand_history() -> void:
 	for frame in 60:
 		RenderingServer.call_on_render_thread(shore.step_render.bind(
 			1.0 / 30.0, 1.0 + float(frame + 1) / 30.0, Vector2.ZERO, 8.0, 0.5, PackedVector4Array()))
-		await RenderingServer.frame_post_draw
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == 59:
+			await RenderingServer.frame_post_draw
 	var index := (int((18.0 / 160.0 + 0.5) * 128.0) * 128 + 64) * 4
 	var incoming := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 	_check(incoming[index] > 0.01 and incoming[index + 3] > 0.99,
@@ -286,7 +291,8 @@ func _check_sand_history() -> void:
 		RenderingServer.call_on_render_thread(shore.step_render.bind(
 			1.0 / 6.0, 3.0 + 1.0 / 30.0 + float(frame + 1) / 6.0,
 			Vector2.ZERO, 0.0, 0.5, PackedVector4Array()))
-		await RenderingServer.frame_post_draw
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == 17 or frame == 35 or frame == 59:
+			await RenderingServer.frame_post_draw
 		if frame == 17 or frame == 35:
 			var residue := await _read(_demo.solver.get_shore_foam_texture_rid(), 128)
 			var ratio := residue[index + 2] / retreat[index + 2]

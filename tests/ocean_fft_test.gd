@@ -2627,7 +2627,9 @@ func _check_breaking_front(demo: Node) -> void:
 				Vector2.ZERO, Vector2.ZERO, Vector2.ZERO, solver.foam_field_domains(),
 				0, 0.9, solver.local_centers())
 		)
-		await RenderingServer.frame_post_draw
+		# Steps carry their own dt, so several share one rendered frame.
+		if step % 8 == 7 or step == 11:
+			await RenderingServer.frame_post_draw
 	var particles := (await _read_texture(spray._particle_state_rid, 0)).to_float32_array()
 	var falling := 0
 	var capacity: int = spray._particle_capacity

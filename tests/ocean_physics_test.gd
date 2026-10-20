@@ -4,6 +4,7 @@ const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const LOW_TIER := OceanQualityProfile.Tier.LOW
 const IMPULSE := Vector4(0.0, 0.0, 1000.0, 0.0)
 const HALF_QUANTUM_TOLERANCE := 0.000004
+const STEPS_PER_FRAME := 8
 
 var _demo
 var _local_solver: OceanLocalSolver
@@ -140,7 +141,9 @@ func _deep_offshore_case() -> float:
 		RenderingServer.call_on_render_thread(_local_solver.step_render.bind(
 			delta, float(frame + 1) * delta, Vector2.ZERO, Vector2.ZERO,
 			PackedVector4Array()))
-		await RenderingServer.frame_post_draw
+		# Steps carry their own dt, so several share one rendered frame.
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == 29:
+			await RenderingServer.frame_post_draw
 	var coast := await _read_output(_local_solver.get_coast_texture_rid(),
 		OceanQualityProfile.COAST_SIZE[LOW_TIER])
 	if coast.is_empty():
