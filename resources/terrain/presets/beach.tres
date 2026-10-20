@@ -1,0 +1,30 @@
+[gd_resource type="Resource" script_class="TerrainPreset" format=3 uid="uid://terrain_preset_beach"]
+
+[ext_resource type="Script" path="res://scripts/terrain/terrain_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+hint = "A wet-sand castle holds past the dry repose angle. Flood it with the water brush and it slumps."
+sand_castle = true
+display_name = "Beach & castle"
+default_tool = 4
+walls_visible = true
+terrain = 0
+base_height_m = 0.25
+water_level_m = 0.0
+camera_target_m = Vector3(0, 0.25, 0)
+camera_distance_m = 4.0
+auto_water_radius_m = 0.0
+auto_water_rate_rad_s = 0.6
+auto_water_strength = 0.7
+evap_rate_m_s = 0.003
+sun_elevation_deg = 45.0
+sun_azimuth_deg = 130.0
+sun_color = Color(1, 0.92, 0.78, 1)
+sun_energy = 1.5
+sky_top = Color(0.42, 0.62, 0.82, 1)
+sky_horizon = Color(0.78, 0.82, 0.85, 1)
+fog_color = Color(0.78, 0.8, 0.82, 1)
+fog_density = 0.0008
+sand_light = Color(0.88, 0.78, 0.58, 1)
+sand_dark = Color(0.6, 0.46, 0.3, 1)

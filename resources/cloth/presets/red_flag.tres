@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="ClothPreset" format=3 uid="uid://cloth_preset_red_flag"]
+
+[ext_resource type="Script" path="res://scripts/cloth/cloth_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Red flag"
+pin = 0
+size_m = Vector2(4, 2.6)
+position_m = Vector3(-7, 0, 0.5)
+yaw_rad = 0.0
+top_m = 5.8
+color = Color(0.75, 0.15, 0.12, 1)
+stripes = true

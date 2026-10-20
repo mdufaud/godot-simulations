@@ -22,9 +22,12 @@ resources/materials/*/
 resources/terrain/*
 !resources/terrain/presets/
 resources/terrain/presets/*
-!resources/terrain/presets/montagne.tres
+!resources/terrain/presets/*.tres
 !resources/ambient_fluid/
 !resources/ambient_fluid/**
+!resources/cloth/
+!resources/cloth/presets/
+!resources/cloth/presets/*.tres
 !resources/nbody/
 !resources/nbody/presets/
 !resources/nbody/presets/*.tres
