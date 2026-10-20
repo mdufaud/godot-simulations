@@ -20,6 +20,7 @@ class_name FirePresentation extends Node3D
 ## ScreenSpaceFluidRenderer's prepasses.
 const LAYER_FIRE_VOLUME := 16
 const VOLUME_UPSAMPLE_SHADER := "res://shaders/fire/fire_volume_upsample.gdshader"
+const SPARK_WIND_DRAG := 2.0 ## 1/s
 
 const FireSceneDistance = preload("res://scripts/fire/fire_scene_distance.gd")
 
@@ -119,6 +120,10 @@ func set_debug_view(mode: int) -> void:
 func update_effects(stats: Dictionary, delta: float) -> void:
 	if sparks != null:
 		sparks.emitting = stats["max_reaction"] > 0.1
+		# Drag toward the wind as a constant acceleration, so sparks leave with the
+		# blown flame instead of hanging over an empty burner.
+		(sparks.process_material as ParticleProcessMaterial).gravity = \
+			Vector3(0.0, -3.0, 0.0) + solver.wind * SPARK_WIND_DRAG
 	if fire_light == null:
 		return
 

@@ -22,8 +22,10 @@ void main() {
 		return;
 	}
 
+	// Against the wind, like the tile keep signal: an absolute speed put every
+	// cell of a 6 m/s breeze above the 5 m/s band and switched confinement off.
 	vec3 vel = vel_at_cell(c);
-	float speed = length(vel);
+	float speed = length(vel - ambient_wind(c.y));
 	if (speed < cfg.vort.x || speed > cfg.vort.y
 			|| load_scal_src(c).x < cfg.vort.z) {
 		store_scal_fwd(c, vec4(0.0));

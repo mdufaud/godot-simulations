@@ -29,6 +29,7 @@ var _look := -1
 var _mood := -1.0
 var _profile := false
 var _quality := -1
+var _render_scale := -1.0
 var _features := true
 var _clouds := true
 var _view := ""
@@ -117,6 +118,7 @@ func _initialize() -> void:
 			"mood": _mood = float(value)
 			"profile": _profile = value == "1" or value.to_lower() == "true"
 			"quality": _quality = _quality_tier(value)
+			"render_scale": _render_scale = float(value)
 			"features": _features = value != "0" and value.to_lower() != "false"
 			"clouds": _clouds = value != "0" and value.to_lower() != "false"
 			"view": _view = value
@@ -212,6 +214,8 @@ func _run() -> void:
 	# pool key.
 	if _pool >= 0 and _demo.has_method("set_pool_budget"):
 		_demo.set_pool_budget(_pool)
+	if _render_scale > 0.0 and _demo.has_method("set_render_scale"):
+		_demo.set_render_scale(_render_scale)
 	ready_deadline = Time.get_ticks_msec() + 20000
 	while _demo.has_method("capture_ready") and not _demo.capture_ready() and Time.get_ticks_msec() < ready_deadline:
 		await process_frame

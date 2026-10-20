@@ -176,49 +176,68 @@ static func preset_values(index: int) -> Dictionary:
 	match index:
 		Preset.QUALITY:
 			return {pressure = 32, advection = 0, vorticity_mode = 0,
-				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
+				vorticity_frequency = 1, vorticity_strength = 8.0,
+				simulation_hz = 30, temporal = false,
 				catchup = 3, water_substeps = 16, water_adaptive = true,
 				water_cap = 16384, march_step = 1.0, march_budget = 280,
 				march_distance = 72.0, water_scale = 0.8,
-				msaa = 2, volume_half = false, pool = 2}
+				msaa = 2, volume_half = false, tile_keep = 1.0, tile_budget = 0, pool = 2}
 		Preset.BALANCED:
-			return {pressure = 24, advection = 0, vorticity_mode = 1,
-				vorticity_frequency = 2, simulation_hz = 30, temporal = false,
+			# Full vorticity every other step costs the same as Reduced (only the
+			# uploaded strength differs) and keeps the plume from rising as a pillar.
+			return {pressure = 24, advection = 0, vorticity_mode = 0,
+				vorticity_frequency = 2, vorticity_strength = 8.0,
+				simulation_hz = 30, temporal = false,
 				catchup = 2, water_substeps = 14, water_adaptive = true,
 				water_cap = 12288, march_step = 1.5, march_budget = 192,
 				march_distance = 56.0, water_scale = 0.55,
-				msaa = 1, volume_half = true, pool = 2}
+				msaa = 1, volume_half = true, tile_keep = 1.0, tile_budget = 0, pool = 2}
 		Preset.REALTIME_LITE:
-			return {pressure = 16, advection = 2, vorticity_mode = 1,
-				vorticity_frequency = 2, simulation_hz = 15, temporal = true,
+			# Semi-Lagrangian velocity (advection 2) damps the eddies confinement
+			# exists to put back, so presets on it triple the strength: at 8 a
+			# 6 m/s crosswind left a laminar wedge with straight edges. The wider
+			# turbulent plume saturates the pool, so the soft tile budget caps it.
+			return {pressure = 16, advection = 2, vorticity_mode = 0,
+				vorticity_frequency = 2, vorticity_strength = 24.0,
+				simulation_hz = 15, temporal = true,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
 				water_cap = 8192, march_step = 2.0, march_budget = 128,
 				march_distance = 40.0, water_scale = 0.4,
-				msaa = 1, volume_half = true, pool = 2}
+				msaa = 1, volume_half = true, tile_keep = 1.0, tile_budget = 1536, pool = 2}
 		Preset.PERFORMANCE:
-			return {pressure = 16, advection = 1, vorticity_mode = 2,
-				vorticity_frequency = 4, simulation_hz = 30, temporal = false,
+			# Full vorticity every other step at the semi-Lagrangian strength: Off
+			# left a laminar pillar. MacCormack on the scalars and the turbulence
+			# both widen the resident set, and the 1536 soft tile budget is what
+			# pays for them: 0-0.3 % frame misses at 30 fps, render scale 0.5, on
+			# the 760M, where the full 2048 pool missed 78-80 %. A 1.25 march step
+			# costs nothing measurable at that scale and halves the crosshatch.
+			return {pressure = 16, advection = 2, vorticity_mode = 0,
+				vorticity_frequency = 2, vorticity_strength = 24.0,
+				simulation_hz = 30, temporal = false,
 				catchup = 1, water_substeps = 12, water_adaptive = true,
-				water_cap = 8192, march_step = 2.0, march_budget = 128,
+				water_cap = 8192, march_step = 1.25, march_budget = 128,
 				march_distance = 40.0, water_scale = 0.4,
-				msaa = 0, volume_half = true, pool = 2}
+				msaa = 0, volume_half = true, tile_keep = 2.0, tile_budget = 1536,
+				pool = 2}
 		Preset.ULTRA:
 			# Lot K: the real keys, not a Reference alias. Paper's full iteration
 			# counts and a raymarch below Reference's, paid for by the atlas the
 			# machine cannot exhaust (4096 slots). msaa 2 is 4x, the top rung.
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
-				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
+				vorticity_frequency = 1, vorticity_strength = 8.0,
+				simulation_hz = 30, temporal = false,
 				catchup = 4, water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.5, march_budget = 384,
 				march_distance = 96.0, water_scale = 1.0,
-				msaa = 2, volume_half = false, pool = 3}
+				msaa = 2, volume_half = false, tile_keep = 1.0, tile_budget = 0, pool = 3}
 		_:
 			return {pressure = 64, advection = 0, vorticity_mode = 0,
-				vorticity_frequency = 1, simulation_hz = 30, temporal = false,
+				vorticity_frequency = 1, vorticity_strength = 8.0,
+				simulation_hz = 30, temporal = false,
 				catchup = 4, water_substeps = 16, water_adaptive = false,
 				water_cap = 16384, march_step = 0.75, march_budget = 320,
 			march_distance = 80.0, water_scale = 1.0,
-				msaa = 2, volume_half = false, pool = 2}
+				msaa = 2, volume_half = false, tile_keep = 1.0, tile_budget = 0, pool = 2}
 
 
 ## The Auto ladder. Levels 1-3 give up rendering only, 4-5 then reduce the
@@ -252,8 +271,8 @@ static func auto_values(level: int) -> Dictionary:
 				march_distance = 56.0, water_scale = 0.45, render_scale = 0.8,
 				msaa = 1, volume_half = true}, true)
 		4:
-			values.merge({pressure = 24, advection = 2, vorticity_mode = 1,
-				vorticity_frequency = 2,
+			values.merge({pressure = 24, advection = 2, vorticity_mode = 0,
+				vorticity_frequency = 2, vorticity_strength = 24.0, tile_budget = 1536,
 				catchup = 2, water_substeps = 12, water_adaptive = true,
 				water_cap = 12288, march_step = 1.75,
 				march_budget = 160, march_distance = 48.0, water_scale = 0.4,
@@ -269,6 +288,7 @@ func _apply(values: Dictionary) -> void:
 	_push("advection", values.advection)
 	_push("vorticity_mode", values.vorticity_mode)
 	_push("vorticity_frequency", values.vorticity_frequency)
+	_push("vorticity_strength", values.vorticity_strength)
 	_push("simulation_hz", SIMULATION_RATES.find(values.simulation_hz))
 	_push("temporal", values.temporal)
 	_push("catchup", values.catchup)
@@ -283,6 +303,8 @@ func _apply(values: Dictionary) -> void:
 		_push("render_scale", values.render_scale)
 	_push("msaa", values.msaa)
 	_push("volume_half", values.volume_half)
+	_push("tile_keep", values.tile_keep)
+	_push("tile_budget", values.tile_budget)
 	if values.has("pool"):
 		# Last, so the atlas rebuild lands on an otherwise settled configuration.
 		_push("pool", values.pool)

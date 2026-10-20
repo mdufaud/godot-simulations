@@ -1,7 +1,7 @@
 // Pass 5/6. One workgroup per alloc request. The free-list pop is deterministic
 // rather than a racing atomic: every workgroup reads the same stack top fstart
 // (nothing writes C_FREE during this pass), and request gid claims
-// free_list[fstart-1-gid] iff gid < fstart. That cannot underflow, needs no undo
+// free_list[fstart-1-gid] iff gid < claimable_free(). That cannot underflow, needs no undo
 // path, and tile_compact settles the new stack top afterwards. Requests beyond
 // the free supply release their reservation and are counted as exhaustion there.
 //
@@ -21,7 +21,7 @@ void main() {
 	uint vti = alloc_request[gid];
 	ivec3 vt = vti_to_vt(vti);
 
-	if (gid >= fstart) {
+	if (gid >= claimable_free()) {
 		// Pool exhausted for this request: undo the reservation (compact counts
 		// the drop). Only one thread needs to touch the shared indirection entry.
 		if (gl_LocalInvocationIndex == 0u) {

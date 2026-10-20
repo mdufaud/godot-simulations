@@ -10,12 +10,14 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 8) in;
 // together with the tile-pool layout of FireTilePool.glsl_header.
 // STAT_DIAG heads the diagnostic block, all gated by cfg.diag.x so an inactive
 // bit costs one uniform branch: 0 reactant-clamp events, 1 temperature-clamp
-// events, 2 fraction renormalisations, 3 chemical heat [mJ], 4 fuel burned [ng],
+// events, 2 fraction renormalisations, 3 chemical heat [mJ], 4 fuel burned [ug],
 // 5 pilot heat [mJ], 6..9 the pure-species molar Cp probe at cfg.diag.y
-// [mJ/(mol.K)] (N2, O2, CO2, H2O), 10 the wood cap-clipped fuel [ng at unit
-// density], 11 the evaporated liquid [ng] and 12 the H2O mass the mixture gained
-// [ng] (equal by Eq. 31); mJ are STAT_SCALE, ng STAT_MASS_SCALE. Cleared with the
-// rest by fire_advect, so every value is one substep.
+// [mJ/(mol.K)] (N2, O2, CO2, H2O), 10 the wood cap-clipped fuel [ug at unit
+// density], 11 the evaporated liquid [ug], 12 the H2O mass the mixture gained
+// [ug] (equal by Eq. 31), then over the wet cells 13 the summed droplet h
+// [W/(m^2.K)], 14 their count and 15 the summed gas/droplet slip [mm/s]; mJ and
+// mm/s are STAT_SCALE, ug STAT_MASS_SCALE. Cleared with the rest by fire_advect,
+// so every value is one substep.
 
 // Field textures ping-pong: *_src is the current state, *_dst receives the
 // advected result, after which the solver flips parity.

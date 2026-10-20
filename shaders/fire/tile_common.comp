@@ -51,7 +51,8 @@ layout(push_constant, std430) uniform Push {
 	// plume rises, whatever the settings say.
 	vec4 wind;
 	// Pool-pressure relief. .x is the free-slot count below which the keep
-	// threshold starts rising, .y the factor it reaches at zero free slots.
+	// threshold starts rising, .y the factor it reaches at zero free slots, .z the
+	// free slots held back so a soft budget caps the resident set without a rebuild.
 	vec4 relief;
 	ivec3 seed_lo;
 	int seed_active;
@@ -71,8 +72,14 @@ layout(push_constant, std430) uniform Push {
 //
 // Continuous rather than a cliff, so the pool settles at the occupancy where the
 // bar it implies matches the demand it admits, instead of oscillating around it.
+uint claimable_free() {
+	uint reserve = uint(pc.relief.z);
+	uint top = counts[C_FREE];
+	return top > reserve ? top - reserve : 0u;
+}
+
 float keep_threshold() {
-	float relief = clamp(float(counts[C_FREE]) / max(pc.relief.x, 1.0), 0.0, 1.0);
+	float relief = clamp(float(claimable_free()) / max(pc.relief.x, 1.0), 0.0, 1.0);
 	return pc.threshold * mix(pc.relief.y, 1.0, relief);
 }
 

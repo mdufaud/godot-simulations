@@ -335,7 +335,7 @@ func clear_seed_capsule() -> void:
 ## passes make each one see the previous one's writes.
 func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		dilate_radius: int, wind := Vector3.ZERO, relief_slots := 0.0,
-		relief_max := 1.0) -> void:
+		relief_max := 1.0, reserve_slots := 0.0) -> void:
 	var pc := PackedByteArray()
 	pc.resize(128)
 	pc.encode_u32(0, frame)
@@ -348,6 +348,7 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		pc.encode_float(48 + i * 4, wind[i])
 	pc.encode_float(64, relief_slots)
 	pc.encode_float(68, relief_max)
+	pc.encode_float(72, reserve_slots)
 	for i in 3:
 		pc.encode_s32(80 + i * 4, _seed_lo[i])
 		pc.encode_float(96 + i * 4, _seed_p0[i])

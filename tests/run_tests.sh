@@ -117,6 +117,7 @@ declare -a CPU_SUITES=(
 	"holonomy_state|res://tests/holonomy_state_test.gd"
 	"grab_controller|res://tests/grab_controller_test.gd"
 	"fire_clock|res://tests/fire_clock_test.gd"
+	"fire_vorticity|res://tests/fire_vorticity_test.gd"
 	"cell_propagation|res://tests/cell_propagation_test.gd"
 	"fire_ssot|res://tests/fire_ssot_test.gd"
 	"fire_fuels|res://tests/fire_fuels_test.gd"

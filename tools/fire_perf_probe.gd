@@ -17,6 +17,14 @@ var _pressure := -1
 var _pool := -1
 var _fuel := ""
 var _jet := -1
+var _scale := -1.0
+var _advection := -1
+var _vorticity := -1
+var _vort_interval := -1
+var _sim_hz := -1
+var _max_fps := 0
+var _keep := -1.0
+var _windx := 0.0
 var _demo: Node = null
 
 
@@ -38,6 +46,14 @@ func _initialize() -> void:
 			"pool": _pool = int(split[1])
 			"fuel": _fuel = split[1]
 			"jet": _jet = int(split[1])
+			"scale": _scale = float(split[1])
+			"advection": _advection = int(split[1])
+			"vorticity": _vorticity = int(split[1])
+			"vort_interval": _vort_interval = int(split[1])
+			"sim_hz": _sim_hz = int(split[1])
+			"max_fps": _max_fps = int(split[1])
+			"keep": _keep = float(split[1])
+			"windx": _windx = float(split[1])
 	var packed := load("res://scenes/fire_demo.tscn") as PackedScene
 	if packed == null:
 		push_error("PERF FAIL: cannot load fire_demo.tscn")
@@ -66,6 +82,20 @@ func _run() -> void:
 		_demo.set_capture_fuel(_fuel == "gas")
 	if _jet >= 0:
 		_demo.set_capture_jet(_jet)
+	if _windx != 0.0:
+		_demo.set_capture_wind_x(_windx)
+	if _scale > 0.0:
+		_demo.set_render_scale(_scale)
+	if _advection >= 0:
+		_demo.set_advection_mode(_advection)
+	if _vorticity >= 0:
+		_demo.set_vorticity_mode(_vorticity)
+	if _vort_interval > 0:
+		solver.vorticity_interval = _vort_interval
+	if _keep > 0.0:
+		solver.tile_keep_scale = _keep
+	if _sim_hz > 0:
+		solver.set_simulation_hz(_sim_hz)
 	solver.profiling = true
 	if not await _wait_ready():
 		return
@@ -73,10 +103,11 @@ func _run() -> void:
 	# force the requested size back so the measurement is deterministic.
 	root.size = _size
 	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
-	Engine.max_fps = 0
+	Engine.max_fps = _max_fps
 	for frame in _warmup:
 		await process_frame
 
+	var clock_start: Dictionary = solver.get_clock_stats()
 	var deltas := PackedFloat64Array()
 	var last := Time.get_ticks_usec()
 	var deadline := last + int(_seconds * 1_000_000.0)
@@ -93,6 +124,12 @@ func _run() -> void:
 		total += ms
 	var p50 := sorted[int(sorted.size() * 0.5)]
 	var p95 := sorted[mini(int(sorted.size() * 0.95), sorted.size() - 1)]
+	var missed := 0
+	for ms in deltas:
+		if ms > 1000.0 / 30.0 * 1.1:
+			missed += 1
+	print("PERF MISS30 label=%s missed=%d/%d (%.1f%%)" % [
+		_label, missed, deltas.size(), 100.0 * missed / maxf(deltas.size(), 1.0)])
 	var mem_mb := float(RenderingServer.get_rendering_info(
 		RenderingServer.RENDERING_INFO_VIDEO_MEM_USED)) / 1048576.0
 	var stats: Dictionary = solver.get_stats()
@@ -105,6 +142,12 @@ func _run() -> void:
 		int(pool.get("resident", 0)), int(pool.get("budget", solver.pool_budget)),
 		mem_mb, int(stats["max_temperature"]), stats["total_reaction"],
 		stats["max_divergence"]])
+	var clock_end: Dictionary = solver.get_clock_stats()
+	var sim_span := float(clock_end["simulation_time"]) - float(clock_start["simulation_time"])
+	var wall_span := float(clock_end["wall_time"]) - float(clock_start["wall_time"])
+	print("PERF CLOCK label=%s ratio=%.3f scale=%.2f advection=%d vorticity=%d interval=%d sim_hz=%d" % [
+		_label, sim_span / maxf(wall_span, 1e-6), _scale, solver.advection_mode,
+		solver.vorticity_mode, solver.vorticity_interval, solver.simulation_hz])
 	var timings: Dictionary = solver.get_timings()
 	if not timings.is_empty():
 		var pairs := []

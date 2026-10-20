@@ -50,9 +50,10 @@ const MAX_LOGS := 12
 ## Stats buffer words, reduced by fire_display and fire_evaporate: 11 scalars, then
 ## one probed gas temperature per wood emitter, then the six words of the
 ## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to,
-## then the thirteen-word diagnostic block (STAT_DIAG in fire_common.comp: three
+## then the sixteen-word diagnostic block (STAT_DIAG in fire_common.comp: three
 ## protection counters, three energy/mass ledgers, four Cp-probe words, one
-## wood-cap clip proxy, two evaporation mass ledgers).
+## wood-cap clip proxy, two evaporation mass ledgers, three droplet-convection
+## words).
 ## Fractional quantities are stored as fixed point at STAT_SCALE, diagnostic
 ## masses at STAT_MASS_SCALE.
 const STAT_MAX_T := 0
@@ -69,7 +70,7 @@ const STAT_ENERGY_BUDGET := 10
 const STAT_WOOD := 11
 const STAT_BOUNDS := STAT_WOOD + MAX_LOGS
 const STAT_DIAG := STAT_BOUNDS + 6
-const STATS_WORDS := STAT_DIAG + 13
+const STATS_WORDS := STAT_DIAG + 16
 const STAT_SCALE := 1000.0
 const STAT_MASS_SCALE := 1e9
 ## std430 layout of fire_common.comp's Config buffer: [name, vec4 count] in order.
@@ -84,7 +85,7 @@ const STAT_MASS_SCALE := 1e9
 ##   vort       vel_lo, vel_hi, temp_lo, h2o_coeff  Fire-X Tab. 3
 ##   wind       wind.xyz, residual_dissipation
 ##   molar      M_O2, M_CO2, M_H2O, M_N2 [kg/mol]
-##   misc       reserved, display_temperature, reaction_reference, emitter_T
+##   misc       vorticity_dt_scale, display_temperature, reaction_reference, emitter_T
 ##   liquid     T_B [K], dvH [J/kg], Cp_l [J/(kg.K)], rho_d [kg/m^3]  NIST, Tab. 4
 ##   liquid2    d_d [m], h_conv [W/(m^2.K)], wet_suppression, wood_shelter_rate
 ##   wood       per log: pos.xyz, radius [m] (radius 0 = free slot)
@@ -93,7 +94,8 @@ const STAT_MASS_SCALE := 1e9
 ##   torch2     direction * length, fuel rate
 ##   torch3     tip radius, temperature, speed, pilot fraction
 ##   diag       flags (bit0 counters, bit1 Cp probe), probe T [K],
-##              Eq. 27 evaporation Cp A/B (0 gas [shipped], 1 liquid)
+##              Eq. 27 evaporation Cp A/B (0 gas [shipped], 1 liquid),
+##              droplet h model (0 constant [shipped], 1 Ranz-Marshall)
 ## NON-PAPER wood tail: Fire-X only has the gas grid emitter of Tab. 3; the solid
 ## fuel bed lives on the CPU (wood_pile.gd). The release goes down through
 ## fire_inject (mode 5), the gas temperature that drives it comes back up through
@@ -256,7 +258,9 @@ var vorticity_strength := 8.0 ## Fire-X Tab. 3, range 0.0-50.0
 var vorticity_mode := VORTICITY_FULL
 var vorticity_interval := 1
 var vorticity_velocity_lo := 0.0 ## Fire-X Tab. 3, range 0.0-0.1
-var vorticity_velocity_hi := 5.0 ## Fire-X Tab. 3, range 0.0-5.0
+## Tab. 3 lists 0.0-5.0 without units; 5 m/s cut confinement out of the plume
+## core, so the gate sits at the 50 m/s velocity clamp, i.e. no upper gate.
+var vorticity_velocity_hi := 50.0
 var vorticity_temperature_lo := 301.0 ## Fire-X Tab. 3
 
 var wind := Vector3.ZERO ## NON-PAPER: inflow boundary condition for the demo
@@ -286,6 +290,10 @@ var droplet_diameter := 0.001 ## d_d, Fire-X Tab. 3 range 0.0005-0.005 m
 ## coefficient against the droplet surface; 50 W/(m^2.K) is Nu = 2 conduction on
 ## a 1 mm droplet. See the header of fire_evaporate.comp.
 var droplet_heat_transfer := 50.0
+## NON-PAPER A/B (cfg.diag.w): replaces [member droplet_heat_transfer] by the
+## Ranz-Marshall droplet convection, Nu = 2 + 0.6 Re^1/2 Pr^1/3, evaluated per
+## cell from the gas/droplet slip and the air properties at the film temperature.
+var droplet_ranz_marshall := false
 ## NON-PAPER: how strongly liquid in a cell suppresses combustion there, as
 ## v_c /= (1 + k.rho_l). The paper's spray extinguishes a flame by disrupting the
 ## flow and cutting the oxygen supply (Sec. 6.1.3); this grid's pinned emitter and
@@ -331,6 +339,12 @@ var atlas_slots := FireTilePool.NSLOTS
 # lowest supported 30 Hz and 0.2 m cells the worst case is ~8.4 cells.
 const TILE_ACTIVITY_THRESHOLD := 1.0 ## fire_display normalises every term to this
 const TILE_HOLD_FRAMES := 8 ## hysteresis, so a flickering front does not thrash
+## Multiplies every keep cut-off in fire_display; above 1 the faint plume tail
+## is released sooner and the resident set (and every stage's cost) shrinks.
+var tile_keep_scale := 1.0
+## Soft cap on resident tiles inside the allocated pool, 0 = the whole pool. Cost
+## is linear in resident tiles, and unlike pool_budget it changes without a rebuild.
+var tile_budget := 0
 ## The FORWARD radius: up and downwind. The other four directions get one tile
 ## less, which is still above that bound (see tile_dilate.comp).
 const TILE_DILATE_RADIUS := 2
@@ -474,13 +488,14 @@ func schedule_steps(delta: float) -> int:
 		dropped_time += frame_delta - 0.1
 		frame_delta = 0.1
 	_time_accumulator += frame_delta
-	var cap := max_catchup_steps * timestep if clock_debt_capped else 0.0
-	if cap > 0.0 and _time_accumulator > cap:
-		dropped_time += _time_accumulator - cap
-		_time_accumulator = cap
 	var available := int(floor(_time_accumulator / timestep + CLOCK_EPSILON))
 	var count := mini(available, max_catchup_steps)
 	_time_accumulator -= float(count) * timestep
+	# Capped after stepping: capping before dropped the sub-step fraction, so
+	# catchup 1 ran the simulation at 58-92 % of real time between 35 and 55 fps.
+	if clock_debt_capped and _time_accumulator > timestep:
+		dropped_time += _time_accumulator - timestep
+		_time_accumulator = timestep
 	last_substeps = count
 	simulation_time += float(count) * timestep
 	return count
@@ -625,6 +640,12 @@ func get_stats() -> Dictionary:
 		"diag_wood_cap_clipped": float(s[STAT_DIAG + 10]) / STAT_MASS_SCALE,
 		"diag_evaporated_kg": float(s[STAT_DIAG + 11]) / STAT_MASS_SCALE,
 		"diag_h2o_gained_kg": float(s[STAT_DIAG + 12]) / STAT_MASS_SCALE,
+		# Droplet convection over the wet cells: mean h [W/(m^2.K)] and mean
+		# gas/droplet slip [m/s].
+		"diag_wet_cells": float(s[STAT_DIAG + 14]),
+		"diag_h_mean": float(s[STAT_DIAG + 13]) / maxf(float(s[STAT_DIAG + 14]), 1.0),
+		"diag_slip_mean": float(s[STAT_DIAG + 15]) / STAT_SCALE
+			/ maxf(float(s[STAT_DIAG + 14]), 1.0),
 	}
 
 
@@ -1279,9 +1300,11 @@ func prepare_topology_render() -> void:
 	if profiling:
 		_rd.capture_timestamp("fire/topology_start")
 	var tcl := _rd.compute_list_begin()
-	_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD, TILE_HOLD_FRAMES,
+	var budget := _pool.budget() if tile_budget <= 0 else mini(tile_budget, _pool.budget())
+	_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD * tile_keep_scale, TILE_HOLD_FRAMES,
 		TILE_DILATE_RADIUS, wind,
-		float(_pool.budget()) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX)
+		float(budget) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX,
+		float(_pool.budget() - budget))
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/topology_end")
@@ -1303,8 +1326,7 @@ func _substep(cl: int, liquid_active: bool) -> void:
 
 	# 17. Buoyancy (+ vorticity confinement, Tab. 3).
 	_dispatch(cl, "forces", p, pc)
-	if _effective_vorticity_strength() > 0.0 \
-			and _simulation_step % maxi(vorticity_interval, 1) == 0:
+	if vorticity_runs_on_step(_simulation_step):
 		# Three passes now: the confinement force is a cell-centred quantity but
 		# the velocity it corrects lives on faces. Computing it once per cell into
 		# a scratch buffer and scattering costs one dispatch; evaluating it again
@@ -1376,6 +1398,18 @@ func _inner_sweeps() -> int:
 
 func _coarse_enabled() -> bool:
 	return pressure_coarse_cycles > 0
+
+
+func vorticity_runs_on_step(step: int) -> bool:
+	return _effective_vorticity_strength() > 0.0 \
+		and step % maxi(vorticity_interval, 1) == 0
+
+
+## The confinement force is integrated over the whole interval it stands for, so
+## the interval trades cost only: applied with a single dt it delivered 1/N of
+## the impulse, and Reduced at interval 2 kept a quarter of the strength.
+func vorticity_dt_scale() -> float:
+	return float(maxi(vorticity_interval, 1))
 
 
 func _effective_vorticity_strength() -> float:
@@ -1521,10 +1555,7 @@ func _upload_config() -> void:
 		vorticity_temperature_lo, h2o_coefficient])
 	_put_config(v, "wind", [wind.x, wind.y, wind.z, residual_dissipation])
 	_put_config(v, "molar", [M_O2, M_CO2, M_H2O, M_N2])
-	# misc[0] was oxygen_replenish, read by nothing in the sparse shaders (the
-	# dense variant's dead uniform); the slot stays reserved so the shared
-	# CPU/GLSL layout does not shift under the rest of the block.
-	_put_config(v, "misc", [0.0, display_temperature, reaction_reference,
+	_put_config(v, "misc", [vorticity_dt_scale(), display_temperature, reaction_reference,
 		emitter_temperature])
 	_put_config(v, "liquid", [boiling_temperature, latent_heat, liquid_heat_capacity,
 		droplet_density])
@@ -1552,7 +1583,7 @@ func _upload_config() -> void:
 	# Diagnostic block: flags in x, the Cp probe temperature in y.
 	_put_config(v, "diag", [(1.0 if diagnostic_counters else 0.0)
 		+ (2.0 if diagnostic_cp_probe else 0.0), diagnostic_probe_temperature,
-		1.0 if diagnostic_evap_liquid_cp else 0.0])
+		1.0 if diagnostic_evap_liquid_cp else 0.0, 1.0 if droplet_ranz_marshall else 0.0])
 
 	var bytes := v.to_byte_array()
 	if bytes == _config_cache:

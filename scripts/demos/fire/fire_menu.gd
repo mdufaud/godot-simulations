@@ -159,7 +159,9 @@ func build(host) -> void:
 
 	menu.add_separator()
 	menu.add_section("Flow")
-	menu.add_slider("Vorticity strength", 0.0, 50.0, solver.vorticity_strength,
+	var vorticity_strength := menu.add_slider("Vorticity strength", 0.0, 50.0,
+		solver.vorticity_strength, func(v: float): solver.vorticity_strength = v)
+	quality.register("vorticity_strength", vorticity_strength,
 		func(v: float): solver.vorticity_strength = v)
 	menu.add_slider("Turbulence Cs", 0.0, 0.4, solver.smagorinsky_cs,
 		func(v: float): solver.smagorinsky_cs = v)
@@ -193,6 +195,16 @@ func _build_performance_section(host, menu: SimMenu, solver: FireGpuSolver,
 	pressure_slider.step = 2.0
 	quality.register("pressure", pressure_slider,
 		func(v: float): solver.pressure_iterations = int(v))
+	var keep_slider := menu.add_slider("Tile keep threshold", 1.0, 4.0,
+		solver.tile_keep_scale, func(v: float): solver.tile_keep_scale = v)
+	keep_slider.step = 0.25
+	quality.register("tile_keep", keep_slider,
+		func(v: float): solver.tile_keep_scale = v)
+	var budget_slider := menu.add_slider("Tile budget (0 = pool)", 0.0, 4096.0,
+		float(solver.tile_budget), func(v: float): solver.tile_budget = int(v))
+	budget_slider.step = 256.0
+	quality.register("tile_budget", budget_slider,
+		func(v: float): solver.tile_budget = int(v))
 	# Entry order is the enum order, not the quality order: the third mode was
 	# appended so that a preset storing 0 or 1 keeps meaning what it meant.
 	var advection_option := menu.add_option_button("Advection",

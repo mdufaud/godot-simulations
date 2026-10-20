@@ -18,6 +18,9 @@ uniform vec2 low_res_size = vec2(640.0, 360.0);
 // surface. 5 % of the distance rather than an absolute metre so it holds at both
 // ends of an 80 m march.
 uniform float depth_tolerance = 0.05;
+// Tent radius in low-res texels: 1 is plain bilinear; 2 also averages out the
+// raymarch's interleaved-gradient jitter, which nothing temporal resolves here.
+uniform float filter_radius : hint_range(1.0, 2.0) = 2.0;
 
 void vertex() {
 	POSITION = vec4(VERTEX.xy, 1.0, 1.0);
@@ -37,19 +40,22 @@ void fragment() {
 	// nearest-depth at an edge and to plain bilinear everywhere else.
 	vec2 texel = SCREEN_UV * low_res_size - vec2(0.5);
 	vec2 base = floor(texel);
-	vec2 f = texel - base;
 	float d_full = scene_distance(SCREEN_UV, INV_PROJECTION_MATRIX);
 
 	vec4 acc = vec4(0.0);
 	float wsum = 0.0;
-	for (int j = 0; j < 2; j++) {
-		for (int i = 0; i < 2; i++) {
-			ivec2 t = ivec2(clamp(base + vec2(float(i), float(j)),
-				vec2(0.0), low_res_size - vec2(1.0)));
-			float bilinear = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+	for (int j = -1; j < 3; j++) {
+		for (int i = -1; i < 3; i++) {
+			vec2 tap = base + vec2(float(i), float(j));
+			vec2 tent = max(vec2(1.0) - abs(tap - texel) / filter_radius, vec2(0.0));
+			float weight = tent.x * tent.y;
+			if (weight <= 0.0) {
+				continue;
+			}
+			ivec2 t = ivec2(clamp(tap, vec2(0.0), low_res_size - vec2(1.0)));
 			float d_tap = texelFetch(scene_distance_tex, t, 0).r;
 			float mismatch = abs(d_tap - d_full) / max(d_full, 1e-3);
-			float w = bilinear / (1.0 + mismatch / max(depth_tolerance, 1e-4));
+			float w = weight / (1.0 + mismatch / max(depth_tolerance, 1e-4));
 			acc += texelFetch(volume_tex, t, 0) * w;
 			wsum += w;
 		}

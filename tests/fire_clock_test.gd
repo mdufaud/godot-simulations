@@ -63,9 +63,22 @@ func _initialize() -> void:
 		if low_rate_solver.schedule_steps(half_tick) != 1:
 			_check(false, "%d Hz clock did not step on second half tick" % low_rate)
 
+	# --- Catchup 1 above the simulation rate must hold real time -------------
+	for fps in [35, 40, 43, 50, 55]:
+		var lean = FireSolver.new()
+		lean.set_simulation_hz(30)
+		lean.max_catchup_steps = 1
+		for _frame in fps * 10:
+			lean.schedule_steps(1.0 / float(fps))
+		var lean_stats: Dictionary = lean.get_clock_stats()
+		if absf(float(lean_stats["simulation_time"]) - 10.0) > 1.0 / 30.0 + 1e-5:
+			_check(false, "catchup 1 at %d FPS simulated %.3f s of 10" % [
+				fps, lean_stats["simulation_time"]])
+
 	# --- Degraded regimes (30 Hz, catchup 1): capped game policy ---------------
 	# 10 s at 20 fps: the backlog is bounded at catchup*timestep and the surplus
-	# is dropped, so the run ends with sim 6.667 s, dropped 3.333 s, no debt.
+	# is dropped, so the run ends with sim 6.667 s, dropped 3.333 s less at most
+	# one pending step.
 	var capped = FireSolver.new()
 	capped.set_simulation_hz(30)
 	capped.max_catchup_steps = 1
@@ -78,7 +91,7 @@ func _initialize() -> void:
 	if absf(float(capped_stats["simulation_time"]) - 200.0 / 30.0) > 1e-3:
 		_check(false, "capped run simulated the wrong time: %s"
 			% str(capped_stats["simulation_time"]))
-	if absf(float(capped_stats["dropped_time"]) - (10.0 - 200.0 / 30.0)) > 1e-3:
+	if absf(float(capped_stats["dropped_time"]) - (10.0 - 200.0 / 30.0)) > 1.0 / 30.0 + 1e-3:
 		_check(false, "capped run did not account the dropped time: %s"
 			% str(capped_stats["dropped_time"]))
 	if float(capped_stats["accumulator"]) > 1.0 / 30.0 + 1e-6:
