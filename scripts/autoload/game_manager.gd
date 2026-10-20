@@ -45,6 +45,7 @@ var settings: Dictionary = {
 	"ssr_quality_profile": 1,
 	"ambient_fluid_quality_profile": 1,
 	"parallax_quality_profile": 1,
+	"wildfire_quality_profile": 1,
 }
 
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
@@ -68,6 +69,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/river_demo.tscn"},
 	{key = "fire_demo",     title = "Fire Simulation",      icon = "🔥", category = "particles",
 		scene = "res://scenes/fire_demo.tscn"},
+	{key = "wildfire_demo", title = "Wildfire",            icon = "🔥", category = "particles",
+		scene = "res://scenes/wildfire_demo.tscn"},
 	{key = "nbody_demo",    title = "N-Body Gallery",       icon = "🌌", category = "particles",
 		scene = "res://scenes/nbody_demo.tscn"},
 	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿", category = "other",
