@@ -191,7 +191,7 @@ fi
 	non_euclidean_log="$LOG_DIR/gpu-non_euclidean.godot.log"
 	non_euclidean_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS non_euclidean$' "$non_euclidean_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -212,7 +212,7 @@ fi
 	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
 	ocean_fft_status=0
 	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -233,7 +233,7 @@ fi
 	ocean_physics_log="$LOG_DIR/gpu-ocean_physics.godot.log"
 	ocean_physics_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS ocean_physics$' "$ocean_physics_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -254,7 +254,7 @@ fi
 		ocean_output="$LOG_DIR/gpu-${ocean_suite}.stdout.log"
 		ocean_status=0
 		physics_test_run_process "$TIMEOUT" "^TEST PASS ${ocean_suite}$" "$ocean_output" \
-			env -u DISPLAY \
+			env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 			XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 			WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 			"$GODOT" --path "$PROJECT_DIR" \
@@ -275,7 +275,7 @@ fi
 	scene_cycle_log="$LOG_DIR/gpu-scene_cycle.godot.log"
 	scene_cycle_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS scene_cycle$' "$scene_cycle_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -296,7 +296,7 @@ fi
 	tornado_look_log="$LOG_DIR/gpu-tornado_boot_look.godot.log"
 	tornado_look_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS tornado_boot_look$' "$tornado_look_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -317,7 +317,7 @@ fi
 	terrain_log="$LOG_DIR/gpu-terrain.godot.log"
 	terrain_status=0
 	physics_test_run_process "${TERRAIN_TIMEOUT:-300}" '^TEST PASS terrain$' "$terrain_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -338,7 +338,7 @@ fi
 	fluid_foam_log="$LOG_DIR/gpu-fluid_foam.godot.log"
 	fluid_foam_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_foam$' "$fluid_foam_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -359,7 +359,7 @@ fi
 	fluid_tier_log="$LOG_DIR/gpu-fluid_tier.godot.log"
 	fluid_tier_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_tier$' "$fluid_tier_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -380,7 +380,7 @@ fi
 	fire_cp_log="$LOG_DIR/gpu-fire_cp_probe.godot.log"
 	fire_cp_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_cp_probe$' "$fire_cp_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -401,7 +401,7 @@ fi
 	fire_balance_log="$LOG_DIR/gpu-fire_combustion_balance.godot.log"
 	fire_balance_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_combustion_balance$' "$fire_balance_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -422,7 +422,7 @@ fi
 	fire_water_log="$LOG_DIR/gpu-fire_water_balance.godot.log"
 	fire_water_status=0
 	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_water_balance$' "$fire_water_output" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \
@@ -442,6 +442,7 @@ fi
 	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \
 		PHYSICS_TEST_XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		PHYSICS_TEST_WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
+		PHYSICS_TEST_X11_DISPLAY="${PHYSICS_TEST_X11_DISPLAY:-}" \
 		PHYSICS_TEST_DISPLAY_DRIVER="$PHYSICS_TEST_DISPLAY_DRIVER" \
 		PHYSICS_TEST_RENDERING_DRIVER="$PHYSICS_TEST_RENDERING_DRIVER" \
 		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \

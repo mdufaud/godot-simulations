@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Screenshot a demo on an isolated virtual Wayland compositor (real GPU, Vulkan),
 # so no window opens on the desktop. PNGs are meant for visual inspection.
+# Without kwin_wayland (cloud containers) it falls back to Xvfb + lavapipe.
 #
 #   tools/capture.sh ocean_demo                                # res://tmp/capture-<timestamp>-<pid>.png
 #   tools/capture.sh ocean_demo tmp/ocean.png 240              # after 240 frames
@@ -53,11 +54,11 @@ fi
 
 status=0
 physics_test_run_process "$TIMEOUT" '^CAPTURE DONE' "$LOG_DIR/capture.stdout.log" \
-	env -u DISPLAY \
+	env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 	XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 	WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 	"$GODOT" --path "$PROJECT_DIR" \
-		--display-driver wayland \
+		--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 		--rendering-driver vulkan \
 		--audio-driver Dummy \
 		--resolution "$RESOLUTION" \

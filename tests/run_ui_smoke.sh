@@ -86,7 +86,7 @@ run_demo() {
 	local godot_log="$LOG_DIR/ui-${demo}.godot.log"
 
 	physics_test_run_process "$TIMEOUT" "^SMOKE PASS $demo$" "$output_file" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		FORCE_TOUCH_UI=1 \

@@ -209,7 +209,7 @@ run_probe() {
 		launch=(bash -c 'ulimit -c 0; "$@"; result=$?; if (( result == 0 )); then printf "TEST PASS river_shutdown\n"; fi; exit "$result"' -- "$GODOT")
 	fi
 	physics_test_run_process "$timeout_seconds" "$PROBE_SENTINEL" "$stdout_log" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"${launch[@]}" --path "$PROJECT_DIR" \
