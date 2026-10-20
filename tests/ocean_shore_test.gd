@@ -5,6 +5,7 @@ const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const N := 128
 const DOMAIN := 160.0
 const TILES: PackedFloat32Array = [2039.0, 111.0, 25.0]
+const STEPS_PER_FRAME := 8
 
 var _solver: OceanShoreSolver
 var _spectrum := RID()
@@ -649,7 +650,9 @@ func _advance(duration: float, fps: int, first_impulse := PackedVector4Array()) 
 		var impulses := first_impulse if frame == 0 else PackedVector4Array()
 		RenderingServer.call_on_render_thread(_solver.step_render.bind(dt, float(frame + 1) * dt,
 			Vector2.ZERO, 1.0, 0.5, impulses))
-		await RenderingServer.frame_post_draw
+		# Steps carry their own dt, so several share one rendered frame.
+		if frame % STEPS_PER_FRAME == STEPS_PER_FRAME - 1 or frame == frames - 1:
+			await RenderingServer.frame_post_draw
 
 
 func _surface() -> PackedFloat32Array:

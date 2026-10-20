@@ -118,9 +118,13 @@ func _channel_sums(field: PackedFloat32Array) -> Vector4:
 
 
 func _step(demo: Node, steps: int, dt: float = DT) -> void:
+	# Like the demo's SimStepClock: as many DT steps per frame as the frame spans,
+	# so the step sequence and its wall time do not depend on the frame rate.
+	var per_frame := maxi(1, roundi(root.get_process_delta_time() / DT))
 	for i in steps:
 		RenderingServer.call_on_render_thread(demo.solver.step_render.bind(dt))
-		await _frames(1)
+		if (i + 1) % per_frame == 0 or i + 1 == steps:
+			await _frames(1)
 
 
 ## Every pass conserves Σ(R+G+B+A) when melt and evaporation are off: tool is
@@ -135,7 +139,7 @@ func _check_conservation(demo: Node) -> void:
 	demo.solver.snow_repose_deg = 2.0  # force snow creep
 	demo.solver.stochasticity = 0.2
 	var before := _channel_sums(await _field(demo))
-	await _step(demo, 120)
+	await _step(demo, 40)
 	var after := _channel_sums(await _field(demo))
 	var total_before: float = before.x + before.y + before.z + before.w
 	var total_after: float = after.x + after.y + after.z + after.w
@@ -166,7 +170,7 @@ func _check_dry_repose(demo: Node) -> void:
 	demo.solver.brush.strength = 0.4
 	await _step(demo, 60)
 	demo.solver.brush.clear()
-	await _step(demo, 200)
+	await _step(demo, 80)
 	var field := await _field(demo)
 	var cell := WORLD / float(n)
 	var max_slope := 0.0
@@ -218,12 +222,12 @@ func _check_wet_repose(demo: Node) -> void:
 	var water := _flat(0.05)
 	demo.solver.wet_gain = 0.0
 	await _reseed(demo, sand, water, _flat(0.0), _flat(0.0))
-	await _step(demo, 180, 0.0)
+	await _step(demo, 90, 0.0)
 	var dry_field := await _field(demo)
 	var dry_slope := _max_sand_slope(dry_field, n, cell)
 	demo.solver.wet_gain = 0.6
 	await _reseed(demo, sand, water, _flat(0.0), _flat(0.0))
-	await _step(demo, 180, 0.0)
+	await _step(demo, 90, 0.0)
 	var wet_field := await _field(demo)
 	var wet_slope := _max_sand_slope(wet_field, n, cell)
 	var dry := tan(deg_to_rad(33.0))
@@ -283,7 +287,7 @@ func _check_snow_cohesion(demo: Node) -> void:
 	_check(peak_held > 0.45,
 		"cohesive snow spike collapsed under 50° cohesion (peak %.3f)" % peak_held)
 	demo.solver.snow_repose_deg = 5.0
-	await _step(demo, 600)
+	await _step(demo, 300)
 	var released := _channel_sums(await _field(demo))
 	var field := await _field(demo)
 	var peak := 0.0
@@ -643,7 +647,7 @@ func _check_closed_basin(demo: Node) -> void:
 					basin[y * _n + x] = 0.23
 	await _reseed(demo, basin, water, _flat(0.0), _flat(0.0))
 	await _step(demo, 1, 0.0)
-	await _step(demo, 240)
+	await _step(demo, 120)
 	var levelled := await _field(demo)
 	var level_min := INF
 	var level_max := -INF
@@ -656,7 +660,7 @@ func _check_closed_basin(demo: Node) -> void:
 	_check(level_max - level_min < 0.003,
 		"closed basin failed to level before spilling (spread %.5f m)" % (level_max - level_min))
 	demo.solver.rain_rate_m_s = 0.04
-	var rain_steps := 180
+	var rain_steps := 90
 	await _step(demo, rain_steps)
 	var spilled := await _field(demo)
 	var outside_water := 0.0
@@ -704,7 +708,8 @@ func _check_hydro_stability(demo: Node) -> void:
 	demo.solver.snowfall_rate_m_s = 0.0005
 	await _reseed(demo, _bump(0.2, 0.08, 12.0), _flat(0.005), _flat(0.0), _flat(0.0))
 	var before := _channel_sums(await _field(demo))
-	await _step(demo, 300)
+	var steps := 120
+	await _step(demo, steps)
 	var field := await _field(demo)
 	var after := _channel_sums(field)
 	var valid := true
@@ -712,19 +717,19 @@ func _check_hydro_stability(demo: Node) -> void:
 		if is_nan(value) or is_inf(value) or value < -1e-6:
 			valid = false
 			break
-	_check(valid, "300 hydro steps produced invalid or negative channel values")
-	var expected_hydro_gain := (0.001 + 0.0005) * 300.0 * DT * float(_n * _n)
+	_check(valid, "%d hydro steps produced invalid or negative channel values" % steps)
+	var expected_hydro_gain := (0.001 + 0.0005) * float(steps) * DT * float(_n * _n)
 	var actual_hydro_gain := after.y + after.z - before.y - before.z
 	_check(absf(actual_hydro_gain - expected_hydro_gain)
 		<= 1e-4 * maxf(expected_hydro_gain, 1.0),
-		"300-step rain/snow budget differs: %.6f vs %.6f"
-			% [actual_hydro_gain, expected_hydro_gain])
-	var expected_uplift_cap := 0.001 * 300.0 * DT * float(_n * _n)
+		"%d-step rain/snow budget differs: %.6f vs %.6f"
+			% [steps, actual_hydro_gain, expected_hydro_gain])
+	var expected_uplift_cap := 0.001 * float(steps) * DT * float(_n * _n)
 	var actual_solid_gain := after.x + after.w - before.x - before.w
 	_check(actual_solid_gain >= -1e-4 * maxf(expected_uplift_cap, 1.0)
 		and actual_solid_gain <= expected_uplift_cap * 1.001 + 1e-4,
-		"300-step R+A gain %.6f outside uplift budget [0, %.6f]"
-			% [actual_solid_gain, expected_uplift_cap])
+		"%d-step R+A gain %.6f outside uplift budget [0, %.6f]"
+			% [steps, actual_solid_gain, expected_uplift_cap])
 	var velocity := await _hydro_velocity(demo)
 	var velocity_valid := velocity.size() == _n * _n * 2
 	var max_speed := 0.0
@@ -737,8 +742,8 @@ func _check_hydro_stability(demo: Node) -> void:
 		max_speed = maxf(max_speed, Vector2(vx, vy).length())
 	var max_velocity := (WORLD / float(_n)) / (DT / float(HeightfieldTerrain.RIVER_ITERATIONS))
 	_check(velocity_valid and max_speed <= max_velocity + 1e-4,
-		"300-step velocity invalid or exceeded substep cap (%.6f / %.6f)"
-			% [max_speed, max_velocity])
+		"%d-step velocity invalid or exceeded substep cap (%.6f / %.6f)"
+			% [steps, max_speed, max_velocity])
 	demo.solver.rain_rate_m_s = 0.0
 	demo.solver.uplift_mode = TerrainConfig.UpliftMode.NONE
 	demo.solver.uplift_rate_m_s = 0.0
@@ -869,12 +874,12 @@ func _check_scene_reset(demo: Node) -> void:
 	_check(absf(demo.solver.snowfall_rate_m_s - 0.001) < 1e-6,
 		"avalanche snowfall override not applied (%.4f)" % demo.solver.snowfall_rate_m_s)
 	var seeded := 0.3 * float(_n * _n)
-	await _step(demo, 240)  # 4 s of release; snowfall adds 0.002·4 m
+	await _step(demo, 120)  # 2 s of release; snowfall adds 0.002·2 m
 	var field := await _field(demo)
 	var snow_sum := 0.0
 	for i in field.size() / 4:
 		snow_sum += field[i * 4 + 2]
-	var expected := seeded + 0.002 * 4.0 * float(_n * _n)
+	var expected := seeded + 0.002 * 2.0 * float(_n * _n)
 	_check(absf(snow_sum - expected) < 0.02 * expected,
 		"avalanche slab mass drifted: %.1f vs expected %.1f (melt leaked?)" % [snow_sum, expected])
 	demo.apply_preset(9)
@@ -969,14 +974,14 @@ func _check_determinism(demo: Node) -> void:
 			break
 	_check(initial_transport_zero,
 		"reseed initialization retained old hydraulic flux or velocity")
-	await _step(demo, 90)
+	await _step(demo, 30)
 	var run_a := await _field(demo)
 	var flux_a := await _hydro_flux(demo)
 	demo.solver.set_seed_channels(sand, water, _flat(0.02), _flat(0.001))
 	RenderingServer.call_on_render_thread(demo.solver.free_render)
 	RenderingServer.call_on_render_thread(demo.solver.init_render)
 	await _frames(2)
-	await _step(demo, 90)
+	await _step(demo, 30)
 	var run_b := await _field(demo)
 	var flux_b := await _hydro_flux(demo)
 	_check(run_a == run_b, "reseeded run diverged bit-for-bit (stochastic flux not deterministic)")

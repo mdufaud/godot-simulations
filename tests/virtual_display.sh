@@ -254,6 +254,15 @@ physics_test_run_process() {
 	deadline=$((SECONDS + timeout_seconds))
 
 	while :; do
+		# Opt-in fail-fast: a coroutine killed by a script error never quits, so
+		# waiting for the sentinel would only burn the whole timeout.
+		if [[ -n "${PHYSICS_TEST_FAIL_PATTERN:-}" ]] \
+			&& grep -q -- "$PHYSICS_TEST_FAIL_PATTERN" "$output_file" 2>/dev/null; then
+			physics_test_process_stop "$process_pid"
+			trap - INT TERM
+			return 1
+		fi
+
 		if grep -q -- "$pass_pattern" "$output_file" 2>/dev/null; then
 			grace_deadline=$((SECONDS + ${TEST_EXIT_GRACE:-2}))
 			while physics_test_process_alive "$process_pid" && (( SECONDS < grace_deadline )); do

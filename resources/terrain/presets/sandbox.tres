@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="TerrainPreset" format=3 uid="uid://sand_preset_sandbox"]
+
+[ext_resource type="Script" path="res://scripts/terrain/terrain_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+hint = "Dig, pour, smooth. The balls plough furrows you can steer with a left-click grab."
+display_name = "Sandbox dig"
+default_tool = 1
+walls_visible = true
+terrain = 0
+base_height_m = 0.35
+camera_target_m = Vector3(0, 0.3, 0)
+camera_distance_m = 4.5
+auto_pour_radius_m = 0.0
+balls_enabled = true
+ball_count = 2
+ball_track = 1

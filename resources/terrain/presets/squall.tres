@@ -1,0 +1,34 @@
+[gd_resource type="Resource" script_class="TerrainPreset" format=3 uid="uid://terrain_preset_squall"]
+
+[ext_resource type="Script" path="res://scripts/terrain/terrain_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Squall"
+default_tool = 1
+walls_visible = false
+terrain = 1
+base_height_m = 0.2
+dune_amplitude_m = 0.18
+dune_frequency = 0.4
+dune_seed = 55
+slope_deg = 3.0
+slope_direction_deg = 0.0
+water_level_m = 0.015
+camera_target_m = Vector3(0, 0.3, 0)
+camera_distance_m = 5.5
+melt_rate_m_s = 0.0
+evap_rate_m_s = 0.001
+snowfall_rate_m_s = 0.004
+freeze_rate_m_s = 0.0025
+sun_elevation_deg = 16.0
+sun_azimuth_deg = 150.0
+sun_color = Color(0.82, 0.86, 1, 1)
+sun_energy = 1.3
+sky_top = Color(0.38, 0.46, 0.6, 1)
+sky_horizon = Color(0.72, 0.76, 0.82, 1)
+fog_color = Color(0.7, 0.74, 0.8, 1)
+fog_density = 0.006
+exposure = 1.05
+snowfall = true
+hint = "Snow accumulates and the ponds freeze over. Push Melt up to thaw it all back to water."

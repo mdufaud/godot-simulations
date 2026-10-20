@@ -13,7 +13,7 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GODOT="${GODOT:-godot}"
 RESOLUTION="${RESOLUTION:-2340x1080}"
 TIMEOUT="${TIMEOUT:-180}"
-JOBS="${JOBS:-2}"
+JOBS="${JOBS:-1}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-logs-$$}"
 
 if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
@@ -93,7 +93,7 @@ run_demo() {
 		"$GODOT" --path "$PROJECT_DIR" \
 			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
 			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
+			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
 			--resolution "$RESOLUTION" \
 			--log-file "$godot_log" \
 			res://tests/ui_smoke.tscn -- "$demo"

@@ -1,0 +1,22 @@
+[gd_resource type="Resource" script_class="TerrainPreset" format=3 uid="uid://sand_preset_dunes"]
+
+[ext_resource type="Script" path="res://scripts/terrain/terrain_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+hint = "Transverse dunes with slip faces. Smooth the crests, or dig a barchan and watch it relax."
+sun_energy = 1.45
+sun_azimuth_deg = 115.0
+sun_elevation_deg = 24.0
+display_name = "Dunes"
+default_tool = 3
+walls_visible = false
+terrain = 1
+base_height_m = 0.12
+dune_amplitude_m = 0.26
+dune_frequency = 0.34
+dune_octaves = 4
+dune_seed = 7
+camera_target_m = Vector3(0, 0.35, 0)
+camera_distance_m = 5.5
+auto_pour_radius_m = 0.0

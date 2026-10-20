@@ -1,0 +1,13 @@
+[gd_resource type="Resource" script_class="ClothPreset" format=3 uid="uid://cloth_preset_linen_b"]
+
+[ext_resource type="Script" path="res://scripts/cloth/cloth_preset.gd" id="1_preset"]
+
+[resource]
+script = ExtResource("1_preset")
+display_name = "Linen B"
+pin = 1
+size_m = Vector2(2.1, 2.4)
+position_m = Vector3(-3.6, 0, -6.9)
+yaw_rad = 0.35
+top_m = 3.1
+color = Color(0.72, 0.78, 0.88, 1)
