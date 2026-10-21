@@ -16,10 +16,11 @@
 # checks, script error, timeout, crash signal or exit code) and its log.
 # Exit status: 0 every selected suite passed, 1 a suite failed, 2 bad usage.
 #
-# On a software Vulkan device (lavapipe, GPU-less hosts) the GPU suites run
-# with timeouts x10 (PHYSICS_TEST_TIMEOUT_SCALE) in a 640x360 window
-# (PHYSICS_TEST_RESOLUTION, empty for the project size); see virtual_display.sh.
-# The whole GPU phase still takes over an hour there: name the suites you need.
+# GPU suites assert behaviour, not image quality: they render in an 854x480
+# window (PHYSICS_TEST_RESOLUTION, empty for the project's 1280x720). On a
+# software Vulkan device (lavapipe, GPU-less hosts) the window drops to 640x360
+# and timeouts scale x5 (PHYSICS_TEST_TIMEOUT_SCALE); see virtual_display.sh.
+# The whole GPU phase takes well over an hour there: name the suites you need.
 #
 # All gate runners hold a shared lock on .godot/import.lock so an import
 # rebuild (tools/import.sh) cannot race a running suite's script parsing.
@@ -96,7 +97,7 @@ declare -a SUITES=(
 	"fluid_tier|gpu|-|-s res://tests/probe.gd -- fluid_tier"
 	"fire_cp_probe|gpu_unpaced|-|-s res://tests/fire_cp_probe_test.gd"
 	"fire_combustion_balance|gpu_unpaced|-|-s res://tests/fire_combustion_balance_test.gd"
-	"fire_water_balance|gpu_unpaced|-|-s res://tests/fire_water_balance_test.gd"
+	"fire_water_balance|gpu_unpaced|400|-s res://tests/fire_water_balance_test.gd"
 	"ui_smoke|ui|-|"
 )
 
@@ -113,7 +114,7 @@ for entry in "${SUITES[@]}"; do
 done
 
 usage() {
-	sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 selected=()
