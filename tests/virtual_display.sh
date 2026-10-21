@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+## Gate suites assert behaviour, not image quality: they render in a small
+## window (PHYSICS_TEST_RESOLUTION, exported by the display start; empty keeps
+## the project's 1280x720). Captures and the UI smoke pick their own size.
+PHYSICS_TEST_GATE_RESOLUTION="854x480"
+
 PHYSICS_TEST_DISPLAY_PID=""
 PHYSICS_TEST_DISPLAY_RUNTIME=""
 PHYSICS_TEST_DISPLAY_SOCKET=""
@@ -115,6 +120,7 @@ physics_test_display_start() {
 			export PHYSICS_TEST_DISPLAY_DRIVER="wayland"
 			export PHYSICS_TEST_RENDERING_DRIVER="vulkan"
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
+			export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-$PHYSICS_TEST_GATE_RESOLUTION}"
 			return 0
 		fi
 		# The setsid wrapper forks and exits when the caller is already a group
@@ -136,9 +142,8 @@ physics_test_display_start() {
 ## vars) plus PHYSICS_TEST_X11_DISPLAY, which callers pass as DISPLAY. On a
 ## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
 ## caller already set them: suite timeouts are scaled (PHYSICS_TEST_TIMEOUT_SCALE)
-## and gate windows shrink to PHYSICS_TEST_RESOLUTION, which cuts fragment cost
-## ~3x (suites that pin a root size read it through test_case.gd _root_size).
-## An empty PHYSICS_TEST_RESOLUTION keeps the project's window size.
+## and gate windows shrink further to 640x360, which cuts fragment cost ~3x
+## (suites that pin a root size read it through test_case.gd _root_size).
 physics_test_xvfb_start() {
 	local log_file="$1"
 	local width="$2"
@@ -173,6 +178,7 @@ physics_test_xvfb_start() {
 				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-10}"
 				export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-640x360}"
 			fi
+			export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-$PHYSICS_TEST_GATE_RESOLUTION}"
 			return 0
 		fi
 		if ! physics_test_process_alive "$PHYSICS_TEST_DISPLAY_PID"; then
