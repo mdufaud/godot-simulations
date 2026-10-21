@@ -140,7 +140,10 @@ void main() {
     vec2 p = query_points[index];
     query_results[index * 2 + 1] = vec4(0.0);
 
-    // Invert the summed horizontal displacement with damped Newton steps.
+    // Invert the summed horizontal displacement with damped Newton steps. The
+    // residual cannot drop below the float32 spacing of world positions (about
+    // 1 mm past 8 km), so the tolerance grows with the query's distance.
+    float tolerance = max(0.001, 3.6e-7 * max(abs(p.x), abs(p.y)));
     vec2 g = p;
     float height = 0.0;
     vec2 height_gradient = vec2(0.0);
@@ -159,7 +162,7 @@ void main() {
                 || !usable_jacobian(deformation, a, b, c, determinant)) {
             break;
         }
-        if (residual_length < 0.001) {
+        if (residual_length < tolerance) {
             break;
         }
         vec2 correction = vec2(
@@ -208,7 +211,7 @@ void main() {
     float c;
     float determinant;
     bool valid = finite_vec2(residual) && finite_vec2(height_gradient)
-        && finite_float(height) && length(residual) < 0.001
+        && finite_float(height) && length(residual) < tolerance
         && usable_jacobian(deformation, a, b, c, determinant);
     if (!valid) {
         query_results[index * 2] = vec4(0.0);
