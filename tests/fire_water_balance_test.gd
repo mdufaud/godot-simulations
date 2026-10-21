@@ -1,8 +1,12 @@
 extends "res://tests/test_case.gd"
 ## Water-phase balances on the live pipeline: droplet round-trip conservation
 ## (evaporation and drain off), the evaporation mass ledger (boiled-off vs H2O
-## gained, equal by Eq. 31), the h-convection and Eq. 27 Cp sensitivity table,
-## the wet-suppression ablation, and the sim-clock vs wall-clock separation.
+## gained, equal by Eq. 31) and the h-convection and Eq. 27 Cp sensitivity table.
+##
+## With `-- --publish` it then runs the published, unasserted diagnostics: the
+## wet-suppression ablation, the drain curve and the sim-clock vs wall-clock
+## separation. They hold no check and cost 60% of the frames, so the gate skips
+## them (on software Vulkan they alone take most of an hour).
 
 const FireSolver = preload("res://scripts/fire/fire_gpu_solver.gd")
 const DROPLET_MASS := 0.025 ## FireWater.DROPLET_MASS
@@ -150,6 +154,22 @@ func _run() -> void:
 			str(liquid_cp_total), str(evap_rates[50.0])])
 	await _reset_water()
 
+	if OS.get_cmdline_user_args().has("--publish"):
+		await _publish_diagnostics(solver, water)
+
+	_demo.queue_free()
+	await process_frame
+	print("WATER round_trip_mass=%s kg | evap=%s h2o=%s kg"
+		% [str(round_trip_mass), str(evaporated), str(gained)])
+	print("WATER h_sweep 25=%s 50=%s 100=%s kg | liquid_cp=%s kg (%.1f%% less)"
+		% [str(evap_rates[25.0]), str(evap_rates[50.0]), str(evap_rates[100.0]),
+		str(liquid_cp_total), cp_percent])
+	_finish("fire_water_balance")
+
+
+## Phases 5-7: measurements published every --publish run, deliberately not
+## asserted (see the phase comments).
+func _publish_diagnostics(solver, water) -> void:
 	# --- Phase 5: wet-suppression ablation on the gas burner -------------------
 	_phase(5)
 	_demo.set_fuel_mode(true)
@@ -212,16 +232,8 @@ func _run() -> void:
 	_demo.interaction.jet_enabled = false
 	_demo.set_capture_fixed_delta(1.0 / 30.0)
 
-	_demo.queue_free()
-	await process_frame
-	print("WATER round_trip_mass=%s kg | evap=%s h2o=%s kg"
-		% [str(round_trip_mass), str(evaporated), str(gained)])
-	print("WATER h_sweep 25=%s 50=%s 100=%s kg | liquid_cp=%s kg (%.1f%% less)"
-		% [str(evap_rates[25.0]), str(evap_rates[50.0]), str(evap_rates[100.0]),
-		str(liquid_cp_total), cp_percent])
 	print("WATER suppression medians 0=%s 20=%s 40=%s" % [
 		str(reaction_by_supp[0.0]), str(reaction_by_supp[20.0]),
 		str(reaction_by_supp[40.0])])
 	print("WATER drain_curve active=%s" % str(drain_curve))
 	print("WATER clock evap dt30=%s dt60=%s (expect ~2x)" % [str(base_rate), str(slow_rate)])
-	_finish("fire_water_balance")
