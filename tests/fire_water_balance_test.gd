@@ -16,6 +16,12 @@ func _median(values: Array) -> float:
 	return sorted[sorted.size() / 2]
 
 
+## Progress line per phase: the suite prints its results only at the end, and
+## on software Vulkan it runs for half an hour.
+func _phase(index: int) -> void:
+	print("WATER phase=%d t=%.0fs" % [index, Time.get_ticks_msec() / 1000.0])
+
+
 func _frames(n: int) -> void:
 	for frame in n:
 		await process_frame
@@ -63,6 +69,7 @@ func _run() -> void:
 	_demo.set_capture_fixed_delta(1.0 / 30.0)
 
 	# --- Phase 1: round-trip mass, evaporation and drain off ------------------
+	_phase(1)
 	solver.evaporation_enabled = false
 	water.evaporation_active = false
 	water.drain_rate = 0.0
@@ -85,6 +92,7 @@ func _run() -> void:
 	await _reset_water()
 
 	# --- Phase 2: evaporation mass ledger -------------------------------------
+	_phase(2)
 	solver.evaporation_enabled = true
 	water.evaporation_active = true
 	_demo.interaction.jet_enabled = true
@@ -108,6 +116,7 @@ func _run() -> void:
 	await _reset_water()
 
 	# --- Phase 3: h-convection sensitivity ------------------------------------
+	_phase(3)
 	var evap_rates: Dictionary = {}
 	for h_conv in [25.0, 50.0, 100.0]:
 		solver.droplet_heat_transfer = h_conv
@@ -125,6 +134,7 @@ func _run() -> void:
 	await _reset_water()
 
 	# --- Phase 4: Eq. 27 Cp A/B (gas Cp shipped vs liquid Cp) ------------------
+	_phase(4)
 	solver.droplet_heat_transfer = 50.0
 	solver.diagnostic_evap_liquid_cp = true
 	_demo.interaction.jet_enabled = true
@@ -141,6 +151,7 @@ func _run() -> void:
 	await _reset_water()
 
 	# --- Phase 5: wet-suppression ablation on the gas burner -------------------
+	_phase(5)
 	_demo.set_fuel_mode(true)
 	await _frames(30)
 	var reaction_by_supp: Dictionary = {}
@@ -163,6 +174,7 @@ func _run() -> void:
 	solver.water_suppression = 40.0
 
 	# --- Phase 6: the drain curve (NON-PAPER cleanup, published) ---------------
+	_phase(6)
 	solver.evaporation_enabled = false
 	water.evaporation_active = false
 	water.drain_rate = 0.2
@@ -180,6 +192,7 @@ func _run() -> void:
 	await _reset_water()
 
 	# --- Phase 7: sim clock vs wall clock --------------------------------------
+	_phase(7)
 	_demo.interaction.jet_enabled = true
 	var base_rate := 0.0
 	for frame in 120:
