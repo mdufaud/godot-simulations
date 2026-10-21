@@ -63,7 +63,7 @@ horizontal_alignment = 1
 layout_mode = 2
 theme_override_font_sizes/font_size = 16
 theme_override_colors/font_color = Color(0.5, 0.6, 0.7, 1)
-text = "Godot 4.6 + Jolt Physics + SSR"
+text = "Godot 4.7 + Jolt Physics + SSR"
 horizontal_alignment = 1
 
 [node name="Spacer" type="Control" parent="MarginContainer/VBoxContainer"]
@@ -123,5 +123,5 @@ grow_horizontal = 0
 grow_vertical = 0
 theme_override_font_sizes/font_size = 12
 theme_override_colors/font_color = Color(0.4, 0.45, 0.5, 1)
-text = "v1.0 - Godot 4.6"
+text = "v1.0 - Godot 4.7"
 horizontal_alignment = 2

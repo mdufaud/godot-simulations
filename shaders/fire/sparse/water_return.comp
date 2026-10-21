@@ -47,8 +47,7 @@ layout(push_constant, std430) uniform Params {
 	float origin_x;
 	float origin_y;
 	float origin_z;
-	// Only this stage declares the tail; water_scatter shares _particle_push() and
-	// reads the prefix above. Both land in the same 48-byte padded block.
+	// Only this stage declares the tail; water_scatter's block is the prefix above.
 	float drain_rate;
 	float dt;
 	// FireWater.drain_cutoff(): below this a droplet has soaked away.

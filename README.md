@@ -1,12 +1,12 @@
 # Physics Playground
 
-A collection of 15 real-time simulation and rendering demos built in Godot 4.6
+A collection of 15 real-time simulation and rendering demos built in Godot 4.7
 (Forward+ renderer, Jolt physics). Most run their solver on the GPU through
 `RenderingDevice` compute shaders.
 
 ## Requirements
 
-- **Godot 4.6** — Forward+ renderer, so a Vulkan/D3D12-capable GPU is required.
+- **Godot 4.7** — Forward+ renderer, so a Vulkan/D3D12-capable GPU is required.
   The Compatibility renderer will not work: it exposes no `RenderingDevice`.
 - **Python 3** — only to fetch the rock assets (standard library only, no pip install).
 
