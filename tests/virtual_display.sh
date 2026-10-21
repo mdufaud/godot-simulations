@@ -142,7 +142,7 @@ physics_test_display_start() {
 ## vars) plus PHYSICS_TEST_X11_DISPLAY, which callers pass as DISPLAY. On a
 ## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
 ## caller already set them: suite timeouts are scaled x5 (PHYSICS_TEST_TIMEOUT_SCALE;
-## the slowest gate measured 2.9x its budget there) and gate windows shrink
+## ocean_fft, the slowest gate, takes ~3x its budget there) and gate windows shrink
 ## further to 640x360, which cuts fragment cost ~3x
 ## (suites that pin a root size read it through test_case.gd _root_size).
 physics_test_xvfb_start() {
