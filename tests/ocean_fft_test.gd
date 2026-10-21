@@ -385,36 +385,7 @@ func _run() -> void:
 	_check(foam_drop > 0.0 and fresh_drop > 0.0,
 		"foam did not decay after injection stopped")
 	demo.apply_preset(3)
-
-	# 180 simulated seconds in 0.5 s steps: persistence must stay finite and
-	# bounded (no runaway growth, no washout). Fresh foam legitimately sits
-	# above persistent (it is the bright transient layer), so only the
-	# persistent band and the logistic bounds are asserted.
-	demo._capture_fixed_delta = 0.5
-	demo.set_frozen(false)
-	await _frames(360)
-	demo.set_frozen(true)
-	demo._capture_fixed_delta = -1.0
-	var near_settled := _near_rg(await _read_texture(
-		demo.solver.get_foam_near_read_tex_rid(), 0), near_size)
-	var persistent_mean := 0.0
-	var fresh_mean := 0.0
-	var max_value := 0.0
-	var texels := near_size * near_size
-	for i in range(0, texels, 4):
-		var r: float = near_settled[i * 2]
-		var g: float = near_settled[i * 2 + 1]
-		persistent_mean += r
-		fresh_mean += g
-		max_value = maxf(max_value, maxf(r, g))
-	persistent_mean /= float(ceil(texels / 4.0))
-	fresh_mean /= float(ceil(texels / 4.0))
-	_check(max_value <= 1.5,
-		"near foam overflowed its logistic bounds after 180 s (max %.3f)" % max_value)
-	_check(persistent_mean > 0.0 and persistent_mean < 0.8,
-		"near persistent foam unstable after 180 s (mean %.3f)" % persistent_mean)
-	_check(fresh_mean > 0.0 and fresh_mean <= 1.0,
-		"near fresh foam unstable after 180 s (mean %.3f)" % fresh_mean)
+	await _check_foam_soak(demo)
 
 	var loop_start: float = demo._sim_time
 	var at_start := await _read_texture(demo.solver.get_displacement_tex_rid(), 0)
@@ -1297,6 +1268,86 @@ func _ribbon_metrics(mask: PackedByteArray, map_size: int, sample_step: int) -> 
 		"small_pixel_fraction": float(isolated_pixels) / maxf(float(active_pixels), 1.0),
 		"dense_pixel_fraction": float(dense_pixels) / maxf(float(active_pixels), 1.0),
 	}
+
+
+## 60 simulated seconds of storm in 0.5 s steps, checked every 15 s: near foam
+## stays finite and inside its logistic bounds (no runaway growth, no washout),
+## the linear wave field keeps its energy, orbital velocities stay finite and
+## physical, and the fixed steps add up to 60 s.
+## Fresh foam legitimately sits above persistent (it is the bright transient
+## layer), so only the persistent band and the logistic bounds are asserted.
+func _check_foam_soak(demo: Node) -> void:
+	var solver: OceanSolver = demo.solver
+	var near_size: int = solver.foam_near_size
+	var start_time: float = demo._sim_time
+	var energies: Array[float] = []
+	var persistent_mean := 0.0
+	var fresh_mean := 0.0
+	demo._capture_fixed_delta = 0.5
+	for checkpoint in 4:
+		# Readbacks resume after frame_post_draw: re-align on process_frame so
+		# each unfrozen run is exactly 30 demo steps.
+		await process_frame
+		demo.set_frozen(false)
+		await _frames(30)
+		demo.set_frozen(true)
+		var elapsed := 15 * (checkpoint + 1)
+		var near := _near_rg(await _read_texture(solver.get_foam_near_read_tex_rid(), 0),
+			near_size)
+		var max_value := 0.0
+		var non_finite := 0
+		persistent_mean = 0.0
+		fresh_mean = 0.0
+		var samples := 0
+		for i in range(0, near_size * near_size, 4):
+			var r: float = near[i * 2]
+			var g: float = near[i * 2 + 1]
+			if not is_finite(r) or not is_finite(g):
+				non_finite += 1
+				continue
+			persistent_mean += r
+			fresh_mean += g
+			max_value = maxf(max_value, maxf(r, g))
+			samples += 1
+		persistent_mean /= maxf(samples, 1.0)
+		fresh_mean /= maxf(samples, 1.0)
+		var energy := 0.0
+		var speed_bound := 0.0
+		for cascade in 3:
+			var heights := _height_rms(await _read_texture(solver.get_displacement_tex_rid(), cascade))
+			energy += heights.sum_sq / maxf(heights.count, 1.0)
+			non_finite += heights.non_finite
+			var velocity := _rgba_half_values(await _read_texture(
+				solver.velocity_solver.get_texture_rid(), cascade), OceanVelocitySolver.VELOCITY_SIZE)
+			var max_speed := 0.0
+			for i in range(0, velocity.size(), 4):
+				var v := Vector3(velocity[i], velocity[i + 1], velocity[i + 2])
+				if not v.is_finite():
+					non_finite += 1
+					continue
+				max_speed = maxf(max_speed, v.length())
+			speed_bound += max_speed
+		energies.append(energy)
+		print("SOAK t=%ds persistent=%.4f fresh=%.4f max=%.4f height-rms=%.4f speed<=%.3f non-finite=%d" % [
+			elapsed, persistent_mean, fresh_mean, max_value, sqrt(energy), speed_bound, non_finite])
+		_check(non_finite == 0,
+			"%d non-finite foam/height/velocity values after %d s" % [non_finite, elapsed])
+		# The storm preset's summed per-cascade peaks sit near 8.4 m/s; 20 m/s
+		# means the velocity composition blew up.
+		_check(speed_bound < 20.0,
+			"orbital velocity reached %.2f m/s after %d s" % [speed_bound, elapsed])
+		_check(max_value <= 1.5,
+			"near foam overflowed its logistic bounds after %d s (max %.3f)" % [elapsed, max_value])
+		_check(absf(sqrt(energy / maxf(energies[0], 1e-12)) - 1.0) < 0.1,
+			"wave height RMS drifted to %.4f m after %d s (%.4f m at 15 s)"
+			% [sqrt(energy), elapsed, sqrt(energies[0])])
+	demo._capture_fixed_delta = -1.0
+	_check(is_equal_approx(demo._sim_time - start_time, 60.0 * demo.time_scale),
+		"120 fixed 0.5 s steps advanced %.3f s instead of 60" % (demo._sim_time - start_time))
+	_check(persistent_mean > 0.0 and persistent_mean < 0.8,
+		"near persistent foam unstable after 60 s (mean %.3f)" % persistent_mean)
+	_check(fresh_mean > 0.0 and fresh_mean <= 1.0,
+		"near fresh foam unstable after 60 s (mean %.3f)" % fresh_mean)
 
 
 func _check_swell_normalization(demo: Node) -> void:

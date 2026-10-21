@@ -141,8 +141,9 @@ physics_test_display_start() {
 ## Xvfb backend: same contract as kwin (lock, runtime dir, exported driver
 ## vars) plus PHYSICS_TEST_X11_DISPLAY, which callers pass as DISPLAY. On a
 ## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
-## caller already set them: suite timeouts are scaled (PHYSICS_TEST_TIMEOUT_SCALE)
-## and gate windows shrink further to 640x360, which cuts fragment cost ~3x
+## caller already set them: suite timeouts are scaled x5 (PHYSICS_TEST_TIMEOUT_SCALE;
+## the slowest gate measured 2.9x its budget there) and gate windows shrink
+## further to 640x360, which cuts fragment cost ~3x
 ## (suites that pin a root size read it through test_case.gd _root_size).
 physics_test_xvfb_start() {
 	local log_file="$1"
@@ -175,7 +176,7 @@ physics_test_xvfb_start() {
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
 			if command -v vulkaninfo >/dev/null 2>&1 \
 				&& ! vulkaninfo --summary 2>/dev/null | grep 'deviceType' | grep -qv 'PHYSICAL_DEVICE_TYPE_CPU'; then
-				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-10}"
+				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-5}"
 				export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-640x360}"
 			fi
 			export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-$PHYSICS_TEST_GATE_RESOLUTION}"
