@@ -602,13 +602,11 @@ func reset_droplets() -> void:
 	mass_measured_once = false
 
 
-## std430 rounds a push constant block up to a 16-byte multiple, and the driver
-## rejects anything shorter than the rounded size.
+## Unpadded: since Godot 4.7 the reflected block size is the exact std430 size, and
+## RenderingDevice rejects any other size, a 16-byte round-up included.
 func _push_bytes(ints: PackedInt32Array, floats: PackedFloat32Array) -> PackedByteArray:
 	var bytes := ints.to_byte_array()
 	bytes.append_array(floats.to_byte_array())
-	var padded := (bytes.size() + 15) / 16 * 16
-	bytes.resize(padded)
 	return bytes
 
 
@@ -619,8 +617,7 @@ func _particle_push() -> PackedByteArray:
 			_grid_origin.x, _grid_origin.y, _grid_origin.z]))
 
 
-## The scatter's block plus the drain the return applies to the particle mass. Both
-## pad to the same 48 bytes, so the two stages still share one dispatch size.
+## The scatter's block plus the drain the return applies to the particle mass.
 func _return_push() -> PackedByteArray:
 	return _push_bytes(
 		PackedInt32Array([particles_active, _grid_dims.x, _grid_dims.y, _grid_dims.z]),

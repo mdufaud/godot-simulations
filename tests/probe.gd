@@ -4808,7 +4808,7 @@ void main() {
 	var compute := rd.compute_list_begin()
 	rd.compute_list_bind_compute_pipeline(compute, pipeline)
 	rd.compute_list_bind_uniform_set(compute, uniform_set, 0)
-	var push_constants := PackedInt32Array([count, 0, 0, 0]).to_byte_array()
+	var push_constants := PackedInt32Array([count]).to_byte_array()
 	rd.compute_list_set_push_constant(compute, push_constants, push_constants.size())
 	rd.compute_list_dispatch(compute, ceili(float(count) / 64.0), 1, 1)
 	rd.compute_list_end()
