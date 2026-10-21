@@ -219,13 +219,18 @@ run_probe() {
 			--log-file "$godot_log" \
 			-s res://tests/probe.gd -- "$name" "$@" || status=$?
 
-	if rg -q '^(SCRIPT ERROR:|ERROR:|handle_crash:)' "$stdout_log" 2>/dev/null; then
+	local reason=""
+	if (( status != 0 )); then
+		reason="$(physics_test_describe_status "$status")"
+	elif grep -qE '^(SCRIPT ERROR:|ERROR:|handle_crash:)' "$stdout_log" 2>/dev/null; then
 		status=1
-	elif (( status == 0 )) && ! grep -q -- "$PROBE_SENTINEL" "$stdout_log" 2>/dev/null; then
+		reason="error lines in its output"
+	elif ! grep -q -- "$PROBE_SENTINEL" "$stdout_log" 2>/dev/null; then
 		status=1
+		reason="exited without its sentinel ($PROBE_SENTINEL)"
 	fi
 	if (( status != 0 )); then
-		printf 'probe: %s failed (exit %d); logs in %s\n' "$name" "$status" "$LOG_DIR" >&2
+		printf 'probe: %s failed: %s; logs in %s\n' "$name" "$reason" "$LOG_DIR" >&2
 		grep -m 3 -A 2 'SCRIPT ERROR:' "$stdout_log" >&2 || true
 		tail -n 30 "$stdout_log" >&2 || true
 		exit "$status"

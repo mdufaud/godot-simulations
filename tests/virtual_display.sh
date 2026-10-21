@@ -134,8 +134,11 @@ physics_test_display_start() {
 
 ## Xvfb backend: same contract as kwin (lock, runtime dir, exported driver
 ## vars) plus PHYSICS_TEST_X11_DISPLAY, which callers pass as DISPLAY. On a
-## CPU-only Vulkan device (lavapipe) frames are ~10x slower, so suite
-## timeouts are scaled unless PHYSICS_TEST_TIMEOUT_SCALE is already set.
+## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
+## caller already set them: suite timeouts are scaled (PHYSICS_TEST_TIMEOUT_SCALE)
+## and gate windows shrink to PHYSICS_TEST_RESOLUTION, which cuts fragment cost
+## ~3x; suites that size their own root viewport keep it. An empty
+## PHYSICS_TEST_RESOLUTION keeps the project's window size.
 physics_test_xvfb_start() {
 	local log_file="$1"
 	local width="$2"
@@ -165,9 +168,10 @@ physics_test_xvfb_start() {
 			export PHYSICS_TEST_DISPLAY_DRIVER="x11"
 			export PHYSICS_TEST_RENDERING_DRIVER="vulkan"
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
-			if [[ -z "${PHYSICS_TEST_TIMEOUT_SCALE:-}" ]] && command -v vulkaninfo >/dev/null 2>&1 \
+			if command -v vulkaninfo >/dev/null 2>&1 \
 				&& ! vulkaninfo --summary 2>/dev/null | grep 'deviceType' | grep -qv 'PHYSICAL_DEVICE_TYPE_CPU'; then
-				export PHYSICS_TEST_TIMEOUT_SCALE=10
+				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-10}"
+				export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-640x360}"
 			fi
 			return 0
 		fi
@@ -304,6 +308,19 @@ physics_test_process_stop() {
 		kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
 	fi
 	wait "$pid" 2>/dev/null || true
+}
+
+
+## Human-readable cause for a physics_test_run_process status.
+physics_test_describe_status() {
+	local status="$1"
+	if (( status == 124 )); then
+		printf 'timed out'
+	elif (( status > 128 )); then
+		printf 'crashed with SIG%s' "$(kill -l $((status - 128)) 2>/dev/null || echo $((status - 128)))"
+	else
+		printf 'exited with code %d' "$status"
+	fi
 }
 
 

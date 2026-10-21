@@ -1,14 +1,28 @@
 #!/usr/bin/env bash
 # Runs the value gates headless (CPU suites, no window, no GPU), then — only
-# with GPU=1 — the rendering suites in an invisible virtual Wayland display.
+# with GPU=1 — the rendering suites in an invisible virtual display (kwin
+# Wayland, or Xvfb + software Vulkan on GPU-less hosts).
 #
-#   tests/run_tests.sh                 # CPU/value gates only (the default gate)
-#   GPU=1 tests/run_tests.sh           # + ocean FFT/physics, portal views, scene cycle, fluid foam, UI smoke
-#   GODOT=/path/to/godot JOBS=1 tests/run_tests.sh
+#   tests/run_tests.sh                    # CPU/value gates only (the default gate)
+#   GPU=1 tests/run_tests.sh              # + ocean FFT/physics, portal views, scene cycle, fluid foam, UI smoke
+#   tests/run_tests.sh ocean_fft terrain  # only these suites; GPU ones start the display
+#   tests/run_tests.sh --list             # suite names and kinds
+#   GODOT=/path/to/godot JOBS=4 GPU_JOBS=1 tests/run_tests.sh
 #
-# JOBS caps the concurrently running suites in both phases (default 1). All
-# gate runners hold a shared lock on .godot/import.lock so an import rebuild
-# (tools/import.sh) cannot race a running suite's script parsing.
+# JOBS caps the concurrent CPU suites, GPU_JOBS the concurrent GPU suites
+# (default 1 each). TIMEOUT is the default per-suite budget in seconds and
+# <SUITE>_TIMEOUT (e.g. OCEAN_FFT_TIMEOUT) overrides one suite. Each result
+# line carries the suite's wall time; a failure names its cause (failed
+# checks, script error, timeout, crash signal or exit code) and its log.
+# Exit status: 0 every selected suite passed, 1 a suite failed, 2 bad usage.
+#
+# On a software Vulkan device (lavapipe, GPU-less hosts) the GPU suites run
+# with timeouts x10 (PHYSICS_TEST_TIMEOUT_SCALE) in a 640x360 window
+# (PHYSICS_TEST_RESOLUTION, empty for the project size); see virtual_display.sh.
+# The whole GPU phase still takes over an hour there: name the suites you need.
+#
+# All gate runners hold a shared lock on .godot/import.lock so an import
+# rebuild (tools/import.sh) cannot race a running suite's script parsing.
 #
 # Screenshots are evidence tools, not gates: tools/capture.sh (any demo) and
 # tests/run_mixwell_capture.sh (mixwell, GPU oracle) are run by hand.
@@ -19,12 +33,131 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GODOT="${GODOT:-godot}"
 TIMEOUT="${TIMEOUT:-180}"
 JOBS="${JOBS:-1}"
+GPU_JOBS="${GPU_JOBS:-1}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-logs-$$}"
 
-if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
-	printf 'Invalid JOBS: %s\n' "$JOBS" >&2
-	exit 2
-fi
+# name|kind|timeout|godot arguments. Kinds: cpu (headless), gpu (virtual
+# display, 30 simulated fps), gpu_unpaced (virtual display, real-time clock),
+# ui (tests/run_ui_smoke.sh over every registered demo). Timeout "-" means
+# $TIMEOUT. Every suite prints "TEST PASS <name>" when it passes.
+#
+# Every Godot process renders 30 frames per simulated second, each frame
+# advancing exactly 1/30 s, and at most 30 per wall second, so a gate leaves
+# the machine usable. Suites wait in simulated seconds, never frame counts.
+declare -a SUITES=(
+	"ambient_fluid|cpu|-|-s res://tests/ambient_fluid_test.gd"
+	"ambient_fluid_phase3|cpu|-|-s res://tests/ambient_fluid_phase3_test.gd"
+	"ambient_fluid_phase4|cpu|-|-s res://tests/ambient_fluid_phase4_test.gd"
+	"ambient_fluid_validation|cpu|-|-s res://tests/ambient_fluid_validation_test.gd"
+	"ambient_fluid_preprocessor|cpu|-|-s res://tests/ambient_fluid_preprocessor_test.gd"
+	"ambient_fluid_float|cpu|-|-s res://tests/ambient_fluid_float_test.gd"
+	"portal_math|cpu|-|-s res://tests/portal_math_test.gd"
+	"river_field|cpu|-|-s res://tests/river_field_test.gd"
+	"river_boot|cpu|-|-s res://tests/river_boot_test.gd"
+	"river_waterfall_curtain|cpu|-|-s res://tests/river_waterfall_curtain_test.gd"
+	"growing_corridor_state|cpu|-|-s res://tests/growing_corridor_state_test.gd"
+	"apparent_scale|cpu|-|-s res://tests/apparent_scale_test.gd"
+	"wrap_world_state|cpu|-|-s res://tests/wrap_world_state_test.gd"
+	"holonomy_state|cpu|-|-s res://tests/holonomy_state_test.gd"
+	"grab_controller|cpu|-|-s res://tests/grab_controller_test.gd"
+	"fire_clock|cpu|-|-s res://tests/fire_clock_test.gd"
+	"fire_vorticity|cpu|-|-s res://tests/fire_vorticity_test.gd"
+	"cell_propagation|cpu|-|-s res://tests/cell_propagation_test.gd"
+	"fire_ssot|cpu|-|-s res://tests/fire_ssot_test.gd"
+	"fire_fuels|cpu|-|-s res://tests/fire_fuels_test.gd"
+	"wood_pyrolysis|cpu|-|-s res://tests/wood_pyrolysis_test.gd"
+	"fire_auto_ladder|cpu|-|-s res://tests/fire_auto_ladder_test.gd"
+	"fire_display_box|cpu|-|-s res://tests/fire_display_box_test.gd"
+	"fire_atlas|cpu|-|-s res://tests/fire_atlas_test.gd"
+	"fractal_math|cpu|-|-s res://tests/fractal_math_test.gd"
+	"fractal_de|cpu|-|-s res://tests/fractal_de_test.gd"
+	"mixwell|cpu|-|-s res://tests/mixwell_test.gd"
+	"gpu_timing_store|cpu|-|-s res://tests/gpu_timing_store_test.gd"
+	"voronoi_fracture|cpu|-|-s res://tests/voronoi_fracture_test.gd"
+	"tornado_wind_field|cpu|-|-s res://tests/tornado_wind_field_test.gd"
+	"cloth_wind|cpu|-|-s res://tests/cloth_wind_test.gd"
+	"sim_step_clock|cpu|-|-s res://tests/sim_step_clock_test.gd"
+	"nbody_values|cpu|-|-s res://tests/nbody_value_test.gd"
+	"quality_profiles|cpu|-|-s res://tests/quality_profiles_test.gd"
+	"ocean_buoyancy|cpu|-|-s res://tests/ocean_buoyancy_test.gd"
+	"ocean_parameters|cpu|-|-s res://tests/ocean_parameter_test.gd"
+	"ocean_coastal_config|cpu|-|-s res://tests/ocean_coastal_config_test.gd"
+	"ocean_ssot|cpu|-|-s res://tests/ocean_ssot_test.gd"
+	"alpine_terrain|cpu|-|-s res://tests/alpine_terrain_test.gd"
+	"non_euclidean|gpu|-|-s res://tests/non_euclidean_runner.gd"
+	"ocean_fft|gpu|600|-s res://tests/ocean_fft_test.gd"
+	"ocean_physics|gpu|-|-s res://tests/ocean_physics_test.gd"
+	"ocean_shore|gpu|-|-s res://tests/ocean_shore_test.gd"
+	"ocean_island|gpu|-|-s res://tests/ocean_island_test.gd"
+	"scene_cycle|gpu|-|-s res://tests/scene_cycle_test.gd"
+	"tornado_boot_look|gpu|-|-s res://tests/probe.gd -- tornado_boot_look"
+	"terrain|gpu|300|-s res://tests/terrain_test.gd"
+	"fluid_foam|gpu|-|-s res://tests/probe.gd -- fluid_foam"
+	"fluid_tier|gpu|-|-s res://tests/probe.gd -- fluid_tier"
+	"fire_cp_probe|gpu_unpaced|-|-s res://tests/fire_cp_probe_test.gd"
+	"fire_combustion_balance|gpu_unpaced|-|-s res://tests/fire_combustion_balance_test.gd"
+	"fire_water_balance|gpu_unpaced|-|-s res://tests/fire_water_balance_test.gd"
+	"ui_smoke|ui|-|"
+)
+
+declare -a SUITE_NAMES=()
+declare -A SUITE_KIND=()
+declare -A SUITE_TIMEOUT=()
+declare -A SUITE_ARGS=()
+for entry in "${SUITES[@]}"; do
+	IFS='|' read -r name kind timeout args <<<"$entry"
+	SUITE_NAMES+=("$name")
+	SUITE_KIND[$name]="$kind"
+	SUITE_TIMEOUT[$name]="$timeout"
+	SUITE_ARGS[$name]="$args"
+done
+
+usage() {
+	sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+selected=()
+for arg in "$@"; do
+	case "$arg" in
+		-h|--help) usage; exit 0 ;;
+		--list)
+			for name in "${SUITE_NAMES[@]}"; do
+				printf '%-28s %s\n' "$name" "${SUITE_KIND[$name]}"
+			done
+			exit 0
+			;;
+		-*) printf 'Unknown option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
+		*)
+			if [[ -z "${SUITE_KIND[$arg]:-}" ]]; then
+				printf 'Unknown suite: %s (tests/run_tests.sh --list)\n' "$arg" >&2
+				exit 2
+			fi
+			selected+=("$arg")
+			;;
+	esac
+done
+for var in JOBS GPU_JOBS TIMEOUT; do
+	if ! [[ "${!var}" =~ ^[1-9][0-9]*$ ]]; then
+		printf 'Invalid %s: %s\n' "$var" "${!var}" >&2
+		exit 2
+	fi
+done
+
+cpu_queue=()
+gpu_queue=()
+for name in "${SUITE_NAMES[@]}"; do
+	if (( ${#selected[@]} > 0 )); then
+		[[ " ${selected[*]} " == *" $name "* ]] || continue
+	elif [[ "${SUITE_KIND[$name]}" != cpu && "${GPU:-0}" != "1" ]]; then
+		continue
+	fi
+	if [[ "${SUITE_KIND[$name]}" == cpu ]]; then
+		cpu_queue+=("$name")
+	else
+		gpu_queue+=("$name")
+	fi
+done
+
 mkdir -p "$LOG_DIR"
 LOG_DIR="$(cd "$LOG_DIR" && pwd)"
 export LOG_DIR
@@ -44,14 +177,15 @@ flock -s 9
 source "$SCRIPT_DIR/virtual_display.sh"
 
 failed=()
-cpu_pids=()
-cpu_names=()
+active_pids=()
+active_names=()
+run_start=$SECONDS
 
 cleanup() {
 	local status=$?
 	local pid
-	for pid in "${cpu_pids[@]:-}"; do
-		physics_test_process_stop "$pid"
+	for pid in "${active_pids[@]:-}"; do
+		[[ -n "$pid" ]] && physics_test_process_stop "$pid"
 	done
 	physics_test_display_stop
 	exit "$status"
@@ -59,401 +193,154 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-run_cpu_suite() {
-	local name="$1"
-	local script="$2"
-	local output_file="$LOG_DIR/cpu-${name}.stdout.log"
-	local godot_log="$LOG_DIR/cpu-${name}.godot.log"
-	local status=0
-
-	# Every Godot process renders 30 frames per simulated second, each frame
-	# advancing exactly 1/30 s, and at most 30 per wall second, so a gate leaves
-	# the machine usable. Suites wait in simulated seconds, never frame counts.
-	physics_test_run_process "$TIMEOUT" "^TEST PASS $name$" "$output_file" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--log-file "$godot_log" --headless --audio-driver Dummy --fixed-fps 30 --max-fps 30 \
-			-s "$script"
+suite_output() {
+	local prefix="cpu"
+	[[ "${SUITE_KIND[$1]}" == cpu ]] || prefix="gpu"
+	printf '%s/%s-%s.stdout.log' "$LOG_DIR" "$prefix" "$1"
 }
 
-report_cpu_suite() {
+## Runs one suite to completion (in a background subshell) and leaves
+## "<status> <seconds>" in <name>.result for report_suite.
+run_suite() {
 	local name="$1"
-	local status="$2"
-	local output_file="$LOG_DIR/cpu-${name}.stdout.log"
+	local kind="${SUITE_KIND[$name]}"
+	local output_file
+	output_file="$(suite_output "$name")"
+	local godot_log="${output_file%.stdout.log}.godot.log"
+	local override="${name^^}_TIMEOUT"
+	local timeout="${!override:-${SUITE_TIMEOUT[$name]}}"
+	[[ "$timeout" == "-" ]] && timeout="$TIMEOUT"
+	local -a args=()
+	read -ra args <<<"${SUITE_ARGS[$name]}"
+	local -a cmd=()
+	case "$kind" in
+		cpu)
+			cmd=("$GODOT" --path "$PROJECT_DIR" --log-file "$godot_log" --headless
+				--audio-driver Dummy --fixed-fps 30 --max-fps 30)
+			;;
+		gpu|gpu_unpaced)
+			cmd=(env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"}
+				XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR"
+				WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY"
+				"$GODOT" --path "$PROJECT_DIR" --log-file "$godot_log"
+				--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER"
+				--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER"
+				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER")
+			if [[ "$kind" == gpu ]]; then
+				cmd+=(--fixed-fps 30 --max-fps 30 --disable-vsync)
+			fi
+			if [[ -n "${PHYSICS_TEST_RESOLUTION:-}" ]]; then
+				cmd+=(--resolution "$PHYSICS_TEST_RESOLUTION")
+			fi
+			;;
+	esac
+	local start=$SECONDS
+	local status=0
+	local sentinel=1
+	if [[ "$kind" == ui ]]; then
+		JOBS="$GPU_JOBS" GODOT="$GODOT" TIMEOUT="$timeout" \
+			"$SCRIPT_DIR/run_ui_smoke.sh" >"$output_file" 2>&1 || status=$?
+	else
+		physics_test_run_process "$timeout" "^TEST PASS ${name}\$" "$output_file" \
+			"${cmd[@]}" "${args[@]}" || status=$?
+		grep -q "^TEST PASS ${name}\$" "$output_file" || sentinel=0
+	fi
+	printf '%d %d %d\n' "$status" "$((SECONDS - start))" "$sentinel" >"$LOG_DIR/${name}.result"
+}
 
-	if (( status == 0 )); then
-		printf 'TEST PASS %s\n' "$name"
+## Prints the PASS line, or the FAIL line with its cause, the failed checks
+## (push_error lines, engine exit-leak noise filtered) and the log path.
+report_suite() {
+	local name="$1"
+	local status=1
+	local seconds=0
+	local sentinel=0
+	local output_file
+	output_file="$(suite_output "$name")"
+	if [[ -f "$LOG_DIR/${name}.result" ]]; then
+		read -r status seconds sentinel <"$LOG_DIR/${name}.result"
+	fi
+	if (( status == 0 && sentinel == 1 )); then
+		printf 'TEST PASS %s (%ds)\n' "$name" "$seconds"
 		return
 	fi
-	if grep -q '^TEST FAIL' "$output_file"; then
-		grep '^TEST FAIL' "$output_file" || true
-	elif grep -q '^SCRIPT ERROR' "$output_file"; then
-		printf 'TEST FAIL %s: %s\n' "$name" "$(grep -m1 '^SCRIPT ERROR' "$output_file")" >&2
+	local reason
+	if (( status == 124 )); then
+		reason="timed out after ${seconds}s"
+	elif grep -q '^TEST FAIL' "$output_file" 2>/dev/null; then
+		reason="$(grep -m1 '^TEST FAIL' "$output_file" | sed 's/^TEST FAIL [^:]*: *//')"
+	elif grep -q '^SCRIPT ERROR' "$output_file" 2>/dev/null; then
+		reason="$(grep -m1 '^SCRIPT ERROR' "$output_file")"
+	elif grep -q '^SMOKE FAIL' "$output_file" 2>/dev/null; then
+		reason="$(grep -c '^SMOKE FAIL' "$output_file") demo(s) failed"
+	elif (( status == 0 )); then
+		reason="exited 0 without printing TEST PASS ${name}"
 	else
-		printf 'TEST FAIL %s: crashed, timed out, or missing pass sentinel\n' "$name" >&2
+		reason="$(physics_test_describe_status "$status")"
 	fi
-	printf 'Log: %s\n' "$output_file" >&2
+	printf 'TEST FAIL %s (%ds): %s\n' "$name" "$seconds" "$reason" >&2
+	grep -E '^(ERROR: |SCRIPT ERROR|SMOKE FAIL)' "$output_file" 2>/dev/null \
+		| grep -v -e 'leaked at exit' -e 'were never freed' -e 'resources still in use at exit' \
+		| grep -vxF -- "$reason" | head -n 8 | sed 's/^/    /' >&2 || true
+	printf '    log: %s\n' "$output_file" >&2
 	failed+=("$name")
 }
 
-reap_cpu_suite() {
-	local pid="${cpu_pids[0]}"
-	local name="${cpu_names[0]}"
-	local status=0
-	if wait "$pid"; then
-		status=0
-	else
-		status=$?
-	fi
-	report_cpu_suite "$name" "$status"
-	cpu_pids=("${cpu_pids[@]:1}")
-	cpu_names=("${cpu_names[@]:1}")
+reap_oldest() {
+	wait "${active_pids[0]}" || true
+	report_suite "${active_names[0]}"
+	active_pids=("${active_pids[@]:1}")
+	active_names=("${active_names[@]:1}")
 }
 
-declare -a CPU_SUITES=(
-	"ambient_fluid|res://tests/ambient_fluid_test.gd"
-	"ambient_fluid_phase3|res://tests/ambient_fluid_phase3_test.gd"
-	"ambient_fluid_phase4|res://tests/ambient_fluid_phase4_test.gd"
-	"ambient_fluid_validation|res://tests/ambient_fluid_validation_test.gd"
-	"ambient_fluid_preprocessor|res://tests/ambient_fluid_preprocessor_test.gd"
-	"ambient_fluid_float|res://tests/ambient_fluid_float_test.gd"
-	"portal_math|res://tests/portal_math_test.gd"
-	"river_field|res://tests/river_field_test.gd"
-	"river_boot|res://tests/river_boot_test.gd"
-	"river_waterfall_curtain|res://tests/river_waterfall_curtain_test.gd"
-	"growing_corridor_state|res://tests/growing_corridor_state_test.gd"
-	"apparent_scale|res://tests/apparent_scale_test.gd"
-	"wrap_world_state|res://tests/wrap_world_state_test.gd"
-	"holonomy_state|res://tests/holonomy_state_test.gd"
-	"grab_controller|res://tests/grab_controller_test.gd"
-	"fire_clock|res://tests/fire_clock_test.gd"
-	"fire_vorticity|res://tests/fire_vorticity_test.gd"
-	"cell_propagation|res://tests/cell_propagation_test.gd"
-	"fire_ssot|res://tests/fire_ssot_test.gd"
-	"fire_fuels|res://tests/fire_fuels_test.gd"
-	"wood_pyrolysis|res://tests/wood_pyrolysis_test.gd"
-	"fire_auto_ladder|res://tests/fire_auto_ladder_test.gd"
-	"fire_display_box|res://tests/fire_display_box_test.gd"
-	"fire_atlas|res://tests/fire_atlas_test.gd"
-	"fractal_math|res://tests/fractal_math_test.gd"
-	"fractal_de|res://tests/fractal_de_test.gd"
-	"mixwell|res://tests/mixwell_test.gd"
-	"gpu_timing_store|res://tests/gpu_timing_store_test.gd"
-	"voronoi_fracture|res://tests/voronoi_fracture_test.gd"
-	"tornado_wind_field|res://tests/tornado_wind_field_test.gd"
-	"cloth_wind|res://tests/cloth_wind_test.gd"
-	"sim_step_clock|res://tests/sim_step_clock_test.gd"
-	"nbody_values|res://tests/nbody_value_test.gd"
-	"quality_profiles|res://tests/quality_profiles_test.gd"
-	"ocean_buoyancy|res://tests/ocean_buoyancy_test.gd"
-	"ocean_parameters|res://tests/ocean_parameter_test.gd"
-	"ocean_coastal_config|res://tests/ocean_coastal_config_test.gd"
-	"ocean_ssot|res://tests/ocean_ssot_test.gd"
-	"alpine_terrain|res://tests/alpine_terrain_test.gd"
-)
-for suite in "${CPU_SUITES[@]}"; do
-	name="${suite%%|*}"
-	script="${suite#*|}"
-	run_cpu_suite "$name" "$script" &
-	cpu_pids+=("$!")
-	cpu_names+=("$name")
-	if (( ${#cpu_pids[@]} >= JOBS )); then
-		reap_cpu_suite
-	fi
-done
-while (( ${#cpu_pids[@]} > 0 )); do
-	reap_cpu_suite
-done
-
-# The GPU phase boots a virtual Wayland compositor and renders real frames —
-# heavy, and it contends with everything else running on the machine. It is a
-# last resort: opt in with GPU=1 for compute suites (ocean FFT/physics, portal views),
-# the fluid foam decay gate, the full scene cycle and the SimMenu touch smoke.
-# Evidence captures are never part of the gate: use tools/capture.sh and
-# tests/run_mixwell_capture.sh by hand instead.
-if [[ "${GPU:-0}" != "1" ]]; then
-	if (( ${#failed[@]} > 0 )); then
-		printf 'Failed suites: %s\n' "${failed[*]}" >&2
-		printf 'Logs: %s\n' "$LOG_DIR" >&2
-		exit 1
-	fi
-	printf 'CPU/value gates passed (GPU suites skipped; run with GPU=1 to include them)\n'
-	exit 0
-fi
-
-	if ! physics_test_display_start "$LOG_DIR/virtual-display.log"; then
-		failed+=(non_euclidean ocean_fft ocean_physics scene_cycle tornado_boot_look fluid_foam fluid_tier ui_smoke)
-	else
-	export PHYSICS_TEST_DISPLAY_DRIVER
-	export PHYSICS_TEST_RENDERING_DRIVER
-	export PHYSICS_TEST_AUDIO_DRIVER
-
-	non_euclidean_output="$LOG_DIR/gpu-non_euclidean.stdout.log"
-	non_euclidean_log="$LOG_DIR/gpu-non_euclidean.godot.log"
-	non_euclidean_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS non_euclidean$' "$non_euclidean_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$non_euclidean_log" \
-			-s res://tests/non_euclidean_runner.gd || non_euclidean_status=$?
-	if (( non_euclidean_status == 0 )) && grep -q '^TEST PASS non_euclidean$' "$non_euclidean_output"; then
-		printf 'TEST PASS non_euclidean\n'
-	else
-		printf 'TEST FAIL non_euclidean: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$non_euclidean_output" >&2
-		failed+=(non_euclidean)
-	fi
-
-	ocean_fft_output="$LOG_DIR/gpu-ocean_fft.stdout.log"
-	ocean_fft_log="$LOG_DIR/gpu-ocean_fft.godot.log"
-	ocean_fft_status=0
-	physics_test_run_process "${OCEAN_FFT_TIMEOUT:-600}" '^TEST PASS ocean_fft$' "$ocean_fft_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$ocean_fft_log" \
-			-s res://tests/ocean_fft_test.gd || ocean_fft_status=$?
-	if (( ocean_fft_status == 0 )) && grep -q '^TEST PASS ocean_fft$' "$ocean_fft_output"; then
-		printf 'TEST PASS ocean_fft\n'
-	else
-		printf 'TEST FAIL ocean_fft: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$ocean_fft_output" >&2
-		failed+=(ocean_fft)
-	fi
-
-	ocean_physics_output="$LOG_DIR/gpu-ocean_physics.stdout.log"
-	ocean_physics_log="$LOG_DIR/gpu-ocean_physics.godot.log"
-	ocean_physics_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS ocean_physics$' "$ocean_physics_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$ocean_physics_log" \
-			-s res://tests/ocean_physics_test.gd || ocean_physics_status=$?
-	if (( ocean_physics_status == 0 )) && grep -q '^TEST PASS ocean_physics$' "$ocean_physics_output"; then
-		printf 'TEST PASS ocean_physics\n'
-	else
-		printf 'TEST FAIL ocean_physics: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$ocean_physics_output" >&2
-		failed+=(ocean_physics)
-	fi
-
-	for ocean_suite in ocean_shore ocean_island; do
-		ocean_output="$LOG_DIR/gpu-${ocean_suite}.stdout.log"
-		ocean_status=0
-		physics_test_run_process "$TIMEOUT" "^TEST PASS ${ocean_suite}$" "$ocean_output" \
-			env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-			XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-			WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-			"$GODOT" --path "$PROJECT_DIR" \
-				--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-				--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-				--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-				--log-file "$LOG_DIR/gpu-${ocean_suite}.godot.log" \
-				-s "res://tests/${ocean_suite}_test.gd" || ocean_status=$?
-		if (( ocean_status == 0 )); then
-			printf 'TEST PASS %s\n' "$ocean_suite"
-		else
-			printf 'TEST FAIL %s; log: %s\n' "$ocean_suite" "$ocean_output" >&2
-			failed+=("$ocean_suite")
-		fi
+## Runs the named suites with at most $1 in flight, reporting in start order.
+run_pool() {
+	local max="$1"
+	shift
+	local name
+	for name in "$@"; do
+		run_suite "$name" &
+		active_pids+=("$!")
+		active_names+=("$name")
+		while (( ${#active_pids[@]} >= max )); do
+			reap_oldest
+		done
 	done
+	while (( ${#active_pids[@]} > 0 )); do
+		reap_oldest
+	done
+}
 
-	scene_cycle_output="$LOG_DIR/gpu-scene_cycle.stdout.log"
-	scene_cycle_log="$LOG_DIR/gpu-scene_cycle.godot.log"
-	scene_cycle_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS scene_cycle$' "$scene_cycle_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$scene_cycle_log" \
-			-s res://tests/scene_cycle_test.gd || scene_cycle_status=$?
-	if (( scene_cycle_status == 0 )) && grep -q '^TEST PASS scene_cycle$' "$scene_cycle_output"; then
-		printf 'TEST PASS scene_cycle\n'
+run_pool "$JOBS" "${cpu_queue[@]}"
+
+# The GPU phase boots a virtual display and renders real frames — heavy, and it
+# contends with everything else running on the machine. It is a last resort:
+# opt in with GPU=1 (or name GPU suites) for compute suites (ocean FFT/physics,
+# portal views), the fluid foam decay gate, the full scene cycle and the
+# SimMenu touch smoke. Evidence captures are never part of the gate.
+if (( ${#gpu_queue[@]} > 0 )); then
+	if physics_test_display_start "$LOG_DIR/virtual-display.log"; then
+		run_pool "$GPU_JOBS" "${gpu_queue[@]}"
+		physics_test_display_stop
 	else
-		printf 'TEST FAIL scene_cycle: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$scene_cycle_output" >&2
-		failed+=(scene_cycle)
-	fi
-
-	tornado_look_output="$LOG_DIR/gpu-tornado_boot_look.stdout.log"
-	tornado_look_log="$LOG_DIR/gpu-tornado_boot_look.godot.log"
-	tornado_look_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS tornado_boot_look$' "$tornado_look_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$tornado_look_log" \
-			-s res://tests/probe.gd -- tornado_boot_look || tornado_look_status=$?
-	if (( tornado_look_status == 0 )) && grep -q '^TEST PASS tornado_boot_look$' "$tornado_look_output"; then
-		printf 'TEST PASS tornado_boot_look\n'
-	else
-		printf 'TEST FAIL tornado_boot_look: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$tornado_look_output" >&2
-		failed+=(tornado_boot_look)
-	fi
-
-	terrain_output="$LOG_DIR/gpu-terrain.stdout.log"
-	terrain_log="$LOG_DIR/gpu-terrain.godot.log"
-	terrain_status=0
-	physics_test_run_process "${TERRAIN_TIMEOUT:-300}" '^TEST PASS terrain$' "$terrain_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$terrain_log" \
-			-s res://tests/terrain_test.gd || terrain_status=$?
-	if (( terrain_status == 0 )) && grep -q '^TEST PASS terrain$' "$terrain_output"; then
-		printf 'TEST PASS terrain\n'
-	else
-		printf 'TEST FAIL terrain: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$terrain_output" >&2
-		failed+=(terrain)
-	fi
-
-	fluid_foam_output="$LOG_DIR/gpu-fluid_foam.stdout.log"
-	fluid_foam_log="$LOG_DIR/gpu-fluid_foam.godot.log"
-	fluid_foam_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_foam$' "$fluid_foam_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$fluid_foam_log" \
-			-s res://tests/probe.gd -- fluid_foam || fluid_foam_status=$?
-	if (( fluid_foam_status == 0 )) && grep -q '^TEST PASS fluid_foam$' "$fluid_foam_output"; then
-		printf 'TEST PASS fluid_foam\n'
-	else
-		printf 'TEST FAIL fluid_foam: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$fluid_foam_output" >&2
-		failed+=(fluid_foam)
-	fi
-
-	fluid_tier_output="$LOG_DIR/gpu-fluid_tier.stdout.log"
-	fluid_tier_log="$LOG_DIR/gpu-fluid_tier.godot.log"
-	fluid_tier_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS fluid_tier$' "$fluid_tier_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" --fixed-fps 30 --max-fps 30 --disable-vsync \
-			--log-file "$fluid_tier_log" \
-			-s res://tests/probe.gd -- fluid_tier || fluid_tier_status=$?
-	if (( fluid_tier_status == 0 )) && grep -q '^TEST PASS fluid_tier$' "$fluid_tier_output"; then
-		printf 'TEST PASS fluid_tier\n'
-	else
-		printf 'TEST FAIL fluid_tier: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$fluid_tier_output" >&2
-		failed+=(fluid_tier)
-	fi
-
-	fire_cp_output="$LOG_DIR/gpu-fire_cp_probe.stdout.log"
-	fire_cp_log="$LOG_DIR/gpu-fire_cp_probe.godot.log"
-	fire_cp_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_cp_probe$' "$fire_cp_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
-			--log-file "$fire_cp_log" \
-			-s res://tests/fire_cp_probe_test.gd || fire_cp_status=$?
-	if (( fire_cp_status == 0 )) && grep -q '^TEST PASS fire_cp_probe$' "$fire_cp_output"; then
-		printf 'TEST PASS fire_cp_probe\n'
-	else
-		printf 'TEST FAIL fire_cp_probe: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$fire_cp_output" >&2
-		failed+=(fire_cp_probe)
-	fi
-
-	fire_balance_output="$LOG_DIR/gpu-fire_combustion_balance.stdout.log"
-	fire_balance_log="$LOG_DIR/gpu-fire_combustion_balance.godot.log"
-	fire_balance_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_combustion_balance$' "$fire_balance_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
-			--log-file "$fire_balance_log" \
-			-s res://tests/fire_combustion_balance_test.gd || fire_balance_status=$?
-	if (( fire_balance_status == 0 )) && grep -q '^TEST PASS fire_combustion_balance$' "$fire_balance_output"; then
-		printf 'TEST PASS fire_combustion_balance\n'
-	else
-		printf 'TEST FAIL fire_combustion_balance: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$fire_balance_output" >&2
-		failed+=(fire_combustion_balance)
-	fi
-
-	fire_water_output="$LOG_DIR/gpu-fire_water_balance.stdout.log"
-	fire_water_log="$LOG_DIR/gpu-fire_water_balance.godot.log"
-	fire_water_status=0
-	physics_test_run_process "$TIMEOUT" '^TEST PASS fire_water_balance$' "$fire_water_output" \
-		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
-		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		"$GODOT" --path "$PROJECT_DIR" \
-			--display-driver "$PHYSICS_TEST_DISPLAY_DRIVER" \
-			--rendering-driver "$PHYSICS_TEST_RENDERING_DRIVER" \
-			--audio-driver "$PHYSICS_TEST_AUDIO_DRIVER" \
-			--log-file "$fire_water_log" \
-			-s res://tests/fire_water_balance_test.gd || fire_water_status=$?
-	if (( fire_water_status == 0 )) && grep -q '^TEST PASS fire_water_balance$' "$fire_water_output"; then
-		printf 'TEST PASS fire_water_balance\n'
-	else
-		printf 'TEST FAIL fire_water_balance: crashed, timed out, or missing pass sentinel\n' >&2
-		printf 'Log: %s\n' "$fire_water_output" >&2
-		failed+=(fire_water_balance)
-	fi
-
-	if ! JOBS="$JOBS" GODOT="$GODOT" TIMEOUT="$TIMEOUT" \
-		PHYSICS_TEST_XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
-		PHYSICS_TEST_WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
-		PHYSICS_TEST_X11_DISPLAY="${PHYSICS_TEST_X11_DISPLAY:-}" \
-		PHYSICS_TEST_DISPLAY_DRIVER="$PHYSICS_TEST_DISPLAY_DRIVER" \
-		PHYSICS_TEST_RENDERING_DRIVER="$PHYSICS_TEST_RENDERING_DRIVER" \
-		PHYSICS_TEST_AUDIO_DRIVER="$PHYSICS_TEST_AUDIO_DRIVER" \
-		"$SCRIPT_DIR/run_ui_smoke.sh"; then
-		failed+=(ui_smoke)
+		for name in "${gpu_queue[@]}"; do
+			printf 'TEST FAIL %s: virtual display did not start (%s)\n' \
+				"$name" "$LOG_DIR/virtual-display.log" >&2
+			failed+=("$name")
+		done
 	fi
 fi
 
-if [[ ${#failed[@]} -gt 0 ]]; then
-	printf 'Failed suites: %s\n' "${failed[*]}" >&2
+total=$(( ${#cpu_queue[@]} + ${#gpu_queue[@]} ))
+elapsed=$((SECONDS - run_start))
+if (( ${#failed[@]} > 0 )); then
+	printf 'Failed %d/%d suites in %ds: %s\n' "${#failed[@]}" "$total" "$elapsed" "${failed[*]}" >&2
 	printf 'Logs: %s\n' "$LOG_DIR" >&2
 	exit 1
 fi
-printf 'All suites passed\n'
+if (( ${#selected[@]} == 0 )) && [[ "${GPU:-0}" != "1" ]]; then
+	printf 'CPU/value gates passed: %d suites in %ds (GPU suites skipped; run with GPU=1 to include them)\n' \
+		"$total" "$elapsed"
+else
+	printf 'All %d suites passed in %ds\n' "$total" "$elapsed"
+fi
