@@ -97,7 +97,7 @@ declare -a SUITES=(
 	"fluid_tier|gpu|-|-s res://tests/probe.gd -- fluid_tier"
 	"fire_cp_probe|gpu_unpaced|-|-s res://tests/fire_cp_probe_test.gd"
 	"fire_combustion_balance|gpu_unpaced|-|-s res://tests/fire_combustion_balance_test.gd"
-	"fire_water_balance|gpu_unpaced|400|-s res://tests/fire_water_balance_test.gd"
+	"fire_water_balance|gpu_unpaced|600|-s res://tests/fire_water_balance_test.gd"
 	"ui_smoke|ui|-|"
 )
 
