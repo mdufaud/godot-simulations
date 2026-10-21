@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GODOT="${GODOT:-godot}"
-RESOLUTION="${RESOLUTION:-2340x1080}"
+RESOLUTION="${RESOLUTION:-}"
 TIMEOUT="${TIMEOUT:-180}"
 JOBS="${JOBS:-1}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-logs-$$}"
@@ -79,6 +79,15 @@ if ! physics_test_display_ready; then
 	fi
 	owns_display=1
 fi
+# A phone in landscape. canvas_items stretch maps both sizes onto the same
+# 1560x720 logical layout, so software Vulkan renders the half-size window
+# (a quarter of the pixels) and checks the exact same UI.
+if [[ -z "$RESOLUTION" ]]; then
+	RESOLUTION="2340x1080"
+	if [[ "${PHYSICS_TEST_SOFTWARE_VULKAN:-0}" == "1" ]]; then
+		RESOLUTION="1170x540"
+	fi
+fi
 
 run_demo() {
 	local demo="$1"
@@ -86,7 +95,7 @@ run_demo() {
 	local godot_log="$LOG_DIR/ui-${demo}.godot.log"
 
 	physics_test_run_process "$TIMEOUT" "^SMOKE PASS $demo$" "$output_file" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		FORCE_TOUCH_UI=1 \

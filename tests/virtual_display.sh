@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+## Gate suites assert behaviour, not image quality: they render in a small
+## window (PHYSICS_TEST_RESOLUTION, exported by the display start; empty keeps
+## the project's 1280x720). Captures and the UI smoke pick their own size.
+PHYSICS_TEST_GATE_RESOLUTION="854x480"
+
 PHYSICS_TEST_DISPLAY_PID=""
 PHYSICS_TEST_DISPLAY_RUNTIME=""
 PHYSICS_TEST_DISPLAY_SOCKET=""
@@ -7,6 +12,10 @@ PHYSICS_TEST_DISPLAY_LOCK_FILE=""
 
 
 physics_test_display_ready() {
+	if [[ -n "${PHYSICS_TEST_X11_DISPLAY:-}" ]]; then
+		[[ -S "/tmp/.X11-unix/X${PHYSICS_TEST_X11_DISPLAY#:}" ]]
+		return
+	fi
 	[[ -n "${PHYSICS_TEST_WAYLAND_DISPLAY:-}" ]] \
 		&& [[ -n "${PHYSICS_TEST_XDG_RUNTIME_DIR:-}" ]] \
 		&& [[ -S "${PHYSICS_TEST_XDG_RUNTIME_DIR}/${PHYSICS_TEST_WAYLAND_DISPLAY}" ]]
@@ -57,6 +66,24 @@ physics_test_display_start() {
 	local width="${VIRTUAL_DISPLAY_WIDTH:-2560}"
 	local height="${VIRTUAL_DISPLAY_HEIGHT:-1440}"
 
+	# PHYSICS_TEST_DISPLAY=kwin|xvfb forces a backend; by default kwin wins and
+	# Xvfb (also invisible) is the fallback for GPU-less hosts such as cloud
+	# containers, where Vulkan is Mesa's software lavapipe.
+	local backend="${PHYSICS_TEST_DISPLAY:-}"
+	if [[ -z "$backend" ]]; then
+		if command -v "$kwin_bin" >/dev/null 2>&1; then
+			backend="kwin"
+		elif command -v Xvfb >/dev/null 2>&1; then
+			backend="xvfb"
+		else
+			printf 'GPU TEST FAIL: neither %s nor Xvfb found; refusing visible display fallback\n' "$kwin_bin" >&2
+			return 1
+		fi
+	fi
+	if [[ "$backend" == "xvfb" ]]; then
+		physics_test_xvfb_start "$log_file" "$width" "$height"
+		return
+	fi
 	if ! command -v "$kwin_bin" >/dev/null 2>&1; then
 		printf 'GPU TEST FAIL: %s not found; refusing visible display fallback\n' "$kwin_bin" >&2
 		return 1
@@ -93,6 +120,7 @@ physics_test_display_start() {
 			export PHYSICS_TEST_DISPLAY_DRIVER="wayland"
 			export PHYSICS_TEST_RENDERING_DRIVER="vulkan"
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
+			export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-$PHYSICS_TEST_GATE_RESOLUTION}"
 			return 0
 		fi
 		# The setsid wrapper forks and exits when the caller is already a group
@@ -110,8 +138,67 @@ physics_test_display_start() {
 }
 
 
+## Xvfb backend: same contract as kwin (lock, runtime dir, exported driver
+## vars) plus PHYSICS_TEST_X11_DISPLAY, which callers pass as DISPLAY. On a
+## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
+## caller already set them: suite timeouts are scaled x5 (PHYSICS_TEST_TIMEOUT_SCALE;
+## ocean_fft, the slowest gate, takes ~3x its budget there) and gate windows shrink
+## further to 640x360, which cuts fragment cost ~3x
+## (suites that pin a root size read it through test_case.gd _root_size).
+physics_test_xvfb_start() {
+	local log_file="$1"
+	local width="$2"
+	local height="$3"
+	local runtime_dir
+	local display_number=""
+
+	if ! physics_test_display_lock_acquire; then
+		return 1
+	fi
+
+	runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/physics-test-xvfb.XXXXXX")"
+	chmod 700 "$runtime_dir"
+	# -displayfd picks a free display number and writes it once the server
+	# accepts connections, so no polling of a guessed socket.
+	Xvfb -displayfd 3 -screen 0 "${width}x${height}x24" -nolisten tcp \
+		3>"$runtime_dir/display" >"$log_file" 2>&1 &
+	PHYSICS_TEST_DISPLAY_PID=$!
+	PHYSICS_TEST_DISPLAY_RUNTIME="$runtime_dir"
+
+	for _attempt in $(seq 1 100); do
+		display_number="$(tr -dc '0-9' <"$runtime_dir/display" 2>/dev/null || true)"
+		if [[ -n "$display_number" && -S "/tmp/.X11-unix/X$display_number" ]]; then
+			export PHYSICS_TEST_X11_DISPLAY=":$display_number"
+			export PHYSICS_TEST_XDG_RUNTIME_DIR="$runtime_dir"
+			export PHYSICS_TEST_WAYLAND_DISPLAY=""
+			export PHYSICS_TEST_DISPLAY_DRIVER="x11"
+			export PHYSICS_TEST_RENDERING_DRIVER="vulkan"
+			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
+			if command -v vulkaninfo >/dev/null 2>&1 \
+				&& ! vulkaninfo --summary 2>/dev/null | grep 'deviceType' | grep -qv 'PHYSICAL_DEVICE_TYPE_CPU'; then
+				export PHYSICS_TEST_SOFTWARE_VULKAN=1
+				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-5}"
+				export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-640x360}"
+			fi
+			export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-$PHYSICS_TEST_GATE_RESOLUTION}"
+			return 0
+		fi
+		if ! physics_test_process_alive "$PHYSICS_TEST_DISPLAY_PID"; then
+			break
+		fi
+		sleep 0.1
+	done
+
+	printf 'GPU TEST FAIL: Xvfb did not start\n' >&2
+	sed -n '1,80p' "$log_file" >&2 || true
+	physics_test_display_stop
+	return 1
+}
+
+
 physics_test_display_stop() {
 	physics_test_display_lock_release
+	unset PHYSICS_TEST_X11_DISPLAY
 	if [[ -n "$PHYSICS_TEST_DISPLAY_PID" ]]; then
 		# TERM then KILL the whole compositor process group: a bare TERM to the
 		# leader leaks kwin children that keep holding a Vulkan device.
@@ -232,6 +319,19 @@ physics_test_process_stop() {
 }
 
 
+## Human-readable cause for a physics_test_run_process status.
+physics_test_describe_status() {
+	local status="$1"
+	if (( status == 124 )); then
+		printf 'timed out'
+	elif (( status > 128 )); then
+		printf 'crashed with SIG%s' "$(kill -l $((status - 128)) 2>/dev/null || echo $((status - 128)))"
+	else
+		printf 'exited with code %d' "$status"
+	fi
+}
+
+
 physics_test_run_process() {
 	local timeout_seconds="$1"
 	local pass_pattern="$2"
@@ -241,6 +341,7 @@ physics_test_run_process() {
 	local grace_deadline
 	local status=0
 	shift 3
+	timeout_seconds=$((timeout_seconds * ${PHYSICS_TEST_TIMEOUT_SCALE:-1}))
 
 	local data_dir
 	data_dir="$(mktemp -d "${output_file}.data.XXXXXX")" || return 1

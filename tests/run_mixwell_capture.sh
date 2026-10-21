@@ -63,7 +63,7 @@ run_capture() {
 	local stdout_file="$LOG_DIR/$(basename "$output").stdout"
 	local status=0
 	physics_test_run_process "$TIMEOUT" "$pass_pattern" "$stdout_file" \
-		env -u DISPLAY \
+		env -u DISPLAY ${PHYSICS_TEST_X11_DISPLAY:+"DISPLAY=$PHYSICS_TEST_X11_DISPLAY"} \
 		XDG_RUNTIME_DIR="$PHYSICS_TEST_XDG_RUNTIME_DIR" \
 		WAYLAND_DISPLAY="$PHYSICS_TEST_WAYLAND_DISPLAY" \
 		"$GODOT" --path "$PROJECT_DIR" \

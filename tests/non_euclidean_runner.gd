@@ -25,7 +25,7 @@ func _run() -> void:
 
 func _test_scene_integration() -> void:
 	var initial_root_size := root.size
-	root.size = Vector2i(1920, 1080)
+	root.size = _root_size(Vector2i(1920, 1080))
 	var packed_scene := load("res://scenes/non_euclidean_demo.tscn") as PackedScene
 	_check(packed_scene != null, "demo scene cannot be loaded")
 	if packed_scene == null:

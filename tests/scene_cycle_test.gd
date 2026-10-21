@@ -12,7 +12,7 @@ func _initialize() -> void:
 
 func _run() -> void:
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_NO_FOCUS, true)
-	root.size = Vector2i(1920, 1080)
+	root.size = _root_size(Vector2i(1920, 1080))
 	await _load_scene("res://scenes/main_menu.tscn")
 	for demo in GameManager.DEMOS:
 		var key: String = demo.key
