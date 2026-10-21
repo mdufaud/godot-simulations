@@ -13,6 +13,15 @@ func _check(condition: bool, message: String) -> void:
 	push_error(message)
 
 
+## Root size for a suite that pins one: `size`, unless the runner shrinks
+## windows for software Vulkan (PHYSICS_TEST_RESOLUTION=WxH, virtual_display.sh).
+func _root_size(size: Vector2i) -> Vector2i:
+	var parts := OS.get_environment("PHYSICS_TEST_RESOLUTION").split("x")
+	if parts.size() == 2 and parts[0].is_valid_int() and parts[1].is_valid_int():
+		return Vector2i(parts[0].to_int(), parts[1].to_int())
+	return size
+
+
 ## Waits until `seconds` of simulated time have elapsed, whatever the frame rate.
 func _sim_seconds(seconds: float) -> void:
 	var elapsed := 0.0

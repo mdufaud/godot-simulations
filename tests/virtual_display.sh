@@ -137,8 +137,8 @@ physics_test_display_start() {
 ## CPU-only Vulkan device (lavapipe) frames cost 3-10x more, so unless the
 ## caller already set them: suite timeouts are scaled (PHYSICS_TEST_TIMEOUT_SCALE)
 ## and gate windows shrink to PHYSICS_TEST_RESOLUTION, which cuts fragment cost
-## ~3x; suites that size their own root viewport keep it. An empty
-## PHYSICS_TEST_RESOLUTION keeps the project's window size.
+## ~3x (suites that pin a root size read it through test_case.gd _root_size).
+## An empty PHYSICS_TEST_RESOLUTION keeps the project's window size.
 physics_test_xvfb_start() {
 	local log_file="$1"
 	local width="$2"
