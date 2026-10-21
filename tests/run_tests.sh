@@ -239,8 +239,13 @@ run_suite() {
 	local status=0
 	local sentinel=1
 	if [[ "$kind" == ui ]]; then
-		JOBS="$GPU_JOBS" GODOT="$GODOT" TIMEOUT="$timeout" \
-			"$SCRIPT_DIR/run_ui_smoke.sh" >"$output_file" 2>&1 || status=$?
+		# Through the same setsid/group-kill primitive as the Godot suites, so
+		# stopping the runner also stops the smoke's own Godot processes. Each
+		# demo has its own $timeout inside; the outer one is only a backstop.
+		physics_test_run_process "$((timeout * 40))" '^All [0-9]* demo(s) passed$' \
+			"$output_file" env JOBS="$GPU_JOBS" GODOT="$GODOT" TIMEOUT="$timeout" \
+			"$SCRIPT_DIR/run_ui_smoke.sh" || status=$?
+		(( status == 0 )) || sentinel=0
 	else
 		physics_test_run_process "$timeout" "^TEST PASS ${name}\$" "$output_file" \
 			"${cmd[@]}" "${args[@]}" || status=$?

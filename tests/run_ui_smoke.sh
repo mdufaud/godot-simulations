@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 GODOT="${GODOT:-godot}"
-RESOLUTION="${RESOLUTION:-2340x1080}"
+RESOLUTION="${RESOLUTION:-}"
 TIMEOUT="${TIMEOUT:-180}"
 JOBS="${JOBS:-1}"
 LOG_DIR="${LOG_DIR:-${TMPDIR:-/tmp}/physics-test-logs-$$}"
@@ -78,6 +78,15 @@ if ! physics_test_display_ready; then
 		exit 1
 	fi
 	owns_display=1
+fi
+# A phone in landscape. canvas_items stretch maps both sizes onto the same
+# 1560x720 logical layout, so software Vulkan renders the half-size window
+# (a quarter of the pixels) and checks the exact same UI.
+if [[ -z "$RESOLUTION" ]]; then
+	RESOLUTION="2340x1080"
+	if [[ "${PHYSICS_TEST_SOFTWARE_VULKAN:-0}" == "1" ]]; then
+		RESOLUTION="1170x540"
+	fi
 fi
 
 run_demo() {

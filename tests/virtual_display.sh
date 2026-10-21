@@ -176,6 +176,7 @@ physics_test_xvfb_start() {
 			export PHYSICS_TEST_AUDIO_DRIVER="Dummy"
 			if command -v vulkaninfo >/dev/null 2>&1 \
 				&& ! vulkaninfo --summary 2>/dev/null | grep 'deviceType' | grep -qv 'PHYSICAL_DEVICE_TYPE_CPU'; then
+				export PHYSICS_TEST_SOFTWARE_VULKAN=1
 				export PHYSICS_TEST_TIMEOUT_SCALE="${PHYSICS_TEST_TIMEOUT_SCALE:-5}"
 				export PHYSICS_TEST_RESOLUTION="${PHYSICS_TEST_RESOLUTION-640x360}"
 			fi
