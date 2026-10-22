@@ -378,17 +378,23 @@ func poll() -> bool:
 
 
 func _unpack_vertices() -> void:
-	var floats := _tri_bytes.to_float32_array()
 	var vertex_count := triangle_count * 3
-	_positions = PackedVector3Array()
-	_normals = PackedVector3Array()
-	_positions.resize(vertex_count)
-	_normals.resize(vertex_count)
-	# Each vertex is 8 floats: position.xyz + pad, normal.xyz + pad.
-	for i in vertex_count:
-		var o := i * 8
-		_positions[i] = Vector3(floats[o], floats[o + 1], floats[o + 2])
-		_normals[i] = Vector3(floats[o + 4], floats[o + 5], floats[o + 6])
+	var native := Native.kernel(&"PlanetKernels")
+	var unpacked: Array = native.unpack_vertices(_tri_bytes, vertex_count) if native != null else []
+	if not unpacked.is_empty():
+		_positions = unpacked[0]
+		_normals = unpacked[1]
+	else:
+		var floats := _tri_bytes.to_float32_array()
+		_positions = PackedVector3Array()
+		_normals = PackedVector3Array()
+		_positions.resize(vertex_count)
+		_normals.resize(vertex_count)
+		# Each vertex is 8 floats: position.xyz + pad, normal.xyz + pad.
+		for i in vertex_count:
+			var o := i * 8
+			_positions[i] = Vector3(floats[o], floats[o + 1], floats[o + 2])
+			_normals[i] = Vector3(floats[o + 4], floats[o + 5], floats[o + 6])
 	_tri_bytes = PackedByteArray()
 	_set_state(State.READY)
 

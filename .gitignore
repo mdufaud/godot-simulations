@@ -65,3 +65,7 @@ CLAUDE.md
 AGENTS.md
 .zcode*
 .agents
+
+# Native build products, rebuilt by native/build.sh.
+/native/src/*.os
+/native/.sconsign.dblite

@@ -1,0 +1,32 @@
+#!/usr/bin/env python
+
+env = SConscript("godot-cpp/SConstruct", {"api_version": "4.7"})
+
+project = env.Clone()
+# godot-cpp headers as system headers: the warning set below judges our code, not theirs.
+project.Append(CXXFLAGS=[flag for path in env["CPPPATH"] for flag in ("-isystem", Dir(path).abspath)])
+project.Replace(CPPPATH=["src/"])
+# -ffp-contract=off: no FMA, so float kernels round exactly like the GDScript they replace.
+project.Append(
+    CXXFLAGS=[
+        "-std=c++23",
+        "-ffp-contract=off",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic",
+        "-Wshadow",
+        "-Wconversion",
+        "-Wnull-dereference",
+    ]
+)
+
+objects = project.SharedObject(Glob("src/*.cpp"))
+# The SCons scanner cannot see -isystem paths: compile after godot-cpp has generated its bindings.
+project.Depends(objects, env["LIBS"])
+
+library = project.SharedLibrary(
+    "../addons/physics_native/bin/libphysics_native{}{}".format(env["suffix"], env["SHLIBSUFFIX"]),
+    source=objects,
+)
+env.NoCache(library)
+Default(library)
