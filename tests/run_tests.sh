@@ -52,6 +52,7 @@ declare -a SUITES=(
 	"ambient_fluid_validation|cpu|-|-s res://tests/ambient_fluid_validation_test.gd"
 	"ambient_fluid_preprocessor|cpu|-|-s res://tests/ambient_fluid_preprocessor_test.gd"
 	"ambient_fluid_float|cpu|-|-s res://tests/ambient_fluid_float_test.gd"
+	"native_kernels|cpu|-|-s res://tests/native_kernels_test.gd"
 	"portal_math|cpu|-|-s res://tests/portal_math_test.gd"
 	"river_field|cpu|-|-s res://tests/river_field_test.gd"
 	"river_boot|cpu|-|-s res://tests/river_boot_test.gd"
@@ -166,6 +167,12 @@ export LOG_DIR
 # can hang in quit(): fail on either line instead of waiting out the timeout
 # (inherited by run_ui_smoke.sh).
 export PHYSICS_TEST_FAIL_PATTERN='^\(SCRIPT ERROR\|TEST FAIL\)'
+
+# Before the shared lock: the build may run tools/import.sh, which takes it exclusive.
+if ! GODOT="$GODOT" "$PROJECT_DIR/native/build.sh" >"$LOG_DIR/native_build.log" 2>&1; then
+	printf 'Native build failed, see %s\n' "$LOG_DIR/native_build.log" >&2
+	exit 1
+fi
 
 # Shared mode: hold this for the whole run so tools/import.sh waits instead of
 # rewriting the script class cache under our feet. Shared locks between runners

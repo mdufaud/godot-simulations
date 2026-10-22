@@ -6,24 +6,33 @@ class_name FractalDE
 
 const ONE := Vector3(1.0, 1.0, 1.0)
 
+static var _native := Native.kernel(&"FractalKernels")
+
 
 static func evaluate(p: Vector3, params: Dictionary) -> float:
 	var fractal_type: int = params.get("fractal_type", 0)
 	var iterations: int = params.get("iterations", 12)
+	var scale: float = params.get("apollonian_scale", 1.3)
+	var klein_r: float = params.get("klein_r", 1.95859103011179)
+	var klein_i: float = params.get("klein_i", 0.0112785606117658)
+	var klein_box_x: float = params.get("klein_box_x", 1.0)
+	var klein_box_z: float = params.get("klein_box_z", 1.0)
+	if Native.enabled and _native != null:
+		return _native.evaluate(p, fractal_type, iterations, scale, klein_r, klein_i,
+			klein_box_x, klein_box_z)
 
 	match fractal_type:
 		0:
-			return _apollonian(p, iterations, params)
+			return _apollonian(p, iterations, scale)
 		1:
 			return _menger(p, iterations)
 		_:
-			return _jos_kleinian(p, iterations, params)
+			return _jos_kleinian(p, iterations, klein_r, klein_i, klein_box_x, klein_box_z)
 
 
-static func _apollonian(p: Vector3, iterations: int, params: Dictionary) -> float:
+static func _apollonian(p: Vector3, iterations: int, scale: float) -> float:
 	var z := p
 	var s := 1.0
-	var scale: float = params.get("apollonian_scale", 1.3)
 
 	for i in range(40):
 		if i >= iterations:
@@ -53,11 +62,8 @@ static func _menger(p: Vector3, iterations: int) -> float:
 	return d
 
 
-static func _jos_kleinian(p: Vector3, iterations: int, params: Dictionary) -> float:
-	var a: float = params.get("klein_r", 1.95859103011179)
-	var b: float = params.get("klein_i", 0.0112785606117658)
-	var bx: float = params.get("klein_box_x", 1.0)
-	var bz: float = params.get("klein_box_z", 1.0)
+static func _jos_kleinian(p: Vector3, iterations: int, a: float, b: float, bx: float,
+		bz: float) -> float:
 	var z := p
 	var lz := z + ONE
 	var llz := z - ONE

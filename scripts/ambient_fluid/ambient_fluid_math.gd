@@ -5,6 +5,8 @@ const MATRIX_SIZE := 6
 const MATRIX_SCALARS := MATRIX_SIZE * MATRIX_SIZE
 const PIVOT_EPSILON := 1.0e-12
 
+static var _native := Native.kernel(&"AmbientFluidKernels")
+
 
 static func zero_matrix() -> PackedFloat64Array:
 	var matrix := PackedFloat64Array()
@@ -65,6 +67,8 @@ static func matrix_vector_multiply(matrix: PackedFloat64Array,
 		vector: PackedFloat64Array) -> PackedFloat64Array:
 	if matrix.size() != MATRIX_SCALARS or vector.size() != MATRIX_SIZE:
 		return PackedFloat64Array()
+	if Native.enabled and _native != null:
+		return _native.matrix_vector_multiply(matrix, vector)
 	var result := PackedFloat64Array()
 	result.resize(MATRIX_SIZE)
 	for row in MATRIX_SIZE:
@@ -108,6 +112,8 @@ static func matrix_transpose(matrix: PackedFloat64Array) -> PackedFloat64Array:
 static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 	if matrix.size() != MATRIX_SCALARS:
 		return PackedFloat64Array()
+	if Native.enabled and _native != null:
+		return _native.matrix_inverse(matrix, MATRIX_SIZE, PIVOT_EPSILON)
 	var augmented := PackedFloat64Array()
 	augmented.resize(MATRIX_SIZE * MATRIX_SIZE * 2)
 	for row in MATRIX_SIZE:
@@ -328,6 +334,9 @@ static func clip_convex_mesh_below_plane(triangle_vertices: PackedVector3Array,
 	if triangle_vertices.is_empty() or triangle_vertices.size() % 3 != 0 \
 		or plane_normal.length_squared() <= 1.0e-12:
 		return {}
+	if Native.enabled and _native != null:
+		return _native.clip_convex_mesh_below_plane(triangle_vertices, interior_point,
+			plane_normal, plane_offset)
 	var normal := plane_normal.normalized()
 	var minimum_distance := INF
 	var maximum_distance := -INF
@@ -531,6 +540,10 @@ static func potential_pressure_wrench(face_centers_m: PackedVector3Array,
 		return {pressure = pressure, attached_faces = 0}
 	if not is_finite(fluid_density_kg_m3) or fluid_density_kg_m3 <= 0.0:
 		return {pressure = pressure, attached_faces = 0}
+	if Native.enabled and _native != null:
+		return _native.potential_pressure_wrench(face_centers_m, face_normals, face_areas_m2,
+			slip_matrix, generalized_velocity, fluid_density_kg_m3, separation_angle_rad,
+			wet_area_fractions, wet_area_centers_m)
 	var cos_separation := cos(clampf(separation_angle_rad, PI * 0.5, PI))
 	var body_relative_velocity := Vector3(generalized_velocity[3],
 		generalized_velocity[4], generalized_velocity[5])
