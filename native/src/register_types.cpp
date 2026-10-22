@@ -6,6 +6,7 @@
 #include "ambient_fluid_kernels.hpp"
 #include "fractal_kernels.hpp"
 #include "planet_kernels.hpp"
+#include "smoke_kernels.hpp"
 
 namespace
 {
@@ -17,6 +18,7 @@ void initialize(godot::ModuleInitializationLevel level)
     GDREGISTER_CLASS(pp::AmbientFluidKernels);
     GDREGISTER_CLASS(pp::FractalKernels);
     GDREGISTER_CLASS(pp::PlanetKernels);
+    GDREGISTER_CLASS(pp::SmokeKernels);
 }
 
 void uninitialize([[maybe_unused]] godot::ModuleInitializationLevel level) {}

@@ -1,0 +1,24 @@
+layout(local_size_x = WG_X, local_size_y = WG_Y, local_size_z = WG_Z) in;
+
+layout(push_constant, std430) uniform Params {
+	ivec4 dims;     // cells xyz, w light downsample
+	vec4 domain;    // origin m xyz, w cell size m
+	vec4 sim;       // dt s, buoyancy m/s2/K, smoke weight m/s2, vorticity confinement
+	vec4 decay;     // density, temperature, velocity, wind relax (Hz)
+	vec4 wind;      // wind x, wind z (m/s), extinction 1/m, unused
+	vec4 light;     // xyz direction to the sun, w light march step (cells)
+	ivec4 counts;   // sources, obstacles, red-black parity, unused
+} pc;
+
+// Pressure neighbour code: bits 0-5 fluid neighbours (+x -x +y -y +z -z), bits
+// 6-8 count of open (p = 0) neighbours, CODE_SOLID for a solid cell.
+const int CODE_OPEN = 64;
+const int CODE_SOLID = 512;
+
+bool in_grid(ivec3 c) {
+	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, pc.dims.xyz));
+}
+
+vec3 cell_center_m(ivec3 c) {
+	return pc.domain.xyz + (vec3(c) + 0.5) * pc.domain.w;
+}

@@ -53,6 +53,7 @@ PROBE_TABLE=(
 	"planet_shape|240|^TEST PASS planet_shape$|PLANET SHAPE "
 	"mixopt|180|^MIXOPT PROBE DONE ok$|MIXOPT "
 	"tornado_boot_look|180|^TEST PASS tornado_boot_look$|"
+	"smoke_boot|300|^TEST PASS smoke_boot$|SMOKE BOOT "
 	"fps|120|^FPS PROBE target=|FPS PROBE "
 	"foam_convergence|600|^FOAM CONVERGENCE DONE|FOAM "
 	"foam_histogram|300|^HISTO DONE|HISTO "

@@ -1,0 +1,74 @@
+[gd_resource type="Resource" script_class="SmokePreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/smoke/smoke_config.gd" id="1_ookig"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_lgti8"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_pja5q"]
+
+[sub_resource type="Resource" id="Resource_qvq4f"]
+script = ExtResource("1_ookig")
+domain_size_m = Vector3(12, 4, 4)
+domain_origin_m = Vector3(-6, 0, -2)
+buoyancy_mps2_per_k = 0.0
+smoke_weight_mps2 = 0.0
+density_decay_hz = 0.05
+temperature_decay_hz = 1.0
+velocity_decay_hz = 0.0
+vorticity_confinement = 1.0
+wind_speed_mps = 2.5
+wind_relax_hz = 0.1
+extinction_per_m = 10.0
+scattering_albedo = 0.95
+phase_g = 0.2
+smoke_color = Color(0.95, 0.95, 0.95, 1)
+ambient_strength = 0.5
+
+[sub_resource type="Resource" id="Resource_rgorn"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-5.7, 2, 0)
+extent_m = Vector3(0.35, 2.4, 2.4)
+density_per_s = 0.0
+velocity_mps = Vector3(2.5, 0, 0)
+relax_hz = 4.0
+
+[sub_resource type="Resource" id="Resource_q4hgc"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-4.9, 1, 0)
+extent_m = Vector3(0.12, 0.12, 0.12)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Resource_6ojbl"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-4.9, 1.5, 0)
+extent_m = Vector3(0.12, 0.12, 0.12)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Resource_3cp0q"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-4.9, 2, 0)
+extent_m = Vector3(0.12, 0.12, 0.12)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Resource_wxubp"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-4.9, 2.5, 0)
+extent_m = Vector3(0.12, 0.12, 0.12)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Resource_ansal"]
+script = ExtResource("2_lgti8")
+position_m = Vector3(-4.9, 3, 0)
+extent_m = Vector3(0.12, 0.12, 0.12)
+density_per_s = 15.0
+
+[resource]
+script = ExtResource("3_pja5q")
+display_name = "Wind tunnel"
+hint = "A fan blows smoke streaks past a ring. Drag the orange sphere through the flow."
+layout = 1
+config = SubResource("Resource_qvq4f")
+emitters = Array[ExtResource("2_lgti8")]([SubResource("Resource_rgorn"), SubResource("Resource_q4hgc"), SubResource("Resource_6ojbl"), SubResource("Resource_3cp0q"), SubResource("Resource_wxubp"), SubResource("Resource_ansal")])
+camera_target_m = Vector3(0, 2, 0)
+camera_distance_m = 11.0
+camera_pitch_deg = -8.0
+sun_elevation_deg = 55.0
+sun_azimuth_deg = 30.0

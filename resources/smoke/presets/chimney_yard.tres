@@ -1,0 +1,33 @@
+[gd_resource type="Resource" script_class="SmokePreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/smoke/smoke_config.gd" id="1_eaorn"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_p6jfw"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_g8n4h"]
+
+[sub_resource type="Resource" id="Resource_3wylk"]
+script = ExtResource("1_eaorn")
+wind_speed_mps = 0.4
+temperature_decay_hz = 0.35
+vorticity_confinement = 1.2
+
+[sub_resource type="Resource" id="Resource_txl1v"]
+script = ExtResource("2_p6jfw")
+position_m = Vector3(-1.6, 2.35, -0.6)
+extent_m = Vector3(0.3, 0.15, 0.3)
+density_per_s = 3.0
+heat_k_per_s = 400.0
+velocity_mps = Vector3(0, 1.5, 0)
+relax_hz = 4.0
+
+[resource]
+script = ExtResource("3_g8n4h")
+hint = "A hot chimney plume bending in the breeze, backlit by a low sun. Throw grenades for heavy smoke."
+config = SubResource("Resource_3wylk")
+emitters = Array[ExtResource("2_p6jfw")]([SubResource("Resource_txl1v")])
+camera_distance_m = 13.0
+camera_pitch_deg = -10.0
+camera_yaw_deg = -20.0
+sun_elevation_deg = 15.0
+sun_azimuth_deg = 160.0
+sun_color = Color(1, 0.78, 0.55, 1)
+sun_energy = 2.2

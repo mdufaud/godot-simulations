@@ -1,0 +1,41 @@
+layout(set = 0, binding = 0, rgba32f) uniform restrict readonly image3D velocity_in;
+layout(set = 0, binding = 1, rg32f) uniform restrict readonly image3D scalar_in;
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image3D obstacle;
+layout(set = 0, binding = 3, rgba32f) uniform restrict writeonly image3D velocity_out;
+layout(set = 0, binding = 4, rg32f) uniform restrict writeonly image3D scalar_out;
+layout(set = 0, binding = 5, std430) restrict readonly buffer Sources {
+	vec4 data[];
+} sources;
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	vec4 solid = imageLoad(obstacle, c);
+	if (solid.w > 0.5) {
+		imageStore(velocity_out, c, vec4(solid.xyz, 0.0));
+		imageStore(scalar_out, c, vec4(0.0));
+		return;
+	}
+	float dt = pc.sim.x;
+	vec3 v = imageLoad(velocity_in, c).xyz * exp(-pc.decay.z * dt);
+	vec2 s = imageLoad(scalar_in, c).xy * exp(-pc.decay.xy * dt);
+	vec3 p = cell_center_m(c);
+	for (int i = 0; i < pc.counts.x; i++) {
+		int base = i * SOURCE_VEC4S;
+		vec4 placement = sources.data[base];
+		vec4 shape = sources.data[base + 1];
+		vec4 motion = sources.data[base + 2];
+		vec3 q = (p - placement.xyz) / shape.xyz;
+		float w = clamp(1.0 - dot(q, q), 0.0, 1.0);
+		w *= w;
+		s += vec2(placement.w, shape.w) * (w * dt);
+		v += (motion.xyz - v) * (1.0 - exp(-motion.w * w * dt));
+	}
+	s.x = max(s.x, 0.0);
+	v.y += (pc.sim.y * s.y - pc.sim.z * s.x) * dt;
+	v.xz += (pc.wind.xy - v.xz) * (1.0 - exp(-pc.decay.w * dt));
+	imageStore(velocity_out, c, vec4(v, 0.0));
+	imageStore(scalar_out, c, vec4(s, 0.0, 0.0));
+}

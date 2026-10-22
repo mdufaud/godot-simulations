@@ -1,0 +1,52 @@
+// Selle et al. 2008: half the round-trip error, clamped to the source stencil's range.
+layout(set = 0, binding = 0) uniform sampler3D velocity_field;
+layout(set = 0, binding = 1) uniform sampler3D scalar_field;
+layout(set = 0, binding = 2) uniform sampler3D velocity_hat;
+layout(set = 0, binding = 3) uniform sampler3D scalar_hat;
+layout(set = 0, binding = 4, rgba32f) uniform restrict writeonly image3D velocity_out;
+layout(set = 0, binding = 5, rg32f) uniform restrict writeonly image3D scalar_out;
+
+vec3 to_uvw(vec3 cell_pos) {
+	return cell_pos / vec3(pc.dims.xyz);
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	float dt_cells = pc.sim.x / pc.domain.w;
+	vec3 x = vec3(c) + 0.5;
+	vec3 v0 = texelFetch(velocity_field, c, 0).xyz;
+	vec3 source = x - dt_cells * texture(velocity_field, to_uvw(x - 0.5 * dt_cells * v0)).xyz;
+	source.y = max(source.y, 0.5);
+	vec3 target = x + dt_cells * texture(velocity_field, to_uvw(x + 0.5 * dt_cells * v0)).xyz;
+	target.y = max(target.y, 0.5);
+
+	ivec3 corner = clamp(ivec3(floor(source - 0.5)), ivec3(0), pc.dims.xyz - 2);
+	vec4 v_lo = vec4(1e30);
+	vec4 v_hi = vec4(-1e30);
+	vec4 s_lo = vec4(1e30);
+	vec4 s_hi = vec4(-1e30);
+	for (int i = 0; i < 8; i++) {
+		ivec3 tap = corner + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+		vec4 v = texelFetch(velocity_field, tap, 0);
+		vec4 s = texelFetch(scalar_field, tap, 0);
+		v_lo = min(v_lo, v);
+		v_hi = max(v_hi, v);
+		s_lo = min(s_lo, s);
+		s_hi = max(s_hi, s);
+	}
+
+	vec4 v_hat = texelFetch(velocity_hat, c, 0);
+	vec4 v_fix = v_hat + 0.5 * (texelFetch(velocity_field, c, 0) - texture(velocity_hat, to_uvw(target)));
+	bool v_ok = all(greaterThanEqual(v_fix.xyz, v_lo.xyz)) && all(lessThanEqual(v_fix.xyz, v_hi.xyz));
+	imageStore(velocity_out, c, v_ok ? v_fix : v_hat);
+
+	vec4 s_hat = texelFetch(scalar_hat, c, 0);
+	vec4 s_fix = s_hat + 0.5 * (texelFetch(scalar_field, c, 0) - texture(scalar_hat, to_uvw(target)));
+	bool s_ok = all(greaterThanEqual(s_fix.xy, s_lo.xy)) && all(lessThanEqual(s_fix.xy, s_hi.xy));
+	vec3 uvw = to_uvw(source);
+	bool inside = all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)));
+	imageStore(scalar_out, c, !inside ? vec4(0.0) : (s_ok ? s_fix : s_hat));
+}

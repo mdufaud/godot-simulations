@@ -12,6 +12,7 @@ const QUALITY_KEYS := [
 	"cloth_quality_profile", "destruction_quality_profile", "grass_quality_profile",
 	"mixwell_quality_profile", "fractal_quality_profile", "non_euclidean_quality_profile",
 	"ssr_quality_profile", "ambient_fluid_quality_profile", "parallax_quality_profile",
+	"smoke_quality_profile",
 ]
 
 ## Profile script → the exact key set values(tier) must return for every tier.
@@ -43,6 +44,9 @@ func _profile_table() -> void:
 		RiverQualityProfile: ["water_cell_size_m", "foam_size_px", "reflection_scale", "rapids_reflection",
 			"grass_density", "grass_distance_m", "grass_detail", "grass_shadows", "msaa", "ssao",
 			"reflection_planes", "surface_detail", "foam_detail", "volumetric_mist"],
+		SmokeQualityProfile: ["grid_cell_budget", "sim_rate_hz", "pressure_iterations",
+			"march_step_cells", "light_downsample", "light_step_cells", "maccormack",
+			"scene_shadows", "msaa"],
 	}
 
 
@@ -180,6 +184,18 @@ func _test_lever_caps() -> void:
 	for tier in 4:
 		_check(planet.values(tier).resolution <= 256,
 			"planet tier %d: resolution in the readback-stall zone" % tier)
+	var smoke := SmokeQualityProfile
+	for tier in 4:
+		var values: Dictionary = smoke.values(tier)
+		_check(values.grid_cell_budget * SmokeSolver.bytes_per_cell(values.maccormack)
+				<= 384 * 1024 * 1024,
+			"smoke tier %d grid above 384 MB" % tier)
+		_check(values.grid_cell_budget in smoke.GRID_CELL_BUDGETS
+			and values.sim_rate_hz in smoke.SIM_RATES_HZ
+			and values.light_downsample in smoke.LIGHT_DOWNSAMPLES,
+			"smoke tier %d value missing from its menu option" % tier)
+		_check(values.march_step_cells > 0.0 and values.light_step_cells > 0.0,
+			"smoke tier %d march step is not positive" % tier)
 
 
 func _test_game_manager_seeds() -> void:

@@ -1,0 +1,48 @@
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D pressure;
+layout(set = 0, binding = 1, rgba32f) uniform restrict readonly image3D obstacle;
+layout(set = 0, binding = 2, rgba32f) uniform restrict image3D velocity;
+
+float neighbor_pressure(ivec3 n, float own) {
+	if (n.y < 0) {
+		return own;
+	}
+	if (!in_grid(n)) {
+		return 0.0;
+	}
+	return imageLoad(obstacle, n).w > 0.5 ? own : imageLoad(pressure, n).r;
+}
+
+// Fluid may leave a solid face but not move into it faster than the solid does.
+void block_against(ivec3 n, int axis, float side, inout vec3 v) {
+	if (!in_grid(n)) {
+		return;
+	}
+	vec4 solid = imageLoad(obstacle, n);
+	if (solid.w > 0.5) {
+		v[axis] = side > 0.0 ? min(v[axis], solid[axis]) : max(v[axis], solid[axis]);
+	}
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c) || imageLoad(obstacle, c).w > 0.5) {
+		return;
+	}
+	float p = imageLoad(pressure, c).r;
+	vec3 gradient = vec3(
+		neighbor_pressure(c + ivec3(1, 0, 0), p) - neighbor_pressure(c - ivec3(1, 0, 0), p),
+		neighbor_pressure(c + ivec3(0, 1, 0), p) - neighbor_pressure(c - ivec3(0, 1, 0), p),
+		neighbor_pressure(c + ivec3(0, 0, 1), p) - neighbor_pressure(c - ivec3(0, 0, 1), p));
+	vec4 stored = imageLoad(velocity, c);
+	vec3 v = stored.xyz - gradient * (0.5 / pc.domain.w);
+	block_against(c + ivec3(1, 0, 0), 0, 1.0, v);
+	block_against(c - ivec3(1, 0, 0), 0, -1.0, v);
+	block_against(c + ivec3(0, 1, 0), 1, 1.0, v);
+	block_against(c - ivec3(0, 1, 0), 1, -1.0, v);
+	block_against(c + ivec3(0, 0, 1), 2, 1.0, v);
+	block_against(c - ivec3(0, 0, 1), 2, -1.0, v);
+	if (c.y == 0) {
+		v.y = max(v.y, 0.0);
+	}
+	imageStore(velocity, c, vec4(v, stored.w));
+}

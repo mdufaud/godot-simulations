@@ -1,0 +1,25 @@
+layout(set = 0, binding = 0, rgba32f) uniform restrict readonly image3D curl_field;
+layout(set = 0, binding = 1, rgba32f) uniform restrict readonly image3D obstacle;
+layout(set = 0, binding = 2, rgba32f) uniform restrict image3D velocity;
+
+float curl_magnitude(ivec3 c) {
+	return imageLoad(curl_field, clamp(c, ivec3(0), pc.dims.xyz - 1)).w;
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c) || imageLoad(obstacle, c).w > 0.5) {
+		return;
+	}
+	vec3 gradient = vec3(
+		curl_magnitude(c + ivec3(1, 0, 0)) - curl_magnitude(c - ivec3(1, 0, 0)),
+		curl_magnitude(c + ivec3(0, 1, 0)) - curl_magnitude(c - ivec3(0, 1, 0)),
+		curl_magnitude(c + ivec3(0, 0, 1)) - curl_magnitude(c - ivec3(0, 0, 1)));
+	float len = length(gradient);
+	if (len < 1e-6) {
+		return;
+	}
+	vec3 force = pc.sim.w * pc.domain.w * cross(gradient / len, imageLoad(curl_field, c).xyz);
+	vec4 v = imageLoad(velocity, c);
+	imageStore(velocity, c, vec4(v.xyz + force * pc.sim.x, v.w));
+}

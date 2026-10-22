@@ -1,0 +1,52 @@
+[gd_resource type="Resource" script_class="SmokePreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/smoke/smoke_config.gd" id="1_lyxmu"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_hnmrn"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_sbpam"]
+
+[sub_resource type="Resource" id="Resource_7ia4f"]
+script = ExtResource("1_lyxmu")
+domain_size_m = Vector3(10, 5, 5)
+domain_origin_m = Vector3(-5, 0, -2.5)
+buoyancy_mps2_per_k = 0.01
+smoke_weight_mps2 = 0.0
+density_decay_hz = 0.25
+temperature_decay_hz = 1.0
+velocity_decay_hz = 0.05
+vorticity_confinement = 0.6
+wind_relax_hz = 0.0
+extinction_per_m = 8.0
+scattering_albedo = 0.92
+phase_g = 0.3
+
+[sub_resource type="Resource" id="Resource_jybp6"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-4.2, 2.5, 0)
+extent_m = Vector3(0.35, 1.0, 1.0)
+density_per_s = 0.0
+velocity_mps = Vector3(10, 0, 0)
+relax_hz = 40.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+
+[sub_resource type="Resource" id="Resource_charge"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.8, 2.5, 0)
+extent_m = Vector3(0.25, 0.55, 0.55)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+
+[resource]
+script = ExtResource("3_sbpam")
+display_name = "Vortex cannon"
+hint = "Pulses of air through a torus nozzle roll up into smoke rings. Puff fires one more."
+layout = 2
+config = SubResource("Resource_7ia4f")
+emitters = Array[ExtResource("2_hnmrn")]([SubResource("Resource_jybp6"), SubResource("Resource_charge")])
+camera_target_m = Vector3(0, 2.5, 0)
+camera_distance_m = 12.0
+camera_pitch_deg = -10.0
+camera_yaw_deg = 35.0
+sun_elevation_deg = 40.0
+sun_azimuth_deg = 40.0

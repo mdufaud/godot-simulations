@@ -1,0 +1,45 @@
+layout(set = 0, binding = 0, rgba32f) uniform restrict readonly image3D velocity;
+layout(set = 0, binding = 1, rgba32f) uniform restrict readonly image3D obstacle;
+// x divergence, y neighbour code read by the pressure solve (smoke_common.comp).
+layout(set = 0, binding = 2, rg32f) uniform restrict writeonly image3D divergence;
+
+vec3 neighbor_velocity(ivec3 n, vec3 own) {
+	if (n.y < 0) {
+		return vec3(own.x, 0.0, own.z);
+	}
+	if (!in_grid(n)) {
+		return own;
+	}
+	vec4 solid = imageLoad(obstacle, n);
+	return solid.w > 0.5 ? solid.xyz : imageLoad(velocity, n).xyz;
+}
+
+// Floor and solids are Neumann (no code), open sides and top are p = 0.
+int neighbor_code(ivec3 n, int bit) {
+	if (n.y < 0) {
+		return 0;
+	}
+	if (!in_grid(n)) {
+		return CODE_OPEN;
+	}
+	return imageLoad(obstacle, n).w > 0.5 ? 0 : bit;
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	if (imageLoad(obstacle, c).w > 0.5) {
+		imageStore(divergence, c, vec4(0.0, float(CODE_SOLID), 0.0, 0.0));
+		return;
+	}
+	vec3 own = imageLoad(velocity, c).xyz;
+	float div = neighbor_velocity(c + ivec3(1, 0, 0), own).x - neighbor_velocity(c - ivec3(1, 0, 0), own).x
+		+ neighbor_velocity(c + ivec3(0, 1, 0), own).y - neighbor_velocity(c - ivec3(0, 1, 0), own).y
+		+ neighbor_velocity(c + ivec3(0, 0, 1), own).z - neighbor_velocity(c - ivec3(0, 0, 1), own).z;
+	int code = neighbor_code(c + ivec3(1, 0, 0), 1) + neighbor_code(c - ivec3(1, 0, 0), 2)
+		+ neighbor_code(c + ivec3(0, 1, 0), 4) + neighbor_code(c - ivec3(0, 1, 0), 8)
+		+ neighbor_code(c + ivec3(0, 0, 1), 16) + neighbor_code(c - ivec3(0, 0, 1), 32);
+	imageStore(divergence, c, vec4(div * 0.5 / pc.domain.w, float(code), 0.0, 0.0));
+}

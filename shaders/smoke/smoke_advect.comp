@@ -1,0 +1,26 @@
+layout(set = 0, binding = 0) uniform sampler3D velocity_field;
+layout(set = 0, binding = 1) uniform sampler3D scalar_field;
+layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image3D velocity_out;
+layout(set = 0, binding = 3, rg32f) uniform restrict writeonly image3D scalar_out;
+
+vec3 to_uvw(vec3 cell_pos) {
+	return cell_pos / vec3(pc.dims.xyz);
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	float dt_cells = pc.sim.x / pc.domain.w;
+	vec3 x = vec3(c) + 0.5;
+	vec3 mid = x - 0.5 * dt_cells * texelFetch(velocity_field, c, 0).xyz;
+	vec3 source = x - dt_cells * texture(velocity_field, to_uvw(mid)).xyz;
+	// The floor is a wall: nothing is fetched from below it.
+	source.y = max(source.y, 0.5);
+	vec3 uvw = to_uvw(source);
+	imageStore(velocity_out, c, texture(velocity_field, uvw));
+	// Open sides and top let clean air in.
+	bool inside = all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)));
+	imageStore(scalar_out, c, inside ? texture(scalar_field, uvw) : vec4(0.0));
+}

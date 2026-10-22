@@ -1,0 +1,26 @@
+layout(set = 0, binding = 0, rg32f) uniform restrict readonly image3D divergence;
+layout(set = 0, binding = 1, r32f) uniform restrict image3D pressure;
+
+float fluid_neighbor(int code, int bit, ivec3 n) {
+	return (code & bit) != 0 ? imageLoad(pressure, n).r : 0.0;
+}
+
+// One thread per cell of this colour: x is packed two-to-one.
+void main() {
+	ivec3 g = ivec3(gl_GlobalInvocationID);
+	ivec3 c = ivec3(2 * g.x + ((g.y + g.z + pc.counts.z) & 1), g.y, g.z);
+	if (!in_grid(c)) {
+		return;
+	}
+	vec2 cell = imageLoad(divergence, c).xy;
+	int code = int(cell.y);
+	float count = float(bitCount(code & 63) + ((code >> 6) & 7));
+	if (count < 0.5) {
+		return;
+	}
+	float sum = fluid_neighbor(code, 1, c + ivec3(1, 0, 0)) + fluid_neighbor(code, 2, c - ivec3(1, 0, 0))
+		+ fluid_neighbor(code, 4, c + ivec3(0, 1, 0)) + fluid_neighbor(code, 8, c - ivec3(0, 1, 0))
+		+ fluid_neighbor(code, 16, c + ivec3(0, 0, 1)) + fluid_neighbor(code, 32, c - ivec3(0, 0, 1));
+	float h = pc.domain.w;
+	imageStore(pressure, c, vec4((sum - h * h * cell.x) / count));
+}
