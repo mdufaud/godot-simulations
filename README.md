@@ -1,6 +1,6 @@
 # Physics Playground
 
-A collection of 15 real-time simulation and rendering demos built in Godot 4.7
+A collection of 20 real-time simulation and rendering demos built in Godot 4.7
 (Forward+ renderer, Jolt physics). Most run their solver on the GPU through
 `RenderingDevice` compute shaders.
 
@@ -31,19 +31,24 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 |------|-----------|
 | SSR Physics Demo | Screen-space reflections + Jolt rigid bodies |
 | FFT Ocean | Tessendorf FFT — JONSWAP/TMA spectrum, Stockham IFFT, 3 cascades, Jacobian foam, clipmap mesh |
+| River | Authored GPU shallow-water flow over terrain + waterfall curtain, spray and mist |
 | Fire Simulation | Sparse GPU Arrhenius combustion grid + volume raymarch |
+| Wildfire | Cheap game fire (RDR2 model): GPUParticles3D flame and smoke cells from the Fire-X atlas, fire-lit smoke on higher tiers |
 | N-Body Gallery | GPU DKD leapfrog gravity, test particles and analytic effects + additive point sprites |
 | Grass Simulation | Multimesh LOD + wind |
 | Parallax Mapping | Cone-relaxed parallax occlusion + per-light self-shadowing |
 | Fluid Simulation | 65K-particle GPU PBF/SPH fluid + screen-space surfacing |
+| Mixwell 2D Mixing | Mixwell (SIGGRAPH 2026) randomized-displacement-field fluid brushes + progressive path-traced preview |
 | 2D Fractal Explorer | 10 fractal types, deep-zoom perturbation, progressive refinement |
 | 3D Fractal Explorer | 7 distance-estimated fractals, sphere tracing |
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
 | Water & Stone | Multi-material heightfield: sediment transport, rainfall, snow, erosion and uplift; dig/pour/smooth/water/pack brushes, throwable balls |
 | Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
+| Ambient Fluid Rigid Body | Kirchhoff equations with an offline BEM added-mass tensor (CPU) driving Jolt bodies |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
 | Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |
+| Smoke Simulation | GPU stable fluids on a MAC grid: MacCormack advection, buoyancy, vorticity confinement, red-black Gauss-Seidel pressure, voxelized mesh obstacles + Jolt bodies, self-shadowed volume raymarch |
 
 ## Layout
 
