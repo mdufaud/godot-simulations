@@ -22,3 +22,37 @@ bool in_grid(ivec3 c) {
 vec3 cell_center_m(ivec3 c) {
 	return pc.domain.xyz + (vec3(c) + 0.5) * pc.domain.w;
 }
+
+ivec3 unit(int a) {
+	return ivec3(equal(ivec3(a), ivec3(0, 1, 2)));
+}
+
+// v[a] without dynamic vector indexing, which a Godot SPIR-V pass logs as unsupported.
+float axis(vec3 v, int a) {
+	return dot(v, vec3(unit(a)));
+}
+
+// Velocity is staggered (MAC), one R32F field per axis: texel t of the axis-a
+// field is the low-a face of cell t. Face fields (velocity, walls) are one texel
+// larger than the grid on every axis so the high boundary faces exist; texels
+// that are no face of their axis stay 0. Walls holds, per texel, the bit mask of
+// its faces that carry a solid's velocity (written by the forces pass).
+bool face_valid(ivec3 t, int a) {
+	return all(greaterThanEqual(t, ivec3(0))) && all(lessThanEqual(t, pc.dims.xyz - 1 + unit(a)));
+}
+
+// Face centre in cell units.
+vec3 face_pos(ivec3 t, int a) {
+	return vec3(t) + 0.5 - 0.5 * vec3(unit(a));
+}
+
+// Axis-a face field at p (cell units), clamped to that axis's faces.
+float sample_face(sampler3D field, vec3 p, int a) {
+	vec3 e = vec3(unit(a));
+	vec3 texel = clamp(p, 0.5 - 0.5 * e, vec3(pc.dims.xyz) - 0.5 + 0.5 * e) + 0.5 * e;
+	return texture(field, texel / vec3(pc.dims.xyz + 1)).r;
+}
+
+vec3 sample_velocity(sampler3D u, sampler3D v, sampler3D w, vec3 p) {
+	return vec3(sample_face(u, p, 0), sample_face(v, p, 1), sample_face(w, p, 2));
+}

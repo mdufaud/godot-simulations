@@ -3,10 +3,11 @@ extends "res://tests/test_case.gd"
 ## solve converges and removes most of an impulse's divergence, the Medium tier's
 ## iteration count converges on its own grid, advection keeps mass without decay,
 ## heat and smoke weight move smoke the right way, air does not flow into solids
-## nor smoke through a wall, clear() empties, MacCormack keeps a transported blob
-## sharper than first-order advection.
+## nor smoke through a wall, clear() empties, dyed sources keep their colour,
+## MacCormack keeps a transported blob sharper than first-order advection.
 
 const DIMS := Vector3i(16, 24, 16)
+const FACES := DIMS + Vector3i.ONE
 const CELL_M := 0.1
 const NEIGHBORS: Array[Vector3i] = [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0),
 	Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
@@ -29,6 +30,7 @@ func _run() -> void:
 	await _buoyancy_case("heavy", 0.0, 2.0, false)
 	await _obstacle_case()
 	await _leak_case()
+	await _dye_case()
 	var first_order := await _peak_after_transport(false)
 	var maccormack := await _peak_after_transport(true)
 	print("SMOKE GPU transported peak first-order=%.4f maccormack=%.4f" % [first_order, maccormack])
@@ -79,18 +81,19 @@ func _divergence_case() -> void:
 		Vector3(3.0, 1.0, 0.0), 30.0))
 	await _steps(solver, 1)
 	var before := _rms(_channel(solver.read_field("divergence"), 0, 2))
-	var after := _rms(_divergence(solver.read_field("velocity")))
+	var after := _rms(_divergence(_read_velocity(solver)))
 	var residual := _poisson_residual(solver, DIMS, CELL_M)
 	print("SMOKE GPU divergence rms before=%.5f after=%.5f ratio=%.4f poisson residual=%.5f" % [
 		before, after, after / maxf(before, 1e-9), residual])
 	_check(before > 0.1, "the impulse produced no divergence (%f)" % before)
 	_check(residual < 0.05, "200 iterations left a %.1f%% Poisson residual" % (100.0 * residual))
-	# A collocated grid keeps an odd-even residual a staggered one would not.
-	_check(after < before * 0.25, "projection left %.1f%% of the divergence" % (100.0 * after / before))
+	_check(after < before * 0.01, "projection left %.2f%% of the divergence" % (100.0 * after / before))
 	solver.clear()
 	await process_frame
 	await process_frame
-	_check(_max(solver.read_field("scalar")) == 0.0 and _max(solver.read_field("velocity")) == 0.0,
+	var velocity := _read_velocity(solver)
+	_check(_max(solver.read_field("scalar")) == 0.0 and _max(velocity[0]) == 0.0
+		and _max(velocity[1]) == 0.0 and _max(velocity[2]) == 0.0,
 		"clear() left smoke or motion behind")
 	solver.stop()
 
@@ -169,7 +172,7 @@ func _obstacle_case() -> void:
 		Vector3(0.0, 0.5, 0.0), 2.0))
 	await _steps(solver, 30)
 	var obstacle := solver.read_field("obstacle")
-	var velocity := solver.read_field("velocity")
+	var velocity := _read_velocity(solver)
 	var solid_cells := 0
 	var faces := 0
 	var inflow := 0.0
@@ -186,8 +189,9 @@ func _obstacle_case() -> void:
 						continue
 					var axis := 0 if offset.x != 0 else (1 if offset.y != 0 else 2)
 					var side := float(offset[axis])
+					var face := _face(velocity, n if side > 0.0 else Vector3i(x, y, z), axis)
 					faces += 1
-					inflow = maxf(inflow, side * (velocity[cell * 4 + axis] - obstacle[_index(n) * 4 + axis]))
+					inflow = maxf(inflow, side * (face - obstacle[_index(n) * 4 + axis]))
 	var expected := (4.0 / 3.0 * PI * 0.027 + 0.064) / (CELL_M * CELL_M * CELL_M)
 	print("SMOKE GPU solids=%d expected=%.0f fluid faces=%d max inflow=%f m/s" % [solid_cells,
 		expected, faces, inflow])
@@ -224,6 +228,35 @@ func _leak_case() -> void:
 	print("SMOKE GPU shell max smoke inside=%f outside=%f" % [inside, outside])
 	_check(inside > 0.1, "the source injected no smoke inside the shell")
 	_check(outside < 1e-6, "smoke leaked through a 2-cell wall: %f" % outside)
+	solver.stop()
+
+
+## A red and a blue source rising side by side: each half of the grid keeps the
+## colour of its source once advected.
+func _dye_case() -> void:
+	var solver := _solver()
+	if not await _start(solver):
+		return
+	solver.set_sources(SmokeSolver.pack_source(Vector3(-0.4, 0.6, 0.0), Vector3.ONE * 0.2, 5.0,
+		0.0, Vector3(0.0, 0.8, 0.0), 10.0, Color.RED)
+		+ SmokeSolver.pack_source(Vector3(0.4, 0.6, 0.0), Vector3.ONE * 0.2, 5.0, 0.0,
+		Vector3(0.0, 0.8, 0.0), 10.0, Color.BLUE))
+	await _steps(solver, 40)
+	var scalar := solver.read_field("scalar")
+	var dye := solver.read_field("dye")
+	var halves: Array[Vector4] = [Vector4.ZERO, Vector4.ZERO]
+	for z in DIMS.z:
+		for y in DIMS.y:
+			for x in DIMS.x:
+				var i := _index(Vector3i(x, y, z))
+				halves[0 if x < DIMS.x / 2 else 1] += Vector4(dye[i * 4], dye[i * 4 + 1],
+					dye[i * 4 + 2], scalar[i * 2])
+	var left := Vector3(halves[0].x, halves[0].y, halves[0].z) / maxf(halves[0].w, 1e-6)
+	var right := Vector3(halves[1].x, halves[1].y, halves[1].z) / maxf(halves[1].w, 1e-6)
+	print("SMOKE GPU dye left=%s right=%s mass=%.3f/%.3f" % [left, right, halves[0].w, halves[1].w])
+	_check(halves[0].w > 0.1 and halves[1].w > 0.1, "the dyed sources injected no smoke")
+	_check(left.distance_to(Vector3(1.0, 0.0, 0.0)) < 0.05, "red smoke is %s" % left)
+	_check(right.distance_to(Vector3(0.0, 0.0, 1.0)) < 0.05, "blue smoke is %s" % right)
 	solver.stop()
 
 
@@ -291,32 +324,29 @@ func _box_faces(center: Vector3, size: float) -> PackedVector3Array:
 	return faces
 
 
-# Central differences with the solver's boundaries: floor wall, open sides.
-func _divergence(velocity: PackedFloat32Array) -> PackedFloat32Array:
+# Net outflow of every cell through its six faces, per second.
+func _divergence(velocity: Array[PackedFloat32Array]) -> PackedFloat32Array:
 	var out := PackedFloat32Array()
 	out.resize(DIMS.x * DIMS.y * DIMS.z)
 	for z in DIMS.z:
 		for y in DIMS.y:
 			for x in DIMS.x:
-				var own := _velocity(velocity, x, y, z)
-				var div := _neighbor(velocity, x + 1, y, z, own).x - _neighbor(velocity, x - 1, y, z, own).x \
-					+ _neighbor(velocity, x, y + 1, z, own).y - _neighbor(velocity, x, y - 1, z, own).y \
-					+ _neighbor(velocity, x, y, z + 1, own).z - _neighbor(velocity, x, y, z - 1, own).z
-				out[x + DIMS.x * (y + DIMS.y * z)] = div * 0.5 / CELL_M
+				var c := Vector3i(x, y, z)
+				var div := 0.0
+				for axis in 3:
+					div += _face(velocity, c + NEIGHBORS[axis * 2], axis) - _face(velocity, c, axis)
+				out[_index(c)] = div / CELL_M
 	return out
 
 
-func _neighbor(velocity: PackedFloat32Array, x: int, y: int, z: int, own: Vector3) -> Vector3:
-	if y < 0:
-		return Vector3(own.x, 0.0, own.z)
-	if x < 0 or x >= DIMS.x or y >= DIMS.y or z < 0 or z >= DIMS.z:
-		return own
-	return _velocity(velocity, x, y, z)
+func _read_velocity(solver: SmokeSolver) -> Array[PackedFloat32Array]:
+	return [solver.read_field("velocity_x"), solver.read_field("velocity_y"),
+		solver.read_field("velocity_z")]
 
 
-func _velocity(velocity: PackedFloat32Array, x: int, y: int, z: int) -> Vector3:
-	var i := (x + DIMS.x * (y + DIMS.y * z)) * 4
-	return Vector3(velocity[i], velocity[i + 1], velocity[i + 2])
+## Axis velocity on the low face of cell t.
+func _face(velocity: Array[PackedFloat32Array], t: Vector3i, axis: int) -> float:
+	return velocity[axis][t.x + FACES.x * (t.y + FACES.y * t.z)]
 
 
 func _in_grid(c: Vector3i) -> bool:

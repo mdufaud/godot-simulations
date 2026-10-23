@@ -1,9 +1,9 @@
 class_name SmokeSolver
 extends RefCounted
-## GPU stable-fluids smoke (Stam 1999) on a dense collocated grid: RK2
-## semi-Lagrangian advection, buoyancy, vorticity confinement, red-black
-## Gauss-Seidel pressure projection, plus a per-frame transmittance volume toward
-## the sun for self-shadowing.
+## GPU stable-fluids smoke (Stam 1999) on a dense MAC grid (velocity on cell
+## faces): RK2 semi-Lagrangian or MacCormack advection, buoyancy, vorticity
+## confinement, red-black Gauss-Seidel pressure projection, plus a per-frame
+## transmittance volume toward the sun and the zenith for self-shadowing.
 ##
 ## Owns every RenderingDevice resource of the grid. The host assigns [member config],
 ## feeds emitters and obstacles each frame, and binds [method density_texture_rid]
@@ -28,16 +28,22 @@ const STAGES: Array[String] = ["obstacles", "advect", "maccormack", "forces", "c
 const WG := Vector3i(8, 8, 4)
 const MAX_SOURCES := 16
 const MAX_OBSTACLES := 32
-const SOURCE_VEC4S := 3
+const SOURCE_VEC4S := 4
 const OBSTACLE_VEC4S := 7
 const OBSTACLE_SPHERE := 0
 const OBSTACLE_BOX := 1
 const PUSH_CONSTANT_BYTES := 112
 ## Full-resolution fields and their float32 channels; "light" is the downsampled extra.
-const GRID_FIELDS := {"velocity": 4, "velocity_tmp": 4, "scalar": 2, "scalar_tmp": 2,
-	"pressure": 1, "divergence": 2, "curl": 4, "obstacle": 4, "occupancy": 1, "velocity_hat": 4,
-	"scalar_hat": 2}
-const MACCORMACK_FIELDS: Array[String] = ["velocity_hat", "scalar_hat"]
+## A velocity field is one texture per axis and binds as an array of the three.
+const GRID_FIELDS := {"velocity_x": 1, "velocity_y": 1, "velocity_z": 1, "velocity_tmp_x": 1,
+	"velocity_tmp_y": 1, "velocity_tmp_z": 1, "velocity_hat_x": 1, "velocity_hat_y": 1,
+	"velocity_hat_z": 1, "walls": 1, "scalar": 2, "scalar_tmp": 2, "scalar_hat": 2, "pressure": 1,
+	"divergence": 2, "curl": 4, "obstacle": 4, "occupancy": 1, "dye": 4, "dye_tmp": 4, "dye_hat": 4}
+const MACCORMACK_FIELDS: Array[String] = ["velocity_hat_x", "velocity_hat_y", "velocity_hat_z",
+	"scalar_hat", "dye_hat"]
+## Face fields (smoke_common.comp), one texel larger than the grid on every axis.
+const FACE_FIELDS: Array[String] = ["velocity_x", "velocity_y", "velocity_z", "velocity_tmp_x",
+	"velocity_tmp_y", "velocity_tmp_z", "velocity_hat_x", "velocity_hat_y", "velocity_hat_z", "walls"]
 const CHANNEL_FORMATS := {
 	1: RenderingDevice.DATA_FORMAT_R32_SFLOAT,
 	2: RenderingDevice.DATA_FORMAT_R32G32_SFLOAT,
@@ -148,6 +154,10 @@ func light_texture_rid() -> RID:
 	return _textures.get("light", RID())
 
 
+func dye_texture_rid() -> RID:
+	return _textures.get("dye", RID())
+
+
 ## GPU times in milliseconds, lagging 1-2 frames.
 func get_timings() -> Dictionary:
 	return _timing_store.snapshot()
@@ -206,11 +216,13 @@ func make_push_constants(sources: int, obstacles: int, parity: int) -> PackedByt
 
 
 static func pack_source(position_m: Vector3, extent_m: Vector3, density_per_s: float,
-		heat_k_per_s: float, velocity_mps: Vector3, relax_hz: float) -> PackedFloat32Array:
+		heat_k_per_s: float, velocity_mps: Vector3, relax_hz: float,
+		color: Color = Color.WHITE) -> PackedFloat32Array:
 	return PackedFloat32Array([
 		position_m.x, position_m.y, position_m.z, density_per_s,
 		extent_m.x, extent_m.y, extent_m.z, heat_k_per_s,
 		velocity_mps.x, velocity_mps.y, velocity_mps.z, relax_hz,
+		color.r, color.g, color.b, 0.0,
 	])
 
 
@@ -298,9 +310,10 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 		_pipelines[stage] = _rd.compute_pipeline_create(_shaders[stage])
 
 	for field in grid_fields(maccormack):
-		_textures[field] = _create_texture(dims, CHANNEL_FORMATS[GRID_FIELDS[field]],
+		_textures[field] = _create_texture(dims + Vector3i.ONE if FACE_FIELDS.has(field) else dims,
+			CHANNEL_FORMATS[GRID_FIELDS[field]],
 			occupancy if field == "occupancy" else PackedByteArray())
-	_textures["light"] = _create_texture(light_dims, CHANNEL_FORMATS[1])
+	_textures["light"] = _create_texture(light_dims, CHANNEL_FORMATS[2])
 	_buffers["sources"] = _rd.storage_buffer_create(MAX_SOURCES * SOURCE_VEC4S * 16)
 	_buffers["obstacles"] = _rd.storage_buffer_create(MAX_OBSTACLES * OBSTACLE_VEC4S * 16)
 	var sampler_state := RDSamplerState.new()
@@ -313,19 +326,21 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 
 	_make_set("obstacles", [_image("occupancy"), _image("obstacle"), _storage("obstacles")])
 	_make_set("advect", [_sampled("velocity"), _sampled("scalar"), _image("velocity_tmp"),
-		_image("scalar_tmp")])
+		_image("scalar_tmp"), _sampled("dye"), _image("dye_tmp")])
 	if maccormack:
 		_make_set("advect", [_sampled("velocity"), _sampled("scalar"), _image("velocity_hat"),
-			_image("scalar_hat")], "advect_hat")
+			_image("scalar_hat"), _sampled("dye"), _image("dye_hat")], "advect_hat")
 		_make_set("maccormack", [_sampled("velocity"), _sampled("scalar"), _sampled("velocity_hat"),
-			_sampled("scalar_hat"), _image("velocity_tmp"), _image("scalar_tmp")])
+			_sampled("scalar_hat"), _image("velocity_tmp"), _image("scalar_tmp"), _sampled("dye"),
+			_sampled("dye_hat"), _image("dye_tmp")])
 	_make_set("forces", [_image("velocity_tmp"), _image("scalar_tmp"), _image("obstacle"),
-		_image("velocity"), _image("scalar"), _storage("sources")])
+		_image("velocity"), _image("scalar"), _storage("sources"), _image("walls"),
+		_image("dye_tmp"), _image("dye")])
 	_make_set("curl", [_image("velocity"), _image("curl")])
-	_make_set("vorticity", [_image("curl"), _image("obstacle"), _image("velocity")])
+	_make_set("vorticity", [_image("curl"), _image("walls"), _image("velocity")])
 	_make_set("divergence", [_image("velocity"), _image("obstacle"), _image("divergence")])
 	_make_set("pressure", [_image("divergence"), _image("pressure")])
-	_make_set("project", [_image("pressure"), _image("obstacle"), _image("velocity")])
+	_make_set("project", [_image("pressure"), _image("walls"), _image("velocity")])
 	_make_set("light", [_sampled("scalar"), _image("light")])
 	_set_ready(true)
 
@@ -341,8 +356,9 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 		_rd.buffer_update(_buffers["obstacles"], 0, obstacles.size(), obstacles)
 	var pc_odd := pc.duplicate()
 	pc_odd.encode_s32(104, 1)
-	var dims := _dims_of("velocity")
+	var dims := _dims_of("scalar")
 	var groups := _groups(dims)
+	var face_groups := _groups(dims + Vector3i.ONE)
 	var pressure_groups := _groups(Vector3i((dims.x + 1) / 2, dims.y, dims.z))
 	var maccormack := _uniform_sets.has("maccormack")
 	_rd.capture_timestamp("smoke/start")
@@ -350,21 +366,21 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 	for substep in substeps:
 		_dispatch(cl, "obstacles", pc, groups)
 		if maccormack:
-			_dispatch(cl, "advect", pc, groups, "advect_hat")
-			_dispatch(cl, "maccormack", pc, groups)
+			_dispatch(cl, "advect", pc, face_groups, "advect_hat")
+			_dispatch(cl, "maccormack", pc, face_groups)
 		else:
-			_dispatch(cl, "advect", pc, groups)
-		_dispatch(cl, "forces", pc, groups)
+			_dispatch(cl, "advect", pc, face_groups)
+		_dispatch(cl, "forces", pc, face_groups)
 		cl = _mark(cl, "smoke/advect")
 		_dispatch(cl, "curl", pc, groups)
-		_dispatch(cl, "vorticity", pc, groups)
+		_dispatch(cl, "vorticity", pc, face_groups)
 		_dispatch(cl, "divergence", pc, groups)
 		cl = _mark(cl, "smoke/vorticity")
 		for i in iterations:
 			_dispatch(cl, "pressure", pc, pressure_groups)
 			_dispatch(cl, "pressure", pc_odd, pressure_groups)
 		cl = _mark(cl, "smoke/pressure")
-		_dispatch(cl, "project", pc, groups)
+		_dispatch(cl, "project", pc, face_groups)
 		cl = _mark(cl, "smoke/project")
 	_dispatch(cl, "light", pc, _groups(_dims_of("light")))
 	cl = _mark(cl, "smoke/light")
@@ -375,10 +391,11 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 func _clear_render() -> void:
 	if _rd == null:
 		return
-	for field in ["velocity", "velocity_tmp", "scalar", "scalar_tmp", "pressure", "divergence",
+	for field in ["velocity", "velocity_tmp", "scalar", "scalar_tmp", "dye", "dye_tmp", "pressure",
+			"divergence",
 			"curl", "light"]:
-		if _textures.has(field):
-			_rd.texture_clear(_textures[field], Color(0, 0, 0, 0), 0, 1, 0, 1)
+		for rid in _texture_ids(field):
+			_rd.texture_clear(rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
 
 
 func _upload_occupancy_render(occupancy: PackedByteArray) -> void:
@@ -445,18 +462,29 @@ func _groups(dims: Vector3i) -> Vector3i:
 		ceili(float(dims.z) / WG.z))
 
 
+## One texture, or the three axes of a velocity field.
+func _texture_ids(field: String) -> Array[RID]:
+	var ids: Array[RID] = []
+	for name in [field] if _textures.has(field) else [field + "_x", field + "_y", field + "_z"]:
+		if _textures.has(name):
+			ids.append(_textures[name])
+	return ids
+
+
 func _image(field: String) -> RDUniform:
 	var u := RDUniform.new()
 	u.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
-	u.add_id(_textures[field])
+	for rid in _texture_ids(field):
+		u.add_id(rid)
 	return u
 
 
 func _sampled(field: String) -> RDUniform:
 	var u := RDUniform.new()
 	u.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
-	u.add_id(_sampler)
-	u.add_id(_textures[field])
+	for rid in _texture_ids(field):
+		u.add_id(_sampler)
+		u.add_id(rid)
 	return u
 
 

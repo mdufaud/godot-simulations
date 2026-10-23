@@ -1,14 +1,10 @@
 extends "res://tests/test_case.gd"
 ## Value gates of the smoke core: config and preset validation, grid sizing,
-## push-constant layout, obstacle and emitter packing, brush plane math and the
-## GDScript mesh voxelizer. No scene, no GPU.
+## push-constant layout, obstacle, emitter and light packing, emitter schedules,
+## push-stroke plane math and the GDScript mesh voxelizer. No scene, no GPU.
 
-const PRESETS: Array[String] = [
-	"res://resources/smoke/presets/chimney_yard.tres",
-	"res://resources/smoke/presets/wind_tunnel.tres",
-	"res://resources/smoke/presets/vortex_cannon.tres",
-	"res://resources/smoke/presets/dry_ice.tres",
-]
+const PRESET_DIR := "res://resources/smoke/presets/"
+const CONTROLLER := "res://scripts/demos/smoke_controller.gd"
 
 
 func _initialize() -> void:
@@ -19,8 +15,10 @@ func _initialize() -> void:
 	_test_shader_defines()
 	_test_pack_box()
 	_test_emitter()
+	_test_scene_action()
 	_test_source_cap()
-	_test_brush_source()
+	_test_push_source()
+	_test_pack_light()
 	_test_splat_hit()
 	_test_voxelizer()
 	_finish("smoke")
@@ -28,9 +26,16 @@ func _initialize() -> void:
 
 func _test_validation() -> void:
 	_check(SmokeConfig.new().validate() == "", "default config is invalid")
-	for path in PRESETS:
-		var preset: SmokePreset = load(path)
-		_check(preset != null and preset.validate() == "", "preset %s is invalid" % path)
+	var shipped: Array = (load(CONTROLLER) as GDScript).get_script_constant_map()["PRESETS"]
+	var files := Array(DirAccess.get_files_at(PRESET_DIR)).filter(
+		func(file: String) -> bool: return file.ends_with(".tres"))
+	_check(shipped.size() == files.size(), "the demo ships %d of %d presets" % [shipped.size(),
+		files.size()])
+	for file in files:
+		var preset: SmokePreset = load(PRESET_DIR + file)
+		_check(preset != null and preset.validate() == "", "preset %s is invalid: %s" % [file,
+			preset.validate() if preset != null else "not a SmokePreset"])
+		_check(shipped.has(preset), "preset %s is not in the demo" % file)
 	var bad: Array[SmokeConfig] = []
 	for i in 6:
 		bad.append(SmokeConfig.new())
@@ -59,7 +64,7 @@ func _test_grid_sizing() -> void:
 	config.grid_cell_budget = 400000
 	config.light_downsample = 4
 	_check(config.light_dims() == Vector3i(16, 25, 16), "quarter light grid is %s" % config.light_dims())
-	_check(SmokeSolver.bytes_per_cell(true) == 120 and SmokeSolver.bytes_per_cell(false) == 96,
+	_check(SmokeSolver.bytes_per_cell(true) == 160 and SmokeSolver.bytes_per_cell(false) == 124,
 		"grid cells cost %d / %d bytes" % [SmokeSolver.bytes_per_cell(true),
 			SmokeSolver.bytes_per_cell(false)])
 
@@ -139,23 +144,48 @@ func _test_pack_box() -> void:
 
 func _test_emitter() -> void:
 	var emitter := SmokeEmitter.new()
-	_check(emitter.is_on(0.0) and emitter.is_on(123.4), "continuous emitter switched off")
+	_check(emitter.is_on(0.0, -INF) and emitter.is_on(123.4, -INF) and emitter.is_continuous(),
+		"continuous emitter switched off")
 	emitter.pulse_period_s = 1.6
 	emitter.pulse_on_s = 0.15
 	_check(emitter.validate() == "", "pulsed emitter is invalid")
-	_check(emitter.is_on(0.0) and emitter.is_on(0.1) and not emitter.is_on(0.2)
-		and emitter.is_on(1.65) and not emitter.is_on(1.8), "pulse gating is wrong")
+	_check(emitter.is_on(0.0, -INF) and emitter.is_on(0.1, -INF) and not emitter.is_on(0.2, -INF)
+		and emitter.is_on(1.65, -INF) and not emitter.is_on(1.8, -INF), "pulse gating is wrong")
+	emitter.trigger_s = 0.5
+	_check(not emitter.is_on(0.2, -INF) and emitter.is_on(3.2, 3.0) and not emitter.is_on(3.6, 3.0)
+		and emitter.is_on(3.21, 0.0), "a pulsed emitter's trigger does not add to its pulses")
+	emitter.pulse_period_s = 0.0
+	_check(not emitter.is_continuous() and not emitter.is_on(2.9, 3.0) and emitter.is_on(3.0, 3.0)
+		and emitter.is_on(3.49, 3.0) and not emitter.is_on(3.5, 3.0) and not emitter.is_on(10.0, -INF),
+		"a triggered emitter fires outside its trigger window")
+	emitter.trigger_s = 0.0
+	emitter.pulse_period_s = 1.6
 	emitter.pulse_on_s = 2.0
 	_check(emitter.validate() != "", "pulse longer than its period passed validation")
 	emitter.density_per_s = 4.0
 	emitter.heat_k_per_s = -10.0
 	emitter.velocity_mps = Vector3(2.0, 0.0, 0.0)
 	emitter.relax_hz = 5.0
+	emitter.color = Color(0.9, 0.1, 0.2)
 	var packed := emitter.pack(2.0, 3.0, 0.5)
 	_check(packed.size() == SmokeSolver.SOURCE_VEC4S * 4, "emitter packs %d floats" % packed.size())
 	_check(is_equal_approx(packed[3], 8.0) and is_equal_approx(packed[7], -30.0)
 		and is_equal_approx(packed[8], 1.0) and is_equal_approx(packed[11], 5.0),
 		"emitter scales are not applied")
+	_check(is_equal_approx(packed[12], 0.9) and is_equal_approx(packed[13], 0.1)
+		and is_equal_approx(packed[14], 0.2), "emitter colour is not packed: %s" % packed)
+
+
+## A preset names its scene action exactly when it has an emitter to fire.
+func _test_scene_action() -> void:
+	var preset: SmokePreset = (load(PRESET_DIR + "smoke_flares.tres") as SmokePreset).duplicate(true)
+	_check(preset.validate() == "", "flares preset is invalid: %s" % preset.validate())
+	preset.action_label = ""
+	_check(preset.validate() != "", "a triggered emitter without a scene action passed validation")
+	preset.action_label = "Gust"
+	for emitter in preset.emitters:
+		emitter.trigger_s = 0.0
+	_check(preset.validate() != "", "a scene action with nothing to fire passed validation")
 
 
 func _test_source_cap() -> void:
@@ -168,32 +198,53 @@ func _test_source_cap() -> void:
 
 
 # Held until the stroke changes: a frame that runs no substep must lose nothing.
-func _test_brush_source() -> void:
+func _test_push_source() -> void:
 	var pointer := SmokePointer.new()
-	_check(pointer.pack_source().is_empty(), "an idle brush emits a source")
-	pointer._stroke = SmokePointer.Brush.INJECT
+	_check(pointer.pack_source().is_empty(), "an idle pointer emits a source")
+	pointer._pushing = true
 	pointer._stroke_point = Vector3(1.0, 2.0, 3.0)
 	pointer._stroke_previous = pointer._stroke_point
 	pointer._process(0.1)
-	var inject := pointer.pack_source()
-	_check(inject.size() == 12 and is_equal_approx(inject[3], 8.0) and is_equal_approx(inject[7], 20.0)
-		and inject == pointer.pack_source(), "inject brush is not a steady source: %s" % inject)
-	pointer._stroke = SmokePointer.Brush.PUSH
+	_check(pointer.pack_source().is_empty(), "a still push stroke emits a source")
 	pointer._stroke_point += Vector3(0.2, 0.0, 0.0)
 	pointer._process(0.1)
 	var push := pointer.pack_source()
-	_check(push.size() == 12 and is_equal_approx(push[3], 0.0) and is_equal_approx(push[8], 2.0)
-		and is_equal_approx(push[11], 30.0) and push == pointer.pack_source(),
-		"push brush is not a steady 2 m/s source: %s" % push)
+	_check(push.size() == SmokeSolver.SOURCE_VEC4S * 4 and is_equal_approx(push[3], 0.0)
+		and is_equal_approx(push[8], 2.0) and is_equal_approx(push[11], 30.0)
+		and push == pointer.pack_source(), "push stroke is not a steady 2 m/s source: %s" % push)
 	pointer._stroke_point += Vector3(5.0, 0.0, 0.0)
 	pointer._process(0.1)
-	_check(is_equal_approx(pointer.pack_source()[8], 6.0), "push brush speed is not capped at 6 m/s")
-	pointer._process(0.1)
-	_check(pointer.pack_source().is_empty(), "a still push brush emits a source")
+	_check(is_equal_approx(pointer.pack_source()[8], 6.0), "push stroke speed is not capped at 6 m/s")
 	pointer._stroke_point += Vector3(0.2, 0.0, 0.0)
 	pointer._process(0.1)
-	_check(pointer._release() and pointer.pack_source().is_empty(), "a released brush emits a source")
+	_check(pointer._release() and pointer.pack_source().is_empty(), "a released stroke emits a source")
 	pointer.free()
+
+
+func _test_pack_light() -> void:
+	var spot := SpotLight3D.new()
+	spot.light_color = Color(1.0, 0.5, 0.25)
+	spot.light_energy = 4.0
+	spot.spot_range = 12.0
+	spot.spot_attenuation = 1.5
+	spot.spot_angle = 20.0
+	spot.spot_angle_attenuation = 2.0
+	var world := Transform3D(Basis(Vector3.RIGHT, -PI * 0.5), Vector3(1.0, 5.0, 2.0))
+	var row := SmokeRenderer.pack_light(spot, world.translated(-Vector3(0.0, 1.0, 0.0)))
+	_check(row.size() == SmokeRenderer.LIGHT_TEXELS, "a light packs %d texels" % row.size())
+	_check(Vector3(row[0].r, row[0].g, row[0].b).distance_to(Vector3(1.0, 4.0, 2.0)) < 1e-5
+		and is_equal_approx(row[0].a, 12.0), "spot position or range is %s" % row[0])
+	_check(Vector3(row[1].r, row[1].g, row[1].b).distance_to(Vector3(4.0, 2.0, 1.0)) < 1e-5
+		and is_equal_approx(row[1].a, 1.5), "spot radiance or decay is %s" % row[1])
+	_check(Vector3(row[2].r, row[2].g, row[2].b).distance_to(Vector3(0.0, -1.0, 0.0)) < 1e-5
+		and is_equal_approx(row[2].a, cos(deg_to_rad(20.0))) and is_equal_approx(row[3].r, 2.0),
+		"spot cone is %s %s" % [row[2], row[3]])
+	var omni := OmniLight3D.new()
+	omni.omni_range = 3.0
+	_check(SmokeRenderer.pack_light(omni, Transform3D.IDENTITY)[2].a < -1.5,
+		"an omni light packs a cone")
+	spot.free()
+	omni.free()
 
 
 func _test_splat_hit() -> void:

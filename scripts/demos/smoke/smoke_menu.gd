@@ -1,14 +1,15 @@
 class_name SmokeMenu extends RefCounted
-## Smoke demo panel and action lane. Air and Look rows belong to the preset
-## (not persisted, rewritten by [method refresh]); Emitters, Brush and Time rows
-## belong to the user; Solver and Graphics rows are driven by the quality tier.
+## Smoke demo panel and action lane. Air and Look rows and the scene action belong
+## to the preset (not persisted, rewritten by [method refresh]); Emitters, Push and
+## Time rows belong to the user; Solver and Graphics rows are driven by the quality
+## tier.
 
 const SHADOW_VOLUME_LABELS := ["Quarter", "Half", "Full"]
 const MSAA_LABELS := ["Off", "2×", "4×"]
 
 var _menu: SimMenu
 var _preset_option: OptionButton
-var _brush_action: Button
+var _scene_action: Button
 var _hint: Label
 var _wind_speed: HSlider
 var _wind_direction: HSlider
@@ -39,12 +40,12 @@ func build(menu: SimMenu, host, presets: Array[SmokePreset]) -> void:
 	menu.add_section("Scene")
 	menu.add_action("🎬", "Scene", host.next_preset)
 	menu.add_action("↺", "Reset", host.reset_scene)
-	menu.add_action("🧹", "Clear", host.clear_smoke)
 	menu.add_action_toggle("⏸", "Pause", false, host.set_paused)
-	menu.add_action("💣", "Throw", host.throw_grenade)
-	menu.add_action("💨", "Puff", host.puff)
-	menu.add_action_toggle("🏭", "Emitters", true, host.set_emitters_on)
-	_brush_action = menu.add_action("✋", "Brush: Orbit", host.cycle_brush)
+	_scene_action = menu.add_action("", "", host.scene_action)
+	menu.add_action("🧨", "Flare", host.throw_flare)
+	menu.add_action_toggle("✋", "Blow", false, func(on: bool) -> void: host.pointer.blow = on)
+	menu.add_action_toggle("🔦", "Torch", false, func(on: bool) -> void: host.torch.visible = on)
+	menu.add_action_toggle("🏭", "Sources", true, host.set_emitters_on)
 	_preset_option = menu.add_option_button("Preset", names, host.preset_idx, host.apply_preset)
 	_hint = menu.add_label("")
 	_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -75,13 +76,11 @@ func build(menu: SimMenu, host, presets: Array[SmokePreset]) -> void:
 		func(v: float) -> void: host.solver.config.velocity_decay_hz = v, false, 0.005)
 	menu.add_separator()
 
-	menu.add_section("Brush")
+	menu.add_section("Push")
 	menu.add_slider("Radius m", 0.1, 1.5, host.pointer.radius_m,
 		func(v: float) -> void: host.pointer.radius_m = v)
 	menu.add_slider("Push m/s", 0.5, 15.0, host.pointer.push_mps,
 		func(v: float) -> void: host.pointer.push_mps = v)
-	menu.add_slider("Inject /s", 1.0, 30.0, host.pointer.inject_per_s,
-		func(v: float) -> void: host.pointer.inject_per_s = v)
 	menu.add_separator()
 
 	menu.add_section("Look")
@@ -165,8 +164,10 @@ func refresh(host, preset: SmokePreset) -> void:
 	var config: SmokeConfig = host.solver.config
 	_preset_option.select(host.preset_idx)
 	_menu.store_value("Scene", "Preset", host.preset_idx)
-	_hint.text = "%s\nLeft drag on a body: move it · Right drag: push smoke · Shift + right drag: add smoke" \
-		% preset.hint
+	_hint.text = "%s\nDrag a body to move it · Blow, or right drag: push the air" % preset.hint
+	_menu.set_action_icon(_scene_action, preset.action_icon)
+	_menu.set_action_label(_scene_action, preset.action_label)
+	_scene_action.visible = preset.action_label != ""
 	_menu.set_slider_value(_wind_speed, config.wind_speed_mps)
 	_menu.set_slider_value(_wind_direction, config.wind_direction_deg)
 	_menu.set_slider_value(_buoyancy, config.buoyancy_mps2_per_k)
@@ -185,5 +186,13 @@ func refresh(host, preset: SmokePreset) -> void:
 	_menu.set_slider_value(_sun_energy, host.sun.light_energy)
 
 
-func show_brush(brush: int) -> void:
-	_menu.set_action_label(_brush_action, "Brush: %s" % SmokePointer.BRUSH_NAMES[brush])
+func profiler_lines(host) -> PackedStringArray:
+	var solver: SmokeSolver = host.solver
+	var t := solver.get_timings()
+	return PackedStringArray([
+		"smoke GPU %.2f ms · grid %s · %s" % [t.get("total", 0.0), solver.grid_dims(),
+			host.quality.label()],
+		"  advect %.2f | vorticity %.2f | pressure %.2f | project %.2f | light %.2f" % [
+			t.get("advect", 0.0), t.get("vorticity", 0.0), t.get("pressure", 0.0),
+			t.get("project", 0.0), t.get("light", 0.0)],
+	])

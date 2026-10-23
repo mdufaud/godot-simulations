@@ -425,19 +425,19 @@ func _run_smoke_boot() -> void:
 		_smoke_check_state(demo, "tier %d" % tier)
 	demo.set_quality_profile(SmokeQualityProfile.default_tier())
 	_check(await _smoke_ready(demo), "smoke_boot: default tier never became ready")
-	demo.throw_grenade()
-	demo.puff()
-	demo.clear_smoke()
+	var lights_before: int = demo.props.volume_lights().size()
+	demo.throw_flare()
+	demo.scene_action()
 	demo.set_paused(true)
 	await _boot_frames(3)
 	demo.set_paused(false)
 	demo.set_emitters_on(false)
 	demo.set_emitters_on(true)
-	for i in SmokePointer.BRUSH_NAMES.size():
-		demo.cycle_brush()
-	_check(demo.pointer.brush == SmokePointer.Brush.ORBIT, "smoke_boot: brush did not cycle back")
-	_check(demo.props._grenades.size() == 1, "smoke_boot: throw spawned %d grenades" % [
-		demo.props._grenades.size()])
+	_check(demo.props._flares.size() == 1, "smoke_boot: throw spawned %d flares" % [
+		demo.props._flares.size()])
+	_check(demo.props.volume_lights().size() == lights_before + 1,
+		"smoke_boot: the thrown flare added no light to the smoke")
+	_check(demo.solver.source_count() > 0, "smoke_boot: no source reached the solver")
 	demo.next_preset()
 	_check(await _smoke_ready(demo), "smoke_boot: next preset never became ready")
 	demo.reset_scene()

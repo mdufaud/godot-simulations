@@ -1,26 +1,47 @@
-layout(set = 0, binding = 0) uniform sampler3D velocity_field;
+layout(set = 0, binding = 0) uniform sampler3D velocity_field[3];
 layout(set = 0, binding = 1) uniform sampler3D scalar_field;
-layout(set = 0, binding = 2, rgba32f) uniform restrict writeonly image3D velocity_out;
+layout(set = 0, binding = 2, r32f) uniform restrict writeonly image3D velocity_out[3];
 layout(set = 0, binding = 3, rg32f) uniform restrict writeonly image3D scalar_out;
+layout(set = 0, binding = 4) uniform sampler3D dye_field;
+layout(set = 0, binding = 5, rgba32f) uniform restrict writeonly image3D dye_out;
 
-vec3 to_uvw(vec3 cell_pos) {
-	return cell_pos / vec3(pc.dims.xyz);
+vec3 velocity_at(vec3 p) {
+	return sample_velocity(velocity_field[0], velocity_field[1], velocity_field[2], p);
 }
 
+vec3 trace(vec3 x, float dt_cells) {
+	return x - dt_cells * velocity_at(x - 0.5 * dt_cells * velocity_at(x));
+}
+
+vec4 advected_face(sampler3D field, ivec3 t, int a, float dt_cells) {
+	return vec4(sample_face(field, trace(face_pos(t, a), dt_cells), a));
+}
+
+// Dispatched over the face grid: every texel advects its faces, grid cells their scalars.
 void main() {
-	ivec3 c = ivec3(gl_GlobalInvocationID);
-	if (!in_grid(c)) {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
 		return;
 	}
 	float dt_cells = pc.sim.x / pc.domain.w;
-	vec3 x = vec3(c) + 0.5;
-	vec3 mid = x - 0.5 * dt_cells * texelFetch(velocity_field, c, 0).xyz;
-	vec3 source = x - dt_cells * texture(velocity_field, to_uvw(mid)).xyz;
+	if (face_valid(t, 0)) {
+		imageStore(velocity_out[0], t, advected_face(velocity_field[0], t, 0, dt_cells));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(velocity_out[1], t, advected_face(velocity_field[1], t, 1, dt_cells));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(velocity_out[2], t, advected_face(velocity_field[2], t, 2, dt_cells));
+	}
+	if (!in_grid(t)) {
+		return;
+	}
+	vec3 source = trace(vec3(t) + 0.5, dt_cells);
 	// The floor is a wall: nothing is fetched from below it.
 	source.y = max(source.y, 0.5);
-	vec3 uvw = to_uvw(source);
-	imageStore(velocity_out, c, texture(velocity_field, uvw));
+	vec3 uvw = source / vec3(pc.dims.xyz);
 	// Open sides and top let clean air in.
 	bool inside = all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)));
-	imageStore(scalar_out, c, inside ? texture(scalar_field, uvw) : vec4(0.0));
+	imageStore(scalar_out, t, inside ? texture(scalar_field, uvw) : vec4(0.0));
+	imageStore(dye_out, t, inside ? texture(dye_field, uvw) : vec4(0.0));
 }

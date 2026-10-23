@@ -1,19 +1,20 @@
 extends Node3D
 
 const PRESETS: Array[SmokePreset] = [
-	preload("res://resources/smoke/presets/chimney_yard.tres"),
-	preload("res://resources/smoke/presets/wind_tunnel.tres"),
+	preload("res://resources/smoke/presets/smoke_flares.tres"),
+	preload("res://resources/smoke/presets/sunset_stacks.tres"),
 	preload("res://resources/smoke/presets/vortex_cannon.tres"),
-	preload("res://resources/smoke/presets/dry_ice.tres"),
+	preload("res://resources/smoke/presets/wind_tunnel.tres"),
+	preload("res://resources/smoke/presets/concert_stage.tres"),
 ]
 const RAYS_PER_AXIS := 2
-const PUFF_S := 0.2
-const GRENADE_SPEED_MPS := 9.0
+const FLARE_FLIGHT_S := 1.2
 const VirtualJoystickScript := preload("res://scripts/ui/virtual_joystick.gd")
 
 @onready var menu: SimMenu = $UI/SimMenu
 @onready var orbit_cam: OrbitCamera = $CameraPivot
 @onready var camera: Camera3D = $CameraPivot/Camera3D
+@onready var torch: SpotLight3D = $CameraPivot/Camera3D/Torch
 @onready var sun: DirectionalLight3D = $Sun
 @onready var world: WorldEnvironment = $WorldEnvironment
 @onready var volume: SmokeRenderer = $SmokeVolume
@@ -35,7 +36,7 @@ var time_scale := 1.0
 var sun_elevation_deg := 35.0
 var sun_azimuth_deg := 0.0
 var _time := 0.0
-var _puff_until_s := -1.0
+var _action_s := -INF
 var _clock := SimStepClock.new()
 var _rebuild_pending := false
 var _capture_dt := -1.0
@@ -57,7 +58,8 @@ func _ready() -> void:
 	pointer.camera = camera
 	pointer.props = props
 	add_child(pointer)
-	profiler.lines_provider = _profiler_lines
+	props.shadow_material = volume.shadow_material
+	profiler.lines_provider = smoke_menu.profiler_lines.bind(self)
 	profiler.enabled_changed.connect(func(on: bool) -> void: solver.profiling = on)
 	profiler.build(menu.get_parent(), get_viewport().get_viewport_rid(), _viewport)
 	smoke_menu.build(menu, self, PRESETS)
@@ -74,6 +76,7 @@ func apply_preset(index: int) -> void:
 		return
 	solver.config = preset.config.duplicate()
 	quality.reapply()
+	world.environment = preset.environment
 	orbit_cam.target = preset.camera_target_m
 	orbit_cam.distance = preset.camera_distance_m
 	orbit_cam.pitch = preset.camera_pitch_deg
@@ -87,7 +90,7 @@ func apply_preset(index: int) -> void:
 	pointer.focus_m = preset.camera_target_m
 	smoke_menu.refresh(self, preset)
 	_time = 0.0
-	_puff_until_s = -1.0
+	_action_s = -INF
 	_clock.reset()
 	_rebuild()
 
@@ -119,13 +122,16 @@ func _process(delta: float) -> void:
 	_time += quanta * _clock.reference_step
 	props.update(_time)
 	var emitters: Array[SmokeEmitter] = PRESETS[preset_idx].emitters if emitters_on else []
-	solver.set_sources(props.pack_sources(emitters, _time, _time < _puff_until_s, rate_scale,
-		heat_scale, speed_scale) + pointer.pack_source())
+	solver.set_sources(props.pack_sources(emitters, _time, _action_s, rate_scale, heat_scale,
+		speed_scale) + pointer.pack_source())
 	solver.set_obstacles(props.pack_obstacles())
 	solver.light_direction = sun.global_basis.z
 	solver.advance(quanta)
 	volume.sync(solver.config, sun.global_basis.z, sun.light_color * sun.light_energy,
 		world.environment.ambient_light_color * world.environment.ambient_light_energy)
+	var lights: Array[Light3D] = [torch]
+	lights.append_array(props.volume_lights())
+	volume.set_lights(lights)
 	profiler.poll(delta)
 
 
@@ -137,10 +143,6 @@ func reset_scene() -> void:
 	apply_preset(preset_idx)
 
 
-func clear_smoke() -> void:
-	solver.clear()
-
-
 func set_paused(on: bool) -> void:
 	paused = on
 
@@ -149,18 +151,18 @@ func set_emitters_on(on: bool) -> void:
 	emitters_on = on
 
 
-func throw_grenade() -> void:
-	var direction := -camera.global_basis.z
-	props.throw_grenade(camera.global_position + direction * 0.6, direction * GRENADE_SPEED_MPS, _time)
+## Fires the preset's triggered emitters.
+func scene_action() -> void:
+	_action_s = _time
 
 
-func puff() -> void:
-	_puff_until_s = _time + PUFF_S
-
-
-func cycle_brush() -> void:
-	pointer.brush = ((pointer.brush + 1) % SmokePointer.BRUSH_NAMES.size()) as SmokePointer.Brush
-	smoke_menu.show_brush(pointer.brush)
+## Lobbed from the camera to land under the orbit target, inside the smoke domain.
+func throw_flare() -> void:
+	var origin := camera.global_position - camera.global_basis.z * 0.6
+	var landing := Vector3(orbit_cam.target.x, 0.0, orbit_cam.target.z)
+	var gravity := Vector3.DOWN * float(ProjectSettings.get_setting("physics/3d/default_gravity"))
+	props.throw_flare(origin, (landing - origin) / FLARE_FLIGHT_S - 0.5 * FLARE_FLIGHT_S * gravity,
+		_time)
 
 
 func set_sun_elevation(degrees: float) -> void:
@@ -234,14 +236,13 @@ func set_capture_fixed_delta(dt: float) -> void:
 	_capture_dt = dt
 
 
-func _profiler_lines() -> PackedStringArray:
-	var t := solver.get_timings()
-	return PackedStringArray([
-		"smoke GPU %.2f ms · grid %s · %s" % [t.get("total", 0.0), solver.grid_dims(), quality.label()],
-		"  advect %.2f | vorticity %.2f | pressure %.2f | project %.2f | light %.2f" % [
-			t.get("advect", 0.0), t.get("vorticity", 0.0), t.get("pressure", 0.0),
-			t.get("project", 0.0), t.get("light", 0.0)],
-	])
+## Capture harness (interaction=1): a thrown flare, the torch, and the scene action
+## 5 s later, once the scene has filled.
+func set_capture_interaction(on: bool) -> void:
+	if on:
+		_action_s = _time + 5.0
+		throw_flare()
+		torch.visible = true
 
 
 func _exit_tree() -> void:

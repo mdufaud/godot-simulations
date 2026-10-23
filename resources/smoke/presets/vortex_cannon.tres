@@ -4,6 +4,21 @@
 [ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_hnmrn"]
 [ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_sbpam"]
 
+[sub_resource type="Environment" id="Environment_studio"]
+background_mode = 1
+background_color = Color(0.012, 0.013, 0.018, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.25, 0.28, 0.35, 1)
+ambient_light_energy = 0.35
+reflected_light_source = 1
+tonemap_mode = 4
+glow_enabled = true
+glow_intensity = 0.4
+glow_bloom = 0.04
+fog_enabled = true
+fog_light_color = Color(0.012, 0.013, 0.018, 1)
+fog_density = 0.04
+
 [sub_resource type="Resource" id="Resource_7ia4f"]
 script = ExtResource("1_lyxmu")
 domain_size_m = Vector3(10, 5, 5)
@@ -15,9 +30,9 @@ temperature_decay_hz = 1.0
 velocity_decay_hz = 0.05
 vorticity_confinement = 0.6
 wind_relax_hz = 0.0
-extinction_per_m = 8.0
+extinction_per_m = 6.0
 scattering_albedo = 0.92
-phase_g = 0.3
+phase_g = 0.5
 
 [sub_resource type="Resource" id="Resource_jybp6"]
 script = ExtResource("2_hnmrn")
@@ -28,25 +43,95 @@ velocity_mps = Vector3(10, 0, 0)
 relax_hz = 40.0
 pulse_period_s = 2.5
 pulse_on_s = 0.2
+trigger_s = 0.2
 
-[sub_resource type="Resource" id="Resource_charge"]
+[sub_resource type="Resource" id="Resource_lip0"]
 script = ExtResource("2_hnmrn")
-position_m = Vector3(-3.8, 2.5, 0)
-extent_m = Vector3(0.25, 0.55, 0.55)
+position_m = Vector3(-3.55, 2.5, 0.55)
+extent_m = Vector3(0.2, 0.26, 0.26)
 density_per_s = 25.0
 pulse_period_s = 2.5
 pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip1"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 2.8889, 0.3889)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip2"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 3.05, 0)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip3"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 2.8889, -0.3889)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip4"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 2.5, -0.55)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip5"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 2.1111, -0.3889)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip6"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 1.95, 0)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
+
+[sub_resource type="Resource" id="Resource_lip7"]
+script = ExtResource("2_hnmrn")
+position_m = Vector3(-3.55, 2.1111, 0.3889)
+extent_m = Vector3(0.2, 0.26, 0.26)
+density_per_s = 25.0
+pulse_period_s = 2.5
+pulse_on_s = 0.2
+trigger_s = 0.2
 
 [resource]
 script = ExtResource("3_sbpam")
 display_name = "Vortex cannon"
-hint = "Pulses of air through a torus nozzle roll up into smoke rings. Puff fires one more."
+hint = "Pulses of air through the drum's nozzle roll up into smoke rings that sail through the hoop. Fire one more at will."
 layout = 2
+environment = SubResource("Environment_studio")
 config = SubResource("Resource_7ia4f")
-emitters = Array[ExtResource("2_hnmrn")]([SubResource("Resource_jybp6"), SubResource("Resource_charge")])
-camera_target_m = Vector3(0, 2.5, 0)
-camera_distance_m = 12.0
-camera_pitch_deg = -10.0
-camera_yaw_deg = 35.0
-sun_elevation_deg = 40.0
-sun_azimuth_deg = 40.0
+emitters = Array[ExtResource("2_hnmrn")]([SubResource("Resource_jybp6"), SubResource("Resource_lip0"), SubResource("Resource_lip1"), SubResource("Resource_lip2"), SubResource("Resource_lip3"), SubResource("Resource_lip4"), SubResource("Resource_lip5"), SubResource("Resource_lip6"), SubResource("Resource_lip7")])
+action_icon = "🎯"
+action_label = "Fire"
+camera_target_m = Vector3(-1, 2.5, 0)
+camera_distance_m = 9.5
+camera_pitch_deg = -6.0
+camera_yaw_deg = 60.0
+sun_elevation_deg = 30.0
+sun_azimuth_deg = 220.0
+sun_color = Color(0.95, 0.96, 1, 1)
+sun_energy = 2.5

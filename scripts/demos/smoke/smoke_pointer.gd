@@ -1,28 +1,23 @@
 class_name SmokePointer extends Node
 ## Mouse and touch for the smoke demo. Added after the camera, so it sees each
-## unhandled event first: a press on a Jolt body grabs it, a press on empty space
-## runs the brush (Orbit leaves it to the camera). Right drag pushes the smoke,
-## Shift + right drag injects it, whatever the brush.
+## unhandled event first: a press on a Jolt body grabs it; with blow on, a press on
+## empty space pushes the air, otherwise the camera orbits. Right drag always
+## pushes the air.
 
-enum Brush { ORBIT, PUSH, INJECT }
-
-const BRUSH_NAMES := ["Orbit", "Push", "Inject"]
-const INJECT_HEAT_K_PER_S := 20.0
 const PUSH_RELAX_HZ := 30.0
 
 var camera: Camera3D
 var props: SmokeProps
-## Centre of the camera-facing plane the brush paints on.
+## Centre of the camera-facing plane the push strokes paint on.
 var focus_m := Vector3.ZERO
-var brush := Brush.ORBIT
+var blow := false
 var radius_m := 0.4
 var push_mps := 6.0
-var inject_per_s := 8.0
 
 var _held: RigidBody3D
 var _grab_distance := 0.0
 var _grab_target := Vector3.ZERO
-var _stroke := Brush.ORBIT
+var _pushing := false
 var _stroke_point := Vector3.ZERO
 var _stroke_previous := Vector3.ZERO
 var _stroke_velocity := Vector3.ZERO
@@ -37,15 +32,14 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var button := event as InputEventMouseButton
 		if button.button_index == MOUSE_BUTTON_LEFT:
-			handled = _press(button.position, brush) if button.pressed else _release()
+			handled = _press(button.position) if button.pressed else _release()
 		elif button.button_index == MOUSE_BUTTON_RIGHT:
-			handled = _begin_stroke(button.position,
-				Brush.INJECT if button.shift_pressed else Brush.PUSH) if button.pressed else _end_stroke()
+			handled = _begin_stroke(button.position) if button.pressed else _end_stroke()
 	elif event is InputEventMouseMotion:
 		handled = _drag((event as InputEventMouseMotion).position)
 	elif event is InputEventScreenTouch:
 		var touch := event as InputEventScreenTouch
-		if touch.pressed and _touch_index < 0 and _press(touch.position, brush):
+		if touch.pressed and _touch_index < 0 and _press(touch.position):
 			_touch_index = touch.index
 			handled = true
 		elif not touch.pressed and touch.index == _touch_index:
@@ -62,15 +56,12 @@ func _process(delta: float) -> void:
 	_stroke_previous = _stroke_point
 
 
-## The brush as one solver source, applied on every substep while the stroke lasts,
-## so its rate does not depend on how many substeps a frame runs.
+## The push stroke as one solver source, applied on every substep while it lasts,
+## so its strength does not depend on how many substeps a frame runs.
 func pack_source() -> PackedFloat32Array:
-	if _stroke == Brush.PUSH and _stroke_velocity.length() > 0.05:
+	if _pushing and _stroke_velocity.length() > 0.05:
 		return SmokeSolver.pack_source(_stroke_point, Vector3.ONE * radius_m, 0.0, 0.0,
 			_stroke_velocity, PUSH_RELAX_HZ)
-	if _stroke == Brush.INJECT:
-		return SmokeSolver.pack_source(_stroke_point, Vector3.ONE * radius_m, inject_per_s,
-			INJECT_HEAT_K_PER_S, Vector3.ZERO, 0.0)
 	return PackedFloat32Array()
 
 
@@ -84,7 +75,7 @@ func _physics_process(_delta: float) -> void:
 		- _held.linear_velocity * 8.0 * _held.mass - _held.get_gravity() * _held.mass)
 
 
-func _press(screen_pos: Vector2, mode: Brush) -> bool:
+func _press(screen_pos: Vector2) -> bool:
 	var from := camera.project_ray_origin(screen_pos)
 	var dir := camera.project_ray_normal(screen_pos)
 	var hit := camera.get_world_3d().direct_space_state.intersect_ray(
@@ -94,13 +85,13 @@ func _press(screen_pos: Vector2, mode: Brush) -> bool:
 		_grab_distance = from.distance_to(hit.position)
 		_grab_target = _held.global_position
 		return true
-	return mode != Brush.ORBIT and _begin_stroke(screen_pos, mode)
+	return blow and _begin_stroke(screen_pos)
 
 
-func _begin_stroke(screen_pos: Vector2, mode: Brush) -> bool:
+func _begin_stroke(screen_pos: Vector2) -> bool:
 	if not _project(screen_pos):
 		return false
-	_stroke = mode
+	_pushing = true
 	_stroke_previous = _stroke_point
 	return true
 
@@ -112,8 +103,8 @@ func _release() -> bool:
 
 
 func _end_stroke() -> bool:
-	var engaged := _stroke != Brush.ORBIT
-	_stroke = Brush.ORBIT
+	var engaged := _pushing
+	_pushing = false
 	return engaged
 
 
@@ -123,7 +114,7 @@ func _drag(screen_pos: Vector2) -> bool:
 			+ camera.project_ray_normal(screen_pos) * _grab_distance
 		_grab_target.y = maxf(_grab_target.y, 0.05)
 		return true
-	if _stroke != Brush.ORBIT:
+	if _pushing:
 		_project(screen_pos)
 		return true
 	return false
