@@ -10,7 +10,9 @@ const PROFILES: Array[AmbientFluidProfile3D] = [
 	preload("res://resources/ambient_fluid/body_bem.tres"),
 	preload("res://resources/ambient_fluid/plate_bem.tres"),
 ]
-const KERNELS: Array[StringName] = [&"AmbientFluidKernels", &"FractalKernels", &"PlanetKernels"]
+const KERNELS: Array[StringName] = [&"AmbientFluidKernels", &"FractalKernels", &"PlanetKernels",
+	&"SmokeKernels"]
+const ROCK := preload("res://resources/fire/fire_rock_0.res")
 
 var _rng := RandomNumberGenerator.new()
 var _cases := 0
@@ -26,6 +28,7 @@ func _initialize() -> void:
 		_test_pressure()
 		_test_fractal()
 		_test_planet_unpack()
+		_test_smoke_voxelize()
 		print("native_kernels: %d cases compared, native=%s" % [_cases, Native.enabled])
 	_finish("native_kernels")
 
@@ -105,6 +108,19 @@ func _test_fractal() -> void:
 				klein_box_x = _rng.randf_range(0.8, 1.2),
 				klein_box_z = _rng.randf_range(0.8, 1.2),
 			}])
+
+
+func _test_smoke_voxelize() -> void:
+	var torus := TorusMesh.new()
+	for _case in 6:
+		var mesh: Mesh = ROCK if _case % 2 == 0 else torus
+		var xform := Transform3D(Basis.from_euler(_random_vector(PI)).scaled(Vector3.ONE
+			* _rng.randf_range(0.6, 1.4)), _random_vector(0.3) + Vector3(0.0, 0.8, 0.0))
+		var faces := PackedVector3Array()
+		for vertex in mesh.get_faces():
+			faces.append(xform * vertex)
+		_check_identical(SmokeVoxelizer, &"voxelize", [faces, Vector3(-1.0, 0.0, -1.0),
+			_rng.randf_range(0.05, 0.09), Vector3i(30, 24, 30), 2 + _case % 2])
 
 
 func _test_planet_unpack() -> void:

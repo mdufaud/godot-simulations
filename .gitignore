@@ -31,6 +31,9 @@ resources/terrain/presets/*
 !resources/nbody/
 !resources/nbody/presets/
 !resources/nbody/presets/*.tres
+!resources/smoke/
+!resources/smoke/presets/
+!resources/smoke/presets/*.tres
 !resources/planet/
 resources/planet/*
 !resources/planet/presets/

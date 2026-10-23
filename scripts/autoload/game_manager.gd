@@ -50,6 +50,7 @@ var settings: Dictionary = {
 	"ambient_fluid_quality_profile": 1,
 	"parallax_quality_profile": 1,
 	"wildfire_quality_profile": 1,
+	"smoke_quality_profile": 1,
 }
 
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
@@ -103,6 +104,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/non_euclidean_demo.tscn"},
 	{key = "planet_demo",   title = "Procedural Planet",    icon = "🪐", category = "other",
 		scene = "res://scenes/planet_demo.tscn"},
+	{key = "smoke_demo",    title = "Smoke Simulation",     icon = "💨", category = "fluids",
+		scene = "res://scenes/smoke_demo.tscn"},
 ]
 
 

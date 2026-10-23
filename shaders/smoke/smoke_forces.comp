@@ -1,0 +1,106 @@
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D velocity_in[3];
+layout(set = 0, binding = 1, rg32f) uniform restrict readonly image3D scalar_in;
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image3D obstacle;
+layout(set = 0, binding = 3, r32f) uniform restrict writeonly image3D velocity_out[3];
+layout(set = 0, binding = 4, rg32f) uniform restrict writeonly image3D scalar_out;
+layout(set = 0, binding = 5, std430) restrict readonly buffer Sources {
+	vec4 data[];
+} sources;
+layout(set = 0, binding = 6, r32f) uniform restrict writeonly image3D walls_out;
+// Density-weighted albedo: decays and is injected with the density, so dye / density
+// stays the colour of the sources that made the smoke.
+layout(set = 0, binding = 7, rgba32f) uniform restrict readonly image3D dye_in;
+layout(set = 0, binding = 8, rgba32f) uniform restrict writeonly image3D dye_out;
+
+float source_weight(int i, vec3 p_m) {
+	vec3 q = (p_m - sources.data[i * SOURCE_VEC4S].xyz) / sources.data[i * SOURCE_VEC4S + 1].xyz;
+	float w = clamp(1.0 - dot(q, q), 0.0, 1.0);
+	return w * w;
+}
+
+vec4 obstacle_at(ivec3 c) {
+	return in_grid(c) ? imageLoad(obstacle, c) : vec4(0.0);
+}
+
+// Mean of the scalar fields in the grid cells on both sides of face a.
+vec2 face_scalars(ivec3 t, int a) {
+	ivec3 low = t - unit(a);
+	vec2 total = vec2(0.0);
+	float count = 0.0;
+	if (in_grid(low)) {
+		total += imageLoad(scalar_in, low).xy;
+		count += 1.0;
+	}
+	if (in_grid(t)) {
+		total += imageLoad(scalar_in, t).xy;
+		count += 1.0;
+	}
+	return total / max(count, 1.0);
+}
+
+// Face a of texel t after this substep's forces. A wall face (the floor, or a solid
+// cell on either side) takes the solid's velocity and sets its bit in walls.
+vec4 updated_face(float v, ivec3 t, int a, inout int walls) {
+	vec4 low = obstacle_at(t - unit(a));
+	vec4 high = obstacle_at(t);
+	float solids = step(0.5, low.w) + step(0.5, high.w);
+	if ((a == 1 && t.y == 0) || solids > 0.0) {
+		walls |= 1 << a;
+		return vec4((step(0.5, low.w) * axis(low.xyz, a) + step(0.5, high.w) * axis(high.xyz, a))
+			/ max(solids, 1.0));
+	}
+	float dt = pc.sim.x;
+	v *= exp(-pc.decay.z * dt);
+	vec3 p = pc.domain.xyz + face_pos(t, a) * pc.domain.w;
+	for (int i = 0; i < pc.counts.x; i++) {
+		vec4 motion = sources.data[i * SOURCE_VEC4S + 2];
+		v += (axis(motion.xyz, a) - v) * (1.0 - exp(-motion.w * source_weight(i, p) * dt));
+	}
+	if (a == 1) {
+		vec2 s = face_scalars(t, a);
+		v += (pc.sim.y * s.y - pc.sim.z * max(s.x, 0.0)) * dt;
+	} else {
+		v += ((a == 0 ? pc.wind.x : pc.wind.y) - v) * (1.0 - exp(-pc.decay.w * dt));
+	}
+	return vec4(v);
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	int walls = 0;
+	if (face_valid(t, 0)) {
+		imageStore(velocity_out[0], t, updated_face(imageLoad(velocity_in[0], t).r, t, 0, walls));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(velocity_out[1], t, updated_face(imageLoad(velocity_in[1], t).r, t, 1, walls));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(velocity_out[2], t, updated_face(imageLoad(velocity_in[2], t).r, t, 2, walls));
+	}
+	imageStore(walls_out, t, vec4(float(walls)));
+
+	if (!in_grid(t)) {
+		return;
+	}
+	if (imageLoad(obstacle, t).w > 0.5) {
+		imageStore(scalar_out, t, vec4(0.0));
+		imageStore(dye_out, t, vec4(0.0));
+		return;
+	}
+	float dt = pc.sim.x;
+	vec2 s = imageLoad(scalar_in, t).xy * exp(-pc.decay.xy * dt);
+	vec3 dye = imageLoad(dye_in, t).rgb * exp(-pc.decay.x * dt);
+	vec3 p = cell_center_m(t);
+	for (int i = 0; i < pc.counts.x; i++) {
+		vec2 rate = vec2(sources.data[i * SOURCE_VEC4S].w, sources.data[i * SOURCE_VEC4S + 1].w)
+			* (source_weight(i, p) * dt);
+		s += rate;
+		dye += sources.data[i * SOURCE_VEC4S + 3].rgb * rate.x;
+	}
+	s.x = max(s.x, 0.0);
+	imageStore(scalar_out, t, vec4(s, 0.0, 0.0));
+	imageStore(dye_out, t, vec4(max(dye, vec3(0.0)), 0.0));
+}

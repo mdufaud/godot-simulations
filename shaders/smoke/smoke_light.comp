@@ -1,0 +1,30 @@
+layout(set = 0, binding = 0) uniform sampler3D scalar_field;
+layout(set = 0, binding = 1, rg32f) uniform restrict writeonly image3D light_out;
+
+// Smoke between x and the grid boundary along dir, as an optical depth.
+float optical_depth(vec3 x, vec3 dir, vec3 dims) {
+	vec3 safe_dir = mix(vec3(1e-6), dir, greaterThanEqual(abs(dir), vec3(1e-6)));
+	vec3 exit_t = max((dims - x) / safe_dir, -x / safe_dir);
+	float span = min(min(exit_t.x, exit_t.y), exit_t.z);
+	float step_cells = pc.light.w;
+	int steps = int(ceil(span / step_cells));
+	float optical = 0.0;
+	for (int i = 0; i < steps; i++) {
+		optical += texture(scalar_field, (x + dir * ((float(i) + 0.5) * step_cells)) / dims).r;
+	}
+	return optical * step_cells * pc.domain.w * pc.wind.z;
+}
+
+// r: transmittance toward the sun, g: toward the zenith (sky occlusion).
+void main() {
+	ivec3 light_dims = (pc.dims.xyz + pc.dims.w - 1) / pc.dims.w;
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThanEqual(c, light_dims))) {
+		return;
+	}
+	vec3 dims = vec3(pc.dims.xyz);
+	// Same normalized extent as the density grid, so both share one uvw.
+	vec3 x = (vec3(c) + 0.5) * dims / vec3(light_dims);
+	imageStore(light_out, c, vec4(exp(-optical_depth(x, normalize(pc.light.xyz), dims)),
+		exp(-optical_depth(x, vec3(0.0, 1.0, 0.0), dims)), 0.0, 0.0));
+}

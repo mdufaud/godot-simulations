@@ -1,0 +1,83 @@
+// Selle et al. 2008: half the round-trip error, clamped to the source stencil's range.
+layout(set = 0, binding = 0) uniform sampler3D velocity_field[3];
+layout(set = 0, binding = 1) uniform sampler3D scalar_field;
+layout(set = 0, binding = 2) uniform sampler3D velocity_hat[3];
+layout(set = 0, binding = 3) uniform sampler3D scalar_hat;
+layout(set = 0, binding = 4, r32f) uniform restrict writeonly image3D velocity_out[3];
+layout(set = 0, binding = 5, rg32f) uniform restrict writeonly image3D scalar_out;
+layout(set = 0, binding = 6) uniform sampler3D dye_field;
+layout(set = 0, binding = 7) uniform sampler3D dye_hat;
+layout(set = 0, binding = 8, rgba32f) uniform restrict writeonly image3D dye_out;
+
+vec3 velocity_at(vec3 p) {
+	return sample_velocity(velocity_field[0], velocity_field[1], velocity_field[2], p);
+}
+
+// Backward and forward RK2 traces from x, both started from the velocity at x.
+void traces(vec3 x, float dt_cells, out vec3 source, out vec3 target) {
+	vec3 v0 = velocity_at(x);
+	source = x - dt_cells * velocity_at(x - 0.5 * dt_cells * v0);
+	target = x + dt_cells * velocity_at(x + 0.5 * dt_cells * v0);
+}
+
+vec4 corrected_face(sampler3D field, sampler3D hat_field, ivec3 t, int a, float dt_cells) {
+	vec3 source;
+	vec3 target;
+	traces(face_pos(t, a), dt_cells, source, target);
+	float hat = texelFetch(hat_field, t, 0).r;
+	float fix = hat + 0.5 * (texelFetch(field, t, 0).r - sample_face(hat_field, target, a));
+	vec3 e = vec3(unit(a));
+	vec3 texel = clamp(source, 0.5 - 0.5 * e, vec3(pc.dims.xyz) - 0.5 + 0.5 * e) + 0.5 * e;
+	ivec3 corner = clamp(ivec3(floor(texel - 0.5)), ivec3(0), pc.dims.xyz - 2 + unit(a));
+	float lo = 1e30;
+	float hi = -1e30;
+	for (int i = 0; i < 8; i++) {
+		float tap = texelFetch(field, corner + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1), 0).r;
+		lo = min(lo, tap);
+		hi = max(hi, tap);
+	}
+	return vec4(fix >= lo && fix <= hi ? fix : hat);
+}
+
+vec4 corrected_cell(sampler3D field, sampler3D hat_field, ivec3 t, ivec3 corner, vec3 target) {
+	vec4 lo = vec4(1e30);
+	vec4 hi = vec4(-1e30);
+	for (int i = 0; i < 8; i++) {
+		vec4 tap = texelFetch(field, corner + ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1), 0);
+		lo = min(lo, tap);
+		hi = max(hi, tap);
+	}
+	vec4 hat = texelFetch(hat_field, t, 0);
+	vec4 fix = hat + 0.5 * (texelFetch(field, t, 0) - texture(hat_field, target / vec3(pc.dims.xyz)));
+	return all(greaterThanEqual(fix, lo)) && all(lessThanEqual(fix, hi)) ? fix : hat;
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	float dt_cells = pc.sim.x / pc.domain.w;
+	if (face_valid(t, 0)) {
+		imageStore(velocity_out[0], t, corrected_face(velocity_field[0], velocity_hat[0], t, 0, dt_cells));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(velocity_out[1], t, corrected_face(velocity_field[1], velocity_hat[1], t, 1, dt_cells));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(velocity_out[2], t, corrected_face(velocity_field[2], velocity_hat[2], t, 2, dt_cells));
+	}
+	if (!in_grid(t)) {
+		return;
+	}
+	vec3 source;
+	vec3 target;
+	traces(vec3(t) + 0.5, dt_cells, source, target);
+	source.y = max(source.y, 0.5);
+	target.y = max(target.y, 0.5);
+	ivec3 corner = clamp(ivec3(floor(source - 0.5)), ivec3(0), pc.dims.xyz - 2);
+	vec3 uvw = source / vec3(pc.dims.xyz);
+	bool inside = all(greaterThanEqual(uvw, vec3(0.0))) && all(lessThanEqual(uvw, vec3(1.0)));
+	imageStore(scalar_out, t, inside ? corrected_cell(scalar_field, scalar_hat, t, corner, target) : vec4(0.0));
+	imageStore(dye_out, t, inside ? corrected_cell(dye_field, dye_hat, t, corner, target) : vec4(0.0));
+}

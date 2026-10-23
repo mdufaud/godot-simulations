@@ -1,0 +1,32 @@
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D static_occupancy;
+layout(set = 0, binding = 1, rgba32f) uniform restrict writeonly image3D obstacle;
+layout(set = 0, binding = 2, std430) restrict readonly buffer Obstacles {
+	vec4 data[];
+} obstacles;
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	vec3 p = cell_center_m(c);
+	vec4 result = vec4(0.0, 0.0, 0.0, imageLoad(static_occupancy, c).r > 0.5 ? 1.0 : 0.0);
+	for (int i = 0; i < pc.counts.y; i++) {
+		int base = i * OBSTACLE_VEC4S;
+		vec4 head = obstacles.data[base];
+		vec3 r = p - head.xyz;
+		vec3 size = obstacles.data[base + 1].xyz;
+		bool inside;
+		if (int(head.w) == OBSTACLE_SPHERE) {
+			inside = dot(r, r) < size.x * size.x;
+		} else {
+			vec3 local = vec3(dot(obstacles.data[base + 2].xyz, r),
+				dot(obstacles.data[base + 3].xyz, r), dot(obstacles.data[base + 4].xyz, r));
+			inside = all(lessThan(abs(local), size));
+		}
+		if (inside) {
+			result = vec4(obstacles.data[base + 5].xyz + cross(obstacles.data[base + 6].xyz, r), 1.0);
+		}
+	}
+	imageStore(obstacle, c, result);
+}

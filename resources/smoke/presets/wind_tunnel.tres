@@ -1,0 +1,112 @@
+[gd_resource type="Resource" script_class="SmokePreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/smoke/smoke_config.gd" id="1_cfg"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_emit"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_preset"]
+
+[sub_resource type="Environment" id="Environment_lab"]
+background_mode = 1
+background_color = Color(0.01, 0.012, 0.016, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.3, 0.33, 0.4, 1)
+ambient_light_energy = 0.3
+reflected_light_source = 1
+tonemap_mode = 4
+glow_enabled = true
+glow_intensity = 0.5
+glow_bloom = 0.04
+fog_enabled = true
+fog_light_color = Color(0.01, 0.012, 0.016, 1)
+fog_density = 0.03
+
+[sub_resource type="Resource" id="Config_tunnel"]
+script = ExtResource("1_cfg")
+domain_size_m = Vector3(12, 4, 4)
+domain_origin_m = Vector3(-6, 0, -2)
+buoyancy_mps2_per_k = 0.0
+smoke_weight_mps2 = 0.0
+density_decay_hz = 0.05
+temperature_decay_hz = 1.0
+velocity_decay_hz = 0.0
+vorticity_confinement = 1.0
+wind_speed_mps = 2.5
+wind_relax_hz = 0.1
+extinction_per_m = 10.0
+scattering_albedo = 0.95
+phase_g = 0.2
+smoke_color = Color(1, 1, 1, 1)
+ambient_strength = 0.5
+
+[sub_resource type="Resource" id="Emitter_fan"]
+script = ExtResource("2_emit")
+position_m = Vector3(-5.7, 2, 0)
+extent_m = Vector3(0.35, 2.4, 2.4)
+density_per_s = 0.0
+velocity_mps = Vector3(2.5, 0, 0)
+relax_hz = 4.0
+
+[sub_resource type="Resource" id="Emitter_rake0"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 0.8, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake1"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 1.2, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake2"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 1.6, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake3"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 2, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake4"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 2.4, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake5"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 2.8, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_rake6"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 3.2, 0)
+extent_m = Vector3(0.1, 0.1, 0.1)
+density_per_s = 15.0
+
+[sub_resource type="Resource" id="Emitter_curtain"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.9, 2, 0)
+extent_m = Vector3(0.15, 1.6, 1.8)
+density_per_s = 12.0
+trigger_s = 1.0
+
+[resource]
+script = ExtResource("3_preset")
+display_name = "Wind tunnel"
+hint = "A smoke rake streams past a cylinder and sheds a vortex street. Drag the orange ball through the flow, or release a smoke curtain."
+layout = 3
+environment = SubResource("Environment_lab")
+config = SubResource("Config_tunnel")
+emitters = Array[ExtResource("2_emit")]([SubResource("Emitter_fan"), SubResource("Emitter_rake0"), SubResource("Emitter_rake1"), SubResource("Emitter_rake2"), SubResource("Emitter_rake3"), SubResource("Emitter_rake4"), SubResource("Emitter_rake5"), SubResource("Emitter_rake6"), SubResource("Emitter_curtain")])
+action_icon = "🌫"
+action_label = "Curtain"
+camera_target_m = Vector3(0, 2, 0)
+camera_distance_m = 10.0
+camera_pitch_deg = -6.0
+sun_elevation_deg = 80.0
+sun_color = Color(0.95, 0.97, 1, 1)
+sun_energy = 2.0

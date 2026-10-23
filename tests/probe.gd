@@ -401,6 +401,102 @@ func _run_nbody_numeric() -> void:
 	_finish("nbody_numeric")
 
 
+## The smoke demo boots on its stored preset and tier without any harness, and
+## every preset, tier and lane action reaches the same consistent state.
+func _run_smoke_boot() -> void:
+	var demo = (load("res://scenes/smoke_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	if not await _smoke_ready(demo):
+		_check(false, "smoke_boot: boot scene never became ready")
+		_finish("smoke_boot")
+		return
+	var boot_preset := clampi(int(demo.menu.stored_value("Scene", "Preset", 0)), 0,
+		demo.PRESETS.size() - 1)
+	_check(demo.preset_idx == boot_preset, "smoke_boot: booted on preset %d, stored %d" % [
+		demo.preset_idx, boot_preset])
+	_smoke_check_state(demo, "boot")
+	for index in demo.PRESETS.size():
+		demo.apply_preset(index)
+		_check(await _smoke_ready(demo), "smoke_boot: preset %d never became ready" % index)
+		_smoke_check_state(demo, "preset %d" % index)
+	for tier in SmokeQualityProfile.tier_count():
+		demo.set_quality_profile(tier)
+		_check(await _smoke_ready(demo), "smoke_boot: tier %d never became ready" % tier)
+		_smoke_check_state(demo, "tier %d" % tier)
+	demo.set_quality_profile(SmokeQualityProfile.default_tier())
+	_check(await _smoke_ready(demo), "smoke_boot: default tier never became ready")
+	var lights_before: int = demo.props.volume_lights().size()
+	demo.throw_flare()
+	demo.scene_action()
+	demo.set_paused(true)
+	await _boot_frames(3)
+	demo.set_paused(false)
+	demo.set_emitters_on(false)
+	demo.set_emitters_on(true)
+	_check(demo.props._flares.size() == 1, "smoke_boot: throw spawned %d flares" % [
+		demo.props._flares.size()])
+	_check(demo.props.volume_lights().size() == lights_before + 1,
+		"smoke_boot: the thrown flare added no light to the smoke")
+	_check(demo.solver.source_count() > 0, "smoke_boot: no source reached the solver")
+	demo.next_preset()
+	_check(await _smoke_ready(demo), "smoke_boot: next preset never became ready")
+	demo.reset_scene()
+	_check(await _smoke_ready(demo), "smoke_boot: reset never became ready")
+	_smoke_check_state(demo, "after actions")
+	print("SMOKE BOOT presets=%d tiers=%d failures=%d" % [demo.PRESETS.size(),
+		SmokeQualityProfile.tier_count(), _failures])
+	demo.queue_free()
+	await process_frame
+	_finish("smoke_boot")
+
+
+func _smoke_ready(demo) -> bool:
+	var deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < deadline:
+		await process_frame
+		if demo.capture_ready():
+			await _boot_frames(2)
+			return true
+	return false
+
+
+func _smoke_check_state(demo, label: String) -> void:
+	var preset: SmokePreset = demo.PRESETS[demo.preset_idx]
+	var config: SmokeConfig = demo.solver.config
+	var values: Dictionary = SmokeQualityProfile.values(demo.quality.effective)
+	_check(config != preset.config and config.domain_size_m == preset.config.domain_size_m
+		and config.buoyancy_mps2_per_k == preset.config.buoyancy_mps2_per_k
+		and config.smoke_weight_mps2 == preset.config.smoke_weight_mps2
+		and config.vorticity_confinement == preset.config.vorticity_confinement
+		and config.extinction_per_m == preset.config.extinction_per_m
+		and config.wind_speed_mps == preset.config.wind_speed_mps,
+		"smoke_boot %s: running config differs from the preset's air and look" % label)
+	_check(config.grid_cell_budget == values.grid_cell_budget
+		and config.pressure_iterations == values.pressure_iterations
+		and config.march_step_cells == values.march_step_cells
+		and config.light_downsample == values.light_downsample
+		and config.light_step_cells == values.light_step_cells
+		and config.maccormack == values.maccormack
+		and config.sim_rate_hz == values.sim_rate_hz,
+		"smoke_boot %s: running config differs from tier %d" % [label, demo.quality.effective])
+	_check(demo.solver.grid_dims() == config.grid_dims() and demo.volume.is_bound(),
+		"smoke_boot %s: solver grid %s, config grid %s" % [label, demo.solver.grid_dims(),
+			config.grid_dims()])
+	_check(demo.sun.shadow_enabled == values.scene_shadows,
+		"smoke_boot %s: sun shadows differ from the tier" % label)
+	var occupancy: PackedFloat32Array = demo.solver.read_field("occupancy")
+	var solid := 0
+	for value in occupancy:
+		if value > 0.5:
+			solid += 1
+	_check(solid > 0, "smoke_boot %s: static props baked no solid cell" % label)
+	_check(is_equal_approx(demo.smoke_menu._buoyancy.value, config.buoyancy_mps2_per_k)
+		and is_equal_approx(demo.smoke_menu._extinction.value, config.extinction_per_m),
+		"smoke_boot %s: menu rows differ from the running config" % label)
+	print("SMOKE BOOT %s preset=%d tier=%d grid=%s solid=%d" % [label, demo.preset_idx,
+		demo.quality.effective, demo.solver.grid_dims(), solid])
+
+
 func _run_terrain_hydro() -> void:
 	var demo = (load("res://scenes/terrain_demo.tscn") as PackedScene).instantiate()
 	root.add_child(demo)

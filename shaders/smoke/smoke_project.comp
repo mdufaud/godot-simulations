@@ -1,0 +1,31 @@
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D pressure;
+layout(set = 0, binding = 1, r32f) uniform restrict readonly image3D walls;
+layout(set = 0, binding = 2, r32f) uniform restrict image3D velocity[3];
+
+// Open sides and top are p = 0; the floor and solids only border wall faces.
+float pressure_at(ivec3 c) {
+	return in_grid(c) ? imageLoad(pressure, c).r : 0.0;
+}
+
+// Dispatched over the face grid; wall faces keep the solid's velocity.
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	int wall_mask = int(imageLoad(walls, t).r);
+	float high = pressure_at(t);
+	float inv_h = 1.0 / pc.domain.w;
+	if (face_valid(t, 0) && (wall_mask & 1) == 0) {
+		imageStore(velocity[0], t, imageLoad(velocity[0], t)
+			- (high - pressure_at(t - ivec3(1, 0, 0))) * inv_h);
+	}
+	if (face_valid(t, 1) && (wall_mask & 2) == 0) {
+		imageStore(velocity[1], t, imageLoad(velocity[1], t)
+			- (high - pressure_at(t - ivec3(0, 1, 0))) * inv_h);
+	}
+	if (face_valid(t, 2) && (wall_mask & 4) == 0) {
+		imageStore(velocity[2], t, imageLoad(velocity[2], t)
+			- (high - pressure_at(t - ivec3(0, 0, 1))) * inv_h);
+	}
+}

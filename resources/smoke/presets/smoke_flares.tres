@@ -1,0 +1,107 @@
+[gd_resource type="Resource" script_class="SmokePreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/smoke/smoke_config.gd" id="1_cfg"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_emitter.gd" id="2_emit"]
+[ext_resource type="Script" path="res://scripts/smoke/smoke_preset.gd" id="3_preset"]
+
+[sub_resource type="ProceduralSkyMaterial" id="SkyMaterial_day"]
+sky_top_color = Color(0.2, 0.4, 0.72, 1)
+sky_horizon_color = Color(0.7, 0.77, 0.86, 1)
+ground_bottom_color = Color(0.7, 0.77, 0.86, 1)
+ground_horizon_color = Color(0.7, 0.77, 0.86, 1)
+sun_angle_max = 25.0
+sun_curve = 0.1
+
+[sub_resource type="Sky" id="Sky_day"]
+sky_material = SubResource("SkyMaterial_day")
+
+[sub_resource type="Environment" id="Environment_day"]
+background_mode = 2
+sky = SubResource("Sky_day")
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.65, 0.82, 1)
+ambient_light_energy = 0.6
+reflected_light_source = 2
+tonemap_mode = 4
+glow_enabled = true
+glow_intensity = 0.3
+glow_bloom = 0.03
+fog_enabled = true
+fog_light_color = Color(0.7, 0.77, 0.86, 1)
+fog_density = 0.012
+fog_sky_affect = 0.3
+
+[sub_resource type="Resource" id="Config_flares"]
+script = ExtResource("1_cfg")
+domain_size_m = Vector3(14, 6, 10)
+domain_origin_m = Vector3(-7, 0, -5)
+buoyancy_mps2_per_k = 0.03
+smoke_weight_mps2 = 0.15
+density_decay_hz = 0.03
+temperature_decay_hz = 0.8
+velocity_decay_hz = 0.05
+vorticity_confinement = 1.0
+wind_speed_mps = 0.7
+wind_relax_hz = 0.3
+extinction_per_m = 7.0
+scattering_albedo = 0.9
+phase_g = 0.3
+smoke_color = Color(1, 1, 1, 1)
+ambient_strength = 0.6
+
+[sub_resource type="Resource" id="Emitter_red"]
+script = ExtResource("2_emit")
+position_m = Vector3(-4.2, 0.4, 0.4)
+extent_m = Vector3(0.25, 0.15, 0.25)
+density_per_s = 10.0
+color = Color(0.92, 0.1, 0.08, 1)
+heat_k_per_s = 150.0
+velocity_mps = Vector3(0, 1.2, 0)
+relax_hz = 3.0
+
+[sub_resource type="Resource" id="Emitter_orange"]
+script = ExtResource("2_emit")
+position_m = Vector3(-2.6, 0.4, -1.4)
+extent_m = Vector3(0.25, 0.15, 0.25)
+density_per_s = 10.0
+color = Color(1, 0.5, 0.04, 1)
+heat_k_per_s = 150.0
+velocity_mps = Vector3(0, 1.2, 0)
+relax_hz = 3.0
+
+[sub_resource type="Resource" id="Emitter_violet"]
+script = ExtResource("2_emit")
+position_m = Vector3(-1.6, 0.4, 1.1)
+extent_m = Vector3(0.25, 0.15, 0.25)
+density_per_s = 10.0
+color = Color(0.55, 0.18, 0.9, 1)
+heat_k_per_s = 150.0
+velocity_mps = Vector3(0, 1.2, 0)
+relax_hz = 3.0
+
+[sub_resource type="Resource" id="Emitter_gust"]
+script = ExtResource("2_emit")
+position_m = Vector3(-6.3, 2, 0)
+extent_m = Vector3(0.6, 2.5, 5)
+density_per_s = 0.0
+velocity_mps = Vector3(7, 0.5, 0)
+relax_hz = 6.0
+trigger_s = 1.2
+
+[resource]
+script = ExtResource("3_preset")
+display_name = "Smoke flares"
+hint = "Three flares burn red, orange and violet; the breeze mixes their smoke. Throw more flares, or call a gust."
+environment = SubResource("Environment_day")
+config = SubResource("Config_flares")
+emitters = Array[ExtResource("2_emit")]([SubResource("Emitter_red"), SubResource("Emitter_orange"), SubResource("Emitter_violet"), SubResource("Emitter_gust")])
+action_icon = "🌬"
+action_label = "Gust"
+camera_target_m = Vector3(-0.5, 1.4, 0)
+camera_distance_m = 11.0
+camera_pitch_deg = -10.0
+camera_yaw_deg = 15.0
+sun_elevation_deg = 28.0
+sun_azimuth_deg = 160.0
+sun_color = Color(1, 0.93, 0.82, 1)
+sun_energy = 1.8

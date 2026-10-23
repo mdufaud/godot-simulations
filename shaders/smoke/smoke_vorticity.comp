@@ -1,0 +1,50 @@
+layout(set = 0, binding = 0, rgba32f) uniform restrict readonly image3D curl_field;
+layout(set = 0, binding = 1, r32f) uniform restrict readonly image3D walls;
+layout(set = 0, binding = 2, r32f) uniform restrict image3D velocity[3];
+
+float curl_magnitude(ivec3 c) {
+	return imageLoad(curl_field, clamp(c, ivec3(0), pc.dims.xyz - 1)).w;
+}
+
+// Fedkiw et al. 2001 confinement force at a cell centre, zero outside the grid.
+vec3 confinement(ivec3 c) {
+	if (!in_grid(c)) {
+		return vec3(0.0);
+	}
+	vec3 gradient = vec3(
+		curl_magnitude(c + ivec3(1, 0, 0)) - curl_magnitude(c - ivec3(1, 0, 0)),
+		curl_magnitude(c + ivec3(0, 1, 0)) - curl_magnitude(c - ivec3(0, 1, 0)),
+		curl_magnitude(c + ivec3(0, 0, 1)) - curl_magnitude(c - ivec3(0, 0, 1)));
+	float len = length(gradient);
+	if (len < 1e-6) {
+		return vec3(0.0);
+	}
+	return pc.sim.w * pc.domain.w * cross(gradient / len, imageLoad(curl_field, c).xyz);
+}
+
+// Velocity change of face a over dt: the mean of the forces at the grid cells on
+// its two sides.
+float face_impulse(ivec3 t, int a, vec3 high) {
+	ivec3 low_cell = t - unit(a);
+	float sides = float(in_grid(low_cell)) + float(in_grid(t));
+	return (axis(confinement(low_cell), a) + axis(high, a)) / max(sides, 1.0) * pc.sim.x;
+}
+
+// Wall faces keep the solid's velocity.
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	int wall_mask = int(imageLoad(walls, t).r);
+	vec3 high = confinement(t);
+	if (face_valid(t, 0) && (wall_mask & 1) == 0) {
+		imageStore(velocity[0], t, imageLoad(velocity[0], t) + face_impulse(t, 0, high));
+	}
+	if (face_valid(t, 1) && (wall_mask & 2) == 0) {
+		imageStore(velocity[1], t, imageLoad(velocity[1], t) + face_impulse(t, 1, high));
+	}
+	if (face_valid(t, 2) && (wall_mask & 4) == 0) {
+		imageStore(velocity[2], t, imageLoad(velocity[2], t) + face_impulse(t, 2, high));
+	}
+}
