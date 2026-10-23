@@ -39,8 +39,8 @@ func _ready() -> void:
 	quality.setup(ParallaxQualityProfile, "parallax_quality_profile", _apply_quality)
 	quality.restore()
 	_menu_builder = ParallaxMenu.new(_settings, _apply_settings, _on_preset_selected,
-		_on_mesh_selected, quality)
-	_menu_builder.build(menu, _preset_names())
+		_on_mesh_selected)
+	_menu_builder.build(menu, _preset_names(), quality)
 	_menu_builder.sync_sliders()
 
 	var error := _settings.validate()

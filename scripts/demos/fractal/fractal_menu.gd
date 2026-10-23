@@ -6,7 +6,6 @@ var _camera: FractalCamera
 var _view: FractalView
 var _autopilot: FractalAutopilot
 var _on_reset: Callable
-var _quality: SimQualityState
 
 var _zoom_label: Label
 var _iterations_label: Label
@@ -15,15 +14,15 @@ var _label_timer := 0.0
 
 
 func _init(camera: FractalCamera, view: FractalView, autopilot: FractalAutopilot,
-		on_reset: Callable, quality: SimQualityState) -> void:
+		on_reset: Callable) -> void:
 	_camera = camera
 	_view = view
 	_autopilot = autopilot
 	_on_reset = on_reset
-	_quality = quality
 
 
-func build(menu: SimMenu) -> void:
+# Not a member: quality keeps the lambdas below, which capture self.
+func build(menu: SimMenu, quality: SimQualityState) -> void:
 	menu.title = "2D Fractal Explorer"
 
 	menu.add_separator()
@@ -79,14 +78,14 @@ func build(menu: SimMenu) -> void:
 	menu.add_section("Quality")
 	var aa_slider: HSlider = menu.add_slider("Anti-Alias", 1, 3, float(_view.aa_quality),
 		func(value: float) -> void: _view.aa_quality = int(value))
-	_quality.bind("aa_quality", aa_slider,
+	quality.bind("aa_quality", aa_slider,
 		func(value: float) -> void: _view.aa_quality = int(value))
 	var band_slider: HSlider = menu.add_slider("Refine band", 32.0, 4096.0,
 		float(_view.config.refine_band_rows),
 		func(value: float) -> void: _view.config.refine_band_rows = int(value))
-	_quality.bind("refine_band_rows", band_slider,
+	quality.bind("refine_band_rows", band_slider,
 		func(value: float) -> void: _view.config.refine_band_rows = int(value))
-	_quality.attach_menu_option(menu)
+	quality.attach_menu_option(menu)
 	menu.add_toggle("Auto Iterations", _camera.auto_iterations,
 		func(on: bool) -> void: _camera.auto_iterations = on)
 	menu.add_slider("Max Iterations", 100, 20000, float(_camera.manual_iterations),

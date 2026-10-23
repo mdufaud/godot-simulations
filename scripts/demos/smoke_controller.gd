@@ -23,7 +23,7 @@ const VirtualJoystickScript := preload("res://scripts/ui/virtual_joystick.gd")
 
 var solver := SmokeSolver.new()
 var quality := SimQualityState.new()
-var pointer := SmokePointer.new()
+var pointer: SmokePointer
 var profiler := SimProfiler.new()
 var smoke_menu := SmokeMenu.new()
 var preset_idx := 0
@@ -55,6 +55,7 @@ func _ready() -> void:
 	if VirtualJoystickScript.is_touch_ui():
 		quality.fallback_tier = SmokeQualityProfile.Tier.LOW
 	quality.restore()
+	pointer = SmokePointer.new()
 	pointer.camera = camera
 	pointer.props = props
 	add_child(pointer)

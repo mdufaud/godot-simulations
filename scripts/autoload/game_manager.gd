@@ -169,6 +169,11 @@ func _create_loading_overlay() -> void:
 	RenderingServer.canvas_item_set_parent(_stage_item, _loading_layer.get_canvas())
 
 
+func _exit_tree() -> void:
+	if _stage_item.is_valid():
+		RenderingServer.free_rid(_stage_item)
+
+
 func _draw_loading_stage() -> void:
 	RenderingServer.canvas_item_clear(_stage_item)
 	if _stage_text.is_empty():

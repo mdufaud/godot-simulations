@@ -47,8 +47,8 @@ func _ready() -> void:
 	get_window().size_changed.connect(_resize_viewports)
 	_resize_viewports()
 
-	_menu_builder = FractalMenu.new(_camera, _view, _autopilot, reset, quality)
-	_menu_builder.build(_menu)
+	_menu_builder = FractalMenu.new(_camera, _view, _autopilot, reset)
+	_menu_builder.build(_menu, quality)
 
 	_autopilot.pick(0)
 	reset()
