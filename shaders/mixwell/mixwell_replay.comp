@@ -1,0 +1,43 @@
+layout(rg32f, set = 0, binding = 10) restrict readonly uniform image2D keyframe_map;
+layout(std430, set = 0, binding = 11) restrict readonly buffer ReplayList {
+	uint replay_list[];
+};
+
+
+vec2 keyframe_displacement(vec2 coordinate) {
+	ivec2 dims = imageSize(keyframe_map);
+	vec2 aspect = vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+	vec2 position = (coordinate + aspect) / (2.0 * aspect) * vec2(dims) - 0.5;
+	vec2 base = floor(position);
+	vec2 fraction = position - base;
+	ivec2 origin = ivec2(base);
+	vec2 corners[4];
+	for (int index = 0; index < 4; index++) {
+		ivec2 texel = origin + ivec2(index & 1, index >> 1);
+		texel = periodic_enabled() ? (texel % dims + dims) % dims
+				: clamp(texel, ivec2(0), dims - ivec2(1));
+		corners[index] = imageLoad(keyframe_map, texel).xy;
+	}
+	return mix(mix(corners[0], corners[1], fraction.x), mix(corners[2], corners[3], fraction.x),
+			fraction.y);
+}
+
+
+void main() {
+	uint slot = gl_GlobalInvocationID.x;
+	if (slot >= replay_list[0]) {
+		return;
+	}
+	ivec2 pixel = work_pixel(replay_list[slot + 1u]);
+	vec2 coordinate = load_coordinate(pixel);
+	vec2 replayed = apply_segments(coordinate, int(round(params.operation.w)),
+			int(round(params.operation.z)), vec2(0.0));
+	vec2 base = params.line.x > 0.5 ? keyframe_displacement(replayed) : vec2(0.0);
+	vec2 drift = periodic_delta(replayed + base, coordinate);
+	vec2 mapped = periodic_wrap(coordinate + drift);
+	vec2 displacement = periodic_optimized()
+			? mapped - display_coordinate(pixel)
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + drift;
+	imageStore(coords_dst, pixel, vec4(mapped, 0.0, 0.0));
+	imageStore(displacement_dst, pixel, vec4(periodic_wrap(displacement), 0.0, 0.0));
+}

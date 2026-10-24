@@ -93,6 +93,8 @@ var undo_action: Button
 var clear_action: Button
 
 var _drawing := false
+var _stroke_dirty := false
+var _accumulated_input := Input.use_accumulated_input
 var _touch_points := {}
 var _preview_active := false
 var _render_transition := false
@@ -121,11 +123,14 @@ func _ready() -> void:
 		quality.fallback_tier = MixwellQualityProfile.Tier.LOW
 	quality.restore()
 	_last_viewport_size = _viewport_size()
-	solver.initialize(_render_size(config.final_scale), config, _last_viewport_size)
+	_requested_size = _render_size(config.final_scale)
+	solver.initialize(_requested_size, config, _last_viewport_size)
 	solver.set_source_mode(source_mode)
 	solver.set_preset(motion_mode)
 	_setup_ui()
 	_setup_experience()
+	# Every pointer sample reaches the stroke, so fast curves stay curves.
+	Input.use_accumulated_input = false
 	get_viewport().size_changed.connect(_on_viewport_size_changed)
 	RenderingServer.call_on_render_thread(solver.init_render.bind(solver.create_render_snapshot()))
 
@@ -139,6 +144,10 @@ func _process(delta: float) -> void:
 	if not solver.is_initialized():
 		_update_status()
 		return
+	if _stroke_dirty:
+		_stroke_dirty = false
+		_apply_visible_strokes()
+		_request_reset()
 	if not texture_bound:
 		if display_texture == null:
 			display_texture = Texture2DRD.new()
@@ -177,6 +186,7 @@ func _process(delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	Input.use_accumulated_input = _accumulated_input
 	if display_texture != null:
 		display_texture.texture_rd_rid = RID()
 	if source_texture != null:
@@ -191,10 +201,13 @@ func _viewport_size() -> Vector2i:
 	return Vector2i(maxi(64, int(viewport_size.x)), maxi(64, int(viewport_size.y)))
 
 
+## Physical window pixels: canvas_items stretch keeps the canvas at 1280x720.
 func _render_size(scale: float) -> Vector2i:
-	var viewport_size := _viewport_size()
-	return Vector2i(maxi(64, int(viewport_size.x * scale)),
-			maxi(64, int(viewport_size.y * scale)))
+	var pixels := Vector2(get_window().size) * scale
+	var area := pixels.x * pixels.y
+	if area > float(config.max_render_pixels):
+		pixels *= sqrt(float(config.max_render_pixels) / area)
+	return Vector2i(maxi(64, int(pixels.x)), maxi(64, int(pixels.y)))
 
 
 func _setup_ui() -> void:
@@ -254,12 +267,10 @@ func _setup_ui() -> void:
 	var budget_slider: HSlider = menu.add_slider("GPU budget (ms)", 0.5, 33.0,
 		config.gpu_budget_ms, _set_gpu_budget)
 	quality.bind("gpu_budget_ms", budget_slider, _set_gpu_budget)
-	var preview_slider: HSlider = menu.add_slider("Preview scale", 0.25, 1.0,
-		config.preview_scale, _set_preview_scale)
-	quality.bind("preview_scale", preview_slider, _set_preview_scale)
 	var final_slider: HSlider = menu.add_slider("Final scale", 0.5, 1.0,
 		config.final_scale, _set_final_scale)
 	quality.bind("final_scale", final_slider, _set_final_scale)
+	quality.bind("max_render_pixels", null, _set_max_render_pixels)
 	quality.attach_menu_option(menu)
 	menu.add_slider("Affine strength", -2.0, 2.0, config.affine_strength,
 		_set_affine_strength)
@@ -660,8 +671,8 @@ func _set_gpu_budget(value: float) -> void:
 ## through the user callbacks (reset + resize included) and skip this.
 func _apply_quality(values: Dictionary) -> void:
 	config.target_spp = values.target_spp
-	config.preview_scale = values.preview_scale
 	config.final_scale = values.final_scale
+	config.max_render_pixels = values.max_render_pixels
 	config.gpu_budget_ms = values.gpu_budget_ms
 
 
@@ -676,20 +687,14 @@ func _run_periodic_gpu_ab() -> void:
 		RenderingServer.call_on_render_thread(solver.verify_periodic_gpu_ab)
 
 
-func _set_preview_scale(value: float) -> void:
-	config.preview_scale = value
-	if _preview_active:
-		_schedule_resize(true)
-	else:
-		_request_reset()
-
-
 func _set_final_scale(value: float) -> void:
 	config.final_scale = value
-	if not _preview_active:
-		_schedule_resize(false)
-	else:
-		_request_reset()
+	_schedule_resize()
+
+
+func _set_max_render_pixels(value: int) -> void:
+	config.max_render_pixels = value
+	_schedule_resize()
 
 
 func _set_affine_strength(value: float) -> void:
@@ -713,19 +718,17 @@ func _request_reset() -> void:
 
 func _on_viewport_size_changed() -> void:
 	var next_size := _viewport_size()
-	if next_size == _last_viewport_size:
+	if next_size == _last_viewport_size and _render_size(config.final_scale) == _requested_size:
 		return
 	_last_viewport_size = next_size
-	_schedule_resize(_preview_active)
+	_schedule_resize()
 
 
-func _schedule_resize(preview: bool) -> void:
-	_preview_active = preview
+func _schedule_resize() -> void:
 	sample_index = 0
 	var reference_size := _viewport_size()
-	var next_size := _render_size(config.preview_scale if preview else config.final_scale)
+	var next_size := _render_size(config.final_scale)
 	_requested_size = next_size
-	progress_bar.max_value = 1.0 if preview else config.target_spp
 	if solver.is_initialized() and not _render_transition \
 			and solver.get_render_size() == next_size:
 		RenderingServer.call_on_render_thread(solver.reset_accumulation)
@@ -750,33 +753,26 @@ func _begin_stroke(position: Vector2) -> void:
 	_preview_active = true
 	active_stroke = MixwellStroke.new()
 	active_stroke.radius_px = config.brush_radius_px
-	stroke_preview.width = maxf(7.0, active_stroke.radius_px * 0.2)
-	stroke_preview.default_color.a = 0.95
 	active_stroke.points_px.append(_clamp_position(position))
 	if _stroke_preview_tween != null:
 		_stroke_preview_tween.kill()
 	stroke_preview.modulate.a = 1.0
 	stroke_preview.points = PackedVector2Array([
-		_clamp_position(position) - Vector2(5.0, 0.0),
-		_clamp_position(position) + Vector2(5.0, 0.0),
+		_clamp_position(position) - Vector2(2.0, 0.0),
+		_clamp_position(position) + Vector2(2.0, 0.0),
 	])
 	_apply_visible_strokes()
-	_schedule_resize(true)
+	_request_reset()
 
 
 func _append_stroke_point(position: Vector2) -> void:
 	if not _drawing or active_stroke == null:
 		return
 	var point := _clamp_position(position)
-	var added := active_stroke.append_drag_point(point, _stroke_spacing(),
-			_stroke_segment_capacity())
-	if added > 0:
-		stroke_preview.points = active_stroke.points_px
-		_apply_visible_strokes()
-		_request_reset()
-		return
+	if active_stroke.append_drag_point(point, _stroke_spacing()) > 0:
+		_stroke_dirty = true
 	var preview_points := active_stroke.points_px.duplicate()
-	if preview_points.is_empty() or preview_points[preview_points.size() - 1] != point:
+	if preview_points[preview_points.size() - 1] != point:
 		preview_points.append(point)
 	stroke_preview.points = preview_points
 
@@ -786,9 +782,8 @@ func _finish_stroke(position: Vector2) -> void:
 		return
 	if active_stroke != null:
 		var point := _clamp_position(position)
-		var capacity := _stroke_segment_capacity()
-		active_stroke.append_drag_point(point, _stroke_spacing(), capacity, true)
-		if active_stroke.segment_count() == 0 and capacity > 0:
+		active_stroke.append_drag_point(point, _stroke_spacing(), -1, true)
+		if active_stroke.segment_count() == 0:
 			var direction := Vector2(config.brush_radius_px * 2.0, 0.0)
 			if position.x + direction.x > size.x:
 				direction.x = -direction.x
@@ -800,8 +795,10 @@ func _finish_stroke(position: Vector2) -> void:
 			stroke_batches.append(1)
 	active_stroke = null
 	_drawing = false
+	_stroke_dirty = false
 	_apply_visible_strokes()
-	_schedule_resize(false)
+	_preview_active = false
+	_request_reset()
 	_stroke_preview_tween = create_tween()
 	_stroke_preview_tween.tween_property(stroke_preview, "modulate:a", 0.0, 0.35)
 	_stroke_preview_tween.tween_callback(func():
@@ -831,9 +828,10 @@ func _undo() -> void:
 		var count: int = stroke_batches.pop_back()
 		for _index in mini(count, strokes.size()):
 			strokes.pop_back()
+	_stroke_dirty = false
 	_apply_visible_strokes()
 	_preview_active = false
-	_schedule_resize(false)
+	_request_reset()
 
 
 func _clear() -> void:
@@ -841,31 +839,14 @@ func _clear() -> void:
 	active_stroke = null
 	strokes.clear()
 	stroke_batches.clear()
+	_stroke_dirty = false
 	_apply_visible_strokes()
 	_preview_active = false
-	_schedule_resize(false)
-
-
-func _segment_limit() -> int:
-	return solver.get_segment_limit()
+	_request_reset()
 
 
 func _stroke_spacing() -> float:
 	return maxf(config.brush_radius_px, 12.0)
-
-
-func _stroke_segment_capacity() -> int:
-	# Mirrors the solver's set_strokes budget: the preset's own segments share
-	# the same buffer as user strokes.
-	return maxi(_segment_limit() - solver.get_preset_segment_count()
-		- _committed_segment_count(), 0)
-
-
-func _committed_segment_count() -> int:
-	var count := 0
-	for stroke in strokes:
-		count += stroke.segment_count()
-	return count
 
 
 func _clamp_position(position: Vector2) -> Vector2:
@@ -934,7 +915,9 @@ func _update_status() -> void:
 		_update_progress_bar()
 		return
 	_status_last_msec = now
-	var segment_count := _committed_segment_count()
+	var segment_count := 0
+	for stroke in strokes:
+		segment_count += stroke.segment_count()
 	if active_stroke != null:
 		segment_count += active_stroke.segment_count()
 	var phase := "preview 1 spp" if _preview_active else "%d/%d spp" % [sample_index, config.target_spp]
@@ -990,10 +973,11 @@ func _update_status() -> void:
 		float(metrics.get("convergence_rms", 0.0)), float(metrics.get("convergence_p99", 0.0)),
 		solver.get_wall_calibration(),
 	]
-	var status_text := "%s · %s · %d strokes · %d/%d segments · passes %d/%d · %s · %s\n%s\n%s" % [
+	var status_text := "%s · %s · %d strokes · %d segments (%d baked) · passes %d/%d · %s · %s\n%s\n%s" % [
 		SOURCE_NAMES[source_mode], "%s / %s / %s" % [mode, DISPLAY_NAMES[display_mode],
 			Gallery.compensation_names()[config.drift_compensation]],
-		strokes.size(), segment_count, _segment_limit(), pattern_active, pattern_total, phase,
+		strokes.size(), segment_count, solver.get_baked_segment_count(), pattern_active,
+		pattern_total, phase,
 		boundary, timing_line, quality_line,
 	]
 	if status_text != _last_status_text:

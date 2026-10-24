@@ -25,6 +25,7 @@ const PAINT_SPREAD := 17
 const LINE := 0
 const LINE_COMB := 1
 const SEGMENT := 2
+const BAKED_MAP := 3
 
 const PRESET_NAMES := [
 	"Single Line", "Finite Segment", "Freehand Lab", "Nonpareil", "Gel-Git",

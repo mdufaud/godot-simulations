@@ -1,0 +1,54 @@
+layout(rg32f, set = 0, binding = 9) restrict readonly uniform image2D baked_map;
+
+
+vec2 baked_texel_coordinate(ivec2 texel) {
+	vec2 aspect = vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+	return (vec2(texel) + 0.5) / vec2(imageSize(baked_map)) * 2.0 * aspect - aspect;
+}
+
+
+vec2 baked_fetch(ivec2 texel) {
+	ivec2 dims = imageSize(baked_map);
+	if (periodic_enabled()) {
+		texel = (texel % dims + dims) % dims;
+	} else {
+		texel = clamp(texel, ivec2(0), dims - ivec2(1));
+	}
+	return imageLoad(baked_map, texel).xy;
+}
+
+
+vec2 baked_displacement(vec2 coordinate) {
+	vec2 aspect = vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+	vec2 position = (coordinate + aspect) / (2.0 * aspect) * vec2(imageSize(baked_map)) - 0.5;
+	vec2 base = floor(position);
+	vec2 fraction = position - base;
+	ivec2 origin = ivec2(base);
+	vec2 bottom = mix(baked_fetch(origin), baked_fetch(origin + ivec2(1, 0)), fraction.x);
+	vec2 top = mix(baked_fetch(origin + ivec2(0, 1)), baked_fetch(origin + ivec2(1, 1)), fraction.x);
+	return mix(bottom, top, fraction.y);
+}
+
+
+// Bilinear lookup plus its predicted error: max second difference / 8 over the cell.
+vec2 baked_displacement_error(vec2 coordinate, out float error) {
+	vec2 aspect = vec2(float(params.dims.x) / float(params.dims.y), 1.0);
+	vec2 position = (coordinate + aspect) / (2.0 * aspect) * vec2(imageSize(baked_map)) - 0.5;
+	vec2 base = floor(position);
+	vec2 fraction = position - base;
+	ivec2 origin = ivec2(base) - ivec2(1);
+	vec2 v[16];
+	for (int index = 0; index < 16; index++) {
+		v[index] = baked_fetch(origin + ivec2(index & 3, index >> 2));
+	}
+	float curvature = 0.0;
+	for (int y = 1; y <= 2; y++) {
+		for (int x = 1; x <= 2; x++) {
+			vec2 centre = v[y * 4 + x];
+			curvature = max(curvature, length(v[y * 4 + x - 1] - 2.0 * centre + v[y * 4 + x + 1]));
+			curvature = max(curvature, length(v[y * 4 + x - 4] - 2.0 * centre + v[y * 4 + x + 4]));
+		}
+	}
+	error = curvature * 0.125;
+	return mix(mix(v[5], v[6], fraction.x), mix(v[9], v[10], fraction.x), fraction.y);
+}

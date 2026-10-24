@@ -1,0 +1,27 @@
+layout(std430, set = 0, binding = 11) restrict buffer ReplayList {
+	uint replay_list[];
+};
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 coordinate = load_coordinate(pixel);
+	float error;
+	vec2 drift = baked_displacement_error(coordinate, error);
+	// Unresolved cell (a recent tine crease): queue it for the exact replay pass.
+	if (params.operation.z > 0.5 && error > params.line.y) {
+		replay_list[atomicAdd(replay_list[0], 1u) + 1u] = index;
+	}
+	vec2 mapped = periodic_wrap(coordinate + drift);
+	vec2 displacement = periodic_optimized()
+			? mapped - display_coordinate(pixel)
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + drift;
+	imageStore(coords_dst, pixel, vec4(mapped, 0.0, 0.0));
+	imageStore(displacement_dst, pixel, vec4(periodic_wrap(displacement), 0.0, 0.0));
+}

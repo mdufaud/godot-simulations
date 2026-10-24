@@ -1,0 +1,17 @@
+layout(rg32f, set = 0, binding = 10) restrict writeonly uniform image2D baked_target;
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 rect_origin = ivec2(params.line.xy);
+	ivec2 rect_size = ivec2(params.line.zw);
+	if (index >= uint(rect_size.x * rect_size.y)) {
+		return;
+	}
+	ivec2 texel = rect_origin + ivec2(int(index) % rect_size.x, int(index) / rect_size.x);
+	vec2 coordinate = baked_texel_coordinate(texel);
+	int segment_count = clamp(int(round(params.operation.z)), 1, 256);
+	vec2 mapped = apply_segments(coordinate, 0, segment_count, vec2(0.0));
+	vec2 displacement = periodic_delta(mapped + baked_displacement(mapped), coordinate);
+	imageStore(baked_target, texel, vec4(displacement, 0.0, 0.0));
+}

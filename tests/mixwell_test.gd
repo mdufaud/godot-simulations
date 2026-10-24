@@ -64,6 +64,7 @@ func _initialize() -> void:
 	_test_gallery_mean_compensation()
 	_test_gallery_published_passes()
 	_test_gallery_retained_stroke_passes()
+	_test_baked_stroke_prefix()
 	_test_pattern_round_trip()
 	_test_pattern_physical_order()
 	_test_pattern_curve_and_transform_expansion()
@@ -321,16 +322,86 @@ func _test_gallery_retained_stroke_passes() -> void:
 	first.points_px = PackedVector2Array([
 		Vector2(24.0, 72.0), Vector2(48.0, 50.0), Vector2(72.0, 28.0),
 	])
-	var second := Stroke.new()
-	second.points_px = PackedVector2Array([Vector2(86.0, 84.0), Vector2(104.0, 36.0)])
-	solver.set_strokes([first, second], Gallery.FREEHAND_LAB)
+	first.points_px.append(Vector2(104.0, 36.0))
+	solver.set_strokes([first], Gallery.FREEHAND_LAB)
 	var descriptor: Dictionary = solver.get_pattern_descriptor()
 	var operations: Array = descriptor.get("operations", [])
 	var pass_groups := {}
 	for operation in operations:
 		pass_groups[operation.curve_group] = true
-	_check(operations.size() == 3 and pass_groups.size() == 3,
-		"retained freehand segments use sequential GPU passes")
+	_check(operations.size() == 3 and pass_groups.size() == 1,
+		"live freehand segments share one GPU pass")
+
+
+func _line_stroke(y: float, segments: int) -> MixwellStroke:
+	var stroke := Stroke.new()
+	for index in segments + 1:
+		stroke.points_px.append(Vector2(20.0 + float(index) * 0.5, y))
+	return stroke
+
+
+func _test_baked_stroke_prefix() -> void:
+	var solver := Solver.new()
+	solver.initialize(Vector2i(256, 256), Config.new(), Vector2i(256, 256))
+	var limit := solver.get_live_segment_limit()
+	var first := _line_stroke(40.0, 10)
+	var second := _line_stroke(200.0, 10)
+	solver.set_strokes([first, second], Gallery.FREEHAND_LAB)
+	_check(limit == Solver.LIVE_SEGMENT_LIMIT and limit >= 20 and limit < 30
+			and solver.get_baked_segment_count() == 0 and solver.get_segment_count() == 20,
+		"recent strokes stay live while they fit the window")
+	var third := _line_stroke(120.0, 10)
+	solver.set_strokes([first, second, third], Gallery.FREEHAND_LAB)
+	var operations: Array = solver.create_render_snapshot().operations
+	_check(solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 30,
+		"the oldest stroke is baked whole once the live window overflows")
+	_check(operations.size() == 21 and int(operations[0].type) == Gallery.SEGMENT
+			and int(operations[20].type) == Gallery.BAKED_MAP,
+		"live segments run before the baked map in RDF order")
+	var baked: PackedFloat32Array = solver.create_render_snapshot().baked_segments
+	var scale := 2.0 / 256.0
+	_check(baked.size() == 80 and is_equal_approx(baked[0], (20.0 - 128.0) * scale)
+			and is_equal_approx(baked[8], (20.5 - 128.0) * scale)
+			and is_equal_approx(baked[4], first.radius_px * scale),
+		"baked segments keep physical order and their stroke epsilon")
+	var generation: int = solver.create_render_snapshot().bake_generation
+	solver.set_strokes([first, second], Gallery.FREEHAND_LAB)
+	_check(solver.create_render_snapshot().bake_generation == generation
+			and solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 20,
+		"undo of a live stroke keeps the baked prefix")
+	solver.set_strokes([first, second, _line_stroke(160.0, 20)], Gallery.FREEHAND_LAB)
+	_check(solver.create_render_snapshot().bake_generation == generation
+			and solver.get_baked_segment_count() == 20,
+		"appending strokes extends the bake without restarting it")
+	solver.set_strokes([first], Gallery.FREEHAND_LAB)
+	_check(solver.create_render_snapshot().bake_generation == generation
+			and solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 10,
+		"undo of the newest baked stroke rewinds instead of restarting")
+	solver.set_strokes([second], Gallery.FREEHAND_LAB)
+	var replaced = solver.create_render_snapshot()
+	_check(replaced.bake_generation == generation and replaced.bake_rewinds.back().y == 0
+			and solver.get_baked_segment_count() == 0 and solver.get_segment_count() == 10,
+		"replacing the first baked stroke rewinds to the empty map")
+	solver.set_strokes([_line_stroke(128.0, 300)], Gallery.FREEHAND_LAB)
+	_check(solver.get_segment_count() == 300
+			and solver.get_baked_segment_count() == 300 - limit / 2,
+		"a stroke longer than the live window bakes its head")
+	var anchor := _line_stroke(20.0, 10)
+	var long_tail := _line_stroke(60.0, 30)
+	solver.set_strokes([anchor, long_tail], Gallery.FREEHAND_LAB)
+	var snapshot = solver.create_render_snapshot()
+	_check(solver.get_baked_segment_count() == 10 + 30 - limit / 2
+			and snapshot.bake_starts == PackedInt32Array([0, 10]),
+		"every baked stroke records where it starts")
+	var third_stroke := _line_stroke(100.0, 30)
+	solver.set_strokes([anchor, long_tail, third_stroke], Gallery.FREEHAND_LAB)
+	solver.set_strokes([anchor], Gallery.FREEHAND_LAB)
+	var rewound = solver.create_render_snapshot()
+	_check(rewound.bake_generation == snapshot.bake_generation
+			and rewound.bake_revision == snapshot.bake_revision + 1
+			and rewound.bake_rewinds.back() == Vector2i(rewound.bake_revision, 10)
+			and solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 10,
+		"undo of several baked strokes rewinds to the first one removed")
 
 
 func _test_pattern_round_trip() -> void:
@@ -627,8 +698,8 @@ func _test_stress_and_export_contract() -> void:
 	for point_index in 257:
 		stroke.points_px.append(Vector2(float(point_index), float(point_index % 17)))
 	solver.set_strokes([stroke])
-	_check(solver.get_segment_count() == solver.get_segment_limit(),
-			"stress fills the configured segment limit")
+	_check(solver.get_segment_count() == 256,
+			"stress keeps every segment past the GPU buffer size")
 	var presets := FileAccess.get_file_as_string("res://export_presets.cfg")
 	for preset_name in ["Windows Desktop", "Linux", "Android"]:
 		var start := presets.find("name=\"%s\"" % preset_name)

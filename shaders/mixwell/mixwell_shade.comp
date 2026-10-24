@@ -1,3 +1,35 @@
+const int FOOTPRINT_TAPS = 4;
+const float FOOTPRINT_LIMIT_PX = 64.0;
+
+
+vec3 footprint_pigment(ivec2 pixel, vec2 coordinate) {
+	ivec2 left_pixel = periodic_pixel(pixel, ivec2(-1, 0));
+	ivec2 right_pixel = periodic_pixel(pixel, ivec2(1, 0));
+	ivec2 down_pixel = periodic_pixel(pixel, ivec2(0, -1));
+	ivec2 up_pixel = periodic_pixel(pixel, ivec2(0, 1));
+	float x_span = periodic_enabled() ? 2.0 : float(max(right_pixel.x - left_pixel.x, 1));
+	float y_span = periodic_enabled() ? 2.0 : float(max(up_pixel.y - down_pixel.y, 1));
+	vec2 dx = periodic_delta(load_coordinate(right_pixel), load_coordinate(left_pixel)) / x_span;
+	vec2 dy = periodic_delta(load_coordinate(up_pixel), load_coordinate(down_pixel)) / y_span;
+	// Sub-pixel filaments squeeze a wide source span into one pixel: average a
+	// bounded footprint rather than point-sampling it into speckles.
+	float limit = FOOTPRINT_LIMIT_PX * 2.0 / float(params.dims.y);
+	float span = max(length(dx), length(dy));
+	if (span > limit) {
+		dx *= limit / span;
+		dy *= limit / span;
+	}
+	vec3 sum = vec3(0.0);
+	for (int y = 0; y < FOOTPRINT_TAPS; y++) {
+		for (int x = 0; x < FOOTPRINT_TAPS; x++) {
+			vec2 offset = (vec2(x, y) + 0.5) / float(FOOTPRINT_TAPS) - 0.5;
+			sum += pigment(coordinate + dx * offset.x + dy * offset.y, params.dims.w);
+		}
+	}
+	return sum / float(FOOTPRINT_TAPS * FOOTPRINT_TAPS);
+}
+
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	ivec2 work_size = work_dims();
@@ -7,7 +39,7 @@ void main() {
 	}
 	ivec2 pixel = work_pixel(index);
 	vec2 coordinate = load_coordinate(pixel);
-	vec3 result = pigment(coordinate, params.dims.w);
+	vec3 result = footprint_pigment(pixel, coordinate);
 	vec3 source = pigment(display_coordinate(pixel), params.dims.w);
 	imageStore(sample_image, pixel, vec4(result, 1.0));
 	imageStore(source_image, pixel, vec4(source, 1.0));

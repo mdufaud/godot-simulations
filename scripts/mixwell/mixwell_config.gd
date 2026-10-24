@@ -10,8 +10,8 @@ const SPP_TARGETS: Array[int] = [1, 4, 16, 64, 256]
 @export_range(0.01, 0.5, 0.01) var midpoint_alpha := 0.1
 @export_range(1.0, 32.0, 0.1) var cutoff_gamma := 10.0
 @export_range(1, 256, 1) var target_spp := 16
-@export_range(0.25, 1.0, 0.05) var preview_scale := 0.5
-@export_range(0.25, 1.0, 0.05) var final_scale := 0.75
+@export_range(0.25, 1.0, 0.05) var final_scale := 1.0
+@export_range(65536, 33177600, 1) var max_render_pixels := 1920 * 1080
 @export_enum("Fullscreen", "Periodic", "Slip walls") var boundary_mode := 0
 @export_enum("None", "Minimum", "Mean") var drift_compensation := 0
 @export_range(0, 3, 1) var source_mode := 0
@@ -39,10 +39,10 @@ func validate() -> String:
 		return "cutoff_gamma must be positive and finite"
 	if not SPP_TARGETS.has(target_spp):
 		return "target_spp must be one of [1, 4, 16, 64, 256]"
-	if not is_finite(preview_scale) or preview_scale <= 0.0 or preview_scale > 1.0:
-		return "preview_scale must be in (0, 1]"
 	if not is_finite(final_scale) or final_scale <= 0.0 or final_scale > 1.0:
 		return "final_scale must be in (0, 1]"
+	if max_render_pixels <= 0:
+		return "max_render_pixels must be positive"
 	if boundary_mode < 0 or boundary_mode > 2:
 		return "boundary_mode is invalid"
 	if drift_compensation < 0 or drift_compensation > 2:

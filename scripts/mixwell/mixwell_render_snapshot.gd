@@ -29,6 +29,11 @@ var periodic_movement_dispatch_pixels := 0
 var fullscreen_movement_dispatch_pixels := 0
 var periodic_dispatch_pixels := 0
 var fullscreen_dispatch_pixels := 0
+var baked_segments := PackedFloat32Array()
+var bake_generation := 0
+var bake_revision := 0
+var bake_starts := PackedInt32Array()
+var bake_rewinds: Array[Vector2i] = []
 
 
 func boundary_copy(next_boundary: int, optimized: bool):
@@ -61,4 +66,9 @@ func boundary_copy(next_boundary: int, optimized: bool):
 	result.fullscreen_movement_dispatch_pixels = fullscreen_movement_dispatch_pixels
 	result.periodic_dispatch_pixels = periodic_dispatch_pixels
 	result.fullscreen_dispatch_pixels = fullscreen_dispatch_pixels
+	result.baked_segments = baked_segments
+	result.bake_generation = bake_generation
+	result.bake_revision = bake_revision
+	result.bake_starts = bake_starts
+	result.bake_rewinds = bake_rewinds.duplicate()
 	return result

@@ -6285,6 +6285,328 @@ func _run_mixopt() -> void:
 		quit(1)
 
 
+## ── mixdraw ─────────────────────────────────────────────────────────────
+## Freehand drawing benchmark for the Mixwell demo, booted like a player launch.
+## Drives real mouse events (press, one motion per frame, release) along loops
+## and reports, per stroke: mean/max frame time while drawing, retained vs drawn
+## length, render size during the drag, and the time to reach target spp after
+## release. Log lines start with "MIXDRAW ".
+
+const MIXDRAW_STROKES := 8
+const MIXDRAW_POINTS := 160
+const MIXDRAW_STEP_PX := 14.0
+
+func _mixdraw_mouse(position: Vector2, pressed: int) -> void:
+	var event: InputEvent
+	if pressed < 0:
+		var motion := InputEventMouseMotion.new()
+		motion.position = position
+		motion.global_position = position
+		motion.button_mask = MOUSE_BUTTON_MASK_LEFT
+		event = motion
+	else:
+		var button := InputEventMouseButton.new()
+		button.button_index = MOUSE_BUTTON_LEFT
+		button.pressed = pressed == 1
+		button.position = position
+		button.global_position = position
+		event = button
+	Input.parse_input_event(event)
+	Input.flush_buffered_events()
+
+
+func _run_mixdraw() -> void:
+	await _boot_frames(2)
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+	root.size = Vector2i(1280, 720)
+	if _extra.size() > 1:
+		var parts: PackedStringArray = _extra[1].split("x")
+		root.size = Vector2i(int(parts[0]), int(parts[1]))
+	var settings: Node = root.get_node("/root/UserSettings")
+	settings.clear_sim("mixwell_demo")
+	var manager: Node = root.get_node("/root/GameManager")
+	manager.current_demo = "mixwell_demo"
+	if not _extra.is_empty():
+		manager.set_setting("mixwell_quality_profile", int(_extra[0]))
+	var demo: Node = load("res://scenes/mixwell_demo.tscn").instantiate()
+	root.add_child(demo)
+	for i in 30:
+		await process_frame
+	if not demo.solver.is_initialized():
+		print("MIXDRAW FAIL solver not initialized")
+		quit(1)
+		return
+	print("MIXDRAW boot quality=%s spp=%d final_scale=%.2f render=%s" % [
+		demo.quality.label(), demo.config.target_spp, demo.config.final_scale,
+		demo.solver.get_render_size()])
+	var canvas: Vector2 = demo.size
+	var total_drawn := 0.0
+	for stroke in MIXDRAW_STROKES:
+		var centre := canvas * Vector2(0.3 + 0.08 * stroke, 0.45 + 0.03 * (stroke % 3))
+		var radius := 90.0 + 15.0 * stroke
+		var points: Array[Vector2] = []
+		var angle := 0.0
+		for i in MIXDRAW_POINTS:
+			points.append(centre + Vector2(cos(angle), sin(angle)) * radius
+					* (0.6 + 0.4 * float(i) / MIXDRAW_POINTS))
+			angle += MIXDRAW_STEP_PX / radius
+		_mixdraw_mouse(points[0], 1)
+		await process_frame
+		var drag_render: Vector2i = demo.solver.get_render_size()
+		var frame_ms: Array[float] = []
+		var drag_gpu := 0.0
+		var last := Time.get_ticks_usec()
+		for i in range(1, points.size()):
+			_mixdraw_mouse(points[i], -1)
+			total_drawn += points[i].distance_to(points[i - 1])
+			await process_frame
+			var now := Time.get_ticks_usec()
+			frame_ms.append(float(now - last) / 1000.0)
+			last = now
+			drag_gpu = maxf(drag_gpu, float(demo.solver.get_timings().get("total", 0.0)))
+		_mixdraw_mouse(points.back(), 0)
+		for i in 600:
+			await process_frame
+			if not demo._render_transition and not demo._preview_active \
+					and demo.sample_index >= demo.config.target_spp:
+				break
+		var mean := 0.0
+		var worst := 0.0
+		for value in frame_ms:
+			mean += value
+			worst = maxf(worst, value)
+		mean /= maxf(frame_ms.size(), 1.0)
+		var retained := 0.0
+		for kept in demo.strokes:
+			for i in range(1, kept.points_px.size()):
+				retained += kept.points_px[i].distance_to(kept.points_px[i - 1])
+		for i in 10:
+			await process_frame
+		print("MIXDRAW stroke %d drag_ms mean=%.1f max=%.1f segments=%d drag_render=%s drag_sample_gpu_max=%.2f final_render=%s final_sample_gpu=%.2f retained_px=%.0f/%.0f" % [
+			stroke, mean, worst, demo.solver.get_segment_count(), drag_render, drag_gpu,
+			demo.solver.get_render_size(), float(demo.solver.get_timings().get("total", 0.0)),
+			retained, total_drawn])
+	# Undo down to the first stroke: the baked prefix shrinks, so the map is
+	# rebuilt from scratch at least once.
+	while demo.strokes.size() > 1:
+		var generation: int = demo.solver.create_render_snapshot().bake_generation
+		var start := Time.get_ticks_usec()
+		demo._undo()
+		await process_frame
+		await process_frame
+		var rebuilt: bool = demo.solver.create_render_snapshot().bake_generation != generation
+		print("MIXDRAW undo strokes=%d rebuilt=%s frames_ms=%.1f sample_gpu=%.2f baked=%d" % [
+			demo.strokes.size(), rebuilt, float(Time.get_ticks_usec() - start) / 1000.0,
+			float(demo.solver.get_timings().get("total", 0.0)), demo.solver.get_baked_segment_count()])
+	print("MIXDRAW PROBE DONE")
+	quit(0)
+
+
+## ── mixshot ─────────────────────────────────────────────────────────────
+## Screenshots for eyeballing the Mixwell demo at 1280x720: curve presets,
+## then a freehand loop mid-drag (1 spp) and after convergence. Writes PNGs to
+## the directory given as first argument. Log lines start with "MIXSHOT ".
+
+func _mixshot_save(path: String) -> void:
+	await RenderingServer.frame_post_draw
+	root.get_texture().get_image().save_png(path)
+	print("MIXSHOT %s" % path)
+
+
+func _run_mixshot() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var out_dir: String = _extra[0] if not _extra.is_empty() else "res://tmp"
+	var manager: Node = root.get_node("/root/GameManager")
+	manager.current_demo = "mixwell_demo"
+	var demo: Node = load("res://scenes/mixwell_demo.tscn").instantiate()
+	root.add_child(demo)
+	for i in 20:
+		await process_frame
+	demo.experience.visible = false
+	for preset in [6, 7, 15, 17]:
+		demo._select_motion(preset)
+		for i in 40:
+			await process_frame
+		await _mixshot_save("%s/preset_%02d.png" % [out_dir, preset])
+	demo._select_official_example(0)
+	demo.experience.visible = false
+	for i in 20:
+		await process_frame
+	var centre: Vector2 = demo.size * 0.5
+	_mixdraw_mouse(centre + Vector2(220.0, 0.0), 1)
+	await process_frame
+	for i in 1 + 140:
+		var angle := float(i) * 0.06
+		_mixdraw_mouse(centre + Vector2(cos(angle), sin(angle)) * (220.0 - float(i) * 0.9), -1)
+		await process_frame
+	await _mixshot_save("%s/drag.png" % out_dir)
+	_mixdraw_mouse(centre, 0)
+	for i in 60:
+		await process_frame
+	await _mixshot_save("%s/released.png" % out_dir)
+	print("MIXSHOT DONE")
+	quit(0)
+
+
+## ── mixbake ─────────────────────────────────────────────────────────────
+## Baked-map fidelity: two strokes replayed live are compared with the same
+## strokes where the first one is baked into the map. The displacement fields
+## must agree to a fraction of a pixel almost everywhere.
+## Sentinel: "TEST PASS mixbake".
+
+var _mixbake_readback: Array = []
+
+func _mixbake_displacement(solver: MixwellSolver, strokes: Array, label: String,
+		reset := true) -> PackedFloat32Array:
+	if reset:
+		solver.set_strokes([], 2)
+	solver.set_strokes(strokes, 2)
+	var snapshot = solver.create_render_snapshot()
+	_mixbake_readback.clear()
+	RenderingServer.call_on_render_thread(func() -> void:
+		solver.reset_accumulation()
+		solver.render_sample(0, snapshot)
+		_mixbake_readback.append(solver.readback_displacement())
+		solver.render_samples(1, 15, snapshot)
+		var size := solver.get_render_size()
+		var bytes := solver._rd.texture_get_data(solver.get_display_texture(), 0)
+		var image := Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAH, bytes)
+		image.convert(Image.FORMAT_RGB8)
+		_mixbake_readback.append(image)
+		if not _extra.is_empty():
+			image.save_png("%s/mixbake_%s.png" % [_extra[0], label]))
+	for i in 3:
+		await process_frame
+	return _mixbake_readback[0] if not _mixbake_readback.is_empty() else PackedFloat32Array()
+
+
+func _mixbake_stroke(points: PackedVector2Array) -> MixwellStroke:
+	var stroke := MixwellStroke.new()
+	stroke.radius_px = 18.0
+	stroke.points_px = points
+	return stroke
+
+
+## Live reference (window large enough for both strokes) against the same
+## strokes with the first one baked; returns the error distribution in pixels.
+func _mixbake_case(solver: MixwellSolver, name: String, strokes: Array,
+		strict := true) -> Dictionary:
+	solver.live_segment_limit = 256
+	var live := await _mixbake_displacement(solver, strokes, name + "_live")
+	var live_image: Image = _mixbake_readback[1] if _mixbake_readback.size() > 1 else null
+	var live_baked := solver.get_baked_segment_count()
+	solver.live_segment_limit = strokes[1].segment_count() + 2
+	var baked := await _mixbake_displacement(solver, strokes, name + "_baked")
+	var baked_image: Image = _mixbake_readback[1] if _mixbake_readback.size() > 1 else null
+	var baked_count := solver.get_baked_segment_count()
+	var speckles := 0
+	if live_image != null and baked_image != null:
+		for y in live_image.get_height():
+			for x in live_image.get_width():
+				var a := live_image.get_pixel(x, y)
+				var b := baked_image.get_pixel(x, y)
+				if maxf(maxf(absf(a.r - b.r), absf(a.g - b.g)), absf(a.b - b.b)) > 0.15:
+					speckles += 1
+	print("MIXBAKE %s colour_diff_px=%d" % [name, speckles])
+	_check(live_baked == 0 and baked_count == strokes[0].segment_count(),
+		"mixbake %s: expected 0/%d baked segments, got %d/%d" % [name,
+		strokes[0].segment_count(), live_baked, baked_count])
+	var pixel_count := live.size() / 2
+	_check(pixel_count > 0 and baked.size() == live.size(), "mixbake %s: readback missing" % name)
+	var pixel := 2.0 / float(solver.get_render_size().y)
+	var errors := PackedFloat32Array()
+	var moved := 0
+	var total := 0.0
+	for index in range(0, mini(live.size(), baked.size()), 2):
+		var error := Vector2(live[index] - baked[index], live[index + 1] - baked[index + 1]).length() / pixel
+		errors.append(error)
+		total += error
+		if Vector2(live[index], live[index + 1]).length() > pixel:
+			moved += 1
+	errors.sort()
+	var result := {
+		"moved": moved,
+		"mean": total / float(maxi(pixel_count, 1)),
+		"p99": errors[int(errors.size() * 0.99)] if not errors.is_empty() else INF,
+		"p999": errors[int(errors.size() * 0.999)] if not errors.is_empty() else INF,
+		"worst": errors[errors.size() - 1] if not errors.is_empty() else INF,
+	}
+	print("MIXBAKE %s moved_px=%d mean=%.5f p99=%.4f p999=%.4f worst=%.3f" % [name,
+		result.moved, result.mean, result.p99, result.p999, result.worst])
+	_check(moved > 1000, "mixbake %s: strokes barely moved the field" % name)
+	result["colour_diff"] = speckles
+	if strict:
+		_check(result.mean < 0.02, "mixbake %s: mean deviation %.4f px" % [name, result.mean])
+		_check(result.p99 < 0.05, "mixbake %s: p99 deviation %.4f px" % [name, result.p99])
+		_check(speckles <= 4, "mixbake %s: %d pixels differ in colour" % [name, speckles])
+	return result
+
+
+func _run_mixbake() -> void:
+	await _boot_frames(2)
+	var size := Vector2i(640, 360)
+	var solver := MixwellSolver.new()
+	solver.initialize(size, MixwellConfig.new(), size)
+	solver.set_preset(2)
+	RenderingServer.call_on_render_thread(solver.init_render.bind(solver.create_render_snapshot()))
+	for i in 3:
+		await process_frame
+	_check(solver.is_initialized(), "mixbake: GPU solver did not initialize")
+	var path := PackedVector2Array()
+	for index in 21:
+		var angle := float(index) * 0.22
+		path.append(Vector2(320.0, 180.0) + Vector2(cos(angle), sin(angle)) * (60.0 + 3.0 * index))
+	var head := _mixbake_stroke(path.slice(0, 13))
+	var crossing := PackedVector2Array()
+	for index in 11:
+		crossing.append(Vector2(170.0, 60.0).lerp(Vector2(470.0, 300.0), float(index) / 10.0))
+	# A stroke resumed at the previous tine end drags material from the map's
+	# crease; one crossing it from elsewhere is the common case and stays tight.
+	await _mixbake_case(solver, "continue", [head, _mixbake_stroke(path.slice(12))])
+	var cross := await _mixbake_case(solver, "cross", [head, _mixbake_stroke(crossing)])
+	_check(cross.p999 < 1.0, "mixbake cross: p99.9 deviation %.3f px" % cross.p999)
+	# A head longer than the replay budget: the crossing reads the bare map.
+	var long_path := PackedVector2Array()
+	for index in 141:
+		var angle := float(index) * 0.05
+		long_path.append(Vector2(320.0, 180.0) + Vector2(cos(angle), sin(angle))
+				* (40.0 + 0.9 * float(index)))
+	var long_head := _mixbake_stroke(long_path)
+	long_head.points_px = PackedVector2Array()
+	for point in long_path:
+		long_head.append_drag_point(point, 4.0)
+	var old := await _mixbake_case(solver, "old", [long_head, _mixbake_stroke(crossing)], false)
+	var render := solver.get_render_size()
+	_check(old.colour_diff * 200 < render.x * render.y,
+		"mixbake old: %d pixels differ in colour" % old.colour_diff)
+	# Undo of a partially baked stroke restores a keyframe copy: it must
+	# match a map rebuilt from scratch with the same baked strokes.
+	solver.live_segment_limit = 13
+	var growing := _mixbake_stroke(crossing.slice(0, 3))
+	await _mixbake_displacement(solver, [head, growing], "grow_a")
+	growing.points_px = crossing
+	for index in 20:
+		growing.points_px.append(Vector2(470.0, 300.0) - Vector2(float(index + 1) * 12.0, 0.0))
+	await _mixbake_displacement(solver, [head, growing], "grow_b", false)
+	var grown_generation: int = solver.create_render_snapshot().bake_generation
+	var rewound := await _mixbake_displacement(solver, [head], "rewound", false)
+	_check(solver.create_render_snapshot().bake_generation == grown_generation
+			and solver.get_baked_segment_count() == 12,
+		"mixbake: undo did not rewind to a keyframe")
+	solver.live_segment_limit = 1
+	var rebuilt := await _mixbake_displacement(solver, [head, MixwellStroke.new()], "rebuilt")
+	var rewind_error := 0.0
+	for index in mini(rewound.size(), rebuilt.size()):
+		rewind_error = maxf(rewind_error, absf(rewound[index] - rebuilt[index]))
+	print("MIXBAKE rewind max_error=%.9f" % rewind_error)
+	_check(rewound.size() > 0 and rewound.size() == rebuilt.size() and rewind_error < 1.0e-6,
+		"mixbake: rewound map differs from a rebuild by %.9f" % rewind_error)
+	RenderingServer.call_on_render_thread(solver.free_render)
+	await process_frame
+	_finish("mixbake")
+
+
 ## ── tornado_boot_look ───────────────────────────────────────────────────
 ## Boot-parity probe: instantiates the tornado demo the way a player run does
 ## (no capture harness, no apply_look call) and asserts the look state

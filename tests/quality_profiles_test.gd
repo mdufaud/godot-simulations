@@ -33,7 +33,7 @@ func _profile_table() -> void:
 		ClothQualityProfile: ["iterations", "substeps"],
 		DestructionQualityProfile: ["chunk_count"],
 		GrassQualityProfile: ["near_detail", "density", "shadows", "shadow_distance_m"],
-		MixwellQualityProfile: ["target_spp", "preview_scale", "final_scale",
+		MixwellQualityProfile: ["target_spp", "final_scale", "max_render_pixels",
 			"gpu_budget_ms"],
 		FractalQualityProfile: ["aa_quality", "refine_band_rows"],
 		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale"],
@@ -159,8 +159,8 @@ func _test_lever_caps() -> void:
 		var values: Dictionary = mixwell.values(tier)
 		_check(values.target_spp in MixwellConfig.SPP_TARGETS,
 			"mixwell tier %d spp outside SPP_TARGETS" % tier)
-		_check(values.preview_scale > 0.0 and values.preview_scale <= 1.0,
-			"mixwell tier %d preview scale out of range" % tier)
+		_check(values.final_scale > 0.0 and values.final_scale <= 1.0,
+			"mixwell tier %d render scale out of range" % tier)
 	var fractal := FractalQualityProfile
 	for tier in 4:
 		var values: Dictionary = fractal.values(tier)

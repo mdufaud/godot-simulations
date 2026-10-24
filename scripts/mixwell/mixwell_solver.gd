@@ -9,12 +9,30 @@ const Pattern := preload("res://scripts/mixwell/mixwell_pattern.gd")
 const Diagnostics := preload("res://scripts/mixwell/mixwell_diagnostics.gd")
 const SHADER_DIR := "res://shaders/mixwell/"
 const WG := 256
-const STAGES := ["init", "rd_line", "rd_segment", "affine", "shade", "diagnostics", "accumulate", "diagnostics_reduce"]
+const STAGES := ["init", "rd_line", "rd_segment", "affine", "shade", "diagnostics", "accumulate",
+	"diagnostics_reduce", "bake", "lookup", "replay"]
+const STAGE_INCLUDES := {
+	"rd_segment": ["segments"], "bake": ["segments", "baked"], "lookup": ["baked"],
+	"replay": ["segments"],
+}
 const DESKTOP_SEGMENT_LIMIT := 256
 const MOBILE_SEGMENT_LIMIT := 128
 const DIAGNOSTIC_REDUCTION_STRIDE := 48
+## User segments replayed every sample; older strokes are baked into the map.
+const LIVE_SEGMENT_LIMIT := 24
+const BAKED_SEGMENT_FLOATS := 8
+## 2x baked map up to 720p renders: sharper old creases, 4x the memory.
+const BAKE_TEXEL_BUDGET := 2560 * 1440
+const USER_CURVE_GROUP := 100000
+const REWIND_HISTORY := 32
+const KEYFRAME_BUDGET_BYTES := 192 * 1024 * 1024
+## Recent baked segments replayed exactly where the baked map cannot resolve a crease.
+const REPLAY_SEGMENT_LIMIT := 192
+## Predicted bilinear error of the baked map above which a pixel is replayed.
+const REPLAY_ERROR_PX := 1.0
 
 var config: MixwellConfig = MixwellConfig.new()
+var live_segment_limit := LIVE_SEGMENT_LIMIT
 var initialized := false
 var profiling := false
 
@@ -75,6 +93,25 @@ var _cached_snapshot
 var _cached_snapshot_key := {}
 ## Total create_render_snapshot builds (cache misses); diagnostics only.
 var snapshot_build_count := 0
+var _baked_strokes: Array = []
+var _baked_partial := 0
+var _partial_stroke: MixwellStroke
+var _baked_segments := PackedFloat32Array()
+var _bake_generation := 0
+var _baked_reference := Vector2i.ZERO
+var _bake_starts := PackedInt32Array()
+var _bake_revision := 0
+var _bake_rewinds: Array[Vector2i] = []
+var _applied_bake_generation := -1
+var _applied_bake_revision := 0
+var _applied_bake_count := 0
+var _applied_bake_key := []
+var _keyframes: Array[Dictionary] = []
+var _keyframe_pool: Array[RID] = []
+var _keyframe_capacity := 2
+var _replay_sets := {}
+var _replay_list := RID()
+var _replay := {}
 
 
 func initialize(size: Vector2i, value: MixwellConfig = null,
@@ -131,6 +168,11 @@ func create_render_snapshot(size_override := Vector2i.ZERO,
 	result.pattern = pattern_descriptor
 	result.pattern_step = _pattern_step
 	result.operations = _physical_operations()
+	result.baked_segments = _baked_segments
+	result.bake_generation = _bake_generation
+	result.bake_revision = _bake_revision
+	result.bake_starts = _bake_starts
+	result.bake_rewinds = _bake_rewinds.duplicate()
 	result.periodic_plan = _periodic_operation_plan(result.operations, true, result.size)
 	result.fullscreen_plan = _periodic_operation_plan(result.operations, false, result.size)
 	result.periodic_domain = _plan_domain(result.periodic_plan, result.size)
@@ -205,29 +247,125 @@ func set_strokes(strokes: Array, base_preset := Gallery.FREEHAND_LAB) -> void:
 	_preset_id = preset_id
 	_preset_segments = Gallery.preset_segments(preset_id)
 	_snapshot_version += 1
-	var segment_limit := get_segment_limit()
+	_sync_baked_strokes(strokes)
 	var operations: Array[Dictionary] = _pattern.to_render_operations()
-	var segment_pass_index := 0
-	# Preset and user segments share one segment buffer: budget user strokes
-	# against what the preset left, so the upload never overflows it.
-	var budget := segment_limit - _preset_segments.size()
-	for item in strokes:
-		if item is MixwellStroke:
-			var stroke := item as MixwellStroke
-			if stroke.validate() == "":
-				for segment in stroke.to_segments(maxi(budget - _segments_px.size(), 0)):
-					_segments_px.append(segment)
-					operations.append({"type": Gallery.SEGMENT, "segment": _normalize_segment(segment),
-						"period": Vector2.ZERO, "period_pixels": Vector2i.ZERO,
-						"pitch": 0.0, "count": 1, "noise": 0.0,
-						"radius_px": stroke.radius_px, "curve_group": 100000 + segment_pass_index})
-					segment_pass_index += 1
-					if _segments_px.size() >= segment_limit:
-						_pattern.set_operations(operations)
-						_refresh_periodicity()
-						return
+	if not _baked_segments.is_empty():
+		operations.append({"type": Gallery.BAKED_MAP, "kind": "BAKED_MAP",
+			"direction": Vector2.ZERO, "count": get_baked_segment_count()})
+	# Preset and live user segments share one segment buffer: budget the live
+	# window against what the preset left, so the upload never overflows it.
+	var budget := get_segment_limit() - _preset_segments.size()
+	for stroke_index in range(_baked_strokes.size(), strokes.size()):
+		var stroke = strokes[stroke_index]
+		if not stroke is MixwellStroke or stroke.validate() != "":
+			continue
+		var segments: Array[Vector4] = stroke.to_segments()
+		var first := _baked_partial if stroke_index == _baked_strokes.size() else 0
+		for segment_index in range(first, segments.size()):
+			if _segments_px.size() >= budget:
+				break
+			var segment := segments[segment_index]
+			_segments_px.append(segment)
+			operations.append({"type": Gallery.SEGMENT, "segment": _normalize_segment(segment),
+				"period": Vector2.ZERO, "period_pixels": Vector2i.ZERO,
+				"pitch": 0.0, "count": 1, "noise": 0.0,
+				"radius_px": stroke.radius_px, "curve_group": USER_CURVE_GROUP})
 	_pattern.set_operations(operations)
 	_refresh_periodicity()
+
+
+func get_baked_segment_count() -> int:
+	return _baked_segments.size() / BAKED_SEGMENT_FLOATS
+
+
+func get_live_segment_limit() -> int:
+	return mini(live_segment_limit, get_segment_limit() - _preset_segments.size())
+
+
+## Oldest strokes bake whole; splitting one is a last resort (its tail drags the baked crease).
+func _sync_baked_strokes(strokes: Array) -> void:
+	var valid := _baked_reference == _reference_size and strokes.size() >= _baked_strokes.size()
+	if valid:
+		for index in _baked_strokes.size():
+			if strokes[index] != _baked_strokes[index]:
+				valid = false
+				break
+	if valid and _baked_partial > 0:
+		valid = strokes.size() > _baked_strokes.size() \
+				and strokes[_baked_strokes.size()] == _partial_stroke
+	if not valid and not _rewind_bake(strokes):
+		_reset_bake()
+	var limit := get_live_segment_limit()
+	var live := -_baked_partial
+	for index in range(_baked_strokes.size(), strokes.size()):
+		live += _stroke_segments(strokes[index])
+	var last := strokes.size() - 1
+	while live > limit and _baked_strokes.size() < last:
+		var stroke = strokes[_baked_strokes.size()]
+		live -= _stroke_segments(stroke) - _baked_partial
+		if _baked_partial == 0:
+			_bake_starts.append(get_baked_segment_count())
+		_bake_stroke_range(stroke, _baked_partial, -1)
+		_baked_strokes.append(stroke)
+		_baked_partial = 0
+	if live > limit and _baked_strokes.size() == last:
+		var target: int = _stroke_segments(strokes[last]) - limit / 2
+		if _baked_partial == 0:
+			_bake_starts.append(get_baked_segment_count())
+		_bake_stroke_range(strokes[last], _baked_partial, target)
+		_baked_partial = target
+		_partial_stroke = strokes[last]
+
+
+func _stroke_segments(stroke) -> int:
+	return stroke.segment_count() if stroke is MixwellStroke and stroke.validate() == "" else 0
+
+
+## Appends segments [first, last) of a stroke in physical (drawing) order.
+func _bake_stroke_range(stroke, first: int, last: int) -> void:
+	if not stroke is MixwellStroke or stroke.validate() != "":
+		return
+	var reference_min := float(maxi(mini(_reference_size.x, _reference_size.y), 1))
+	var epsilon: float = stroke.radius_px * 2.0 / reference_min
+	var segments: Array[Vector4] = stroke.to_segments()
+	var end := segments.size() if last < 0 else mini(last, segments.size())
+	for segment_index in range(first, end):
+		var segment := _normalize_segment(segments[segment_index])
+		_baked_segments.append_array([segment.x, segment.y, segment.z, segment.w,
+			epsilon, 0.0, 0.0, 0.0])
+
+
+## Drops the baked strokes past the longest unchanged prefix; the render
+## thread rewinds to its nearest keyframe instead of replaying everything.
+func _rewind_bake(strokes: Array) -> bool:
+	if _baked_reference != _reference_size:
+		return false
+	var keep := 0
+	while keep < _baked_strokes.size() and keep < strokes.size() \
+			and strokes[keep] == _baked_strokes[keep]:
+		keep += 1
+	if keep >= _bake_starts.size():
+		return false
+	var rewind := _bake_starts[keep]
+	_baked_strokes.resize(keep)
+	_baked_partial = 0
+	_bake_starts.resize(keep)
+	_baked_segments = _baked_segments.slice(0, rewind * BAKED_SEGMENT_FLOATS)
+	_bake_revision += 1
+	_bake_rewinds.append(Vector2i(_bake_revision, rewind))
+	if _bake_rewinds.size() > REWIND_HISTORY:
+		_bake_rewinds.pop_front()
+	return true
+
+
+func _reset_bake() -> void:
+	_baked_strokes.clear()
+	_baked_partial = 0
+	_baked_segments = PackedFloat32Array()
+	_bake_starts = PackedInt32Array()
+	_bake_rewinds.clear()
+	_baked_reference = _reference_size
+	_bake_generation += 1
 
 
 func set_preset(id: int) -> void:
@@ -240,6 +378,7 @@ func set_preset(id: int) -> void:
 	_pattern = Gallery.preset_pattern(_preset_id)
 	_pattern_step = -1
 	_preset_segments = Gallery.preset_segments(_preset_id)
+	_reset_bake()
 	_snapshot_version += 1
 	_refresh_periodicity()
 
@@ -352,7 +491,8 @@ func get_segment_limit() -> int:
 
 
 func get_segment_count() -> int:
-	return _segments_px.size() if _preset_id == Gallery.FREEHAND_LAB else _preset_segments.size()
+	return get_baked_segment_count() + _segments_px.size() if _preset_id == Gallery.FREEHAND_LAB \
+			else _preset_segments.size()
 
 
 func get_preset_segment_count() -> int:
@@ -496,11 +636,14 @@ func render_sample(index: int, snapshot = null) -> void:
 	var pc := _pack_push_constant(index, Vector4.ZERO, -1.0, {}, initial_domain,
 			initial_domain, initial_period, optimized, active_snapshot)
 	var groups_x := ceili(float(initial_domain.x * initial_domain.y) / WG)
-	_upload_segment_buffer(operations)
+	# Always bracketed, bake included: the per-frame sample budget needs the cost.
+	_rd.capture_timestamp("mixwell/start")
+	_sync_bake_render(active_snapshot)
+	_replay = _choose_replay(active_snapshot, _upload_segment_buffer(operations))
 	if active_snapshot.diagnostics_enabled:
 		_upload_diagnostic_operations(operations)
-	if _render_profiling:
-		_rd.capture_timestamp("mixwell/start")
+	if not _replay.is_empty():
+		_rd.buffer_clear(_replay_list, 0, 4)
 	var cl := _rd.compute_list_begin()
 	_parity = 1
 	var segment_buffer_offset := 0
@@ -523,6 +666,8 @@ func render_sample(index: int, snapshot = null) -> void:
 				operation_count += 1
 		var stage := "affine" if int(operation.type) == Gallery.LINE and active_snapshot.affine_mode >= 0 \
 				else ("rd_line" if int(operation.type) != Gallery.SEGMENT else "rd_segment")
+		if int(operation.type) == Gallery.BAKED_MAP:
+			stage = "lookup"
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var radius: float = _operation_radius(operation, active_snapshot)
 		var current_domain: Vector2i = period_pass["current"]
@@ -530,6 +675,11 @@ func render_sample(index: int, snapshot = null) -> void:
 		var operation_pc := _pack_push_constant(index, segment, radius, operation,
 				current_domain, previous_domain, _periodic_coordinate_period(current_domain,
 				active_snapshot.reference_size, active_snapshot.size), optimized, active_snapshot)
+		if stage == "lookup":
+			operation_pc.encode_float(32, 1.0 if _replay.get("texture", RID()).is_valid() else 0.0)
+			operation_pc.encode_float(36, REPLAY_ERROR_PX * 2.0 / float(active_snapshot.size.y))
+			operation_pc.encode_float(88, float(_replay.get("count", 0)))
+			operation_pc.encode_float(92, float(_replay.get("base", 0)))
 		if stage == "rd_segment":
 			var dispatch_count := operation_count
 			# Only gallery curves carrying a periodic head shrink to it; stroke
@@ -542,10 +692,12 @@ func render_sample(index: int, snapshot = null) -> void:
 				operation_index += operation_count
 				segment_buffer_offset += operation_count
 				continue
-			operation_pc.encode_s32(88, dispatch_count)
+			operation_pc.encode_float(88, float(dispatch_count))
 			operation_pc.encode_float(92, float(segment_buffer_offset))
 		var operation_groups := ceili(float(current_domain.x * current_domain.y) / WG)
 		_dispatch(cl, stage, operation_pc, operation_groups)
+		if stage == "lookup" and int(_replay.get("count", 0)) > 0:
+			_dispatch(cl, "replay", operation_pc, operation_groups)
 		_parity = 1 - _parity
 		cl = _mark(cl, "mixwell/%s" % stage)
 		if stage == "rd_segment":
@@ -567,7 +719,7 @@ func render_sample(index: int, snapshot = null) -> void:
 	_rd.compute_list_end()
 	if _render_profiling:
 		_rd.capture_timestamp("mixwell/accumulate")
-		_rd.capture_timestamp("mixwell/end")
+	_rd.capture_timestamp("mixwell/end")
 	_state_mutex.lock()
 	_sample_count = maxi(_sample_count, index + 1)
 	_state_mutex.unlock()
@@ -820,7 +972,10 @@ func init_render(snapshot = null) -> void:
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "mixwell_common.comp")
 	for stage in STAGES:
-		var stage_source := FileAccess.get_file_as_string(SHADER_DIR + "mixwell_" + stage + ".comp")
+		var stage_source := ""
+		for include in STAGE_INCLUDES.get(stage, []):
+			stage_source += FileAccess.get_file_as_string(SHADER_DIR + "mixwell_" + include + ".comp") + "\n"
+		stage_source += FileAccess.get_file_as_string(SHADER_DIR + "mixwell_" + stage + ".comp")
 		var spirv := ShaderCache.compile(_rd, "mixwell_" + stage,
 				"#version 450\n\n" + common + "\n" + stage_source)
 		if not spirv.compile_error_compute.is_empty():
@@ -837,12 +992,20 @@ func init_render(snapshot = null) -> void:
 	_diagnostic_group_count = ceili(float(_size.x * _size.y) / WG)
 	_diagnostic_reduction_buffer = _rd.storage_buffer_create(
 			DIAGNOSTIC_REDUCTION_STRIDE * _diagnostic_group_count * 4)
+	_replay_list = _rd.storage_buffer_create((_size.x * _size.y + 1) * 4)
 	for stage in STAGES:
 		var sets: Array[RID] = []
 		for parity in 2:
 			sets.append(_create_uniform_set(_shaders[stage], parity, stage))
 		_uniform_sets[stage] = sets
 	_init_uniform_set = _create_init_uniform_set(_shaders.init)
+	_applied_bake_generation = -1
+	_applied_bake_count = 0
+	_applied_bake_key = []
+	_keyframes.clear()
+	_keyframe_pool.clear()
+	var map_size := _baked_map_size()
+	_keyframe_capacity = clampi(KEYFRAME_BUDGET_BYTES / (map_size.x * map_size.y * 8), 2, 8)
 	_parity = 1
 	_state_mutex.lock()
 	_sample_count = 0
@@ -883,6 +1046,18 @@ func free_render() -> void:
 				_rd.free_rid(uniform_set)
 	if _init_uniform_set.is_valid():
 		_rd.free_rid(_init_uniform_set)
+	for texture in _replay_sets:
+		for uniform_set in _replay_sets[texture]:
+			if uniform_set.is_valid():
+				_rd.free_rid(uniform_set)
+	_replay_sets.clear()
+	for keyframe in _keyframes:
+		_keyframe_pool.append(keyframe.texture)
+	_keyframes.clear()
+	for texture in _keyframe_pool:
+		if texture.is_valid():
+			_rd.free_rid(texture)
+	_keyframe_pool.clear()
 	for key in _textures:
 		if _textures[key].is_valid():
 			_rd.free_rid(_textures[key])
@@ -892,6 +1067,8 @@ func free_render() -> void:
 		_rd.free_rid(_diagnostic_ops_buffer)
 	if _diagnostic_reduction_buffer.is_valid():
 		_rd.free_rid(_diagnostic_reduction_buffer)
+	if _replay_list.is_valid():
+		_rd.free_rid(_replay_list)
 	for stage in _pipelines:
 		if _pipelines[stage].is_valid():
 			_rd.free_rid(_pipelines[stage])
@@ -904,6 +1081,7 @@ func free_render() -> void:
 	_segment_buffer = RID()
 	_diagnostic_ops_buffer = RID()
 	_diagnostic_reduction_buffer = RID()
+	_replay_list = RID()
 	_diagnostic_group_count = 0
 	_pipelines.clear()
 	_shaders.clear()
@@ -914,6 +1092,10 @@ func free_render() -> void:
 func _create_textures() -> void:
 	for key in ["coords_a", "coords_b", "disp_a", "disp_b"]:
 		_textures[key] = _create_texture(RenderingDevice.DATA_FORMAT_R32G32_SFLOAT)
+	for key in ["baked", "baked_target"]:
+		_textures[key] = _create_texture(RenderingDevice.DATA_FORMAT_R32G32_SFLOAT,
+				_baked_map_size())
+	_rd.texture_clear(_textures.baked, Color(0, 0, 0, 0), 0, 1, 0, 1)
 	for key in ["sample", "accumulation", "source", "diagnostic", "convergence"]:
 		_textures[key] = _create_texture(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT)
 	_textures["diagnostic_zone"] = _create_texture(RenderingDevice.DATA_FORMAT_R8_UINT)
@@ -923,10 +1105,16 @@ func _create_textures() -> void:
 	_rd.texture_clear(_textures.diagnostic_zone, Color(0, 0, 0, 0), 0, 1, 0, 1)
 
 
-func _create_texture(format: int) -> RID:
+func _baked_map_size() -> Vector2i:
+	var single := OS.has_feature("mobile") or OS.get_environment("FORCE_TOUCH_UI") == "1" \
+			or _size.x * _size.y * 4 > BAKE_TEXEL_BUDGET
+	return _size if single else _size * 2
+
+
+func _create_texture(format: int, size := Vector2i.ZERO) -> RID:
 	var texture_format := RDTextureFormat.new()
-	texture_format.width = _size.x
-	texture_format.height = _size.y
+	texture_format.width = _size.x if size == Vector2i.ZERO else size.x
+	texture_format.height = _size.y if size == Vector2i.ZERO else size.y
 	texture_format.format = format
 	texture_format.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT \
 			| RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT \
@@ -936,7 +1124,7 @@ func _create_texture(format: int) -> RID:
 	return _rd.texture_create(texture_format, RDTextureView.new(), [])
 
 
-func _create_uniform_set(shader: RID, parity: int, stage := "") -> RID:
+func _create_uniform_set(shader: RID, parity: int, stage := "", keyframe := RID()) -> RID:
 	var texture_order: Array[String] = ["coords_a", "coords_b", "disp_a", "disp_b"]
 	if parity == 1:
 		texture_order = ["coords_b", "coords_a", "disp_b", "disp_a"]
@@ -958,12 +1146,33 @@ func _create_uniform_set(shader: RID, parity: int, stage := "") -> RID:
 			texture_name = "diagnostic"
 		uniform.add_id(_textures[texture_name])
 		uniforms.append(uniform)
-	if stage == "rd_segment":
+	if stage == "rd_segment" or stage == "bake" or stage == "replay":
 		var segment_uniform := RDUniform.new()
 		segment_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 		segment_uniform.binding = 8
 		segment_uniform.add_id(_segment_buffer)
 		uniforms.append(segment_uniform)
+	if stage == "lookup" or stage == "replay":
+		var list_uniform := RDUniform.new()
+		list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+		list_uniform.binding = 11
+		list_uniform.add_id(_replay_list)
+		uniforms.append(list_uniform)
+	if stage == "bake" or stage == "lookup":
+		var baked_uniform := RDUniform.new()
+		baked_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		baked_uniform.binding = 9
+		baked_uniform.add_id(_textures.baked)
+		uniforms.append(baked_uniform)
+	if stage == "bake" or stage == "replay":
+		var target_uniform := RDUniform.new()
+		target_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
+		target_uniform.binding = 10
+		if stage == "bake":
+			target_uniform.add_id(_textures.baked_target)
+		else:
+			target_uniform.add_id(keyframe if keyframe.is_valid() else _textures.baked)
+		uniforms.append(target_uniform)
 	elif stage == "diagnostics":
 		var operations_uniform := RDUniform.new()
 		operations_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1010,15 +1219,17 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, groups: int,
 	var uniform_set: RID = _init_uniform_set
 	if not initialization:
 		uniform_set = _uniform_sets[stage][_parity]
+	if stage == "replay" and _replay.get("texture", RID()).is_valid():
+		uniform_set = _replay_uniform_set(_replay.texture)
 	_rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
 	_rd.compute_list_set_push_constant(cl, pc, pc.size())
 	_rd.compute_list_dispatch(cl, groups, 1, 1)
 	_rd.compute_list_add_barrier(cl)
 
 
-func _upload_segment_buffer(operations: Array[Dictionary]) -> void:
+func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 	if not _segment_buffer.is_valid() or _render_snapshot == null:
-		return
+		return 0
 	var values := PackedFloat32Array()
 	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
 		_render_snapshot.reference_size.y), 1))
@@ -1041,6 +1252,182 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> void:
 	if not values.is_empty():
 		var bytes := values.to_byte_array()
 		_rd.buffer_update(_segment_buffer, 0, bytes.size(), bytes)
+	return values.size() / 8
+
+
+## Oldest base the replay budget reaches (identity or a keyframe); its segments
+## go after the live ones in the segment buffer.
+func _choose_replay(snapshot, used: int) -> Dictionary:
+	var count := _applied_bake_count
+	var limit := mini(REPLAY_SEGMENT_LIMIT, DESKTOP_SEGMENT_LIMIT - used)
+	var first := 0 if count <= limit else -1
+	var texture := RID()
+	if first < 0:
+		for keyframe in _keyframes:
+			if count - keyframe.count <= limit:
+				first = keyframe.count
+				texture = keyframe.texture
+				break
+	if first < 0 or first >= count:
+		return {}
+	var bytes := _baked_block(snapshot, first, count).to_byte_array()
+	_rd.buffer_update(_segment_buffer, used * 32, bytes.size(), bytes)
+	return {"count": count - first, "base": used, "texture": texture}
+
+
+func _replay_uniform_set(texture: RID) -> RID:
+	if not _replay_sets.has(texture):
+		_replay_sets[texture] = [_create_uniform_set(_shaders.replay, 0, "replay", texture),
+			_create_uniform_set(_shaders.replay, 1, "replay", texture)]
+	return _replay_sets[texture][_parity]
+
+
+## Appends fold in by chunk; a rewind restores the nearest keyframe and replays the gap.
+func _sync_bake_render(snapshot) -> void:
+	if not _uniform_sets.has("bake"):
+		return
+	var key := [snapshot.size, snapshot.reference_size, snapshot.midpoint_alpha,
+		snapshot.cutoff_gamma, snapshot.active_boundary_mode]
+	var count: int = snapshot.baked_segments.size() / BAKED_SEGMENT_FLOATS
+	if snapshot.bake_generation != _applied_bake_generation or key != _applied_bake_key:
+		_applied_bake_generation = snapshot.bake_generation
+		_applied_bake_revision = snapshot.bake_revision
+		_applied_bake_key = key
+		_applied_bake_count = -1
+	elif snapshot.bake_revision != _applied_bake_revision:
+		var rewind := _rewind_target(snapshot)
+		_applied_bake_revision = snapshot.bake_revision
+		if rewind < 0:
+			_applied_bake_count = -1
+		elif _applied_bake_count > rewind:
+			_drop_keyframes_above(rewind)
+			_applied_bake_count = -1
+			if not _keyframes.is_empty():
+				var keyframe: Dictionary = _keyframes.back()
+				_rd.texture_copy(keyframe.texture, _textures.baked, Vector3.ZERO, Vector3.ZERO,
+						_baked_map_extent(), 0, 0, 0, 0)
+				_applied_bake_count = keyframe.count
+	if _applied_bake_count < 0 or count < _applied_bake_count:
+		_rd.texture_clear(_textures.baked, Color(0, 0, 0, 0), 0, 1, 0, 1)
+		_drop_keyframes_above(0)
+		_applied_bake_count = 0
+	var period := _periodic_coordinate_period(snapshot.size, snapshot.reference_size, snapshot.size)
+	var starts: PackedInt32Array = snapshot.bake_starts
+	while _applied_bake_count < count:
+		if _applied_bake_count > 0 \
+				and (_keyframes.is_empty() or _keyframes.back().count < _applied_bake_count):
+			_save_keyframe(_applied_bake_count)
+		var end := count
+		for start in starts:
+			if start > _applied_bake_count:
+				end = mini(end, start)
+				break
+		var chunk := mini(end - _applied_bake_count, DESKTOP_SEGMENT_LIMIT)
+		var values := _baked_block(snapshot, _applied_bake_count, _applied_bake_count + chunk)
+		var rect := _bake_rect(values, snapshot)
+		if not rect.has_area():
+			_applied_bake_count += chunk
+			continue
+		var bytes := values.to_byte_array()
+		_rd.buffer_update(_segment_buffer, 0, bytes.size(), bytes)
+		var pc := _pack_push_constant(0, Vector4.ZERO, -1.0, {"type": Gallery.SEGMENT},
+				snapshot.size, snapshot.size, period, false, snapshot)
+		pc.encode_float(32, float(rect.position.x))
+		pc.encode_float(36, float(rect.position.y))
+		pc.encode_float(40, float(rect.size.x))
+		pc.encode_float(44, float(rect.size.y))
+		pc.encode_float(88, float(chunk))
+		pc.encode_float(92, 0.0)
+		var cl := _rd.compute_list_begin()
+		_rd.compute_list_bind_compute_pipeline(cl, _pipelines.bake)
+		_rd.compute_list_bind_uniform_set(cl, _uniform_sets.bake[0], 0)
+		_rd.compute_list_set_push_constant(cl, pc, pc.size())
+		_rd.compute_list_dispatch(cl, ceili(float(rect.size.x * rect.size.y) / WG), 1, 1)
+		_rd.compute_list_end()
+		var origin := Vector3(rect.position.x, rect.position.y, 0)
+		_rd.texture_copy(_textures.baked_target, _textures.baked, origin, origin,
+				Vector3(rect.size.x, rect.size.y, 1), 0, 0, 0, 0)
+		_applied_bake_count += chunk
+
+
+## Baked segments [first, end), newest first like every RDF pass.
+func _baked_block(snapshot, first: int, end: int) -> PackedFloat32Array:
+	var values := PackedFloat32Array()
+	for index in range(end - 1, first - 1, -1):
+		values.append_array(snapshot.baked_segments.slice(index * BAKED_SEGMENT_FLOATS,
+				(index + 1) * BAKED_SEGMENT_FLOATS))
+	return values
+
+
+## Lowest rewind since the last applied revision; -1 when the history has a gap.
+func _rewind_target(snapshot) -> int:
+	var target := -1
+	var covered := false
+	for entry: Vector2i in snapshot.bake_rewinds:
+		if entry.x == _applied_bake_revision + 1:
+			covered = true
+		if entry.x > _applied_bake_revision:
+			target = entry.y if target < 0 else mini(target, entry.y)
+	return target if covered else -1
+
+
+func _baked_map_extent() -> Vector3:
+	var map_size := _baked_map_size()
+	return Vector3(map_size.x, map_size.y, 1)
+
+
+func _drop_keyframes_above(count: int) -> void:
+	while not _keyframes.is_empty() and _keyframes.back().count > count:
+		_keyframe_pool.append(_keyframes.pop_back().texture)
+
+
+## Keyframes within the replay window stay; older ones thin out geometrically
+## (the one leaving the smallest gap relative to its age goes first).
+func _save_keyframe(count: int) -> void:
+	var texture := RID()
+	if not _keyframe_pool.is_empty():
+		texture = _keyframe_pool.pop_back()
+	elif _keyframes.size() < _keyframe_capacity:
+		texture = _create_texture(RenderingDevice.DATA_FORMAT_R32G32_SFLOAT, _baked_map_size())
+	else:
+		var evict := 0
+		var best := INF
+		for index in _keyframes.size():
+			var age: int = count - _keyframes[index].count
+			var previous: int = 0 if index == 0 else _keyframes[index - 1].count
+			var next: int = count if index == _keyframes.size() - 1 else _keyframes[index + 1].count
+			var score := float(next - previous) / float(maxi(age, 1))
+			if age <= REPLAY_SEGMENT_LIMIT:
+				score += 1.0e6
+			if score < best:
+				best = score
+				evict = index
+		texture = _keyframes[evict].texture
+		_keyframes.remove_at(evict)
+	_rd.texture_copy(_textures.baked, texture, Vector3.ZERO, Vector3.ZERO, _baked_map_extent(),
+			0, 0, 0, 0)
+	_keyframes.append({"count": count, "texture": texture})
+
+
+## Texels within the chunk's influence cutoff; wrap and mirror boundaries reach everywhere.
+func _bake_rect(values: PackedFloat32Array, snapshot) -> Rect2i:
+	var map_size := _baked_map_size()
+	var full := Rect2i(Vector2i.ZERO, map_size)
+	if snapshot.active_boundary_mode != MixwellConfig.BoundaryMode.FULLSCREEN:
+		return full
+	var low := Vector2(INF, INF)
+	var high := Vector2(-INF, -INF)
+	for base in range(0, values.size(), BAKED_SEGMENT_FLOATS):
+		var cutoff := maxf(values[base + 4] * snapshot.cutoff_gamma, values[base + 4])
+		low = low.min(Vector2(minf(values[base], values[base + 2]),
+				minf(values[base + 1], values[base + 3])) - Vector2(cutoff, cutoff))
+		high = high.max(Vector2(maxf(values[base], values[base + 2]),
+				maxf(values[base + 1], values[base + 3])) + Vector2(cutoff, cutoff))
+	var aspect := Vector2(float(snapshot.size.x) / float(snapshot.size.y), 1.0)
+	var scale := Vector2(map_size) / (2.0 * aspect)
+	var start := Vector2i(((low + aspect) * scale).floor()) - Vector2i.ONE
+	var end := Vector2i(((high + aspect) * scale).ceil()) + Vector2i.ONE
+	return full.intersection(Rect2i(start, end - start))
 
 
 func _upload_diagnostic_operations(operations: Array[Dictionary]) -> void:
@@ -1105,8 +1492,12 @@ func _read_timings() -> void:
 				"timestamps_available": false,
 			})
 		return
+	var chains := 0
+	for index in _rd.get_captured_timestamps_count():
+		if _rd.get_captured_timestamp_name(index) == "mixwell/start":
+			chains += 1
 	if result.has("total") and is_finite(float(result.total)) and result.total > 0.0:
-		_last_sample_gpu_ms = float(result.total)
+		_last_sample_gpu_ms = float(result.total) / float(maxi(chains, 1))
 	_timing_store.publish(result)
 
 
