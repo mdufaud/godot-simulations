@@ -23,6 +23,8 @@ var grass_distance_m := 38.0
 var grass_detail := false
 var grass_shadows := false
 var water_detail := 0.0
+var fall_rocks := true
+var dropped_rocks := 0
 var ground_cache: Dictionary = {}
 var _grass_tiles: Array[MultiMeshInstance3D] = []
 var _grass_meshes: Array[ArrayMesh] = []
@@ -45,6 +47,8 @@ func build(host: Node3D, selected_field: RiverField = null) -> void:
 	_build_ground()
 	LoadingPump.stage("Placing rocks")
 	_build_rocks()
+	if field.waterfall != null:
+		field.bake_obstacles()
 	LoadingPump.stage("Planting grass")
 	_build_grass()
 	if field.waterfall != null and field.waterfall.is_vertical():
@@ -53,6 +57,9 @@ func build(host: Node3D, selected_field: RiverField = null) -> void:
 
 
 func clear() -> void:
+	if dropped_rocks > 0 and field != null:
+		field.solver_terrain_image = null
+	dropped_rocks = 0
 	if is_instance_valid(root):
 		root.free()
 	root = null
@@ -345,6 +352,8 @@ func _build_waterfall_bank_rocks() -> void:
 	var crest := profile.crest_z_m
 	var foot := crest - profile.run_m()
 	var half := profile.width_m * 0.5
+	if fall_rocks:
+		_build_fall_rocks()
 	for side: float in [-1.0, 1.0]:
 		for rock: Vector3 in [Vector3(half + 1.0, crest + 1.8, 1.0), Vector3(half + 0.2, foot - 3.2, 0.9), Vector3(half + 0.4, foot - 8.5, 1.1)]:
 			var point := Vector2(side * rock.x, rock.y + _rng.randf_range(-0.6, 0.6))
@@ -356,6 +365,33 @@ func _build_waterfall_bank_rocks() -> void:
 		var point := Vector2(side * (half + _rng.randf_range(1.5, 6.0)), z)
 		if absf(point.x) + radius < field.domain_m.x * 0.5:
 			_add_rock(point, radius, _bed(point) - radius * 0.3, radius * _rng.randf_range(0.8, 1.3))
+
+
+func _build_fall_rocks() -> void:
+	var profile := field.waterfall
+	var crest := profile.crest_z_m
+	var lip := profile.height_m - profile.bed_depth_m
+	var cliff := profile.angle_degrees >= 70.0
+	var crest_point := Vector2(-1.7, crest + 0.1)
+	_add_rock(crest_point, 0.6, lip - 0.3, profile.height_m + 0.42 - (lip - 0.3), BOULDER_PATHS)
+	# (x m, fraction of the drop below the lip, radius m, top above the face m)
+	var face_rocks := [Vector4(1.2, 0.36, 0.62, 0.45), Vector4(-1.0, 0.72, 0.72, 0.25)] if cliff \
+		else [Vector4(1.1, 0.33, 0.6, 0.8), Vector4(-0.95, 0.62, 0.5, 0.5)]
+	for rock: Vector4 in face_rocks:
+		var face_y := lip - rock.y * profile.height_m
+		var face_z := crest - rock.y * profile.run_m()
+		if cliff:
+			var point := Vector2(rock.x, face_z - rock.z * 0.45)
+			_add_rock(point, rock.z, face_y - 0.8, 0.8 + rock.w, BOULDER_PATHS)
+		else:
+			var point := Vector2(rock.x, face_z)
+			var base := maxf(_footprint_floor(point, rock.z), face_y - rock.z * 1.2) - 0.15
+			_add_rock(point, rock.z, base, face_y + rock.w - base, BOULDER_PATHS)
+	var impact := crest - (profile.run_m() if not cliff else 0.9)
+	for rock: Vector4 in [Vector4(2.0, impact - 0.7, 0.6, 0.45), Vector4(-2.25, impact - 2.1, 0.5, 0.32)]:
+		var point := Vector2(rock.x, rock.y)
+		var base := _footprint_floor(point, rock.z) - 0.2
+		_add_rock(point, rock.z, base, rock.w - base, BOULDER_PATHS)
 
 
 func _build_torrent_rocks() -> void:
@@ -444,7 +480,16 @@ func _build_cliff() -> void:
 	face.create_trimesh_collision()
 
 
-func _add_rock(point: Vector2, radius: float, base: float, height: float, paths: Array = ROCK_PATHS, tilt_rad := 0.0) -> void:
+func add_dropped_rock(hit: Vector3, normal: Vector3) -> Array[MeshInstance3D]:
+	var radius := _rng.randf_range(0.45, 0.75)
+	dropped_rocks += 1
+	if normal.y > 0.5:
+		return _add_rock(Vector2(hit.x, hit.z), radius, hit.y - radius * 0.35, radius * 1.3, BOULDER_PATHS)
+	var outward := Vector2(normal.x, normal.z).normalized()
+	return _add_rock(Vector2(hit.x, hit.z) + outward * radius * 0.5, radius, hit.y - radius * 0.6, radius * 1.2, BOULDER_PATHS)
+
+
+func _add_rock(point: Vector2, radius: float, base: float, height: float, paths: Array = ROCK_PATHS, tilt_rad := 0.0) -> Array[MeshInstance3D]:
 	var scene := load(paths[_rng.randi_range(0, paths.size() - 1)]) as PackedScene
 	var rock := scene.instantiate() as Node3D
 	var meshes: Array[MeshInstance3D] = []
@@ -483,6 +528,7 @@ func _add_rock(point: Vector2, radius: float, base: float, height: float, paths:
 		mesh.add_child(body)
 		body.add_child(shape)
 	field.obstacle_meshes.append_array(meshes)
+	return meshes
 
 
 func _collect_meshes(node: Node, meshes: Array[MeshInstance3D]) -> void:

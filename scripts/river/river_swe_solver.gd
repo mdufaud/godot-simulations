@@ -10,7 +10,6 @@ const LANES := 48
 const FILM_CELLS := 63
 const PACKET_CAPACITY := 256
 const EMISSION_HZ := 120.0
-const ROCK_MAP_SIZE := 96
 
 var region_m := Rect2()
 var loading_stage := Callable()
@@ -29,6 +28,9 @@ var _balance := RID()
 var _source := RID()
 var _ground := RID()
 var _ground_image: Image
+var _obstacles := RID()
+var _obstacle_bytes := 0
+var _obstacle_image: Image
 var _sampler := RID()
 var _query_points := RID()
 var _query_results := RID()
@@ -49,7 +51,10 @@ var _waterfall_clock := RID()
 var _waterfall_boundary := RID()
 var _waterfall: Variant
 var _waterfall_sets: Array[RID] = []
-var _rock_maps: Dictionary = {}
+var _stamps := RiverObstacleStamp.new()
+var _rock_parameters := RID()
+var _rock_bytes := PackedFloat32Array([RiverWaterfallCurtain.ROCK_RESTITUTION, RiverWaterfallCurtain.ROCK_SPREAD,
+	RiverWaterfallCurtain.ROCK_FAN_RAD, RiverWaterfallCurtain.ROCK_MIN_M, RiverWaterfallConfig.FILM_SOLID_M, 0.0, 0.0, 0.0]).to_byte_array()
 var _cfl_sets: Array[RID] = []
 var _schedule_set := RID()
 var _index := 0
@@ -69,6 +74,7 @@ var _progress_generation := 0
 func start(field: RiverField, config: RiverConfig) -> void:
 	_waterfall = field.get("waterfall")
 	_ground_image = field.ground_height_image
+	_obstacle_image = field.obstacle_image
 	_source_domain = field.domain_rect()
 	var image := _solver_terrain(field)
 	_request_init_render(image.get_data(), image.get_size(), config)
@@ -104,9 +110,38 @@ func _solver_terrain(field: RiverField) -> Image:
 	for row: PackedFloat32Array in rows:
 		values.append_array(row)
 	for instance in field.obstacle_meshes:
-		_stamp_rock(values, instance, size)
+		_stamps.stamp(values, 4, size, origin, CELL_M, instance)
 	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, values.to_byte_array())
 	return field.solver_terrain_image
+
+
+func add_obstacles(field: RiverField, meshes: Array[MeshInstance3D], parameters_bytes: PackedByteArray) -> void:
+	var image := field.solver_terrain_image
+	if image == null:
+		return
+	var size := image.get_size()
+	var values := image.get_data().to_float32_array()
+	for instance in meshes:
+		_stamps.stamp(values, 4, size, _source_domain.position, CELL_M, instance)
+	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, values.to_byte_array())
+	var obstacles := PackedByteArray()
+	if field.obstacle_image != null:
+		var converted := field.obstacle_image.duplicate() as Image
+		converted.convert(Image.FORMAT_RF)
+		obstacles = converted.get_data()
+	RenderingServer.call_on_render_thread(_add_obstacles_render.bind(field.solver_terrain_image.get_data(), size, obstacles, parameters_bytes))
+
+
+func _add_obstacles_render(terrain_bytes: PackedByteArray, source_size: Vector2i, obstacle_bytes: PackedByteArray,
+		parameters_bytes: PackedByteArray) -> void:
+	if _rd == null or _sets.is_empty() or source_size != _source_size:
+		return
+	_rd.texture_update(_source, 0, terrain_bytes)
+	if _obstacles.is_valid() and obstacle_bytes.size() == _obstacle_bytes:
+		_rd.texture_update(_obstacles, 0, obstacle_bytes)
+	var list := _rd.compute_list_begin()
+	_dispatch_render(list, parameters_bytes, 8.0)
+	_rd.compute_list_end()
 
 
 func _request_init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, config: RiverConfig) -> void:
@@ -129,93 +164,6 @@ func _update_source_render(terrain_bytes: PackedByteArray, source_size: Vector2i
 func _report_stage(label: String) -> void:
 	if loading_stage.is_valid():
 		loading_stage.call(label)
-
-
-func _stamp_rock(values: PackedFloat32Array, instance: MeshInstance3D, size: Vector2i) -> void:
-	var transform := instance.global_transform
-	var bounds := transform * instance.get_aabb()
-	if not _source_domain.intersects(Rect2(Vector2(bounds.position.x, bounds.position.z), Vector2(bounds.size.x, bounds.size.z))):
-		return
-	var basis := transform.basis
-	var tolerance := 0.001 * basis.get_scale().length()
-	if absf(basis.x.y) > tolerance or absf(basis.z.y) > tolerance or absf(basis.y.x) > tolerance or absf(basis.y.z) > tolerance:
-		_stamp_faces(values, instance, size)
-		return
-	var map := _rock_map(instance.mesh)
-	var local := instance.mesh.get_aabb()
-	var texel := Vector2(local.size.x, local.size.z) / float(ROCK_MAP_SIZE - 1)
-	var inverse := transform.affine_inverse()
-	var low := ((Vector2(bounds.position.x, bounds.position.z) - _source_domain.position) / CELL_M - Vector2.ONE * 0.5).ceil()
-	var high := ((Vector2(bounds.end.x, bounds.end.z) - _source_domain.position) / CELL_M - Vector2.ONE * 0.5).floor()
-	for y in range(maxi(int(low.y), 0), mini(int(high.y) + 1, size.y)):
-		for x in range(maxi(int(low.x), 0), mini(int(high.x) + 1, size.x)):
-			var world := _source_domain.position + Vector2(x + 0.5, y + 0.5) * CELL_M
-			var point := inverse * Vector3(world.x, 0.0, world.y)
-			var cell := ((Vector2(point.x, point.z) - Vector2(local.position.x, local.position.z)) / texel).round()
-			if cell.x < 0.0 or cell.y < 0.0 or cell.x >= ROCK_MAP_SIZE or cell.y >= ROCK_MAP_SIZE:
-				continue
-			var top := map[int(cell.y) * ROCK_MAP_SIZE + int(cell.x)]
-			if top == -INF:
-				continue
-			var offset := (y * size.x + x) * 4
-			values[offset] = maxf(values[offset], (transform * Vector3(point.x, top, point.z)).y)
-
-
-func _rock_map(mesh: Mesh) -> PackedFloat32Array:
-	if _rock_maps.has(mesh):
-		return _rock_maps[mesh]
-	var bounds := mesh.get_aabb()
-	var texel := Vector2(bounds.size.x, bounds.size.z) / float(ROCK_MAP_SIZE - 1)
-	var origin := Vector2(bounds.position.x, bounds.position.z)
-	var map := PackedFloat32Array()
-	map.resize(ROCK_MAP_SIZE * ROCK_MAP_SIZE)
-	map.fill(-INF)
-	var faces := mesh.get_faces()
-	for index in range(0, faces.size(), 3):
-		var a := faces[index]
-		var b := faces[index + 1]
-		var c := faces[index + 2]
-		var ab := Vector2(b.x - a.x, b.z - a.z)
-		var ac := Vector2(c.x - a.x, c.z - a.z)
-		var area := ab.cross(ac)
-		if absf(area) < 0.0000001:
-			continue
-		var low := ((Vector2(minf(a.x, minf(b.x, c.x)), minf(a.z, minf(b.z, c.z))) - origin) / texel).ceil()
-		var high := ((Vector2(maxf(a.x, maxf(b.x, c.x)), maxf(a.z, maxf(b.z, c.z))) - origin) / texel).floor()
-		for y in range(maxi(int(low.y), 0), mini(int(high.y) + 1, ROCK_MAP_SIZE)):
-			for x in range(maxi(int(low.x), 0), mini(int(high.x) + 1, ROCK_MAP_SIZE)):
-				var point := origin + Vector2(x, y) * texel - Vector2(a.x, a.z)
-				var wb := point.cross(ac) / area
-				var wc := ab.cross(point) / area
-				if minf(1.0 - wb - wc, minf(wb, wc)) >= -0.0001:
-					var cell := y * ROCK_MAP_SIZE + x
-					map[cell] = maxf(map[cell], a.y + wb * (b.y - a.y) + wc * (c.y - a.y))
-	_rock_maps[mesh] = map
-	return map
-
-
-func _stamp_faces(values: PackedFloat32Array, instance: MeshInstance3D, size: Vector2i) -> void:
-	var faces := instance.mesh.get_faces()
-	for index in range(0, faces.size(), 3):
-		var a := instance.global_transform * faces[index]
-		var b := instance.global_transform * faces[index + 1]
-		var c := instance.global_transform * faces[index + 2]
-		var origin := Vector2(a.x, a.z)
-		var ab := Vector2(b.x - a.x, b.z - a.z)
-		var ac := Vector2(c.x - a.x, c.z - a.z)
-		var area := ab.cross(ac)
-		if absf(area) < 0.000001:
-			continue
-		var low := (Vector2(minf(a.x, minf(b.x, c.x)), minf(a.z, minf(b.z, c.z))) - _source_domain.position) / CELL_M - Vector2.ONE * 0.5
-		var high := (Vector2(maxf(a.x, maxf(b.x, c.x)), maxf(a.z, maxf(b.z, c.z))) - _source_domain.position) / CELL_M - Vector2.ONE * 0.5
-		for y in range(maxi(ceili(low.y), 0), mini(floori(high.y) + 1, size.y)):
-			for x in range(maxi(ceili(low.x), 0), mini(floori(high.x) + 1, size.x)):
-				var point := _source_domain.position + Vector2(x + 0.5, y + 0.5) * CELL_M - origin
-				var wb := point.cross(ac) / area
-				var wc := ab.cross(point) / area
-				if minf(1.0 - wb - wc, minf(wb, wc)) >= -0.0001:
-					var offset := (y * size.x + x) * 4
-					values[offset] = maxf(values[offset], a.y + wb * (b.y - a.y) + wc * (c.y - a.y))
 
 
 func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
@@ -332,6 +280,16 @@ func _init_waterfall_render(parameters_bytes: PackedByteArray) -> void:
 		_waterfall_shader = _rd.shader_create_from_spirv(waterfall_source)
 		_waterfall_pipeline = _rd.compute_pipeline_create(_waterfall_shader)
 		_ground = _texture_render(_ground_image.get_size(), _ground_image.get_data())
+		var obstacles := Image.create(1, 1, false, Image.FORMAT_RF) if _obstacle_image == null else _obstacle_image.duplicate() as Image
+		obstacles.convert(Image.FORMAT_RF)
+		var obstacle_format := RDTextureFormat.new()
+		obstacle_format.width = obstacles.get_width()
+		obstacle_format.height = obstacles.get_height()
+		obstacle_format.format = RenderingDevice.DATA_FORMAT_R32_SFLOAT
+		obstacle_format.usage_bits = RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT | RenderingDevice.TEXTURE_USAGE_CAN_UPDATE_BIT
+		_obstacles = _rd.texture_create(obstacle_format, RDTextureView.new(), [obstacles.get_data()])
+		_obstacle_bytes = obstacles.get_data().size()
+		_rock_parameters = _rd.uniform_buffer_create(_rock_bytes.size(), _rock_bytes)
 		_cfl_shader = _rd.shader_create_from_spirv(cfl_source)
 		_cfl_pipeline = _rd.compute_pipeline_create(_cfl_shader)
 		_schedule_shader = _rd.shader_create_from_spirv(schedule_source)
@@ -353,6 +311,10 @@ func _init_waterfall_render(parameters_bytes: PackedByteArray) -> void:
 			ground_sampler.add_id(_ground)
 			wf_uniforms.append(ground_sampler)
 			wf_uniforms.append(_uniform(11, _waterfall_boundary, RenderingDevice.UNIFORM_TYPE_IMAGE))
+			var obstacle_sampler := _uniform(12, _sampler, RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE)
+			obstacle_sampler.add_id(_obstacles)
+			wf_uniforms.append(obstacle_sampler)
+			wf_uniforms.append(_uniform(13, _rock_parameters, RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER))
 			_waterfall_sets.append(_rd.uniform_set_create(wf_uniforms, _waterfall_shader, 0))
 			var cfl_uniforms: Array[RDUniform] = [
 				_uniform(0, _states[index], RenderingDevice.UNIFORM_TYPE_IMAGE),
@@ -730,7 +692,7 @@ func _free_render() -> void:
 	_waterfall_sets.clear()
 	_cfl_sets.clear()
 	_schedule_set = RID()
-	for texture in _states + _film_states + [_terrain, _surface, _foam, _balance, _source, _ground, _sampler,
+	for texture in _states + _film_states + [_terrain, _surface, _foam, _balance, _source, _ground, _obstacles, _rock_parameters, _sampler,
 		_query_points, _query_results, _control, _cascade, _waterfall_surface, _waterfall_velocity, _waterfall_clock,
 		_waterfall_boundary]:
 		if texture.is_valid():
@@ -765,5 +727,8 @@ func _free_render() -> void:
 	_waterfall_boundary = RID()
 	_ground = RID()
 	_ground_image = null
+	_obstacles = RID()
+	_rock_parameters = RID()
+	_obstacle_image = null
 	_index = 0
 	_rd = null

@@ -14,6 +14,8 @@ const STEEP_WINDOW_M := Vector2(16.0, 24.0)
 const STEEP_RANGE_M := 24.0
 const STEEP_EDGE_FADE_M := 2.0
 const FIELD_CACHE_SIZE := 6
+const MAX_DROPPED_ROCKS := 12
+const DROP_RAY_M := 200.0
 const STEEP_VIEWS := {
 	"default": Vector3(20.0, -50.0, 20.0), "near": Vector3(10.0, -30.0, 20.0), "top": Vector3(34.0, -88.0, 0.0),
 	"far": Vector3(48.0, -50.0, 20.0), "low": Vector3(12.0, -14.0, 215.0), "low_down": Vector3(14.0, -24.0, 35.0),
@@ -41,6 +43,8 @@ var channel_grade_index := 1
 var channel_heading_index := 2
 var steep_guidance := true
 var steep_window := false
+var fall_rocks := true
+var _drop_at := Vector2.INF
 var _quality_reflection_scale := 0.5
 var window_overlay := WindowOverlay.new()
 var _quality_tier := 1
@@ -181,7 +185,7 @@ func _build_scene(index: int) -> void:
 
 
 func _field_for(index: int) -> RiverField:
-	var key := [index] if index == 0 else ([index, channel_grade_index, channel_heading_index] if index == STEEP_SCENE else [index, waterfall_angles[index]])
+	var key := [index] if index == 0 else ([index, channel_grade_index, channel_heading_index] if index == STEEP_SCENE else [index, waterfall_angles[index], fall_rocks])
 	var selected: RiverField = _fields.get(key)
 	if selected == null:
 		selected = RiverLandscape.new() if index == 0 else (TorrentLandscape.new(CHANNEL_GRADES[channel_grade_index],
@@ -225,6 +229,43 @@ func _apply_guidance() -> void:
 	var steep := scene_index == STEEP_SCENE and steep_guidance
 	config.current_guidance_hz = STEEP_GUIDANCE_HZ.x if steep else base.current_guidance_hz
 	config.level_guidance_hz = STEEP_GUIDANCE_HZ.y if steep else base.level_guidance_hz
+
+
+func set_fall_rocks(enabled: bool) -> void:
+	fall_rocks = enabled
+	_scenery.fall_rocks = enabled
+	if scene_index != 0 and scene_index != STEEP_SCENE:
+		_build_scene(scene_index)
+
+
+func drop_rock(screen_point := Vector2.INF) -> void:
+	_drop_at = get_viewport().get_visible_rect().size * 0.5 if screen_point == Vector2.INF else screen_point
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	var click := event as InputEventMouseButton
+	if click != null and click.pressed and click.shift_pressed and click.button_index == MOUSE_BUTTON_LEFT:
+		drop_rock(click.position)
+		get_viewport().set_input_as_handled()
+
+
+func _physics_process(_delta: float) -> void:
+	if _drop_at == Vector2.INF:
+		return
+	var point := _drop_at
+	_drop_at = Vector2.INF
+	if scene_index == STEEP_SCENE or _scenery.dropped_rocks >= MAX_DROPPED_ROCKS:
+		return
+	var origin := camera.project_ray_origin(point)
+	var query := PhysicsRayQueryParameters3D.create(origin, origin + camera.project_ray_normal(point) * DROP_RAY_M)
+	var excluded: Array[RID] = []
+	for crate in interactions.crates:
+		excluded.append(crate.get_rid())
+	query.exclude = excluded
+	var hit := camera.get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty() or not hit.collider is StaticBody3D:
+		return
+	river.obstacles_added(_scenery.add_dropped_rock(hit.position, hit.normal))
 
 
 func set_waterfall_angle(value: float) -> void:
@@ -330,6 +371,10 @@ func set_capture_params(parameters: Dictionary) -> void:
 		set_steep_guidance(bool(parameters["guidance"]))
 	if parameters.has("window"):
 		set_steep_window(bool(parameters["window"]))
+	if parameters.has("rocks"):
+		set_fall_rocks(bool(parameters["rocks"]))
+	if parameters.has("drop"):
+		drop_rock()
 	if parameters.has("crates"):
 		for index in int(parameters["crates"]):
 			interactions.throw_crate()

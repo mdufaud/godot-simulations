@@ -129,6 +129,11 @@ func _water_within_range() -> bool:
 	return false
 
 
+func add_obstacles(meshes: Array[MeshInstance3D], time_s: float) -> void:
+	if available and not _windowed():
+		solver.add_obstacles(field, meshes, solver.parameters(config, time_s))
+
+
 func set_enabled(value: bool) -> void:
 	enabled = value
 	reset()

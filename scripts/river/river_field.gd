@@ -1,5 +1,7 @@
 class_name RiverField extends RefCounted
 
+const OBSTACLE_CELL_M := 0.0625
+
 var domain_m := Vector2(72.0, 160.0)
 var origin_m := Vector2.ZERO
 var surface_slope := 0.0
@@ -17,6 +19,8 @@ var has_water := true
 var ground_height_image: Image
 var ground_rows_m := PackedFloat32Array()
 var waterfall: RiverWaterfallConfig
+var obstacle_image: Image
+var _obstacle_stamp := RiverObstacleStamp.new()
 var _baked_key: Array = []
 var _baked: Array = []
 
@@ -30,6 +34,49 @@ func sample_height(point: Vector2, level_m: float) -> float:
 
 
 func sample_ground_height(point: Vector2) -> float:
+	return sample_base_ground_height(point) + sample_obstacle_excess(point)
+
+
+func sample_obstacle_excess(point: Vector2) -> float:
+	if obstacle_image == null:
+		return 0.0
+	var size := obstacle_image.get_size()
+	var cell := (point - domain_rect().position) / (domain_m / Vector2(size)) - Vector2.ONE * 0.5
+	var low := Vector2i(cell.floor())
+	var fraction := cell - Vector2(low)
+	var last := size - Vector2i.ONE
+	var a := obstacle_image.get_pixelv(low.clamp(Vector2i.ZERO, last)).r
+	var b := obstacle_image.get_pixelv((low + Vector2i(1, 0)).clamp(Vector2i.ZERO, last)).r
+	var c := obstacle_image.get_pixelv((low + Vector2i(0, 1)).clamp(Vector2i.ZERO, last)).r
+	var d := obstacle_image.get_pixelv((low + Vector2i.ONE).clamp(Vector2i.ZERO, last)).r
+	return lerpf(lerpf(a, b, fraction.x), lerpf(c, d, fraction.x), fraction.y)
+
+
+func bake_obstacles() -> void:
+	obstacle_image = null
+	var size := Vector2i((domain_m / OBSTACLE_CELL_M).round())
+	var origin := domain_rect().position
+	var tops := PackedFloat32Array()
+	tops.resize(size.x * size.y)
+	tops.fill(-INF)
+	var areas: Array[Rect2i] = []
+	for instance in obstacle_meshes:
+		areas.append(_obstacle_stamp.stamp(tops, 1, size, origin, domain_m.x / size.x, instance))
+	var data := PackedFloat32Array()
+	data.resize(size.x * size.y * 2)
+	for area in areas:
+		for y in range(area.position.y, area.end.y):
+			for x in range(area.position.x, area.end.x):
+				var index := y * size.x + x
+				if tops[index] == -INF or data[index * 2 + 1] != 0.0:
+					continue
+				var ground := sample_base_ground_height(origin + (Vector2(x, y) + Vector2.ONE * 0.5) * domain_m / Vector2(size))
+				data[index * 2] = maxf(tops[index] - ground, 0.0)
+				data[index * 2 + 1] = ground
+	obstacle_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGF, data.to_byte_array())
+
+
+func sample_base_ground_height(point: Vector2) -> float:
 	if ground_height_image == null:
 		return sample_bed(point)
 	var last := ground_height_image.get_size() - Vector2i.ONE

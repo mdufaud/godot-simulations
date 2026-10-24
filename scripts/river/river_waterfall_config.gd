@@ -4,6 +4,7 @@ const LANE_COUNT := 48
 const FILM_CELLS := 63
 const PACKET_CAPACITY := 256
 const EMISSION_RATE_HZ := 120.0
+const FILM_SOLID_M := 0.25
 
 @export_range(20.0, 90.0, 0.1) var angle_degrees := 90.0
 @export var height_m := 6.0

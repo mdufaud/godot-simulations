@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode cull_disabled, depth_draw_always;
 
 // Mesh layout from RiverWaterfallCurtain: UV = (fraction across the crest, seconds since the lip),
-// UV2 = (metres past the lip, speed m/s), COLOR.r = film / max_film_m,
+// UV2 = (metres past the lip, speed m/s), COLOR.r = film / max_film_m, COLOR.g = torn edge,
 // CUSTOM0 = (wet, free edge, impact, attached; -1 on edges tucked into a bank).
 
 group_uniforms look;
@@ -20,6 +20,10 @@ uniform float width_m = 6.0;
 uniform float max_film_m = 0.8;
 uniform float landing_level_m = 0.0;
 uniform float speed_m_s = 0.85;
+uniform sampler2D obstacle_map : filter_linear, repeat_disable;
+uniform vec4 obstacle_domain = vec4(0.0, 0.0, 1.0, 1.0);
+uniform float rock_min_m = 0.02;
+uniform float film_solid_m = 0.25;
 uniform uint reflection_layer = uint(0);
 uniform vec2 reflection_heights_m = vec2(-1.0e6);
 
@@ -28,6 +32,7 @@ uniform bool live_enabled = false;
 uniform bool free_fall = false;
 uniform sampler2D basin_surface : filter_linear, repeat_disable;
 uniform sampler2D fall_surface : filter_linear, repeat_disable;
+uniform sampler2D fall_velocity : filter_linear, repeat_disable;
 uniform sampler2D fall_clock : filter_nearest, repeat_disable;
 uniform sampler2D fall_boundary : filter_nearest, repeat_disable;
 uniform vec4 basin_region;
@@ -43,12 +48,16 @@ const float EDGE_FRAY_M = 0.4;
 const float BANK_FOAM_M = 0.5;
 const float IMPACT_FOAM_M = 0.6;
 const float REFRACTION = 0.025;
+const float DRAPE_PROBE_M = 0.08;
+const float PILE_RATIO = 2.0;
 
 varying vec3 world_position;
 varying vec3 surface_normal;
 varying vec4 traits;
 varying float activity;
 varying float film_m;
+varying float draped;
+varying float torn;
 
 vec4 basin(vec2 point) {
 	return textureLod(basin_surface, (point - basin_region.xy) / basin_region.zw, 0.0);
@@ -59,21 +68,38 @@ float pool_height(vec2 point) {
 	return water.w > 0.12 ? water.z : landing_level_m;
 }
 
+float obstacle_excess(vec2 point) {
+	return textureLod(obstacle_map, (point - obstacle_domain.xy) / obstacle_domain.zw, 0.0).r;
+}
+
+bool inside_rock(vec3 point) {
+	ivec2 size = textureSize(obstacle_map, 0);
+	ivec2 cell = clamp(ivec2(floor((point.xz - obstacle_domain.xy) / obstacle_domain.zw * vec2(size))), ivec2(0), size - 1);
+	vec2 rock = texelFetch(obstacle_map, cell, 0).rg;
+	return rock.x > rock_min_m && point.y < rock.y + rock.x - 0.03;
+}
+
+vec2 film_uv(float u, float distance_m) {
+	float cell = 0.5 / fall_grid.y;
+	float film_end = textureLod(fall_boundary, vec2(u, 0.5), 0.0).y;
+	float distance = clamp(distance_m, 0.0, max(film_end - 0.3, 0.0));
+	return vec2(u, clamp(distance / film_length_m, cell, 1.0 - cell));
+}
+
 float transported_depth(float u, float age_s, float distance_m) {
 	if (free_fall) {
 		float head = textureLod(fall_clock, vec2(0.5), 0.0).g;
 		float row = mod(head - floor(max(age_s, 0.0) * fall_grid.w) + fall_grid.z, fall_grid.z);
-		return textureLod(fall_surface, vec2(u, (row + 0.5) / fall_grid.z), 0.0).w;
+		return textureLod(fall_velocity, vec2(u, (row + 0.5) / fall_grid.z), 0.0).w;
 	}
-	float film_end = textureLod(fall_boundary, vec2(u, 0.5), 0.0).y;
-	float cell = 0.5 / fall_grid.y;
-	float distance = clamp(distance_m, 0.0, max(film_end - 0.3, 0.0));
-	return textureLod(fall_surface, vec2(u, clamp(distance / film_length_m, cell, 1.0 - cell)), 0.0).w;
+	return textureLod(fall_surface, film_uv(u, distance_m), 0.0).w;
 }
 
 void vertex() {
 	traits = CUSTOM0;
 	film_m = COLOR.r * max_film_m;
+	draped = 0.0;
+	torn = COLOR.g;
 	float time = UV.y;
 	float attached = clamp(traits.w, 0.0, 1.0);
 	vec3 position = VERTEX;
@@ -89,11 +115,27 @@ void vertex() {
 		}
 		float depth = max(transported_depth(UV.x, time, UV2.x), transported_depth(UV.x, time - 0.08, UV2.x - 0.4));
 		activity = smoothstep(0.0001, 0.003, depth);
+		if (!free_fall) {
+			draped = attached * smoothstep(0.0, 0.25, time);
+			vec3 bed = VERTEX - NORMAL * film_m;
+			float film = transported_depth(UV.x, time, UV2.x);
+			float lift = min(obstacle_excess(VERTEX.xz), film_solid_m / max(NORMAL.y, 0.05));
+			float pile_start = max(film_m * PILE_RATIO, 0.08);
+			float drawn = min(film, pile_start) + max(film - pile_start, 0.0) * 0.3;
+			position = mix(position, bed + vec3(0.0, lift, 0.0) + NORMAL * max(drawn, 0.004), draped);
+		}
 	}
 	float wobble = textureLod(turbulence_texture, vec2(UV.x * width_m * 0.2, (time - simulation_time_s) * 0.8), 2.0).r - 0.5;
 	float amplitude = mix(0.05, 0.025, attached) * smoothstep(0.05, 0.4, time) * (1.0 - traits.y);
 	position += NORMAL * mix(wobble, max(wobble, 0.0), attached) * amplitude;
 	surface_normal = NORMAL;
+	if (draped > 0.0) {
+		vec2 base = vec2(-NORMAL.x, -NORMAL.z) / max(NORMAL.y, 0.05);
+		vec2 rock = vec2(obstacle_excess(VERTEX.xz + vec2(DRAPE_PROBE_M, 0.0)) - obstacle_excess(VERTEX.xz - vec2(DRAPE_PROBE_M, 0.0)),
+			obstacle_excess(VERTEX.xz + vec2(0.0, DRAPE_PROBE_M)) - obstacle_excess(VERTEX.xz - vec2(0.0, DRAPE_PROBE_M))) / (2.0 * DRAPE_PROBE_M);
+		vec3 bent = normalize(vec3(-(base.x + rock.x), 1.0, -(base.y + rock.y)));
+		surface_normal = normalize(mix(NORMAL, dot(bent, NORMAL) < 0.0 ? -bent : bent, draped));
+	}
 	world_position = position;
 	VERTEX = position;
 }
@@ -107,9 +149,21 @@ void fragment() {
 	float edge_m = min(UV.x, 1.0 - UV.x) * width_m;
 	float across_m = UV.x * width_m;
 	float flow_s = time - simulation_time_s;
+	if (draped < 0.5 && inside_rock(world_position)) { discard; }
+	bool film_live = live_enabled && !free_fall;
+	vec4 film_flow = film_live ? textureLod(fall_velocity, film_uv(UV.x, UV2.x), 0.0) : vec4(0.0);
+	float pile = film_live && time > 0.0
+		? smoothstep(PILE_RATIO, PILE_RATIO * 2.0, transported_depth(UV.x, time, UV2.x) / max(film_m, 0.04)) * draped : 0.0;
+	float live_activity = film_live && time > 0.0
+		? smoothstep(0.0001, 0.003, max(transported_depth(UV.x, time, UV2.x), transported_depth(UV.x, time - 0.08, UV2.x - 0.4)))
+		: activity;
 	float fray = texture(turbulence_texture, vec2(across_m * 2.1, flow_s * 1.26) + vec2(0.53, 0.71)).r - 0.5;
-	float coverage = activity * traits.x * (1.0 - traits.y * (1.0 - smoothstep(0.0, EDGE_FRAY_M, edge_m)));
+	float wet = film_live && time > 0.0 ? 1.0 : traits.x;
+	float shattered = smoothstep(0.2, 0.7, traits.z) * smoothstep(0.1, 0.4, above_pool_m) * (1.0 - draped);
+	float coverage = live_activity * wet * (1.0 - traits.y * (1.0 - smoothstep(0.0, EDGE_FRAY_M, edge_m)))
+		* (1.0 - max(max(torn * 0.45, shattered * 0.7), pile * 0.5));
 	if (coverage < 0.01) { discard; }
+	across_m -= dot(film_flow.xyz, across_direction) * clamp(time, 0.0, 0.6);
 
 	float speed = UV2.y;
 	float strength = smoothstep(0.0, 0.5, foam_amount);
@@ -134,7 +188,7 @@ void fragment() {
 	float reach_s = time + (streaks - 0.5) * 0.25;
 	float aeration = smoothstep(front_s - 0.05, front_s + 0.3, reach_s) * mix(0.55, 1.0, smoothstep(1.5, 6.0, speed));
 	float glass = (1.0 - smoothstep(front_s - 0.2, front_s + 0.05, reach_s)) * smoothstep(-0.15, 0.0, time);
-	float impact = max(1.0 - smoothstep(0.0, IMPACT_FOAM_M, above_pool_m), traits.z);
+	float impact = max(max(1.0 - smoothstep(0.0, IMPACT_FOAM_M, above_pool_m), traits.z), max(smoothstep(0.05, 0.6, film_flow.w), pile));
 	float bank = (1.0 - smoothstep(0.0, BANK_FOAM_M, edge_m)) * (1.0 - traits.y) * smoothstep(0.0, 0.3, time);
 	float foam = strength * max(max(
 		pow(streaks, 0.8) * aeration * mix(0.55, 1.0, max(aeration, impact) * strength),
@@ -163,5 +217,5 @@ void fragment() {
 	ROUGHNESS = mix(0.12, 0.75, foam);
 	SPECULAR = mix(0.5, 0.2, foam);
 	BACKLIGHT = vec3(0.5, 0.6, 0.6) * mix(0.25, 0.8, foam);
-	ALPHA = smoothstep(0.25, 0.6, coverage + fray * 0.7 + (streaks - 0.5) * 0.3 * traits.y);
+	ALPHA = smoothstep(0.25, 0.6, coverage + fray * 0.7 + (streaks - 0.5) * 0.3 * max(traits.y, torn) + (streaks - 0.5) * 0.8 * max(shattered, pile));
 }

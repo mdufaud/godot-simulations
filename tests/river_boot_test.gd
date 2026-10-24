@@ -31,11 +31,12 @@ func _run() -> void:
 		"Normal Medium boot must enable detailed foam independently of Ultra surface effects")
 	var actions: GridContainer = demo.menu.get_node("BottomRight/ActionBar")
 	var action: Button = demo._menu_builder.preset_action
-	_check(actions.get_child_count() == 4 and action.get_parent() == actions
+	_check(actions.get_child_count() == 5 and action.get_parent() == actions
 		and demo._menu_builder.flow_action.get_parent() == actions
 		and demo._menu_builder.crate_action.get_parent() == actions
-		and demo._menu_builder.scene_action.get_parent() == actions,
-		"River presets, flow, crates and scene switching must use native actions")
+		and demo._menu_builder.scene_action.get_parent() == actions
+		and demo._menu_builder.drop_action.get_parent() == actions,
+		"River presets, flow, crates, scene switching and rock drops must use native actions")
 	_check(demo.river.swe.enabled and demo.river.swe.available == GpuPreflight.available(),
 		"Player boot must request the live SWE system with an explicit GPU availability check")
 	_check((demo._menu_builder.flow_action.find_child("ActionCaption", true, false) as Label).text
@@ -61,7 +62,7 @@ func _run() -> void:
 	scene_key.pressed = true
 	demo.menu._unhandled_input(scene_key)
 	_check(demo.scene_index == 2 and demo.river.field.waterfall.angle_degrees == 90.0
-		and actions.get_child_count() == 4 and demo._menu_builder.scene_option.selected == 2,
+		and actions.get_child_count() == 5 and demo._menu_builder.scene_option.selected == 2,
 		"Scene selector must install the vertical waterfall and retain the native action bar")
 	var height: float = demo.config.water_level_m + 6.0
 	var age := sqrt(2.0 * (height - 3.0) / 9.81)
@@ -88,7 +89,7 @@ func _run() -> void:
 		"Scene action must install the steep channel with its whole-domain solver, guidance and no planar reflection")
 	demo._menu_builder.scene_action.pressed.emit()
 	_check(demo.scene_index == 0 and demo.river.field is RiverLandscape
-		and demo.river.waterfall == null and actions.get_child_count() == 4 and not demo._menu_builder.angle_slider.editable
+		and demo.river.waterfall == null and actions.get_child_count() == 5 and not demo._menu_builder.angle_slider.editable
 		and demo.river.swe_window_m == Vector2.ZERO and demo.config.current_guidance_hz == RiverConfig.new().current_guidance_hz
 		and demo.river.reflection_scale > 0.0 and demo._menu_builder.grade_option.disabled,
 		"Scene action must cycle back to the river with its whole-domain solver, default guidance and reflections")

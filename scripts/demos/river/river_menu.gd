@@ -17,6 +17,8 @@ var preset_action: Button
 var quality_option: OptionButton
 var flow_action: Button
 var crate_action: Button
+var rocks_toggle: Button
+var drop_action: Button
 var _menu: SimMenu
 var _level_dragging := false
 var _angle_dragging := false
@@ -35,6 +37,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 		if changed:
 			controller.set_waterfall_angle(angle_slider.value))
 	mist_slider = menu.add_slider("Mist density", 0.0, 1.0, 0.6, controller.set_mist_density, false, 0.01)
+	rocks_toggle = menu.add_toggle("Rocks in the fall", controller.fall_rocks, controller.set_fall_rocks, false)
 	grade_option = menu.add_option_button("Channel grade", ["5 %", "15 %", "30 %"], controller.channel_grade_index, controller.set_channel_grade, false)
 	heading_option = menu.add_option_button("Channel direction", ["Along Z", "Along X", "Diagonal"], controller.channel_heading_index, controller.set_channel_heading, false)
 	guidance_toggle = menu.add_toggle("Steep guidance (1 / 5 Hz)", controller.steep_guidance, controller.set_steep_guidance, false)
@@ -55,7 +58,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 	sliders.append(level)
 	sliders.append(menu.add_slider("Clarity", 0.0, 1.0, 0.82, controller.set_clarity, false, 0.01))
 	sliders.append(menu.add_slider("Foam", 0.0, 2.0, 0.65, controller.set_foam, false, 0.01))
-	menu.add_label("Drag to orbit · Scroll to zoom · WASD to move")
+	menu.add_label("Drag to orbit · Scroll to zoom · WASD to move · Shift+click to drop a rock")
 	pause_button = menu.add_toggle("Pause", false, controller.set_frozen, false)
 	menu.add_button("Reset river", controller.reset_river)
 	menu.add_section("Performance")
@@ -69,6 +72,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 		sync_flow(controller.river.swe))
 	crate_action = menu.add_action("📦", "Throw crate", controller.interactions.throw_crate)
 	scene_action = menu.add_action("➡", "Scene", controller.cycle_scene)
+	drop_action = menu.add_action("🪨", "Drop rock", controller.drop_rock)
 	sync_scene(controller.scene_index, controller.waterfall_angles)
 	sync_flow(controller.river.swe)
 	menu.settings_reset.connect(func():
@@ -95,6 +99,9 @@ func sync_scene(index: int, angles: PackedFloat32Array) -> void:
 	var steep := index == SCENES.size() - 1
 	angle_slider.editable = index > 0 and not steep
 	mist_slider.editable = index > 0 and not steep
+	rocks_toggle.disabled = index == 0 or steep
+	drop_action.disabled = steep
+	drop_action.tooltip_text = "Drop a boulder where the view is centred · Shift+click drops one under the cursor"
 	grade_option.disabled = not steep
 	heading_option.disabled = not steep
 	guidance_toggle.disabled = not steep

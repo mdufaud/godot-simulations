@@ -39,6 +39,12 @@ A domain with no wet texel idles: the surface is hidden and the solver, foam and
 
 `river.move_domain(origin_m)` recentres the domain without `stop()`/`start()`. Assign the new prepared images to the field first. The solver keeps its state in world coordinates: overlapping cells carry over, new cells start from the guided field, and foam history is shifted. Waterfalls do not support moving domains.
 
+## Rocks in a waterfall
+
+Rocks are the `MeshInstance3D`s in `field.obstacle_meshes`; their upper surface is stamped into the solver bed. On a waterfall field, call `field.bake_obstacles()` once they are placed and `ground_height_image` exists: it stores each rock's height above the ground at 1/16 m in `field.obstacle_image`, and `sample_ground_height()` includes it. On ramps the film is a 2D slope-aligned shallow-water grid: rocks taller than `RiverWaterfallConfig.FILM_SOLID_M` along the slope normal are seeping walls (bow wave, dry wake), lower ones are bed bumps the film runs over. On cliffs, falling packets bounce, slide and fan off rock surfaces. The drawn sheet drapes over rocks, tears where it splits and gets splash at rock impacts.
+
+To add a rock at runtime, append its meshes to `field.obstacle_meshes` and call `river.obstacles_added(meshes)`: the bed, the rock map and the sheet update without resetting the water. This is not supported with a moving solver window.
+
 ## Simulation window and level of detail
 
 By default the SWE solver covers the whole domain at `river.swe_cell_m` (0.125 m). Set `river.swe_window_m` (for example `Vector2(16.0, 24.0)`, axis-aligned) before `start()` to simulate only a window inside a larger guided domain. The window follows the camera's view of the water, snaps in 4 m steps and reprojects overlapping state; outside it, the guided field draws the river. `river.swe_range_m` (0 = always) stops the solver when no wet water of the window is within that distance of the camera: the surface fades to guided flow over about 1 s, and on return the solver reseeds, warms up for 0.5 s and fades back in. Waterfall fields always simulate the whole domain.

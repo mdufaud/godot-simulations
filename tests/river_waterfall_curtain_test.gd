@@ -11,6 +11,7 @@ func _initialize() -> void:
 	_check_fast_rounded_ramp()
 	_check_deep_inlet()
 	_check_gorge()
+	_check_rock_ledge()
 	_finish("river_waterfall_curtain")
 
 
@@ -158,3 +159,36 @@ func _check_gorge() -> void:
 			var point := vertices[slot]
 			tucked = tucked and gorge.call(Vector2(point.x, point.z)) >= point.y
 	_check(tucked, "Curtain edges must sink into the gorge walls along the whole fall")
+
+
+func _check_rock_ledge() -> void:
+	var cliff := func(point: Vector2) -> float: return 6.0 if point.y > 0.0 else 0.0
+	var ledge := func(point: Vector2) -> float:
+		var offset := Vector2(point.x / 0.5, (point.y + 0.45) / 0.45)
+		return 3.0 + 0.3 * (1.0 - offset.length_squared()) if offset.length() < 1.0 else 0.0
+	var curtain := _curtain(cliff, Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0))
+	curtain.obstacles = ledge
+	curtain.columns = 8
+	var arrays := curtain.build().surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	var traits: PackedFloat32Array = arrays[Mesh.ARRAY_CUSTOM0]
+	var on_rock := not curtain.rock_impacts.is_empty()
+	for impact in curtain.rock_impacts:
+		on_rock = on_rock and absf(impact.x) < 0.55 and impact.y > 2.95 and impact.y < 3.35 and impact.w > 3.0
+	_check(on_rock, "A jet falling on a ledge must report its impacts on the rock top with their impact speed")
+	var stride := curtain.columns + 3
+	var deflected := false
+	var outside := true
+	for index in vertices.size():
+		var column := clampi(index % stride - 1, 0, curtain.columns)
+		var origin_x := -1.0 + 2.0 * column / curtain.columns
+		var point := vertices[index]
+		deflected = deflected or (absf(origin_x) < 0.3 and absf(point.x - origin_x) > 0.1)
+		if traits[index * 4 + 3] >= -0.5:
+			outside = outside and point.y >= cliff.call(Vector2(point.x, point.z)) + ledge.call(Vector2(point.x, point.z)) - 0.05
+	_check(deflected, "Water hitting a ledge must fan sideways instead of only sliding over it")
+	_check(outside, "The sheet must stay outside the ledge it pours over")
+	var clear := 0
+	for point in curtain.impact_points:
+		clear += 1 if absf(point.x) > 0.7 and point.z < -1.04 and point.z > -1.16 else 0
+	_check(clear == 4, "Columns that miss the ledge must keep their free-fall landing")

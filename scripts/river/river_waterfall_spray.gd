@@ -3,7 +3,7 @@ extends Node3D
 ## Impact effects at the foot of a waterfall: a churning foam boil, a rising mist
 ## cloud that shows a rainbow when the sun is behind the viewer, elongated splash
 ## sheets and a volumetric mist volume. Emitters follow the impact points of a
-## RiverWaterfallCurtain. The volume only renders when the host Environment has
+## RiverWaterfallCurtain; its rock impacts get their own splash and puffs. The volume only renders when the host Environment has
 ## volumetric fog enabled; keep its base density at 0 so only this volume adds fog.
 ##
 ##   var spray := RiverWaterfallSpray.new()
@@ -11,11 +11,15 @@ extends Node3D
 ##   add_child(spray)
 ##   spray.start()
 ##   spray.set_impacts(curtain.impact_points, curtain.downstream, curtain.across, curtain.width_m)
+##   spray.set_rock_impacts(curtain.rock_impacts, curtain.downstream)
 ##   spray.tick(intensity, false)                    # every frame, intensity in [0, 1]
 
 const BOIL_COUNT := [36, 60, 96, 144]
 const MIST_COUNT := [10, 16, 24, 32]
 const SPLASH_COUNT := [48, 128, 192, 288]
+const ROCK_SPLASH_COUNT := [32, 96, 160, 240]
+const ROCK_PUFF_COUNT := [10, 20, 32, 48]
+const ROCK_PUFF_OPACITY := 0.45
 const BOIL_LIFETIME_S := 2.6
 const MIST_LIFETIME_S := 8.0
 const SPLASH_LIFETIME_S := 0.7
@@ -33,11 +37,14 @@ var noise_texture: Texture2D
 var _boil: GPUParticles3D
 var _mist: GPUParticles3D
 var _splash: GPUParticles3D
+var _rock_splash: GPUParticles3D
+var _rock_puff: GPUParticles3D
 var _fog: FogVolume
 var _mist_material: ShaderMaterial
 var _fog_material: ShaderMaterial
 var _mist_density := 0.6
 var _splash_count := 0
+var _rock_count := 0
 
 
 func start() -> void:
@@ -82,6 +89,26 @@ func start() -> void:
 	splash.scale_max = 1.4
 	splash.particle_flag_align_y = true
 	splash.color_ramp = _fade([Vector2(0.05, 0.9), Vector2(0.7, 0.6)])
+	_rock_splash = _particles("RockSplash", SPLASH_LIFETIME_S, droplet, Vector2(0.04, 0.24))
+	var rock_splash := _rock_splash.process_material as ParticleProcessMaterial
+	rock_splash.spread = 70.0
+	rock_splash.initial_velocity_min = 1.5
+	rock_splash.initial_velocity_max = 4.5
+	rock_splash.gravity = Vector3(0.0, -9.81, 0.0)
+	rock_splash.scale_min = 0.5
+	rock_splash.scale_max = 1.2
+	rock_splash.particle_flag_align_y = true
+	rock_splash.color_ramp = splash.color_ramp
+	_rock_puff = _particles("RockPuff", 1.2, _puff_material(ROCK_PUFF_OPACITY, 0.1, 0.0), Vector2.ONE * 0.8)
+	var rock_puff := _rock_puff.process_material as ParticleProcessMaterial
+	rock_puff.spread = 60.0
+	rock_puff.initial_velocity_min = 0.4
+	rock_puff.initial_velocity_max = 1.1
+	rock_puff.gravity = Vector3(0.0, -1.5, 0.0)
+	rock_puff.damping_min = 0.8
+	rock_puff.damping_max = 1.2
+	rock_puff.scale_curve = _curve([Vector2(0.0, 0.5), Vector2(0.5, 1.0), Vector2(1.0, 1.4)])
+	rock_puff.color_ramp = _fade([Vector2(0.15, 0.8), Vector2(0.5, 0.5)])
 	var noise := FastNoiseLite.new()
 	noise.seed = 913
 	noise.frequency = 0.06
@@ -110,6 +137,8 @@ func stop() -> void:
 	_boil = null
 	_mist = null
 	_splash = null
+	_rock_splash = null
+	_rock_puff = null
 	_fog = null
 	_mist_material = null
 	_fog_material = null
@@ -123,6 +152,8 @@ func set_quality(tier: int) -> void:
 	_splash_count = SPLASH_COUNT[tier]
 	_splash.amount = maxi(_splash_count, 1)
 	_splash.visible = _splash_count > 0
+	_rock_splash.amount = ROCK_SPLASH_COUNT[tier]
+	_rock_puff.amount = ROCK_PUFF_COUNT[tier]
 
 
 func set_mist_density(value: float) -> void:
@@ -152,12 +183,32 @@ func set_impacts(points: PackedVector3Array, downstream: Vector3, across: Vector
 	_fog.size = Vector3(width_m, 0.0, 0.0) + FOG_MARGIN_M
 
 
+func set_rock_impacts(impacts: PackedVector4Array, downstream: Vector3) -> void:
+	var points := PackedVector3Array()
+	for impact in impacts:
+		points.append(Vector3(impact.x, impact.y, impact.z))
+	_rock_count = points.size()
+	if points.is_empty():
+		return
+	_emit_from(_rock_splash, _band(points, downstream, [0.0], 0.03))
+	_emit_from(_rock_puff, _band(points, downstream, [0.0], 0.1))
+	(_rock_splash.process_material as ParticleProcessMaterial).direction = (Vector3.UP + downstream * 0.8).normalized()
+	(_rock_puff.process_material as ParticleProcessMaterial).direction = (Vector3.UP + downstream * 0.5).normalized()
+	var bounds := AABB(points[0], Vector3.ZERO)
+	for point in points:
+		bounds = bounds.expand(point)
+	for particles: GPUParticles3D in [_rock_splash, _rock_puff]:
+		particles.visibility_aabb = bounds.grow(VISIBILITY_MARGIN_M)
+
+
 func tick(intensity: float, frozen: bool) -> void:
 	var active := intensity > ACTIVE_INTENSITY
-	for particles: GPUParticles3D in [_boil, _mist, _splash]:
+	for particles: GPUParticles3D in [_boil, _mist, _splash, _rock_splash, _rock_puff]:
 		particles.speed_scale = 0.0 if frozen else 1.0
 		particles.amount_ratio = clampf(intensity, 0.05, 1.0)
 	_boil.emitting = active
+	_rock_splash.emitting = active and _rock_count > 0
+	_rock_puff.emitting = active and _rock_count > 0
 	_splash.emitting = active and _splash_count > 0
 	_mist.emitting = active and _mist_density > 0.0
 	_fog.visible = active and _mist_density > 0.0
@@ -167,7 +218,7 @@ func tick(intensity: float, frozen: bool) -> void:
 func restart() -> void:
 	if _boil == null:
 		return
-	for particles: GPUParticles3D in [_boil, _mist, _splash]:
+	for particles: GPUParticles3D in [_boil, _mist, _splash, _rock_splash, _rock_puff]:
 		particles.restart(true)
 
 

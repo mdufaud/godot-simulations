@@ -199,6 +199,18 @@ float surface_height(ivec2 p, vec4 q, vec4 bed) {
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (params.control.x > 7.5) {
+        if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
+        vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
+        vec4 bed = source_bed(world);
+        if (params.waterfall.x > 0.0) bed.y = world.y >= params.waterfall.w ? params.waterfall.y : 0.0;
+        vec4 q = read_state(p);
+        float depth = max(q.x - max(bed.x - imageLoad(terrain, p).x, 0.0), 0.0);
+        q = depth > 0.004 ? vec4(depth, q.yzw * (depth / max(q.x, 0.004))) : vec4(0.0);
+        imageStore(terrain, p, bed);
+        if (params.waterfall.x > 0.0) store_current(p, q); else imageStore(state_in, p, q);
+        return;
+    }
     if (params.control.x > 6.5) {
         if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
         vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;

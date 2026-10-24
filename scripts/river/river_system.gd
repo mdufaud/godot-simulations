@@ -181,6 +181,18 @@ func apply_config(value: RiverConfig) -> void:
 	set_reflection_enabled(_reflection_requested)
 
 
+# Call after appending rock meshes to `field.obstacle_meshes`: the solver bed, the
+# waterfall rock map and the sheet adapt without resetting the water.
+func obstacles_added(meshes: Array[MeshInstance3D]) -> void:
+	if not _started:
+		return
+	if field.waterfall != null:
+		field.bake_obstacles()
+	swe.add_obstacles(meshes, simulation_time_s)
+	if waterfall != null:
+		waterfall.refresh_obstacles()
+
+
 func move_domain(origin_m: Vector2) -> void:
 	if not _started:
 		field.origin_m = origin_m

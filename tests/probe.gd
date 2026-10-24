@@ -1891,6 +1891,111 @@ func _run_river_waterfall() -> void:
 	_finish("river_waterfall")
 
 
+func _run_river_rocks() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(960, 600)
+	var manager := root.get_node("GameManager")
+	manager.set_setting("river_quality_profile", 1)
+	var demo := (load("res://scenes/river_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	for scene: int in [1, 2]:
+		demo.set_scene(scene)
+		deadline = Time.get_ticks_msec() + 30000
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		var river: RiverSystem = demo.river
+		var field: RiverField = river.field
+		var config: RiverWaterfallConfig = field.waterfall
+		_check(demo.capture_ready() and river.swe.active and field.obstacle_image != null
+			and field.sample_obstacle_excess(Vector2(-1.7, config.crest_z_m + 0.1)) > 0.5,
+			"river_rocks: waterfall scenes must boot live with their fall rocks baked")
+		_check(not river.waterfall.curtain_rock_impacts().is_empty(),
+			"river_rocks: the sheet must find the rocks it falls on")
+		if scene == 2:
+			demo.set_capture_view("front")
+			await _boot_frames(2)
+			var before: int = field.obstacle_meshes.size()
+			var impacts_before: int = river.waterfall.curtain_rock_impacts().size()
+			demo.drop_rock()
+			await _boot_frames(20)
+			var dropped: MeshInstance3D = field.obstacle_meshes[field.obstacle_meshes.size() - 1]
+			print("RIVER ROCKS dropped at=%s impacts=%d->%d" % [dropped.global_position, impacts_before, river.waterfall.curtain_rock_impacts().size()])
+			_check(field.obstacle_meshes.size() > before and demo._scenery.dropped_rocks == 1,
+				"river_rocks: Drop rock must add a boulder under the view centre")
+		await _boot_frames(300)
+		demo.set_frozen(true)
+		await _boot_frames(3)
+		var status: Dictionary = river.swe.solver.snapshot()
+		var rows := config.packet_capacity if config.is_vertical() else config.film_cells
+		var surface: PackedFloat32Array = (await TextureReadback.new().read_layer(status.waterfall_surface, 0, config.lane_count * rows * 16)).to_float32_array()
+		var velocity: PackedFloat32Array = (await TextureReadback.new().read_layer(status.waterfall_velocity, 0, config.lane_count * rows * 16)).to_float32_array()
+		var error := absf(float(status.volume_removed) - float(status.volume_received) - float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
+		print("RIVER ROCKS scene=%d error=%.7f cfl=%.5f overflow=%d removed=%.4f" % [scene, error, status.cfl_max, status.overflow, status.volume_removed])
+		_check(error < 0.005 and status.cfl_max <= 0.4001 and status.overflow == 0 and status.volume_removed > 0.0,
+			"river_rocks: rocks must keep the transport conservative, CFL-bounded and within capacity")
+		var lateral := 0.0
+		var clearance := INF
+		for index in config.lane_count * rows:
+			if surface[index * 4 + 3] <= 0.00001:
+				continue
+			lateral = maxf(lateral, absf(velocity[index * 4]))
+			clearance = minf(clearance, surface[index * 4 + 1] - field.sample_ground_height(Vector2(surface[index * 4], surface[index * 4 + 2])))
+		print("RIVER ROCKS scene=%d max_lateral=%.3f clearance=%.5f" % [scene, lateral, clearance])
+		_check(lateral > 0.2 and clearance >= 0.0099,
+			"river_rocks: water must be deflected sideways by rocks and stay above every rock surface")
+		if not config.is_vertical():
+			var lane := int((-1.7 + config.width_m * 0.5) / config.width_m * config.lane_count)
+			var top := surface[lane * 4 + 3]
+			var low := surface[(rows / 2 * config.lane_count + lane) * 4 + 3]
+			for row in range(0, rows, 3):
+				var line := ""
+				for column in config.lane_count:
+					var depth := surface[(row * config.lane_count + column) * 4 + 3]
+					line += " " if depth < 0.0005 else ("." if depth < 0.01 else ("o" if depth < 0.04 else ("O" if depth < 0.1 else "#")))
+				print("RIVER ROCKS film row=%02d |%s|" % [row, line])
+			_check(top < 0.0005 and low > 0.002,
+				"river_rocks: the lane behind the crest rock must start dry and be refilled by lateral spreading")
+		demo.set_frozen(false)
+	demo.set_scene(0)
+	deadline = Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	await _boot_frames(30)
+	var river_field: RiverField = demo.river.field
+	var count := river_field.obstacle_meshes.size()
+	demo.drop_rock()
+	await _boot_frames(4)
+	var rock: MeshInstance3D = river_field.obstacle_meshes[river_field.obstacle_meshes.size() - 1]
+	var center := Vector2(rock.global_position.x, rock.global_position.z)
+	var cell := Vector2i(((center - river_field.domain_rect().position) / demo.river.swe.cell_m).floor())
+	var stamped := river_field.solver_terrain_image.get_pixelv(cell).r
+	print("RIVER ROCKS river drop at=%s stamped_bed=%.3f ground=%.3f" % [rock.global_position, stamped, river_field.sample_bed(center)])
+	_check(river_field.obstacle_meshes.size() > count and stamped > river_field.sample_bed(center) + 0.2,
+		"river_rocks: a rock dropped in the river must be stamped into the live solver bed")
+	await _boot_frames(120)
+	var river_status: Dictionary = demo.river.swe.solver.snapshot()
+	var grid: Vector2i = demo.river.swe.solver.grid
+	var river_surface: PackedFloat32Array = (await TextureReadback.new().read_layer(river_status.surface, 0, grid.x * grid.y * 16)).to_float32_array()
+	var finite := true
+	for value in river_surface:
+		finite = finite and is_finite(value)
+	_check(finite, "river_rocks: the river must stay finite after a rock lands in it")
+	demo.set_scene(2)
+	demo.set_fall_rocks(false)
+	deadline = Time.get_ticks_msec() + 30000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.river.field.sample_obstacle_excess(Vector2(-1.7, demo.river.field.waterfall.crest_z_m + 0.1)) == 0.0
+		and demo._scenery.dropped_rocks == 0, "river_rocks: turning the fall rocks off must rebuild a clear waterfall")
+	demo.queue_free()
+	await _boot_frames(2)
+	_finish("river_rocks")
+
+
 func _run_river_shutdown() -> void:
 	await _boot_frames(2)
 	var manager := root.get_node("GameManager")

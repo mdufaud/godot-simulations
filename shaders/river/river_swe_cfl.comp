@@ -40,10 +40,12 @@ void main() {
             && params.waterfall.x < 90.0) {
         vec4 q = control.words[19] == 0u ? imageLoad(film_state, p) : imageLoad(film_b, p);
         float depth = max(q.x, 0.0);
-        float speed = depth > 0.00001 ? abs(q.y / depth) : 0.0;
+        vec2 speed = depth > 0.0001 ? min(abs(q.yz / depth), vec2(30.0)) : vec2(0.0);
         float ds = params.waterfall.y / sin(radians(params.waterfall.x)) / params.cascade.y;
-        signal = max(signal, (speed + sqrt(params.domain.w * cos(radians(params.waterfall.x)) * depth)
-            + params.domain.w * params.water.z) * params.domain.z / ds);
+        float lane_width = params.waterfall.z / params.cascade.x;
+        float wave = sqrt(params.domain.w * cos(radians(params.waterfall.x)) * depth);
+        signal = max(signal, (speed.x + wave + params.domain.w * params.water.z) * params.domain.z / ds);
+        signal = max(signal, (speed.y + wave) * params.domain.z / lane_width);
     }
     uint lane = gl_LocalInvocationIndex;
     signals[lane] = signal;

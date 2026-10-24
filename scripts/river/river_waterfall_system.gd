@@ -16,6 +16,7 @@ var quality_tier := 1
 var _surface: MeshInstance3D
 var _spray: RiverWaterfallSpray
 var _rebuild_at_ms := -1
+var _rock_impacts := PackedVector4Array()
 
 
 func start() -> void:
@@ -29,6 +30,11 @@ func start() -> void:
 	material.set_shader_parameter("film_length_m", config.length_m())
 	material.set_shader_parameter("max_film_m", RiverWaterfallCurtain.MAX_FILM_M)
 	material.set_shader_parameter("reflection_layer", reflection_layer)
+	refresh_obstacles()
+	material.set_shader_parameter("rock_min_m", RiverWaterfallCurtain.ROCK_MIN_M)
+	material.set_shader_parameter("film_solid_m", RiverWaterfallConfig.FILM_SOLID_M)
+	var domain := field.domain_rect()
+	material.set_shader_parameter("obstacle_domain", Vector4(domain.position.x, domain.position.y, domain.size.x, domain.size.y))
 	_surface = MeshInstance3D.new()
 	_surface.name = "WaterfallSheet"
 	_surface.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -59,6 +65,12 @@ func apply_config(value: RiverConfig) -> void:
 	_rebuild_at_ms = Time.get_ticks_msec() + REBUILD_DELAY_MS
 
 
+func refresh_obstacles() -> void:
+	var obstacles := field.obstacle_image if field.obstacle_image != null else Image.create(1, 1, false, Image.FORMAT_RGF)
+	material.set_shader_parameter("obstacle_map", ImageTexture.create_from_image(obstacles))
+	_rebuild_at_ms = Time.get_ticks_msec()
+
+
 func set_quality(tier: int) -> void:
 	quality_tier = clampi(tier, 0, 3)
 	if _surface == null:
@@ -74,7 +86,8 @@ static func source_height_m(river_field: RiverField, profile: RiverWaterfallConf
 static func build_curtain(river_field: RiverField, profile: RiverWaterfallConfig, flow: RiverConfig,
 		columns: int, rows: int) -> RiverWaterfallCurtain:
 	var curtain := RiverWaterfallCurtain.new()
-	curtain.ground = river_field.sample_ground_height
+	curtain.ground = river_field.sample_base_ground_height
+	curtain.obstacles = river_field.sample_obstacle_excess
 	var half := Vector3(profile.width_m * 0.5, 0.0, 0.0)
 	var crest := Vector3(0.0, 0.0, profile.crest_z_m)
 	curtain.crest_from = crest - half
@@ -98,6 +111,8 @@ func _rebuild() -> void:
 	var points := curtain.impact_points if not curtain.impact_points.is_empty() \
 		else PackedVector3Array([Vector3(0.0, 0.0, config.crest_z_m)])
 	_spray.set_impacts(points, curtain.downstream, curtain.across, curtain.width_m)
+	_rock_impacts = curtain.rock_impacts
+	_spray.set_rock_impacts(_rock_impacts, curtain.downstream)
 
 
 func tick(time_s: float, frozen: bool) -> void:
@@ -108,6 +123,7 @@ func tick(time_s: float, frozen: bool) -> void:
 	material.set_shader_parameter("live_enabled", live)
 	if live:
 		material.set_shader_parameter("fall_surface", swe.waterfall_surface)
+		material.set_shader_parameter("fall_velocity", swe.waterfall_velocity)
 		material.set_shader_parameter("fall_clock", swe.waterfall_clock)
 		material.set_shader_parameter("fall_boundary", swe.waterfall_boundary)
 		material.set_shader_parameter("basin_surface", swe.surface_texture)
@@ -124,7 +140,7 @@ func reset() -> void:
 
 func stop() -> void:
 	if material != null:
-		for parameter: String in ["fall_surface", "fall_clock", "fall_boundary", "basin_surface"]:
+		for parameter: String in ["fall_surface", "fall_velocity", "fall_clock", "fall_boundary", "basin_surface", "obstacle_map"]:
 			material.set_shader_parameter(parameter, null)
 	if _spray != null:
 		_spray.stop()
@@ -168,6 +184,10 @@ func guided_contact(point: Vector3) -> Array[Vector4]:
 	if absf(normal.dot(point - surface)) > thickness * 0.5 + 0.8:
 		return []
 	return [Vector4(surface.x, surface.y, surface.z, thickness), Vector4(velocity.x, velocity.y, velocity.z, kind), Vector4(normal.x, normal.y, normal.z, normal.dot(point - surface))]
+
+
+func curtain_rock_impacts() -> PackedVector4Array:
+	return _rock_impacts
 
 
 func set_effects_enabled(enabled: bool) -> void:

@@ -7,9 +7,14 @@ extends RefCounted
 ## and thickness follows continuity, so ramps, cliffs, ledges and uneven lips share
 ## one algorithm. Edges are sunk into the terrain where a bank exists, and thinned to
 ## nothing where they hang free, so the sheet never shows an empty underside.
+## Optional `obstacles` (rock height above the ground) catch falling water: a jet that
+## hits a rock spreads along its surface like an impinging jet, fans sideways, slides
+## off and falls again; columns that drift apart tear the sheet. Attached water
+## follows the ground under it and is shaped around rocks by the film.
 ##
 ##   var curtain := RiverWaterfallCurtain.new()
 ##   curtain.ground = terrain.height_at            # func(point: Vector2) -> float
+##   curtain.obstacles = rocks.height_above_ground # optional, same signature
 ##   curtain.crest_from = Vector3(-3.0, 0.0, 4.0)  # left end of the lip, facing downstream
 ##   curtain.crest_to = Vector3(3.0, 0.0, 4.0)
 ##   curtain.surface_height_m = 6.06
@@ -29,10 +34,19 @@ const CLING_MAX_TURN_DEG := 60.0
 const EDGE_TUCK_M := 0.2
 const FREE_EDGE_M := 0.6
 const IMPACT_DECAY_S := 0.35
+const ROCK_MIN_M := 0.02
+const ROCK_RESTITUTION := 0.15
+const ROCK_SPREAD := 0.3
+const ROCK_IMPACT_MIN_M_S := 1.0
 const MAX_STEPS := 4096
-const STRIDE := 10
+const STRIDE := 12
+const ROCK_FAN_RAD := 0.7
+const ROCK_PROBE_M := 0.04
+const DRIFT_DAMPING_HZ := 2.0
+const TEAR_SPACINGS := 3.0
 
 var ground: Callable
+var obstacles: Callable
 var crest_from := Vector3.ZERO
 var crest_to := Vector3.RIGHT
 var surface_height_m := 0.0
@@ -48,9 +62,13 @@ var across := Vector3.RIGHT
 var downstream := Vector3.FORWARD
 var width_m := 0.0
 var impact_points := PackedVector3Array()
+var rock_impacts := PackedVector4Array()
 var _profile := PackedFloat32Array()
+var _rock_profile := PackedFloat32Array()
+var _rock_hit := Vector4.ZERO
 var _profile_origin := Vector2.ZERO
 var _flow := Vector2.ZERO
+var _side := Vector2.ZERO
 
 
 func validate() -> String:
@@ -73,7 +91,9 @@ func build() -> ArrayMesh:
 	across = span / width_m
 	downstream = Vector3.UP.cross(across)
 	_flow = Vector2(downstream.x, downstream.z)
+	_side = Vector2(across.x, across.z)
 	impact_points.clear()
+	rock_impacts.clear()
 	var origins := PackedVector2Array()
 	var depths := PackedFloat32Array()
 	var traces: Array[PackedFloat32Array] = []
@@ -81,10 +101,12 @@ func build() -> ArrayMesh:
 	for column in columns + 1:
 		var point := crest_from.lerp(crest_to, float(column) / columns)
 		var origin := Vector2(point.x, point.z)
-		var depth := maxf(surface_height_m - ground.call(origin - _flow * inlet_m), 0.0)
+		var depth := maxf(surface_height_m - _height(origin - _flow * inlet_m), 0.0)
 		origins.append(origin)
 		depths.append(depth)
-		traces.append(_trace(origin, depth))
+		traces.append(_trace(origin, depth, (fposmod(column * 0.6180339 + 0.137, 1.0) - 0.5) * 2.0 * ROCK_FAN_RAD))
+		if depth > DRY_M and _rock_hit.w > 0.0:
+			rock_impacts.append(_rock_hit)
 		if depth > depths[reference]:
 			reference = column
 	var times := _row_times(traces[reference])
@@ -130,9 +152,16 @@ func build() -> ArrayMesh:
 			uvs.append(Vector2(u, times[row] - lip_time))
 			details.append(Vector2(state[8], Vector2(state[3], state[4]).length()))
 			traits.append_array(PackedFloat32Array([smoothstep(DRY_M, 0.03, depths[column]), side_free, state[7], -1.0 if tucked else state[6]]))
-			if row < times.size() - 1 and slot < stride - 1:
-				var i := row * stride + slot
-				indices.append_array(PackedInt32Array([i, i + stride, i + 1, i + 1, i + stride, i + stride + 1]))
+	var tear_m := spacing * TEAR_SPACINGS + 0.1
+	for row in times.size() - 1:
+		for slot in stride - 1:
+			var i := row * stride + slot
+			var gap := maxf(_horizontal(vertices[i], vertices[i + 1]), _horizontal(vertices[i + stride], vertices[i + stride + 1]))
+			if gap > tear_m:
+				for corner: int in [i, i + 1, i + stride, i + stride + 1]:
+					films[corner] = Color(films[corner].r, 1.0, 0.0)
+				continue
+			indices.append_array(PackedInt32Array([i, i + stride, i + 1, i + 1, i + stride, i + stride + 1]))
 	for column in columns + 1:
 		var landing := _landing_state(traces[column])
 		if depths[column] > DRY_M and not landing.is_empty():
@@ -153,9 +182,11 @@ func build() -> ArrayMesh:
 
 
 # Samples: time, along, bottom height, horizontal speed, vertical speed, thickness,
-# attached, impact foam, distance travelled past the lip, landed.
-func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
+# attached, impact foam, distance travelled past the lip, landed, lateral offset, lateral speed.
+func _trace(origin: Vector2, depth: float, fan_rad: float) -> PackedFloat32Array:
 	_profile.clear()
+	_rock_profile.clear()
+	_rock_hit = Vector4.ZERO
 	_profile_origin = origin
 	var inlet_speed := maxf(speed_m_s, 0.05)
 	var discharge := inlet_speed * maxf(depth, MIN_FILM_M)
@@ -169,15 +200,17 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 	var travelled := -inlet_m
 	var landed := false
 	var time := 0.0
+	var lateral := 0.0
+	var drift := 0.0
 	var samples := PackedFloat32Array()
 	for step in MAX_STEPS:
-		var speed := maxf(velocity.length(), 0.01)
+		var speed := maxf(Vector3(velocity.x, velocity.y, drift).length(), 0.01)
 		var thickness := clampf(discharge / speed, MIN_FILM_M, max_film)
 		if along < 0.0:
 			thickness = maxf(surface_height_m - bottom, MIN_FILM_M)
 			max_film = maxf(max_film, thickness)
 		samples.append_array(PackedFloat32Array([time, along, bottom, velocity.x, velocity.y, thickness,
-			1.0 if attached else 0.0, impact, travelled, 1.0 if landed else 0.0]))
+			1.0 if attached else 0.0, impact, travelled, 1.0 if landed else 0.0, lateral, drift]))
 		var surface := bottom + velocity.x / speed * thickness
 		if along > 0.0 and surface < landing_level_m:
 			landed = true
@@ -189,10 +222,12 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 		time += dt
 		impact *= exp(-dt / IMPACT_DECAY_S)
 		var previous := Vector2(along, bottom)
+		lateral += drift * dt
 		if attached:
+			drift *= exp(-dt * DRIFT_DAMPING_HZ)
 			var next := along + velocity.x * dt
 			var flight := bottom + velocity.y * dt - 0.5 * GRAVITY_M_S2 * dt * dt
-			var terrain := _ground(next)
+			var terrain := _base_at(next, lateral)
 			var direction := Vector2(next - along, terrain - bottom).normalized()
 			var sharp := flight > terrain and direction.dot(velocity / speed) < cos(deg_to_rad(CLING_MAX_TURN_DEG))
 			if sharp or flight > terrain + maxf(0.002, thickness * CLING_FRACTION):
@@ -208,13 +243,36 @@ func _trace(origin: Vector2, depth: float) -> PackedFloat32Array:
 					head = bottom + velocity.length_squared() / (2.0 * GRAVITY_M_S2)
 				else:
 					velocity = direction * sqrt(maxf(2.0 * GRAVITY_M_S2 * (head - bottom), 0.0025))
+					if _rock_hit.w == 0.0 and _rock_at(along, lateral) > maxf(thickness, 0.05):
+						var bow := _world(along, lateral, bottom + thickness)
+						_rock_hit = Vector4(bow.x, bow.y, bow.z, velocity.length())
 		else:
 			along += velocity.x * dt
 			bottom += velocity.y * dt - 0.5 * GRAVITY_M_S2 * dt * dt
 			velocity.y -= GRAVITY_M_S2 * dt
-			var terrain := _ground(along)
-			if bottom < terrain:
-				var tangent := Vector2(2.0 * PROFILE_STEP_M, _ground(along + PROFILE_STEP_M) - _ground(along - PROFILE_STEP_M)).normalized()
+			var rock := _rock_at(along, lateral)
+			var terrain := _base_at(along, lateral) + rock
+			if bottom < terrain and rock > ROCK_MIN_M:
+				var normal := _rock_normal(along, lateral)
+				var motion := Vector3(velocity.x, velocity.y, drift)
+				var into := motion.dot(normal)
+				if into < 0.0:
+					var tangential := motion - normal * into
+					var downhill := Vector3.DOWN + normal * normal.y
+					var direction := tangential.normalized() if tangential.length() > 0.05 \
+						else (downhill.normalized() if downhill.length() > 0.0001 else Vector3.RIGHT)
+					var turn := fan_rad * smoothstep(0.5, 2.0, -into)
+					direction = direction * cos(turn) + normal.cross(direction) * sin(turn)
+					motion = direction * (tangential.length() - into * ROCK_SPREAD) - normal * into * ROCK_RESTITUTION
+					velocity = Vector2(motion.x, motion.y)
+					drift = motion.z
+					impact = maxf(impact, clampf(-into / 6.0, 0.0, 1.0))
+					if _rock_hit.w == 0.0 and -into > ROCK_IMPACT_MIN_M_S:
+						var hit := _world(along, lateral, terrain)
+						_rock_hit = Vector4(hit.x, hit.y, hit.z, -into)
+				bottom = terrain
+			elif bottom < terrain:
+				var tangent := Vector2(2.0 * PROFILE_STEP_M, _base_at(along + PROFILE_STEP_M, lateral) - _base_at(along - PROFILE_STEP_M, lateral)).normalized()
 				var kept := maxf(velocity.dot(tangent), 0.05)
 				impact = maxf(impact, clampf(absf(velocity.dot(Vector2(-tangent.y, tangent.x))) / 6.0, 0.0, 1.0))
 				bottom = terrain
@@ -238,6 +296,50 @@ func _ground(along: float) -> float:
 		var point := _profile_origin + _flow * (_profile.size() * PROFILE_STEP_M - inlet_m)
 		_profile.append(ground.call(point))
 	return lerpf(_profile[index], _profile[index + 1], position - index)
+
+
+func _base_at(along: float, lateral: float) -> float:
+	if absf(lateral) < 0.000001:
+		return _ground(along)
+	return ground.call(_profile_origin + _flow * along + _side * lateral)
+
+
+func _rock_at(along: float, lateral: float) -> float:
+	if absf(lateral) < 0.000001 or not obstacles.is_valid():
+		return _rock(along)
+	return obstacles.call(_profile_origin + _flow * along + _side * lateral)
+
+
+func _rock_normal(along: float, lateral: float) -> Vector3:
+	var slope := Vector2(
+		_base_at(along + ROCK_PROBE_M, lateral) + _rock_at(along + ROCK_PROBE_M, lateral)
+			- _base_at(along - ROCK_PROBE_M, lateral) - _rock_at(along - ROCK_PROBE_M, lateral),
+		_base_at(along, lateral + ROCK_PROBE_M) + _rock_at(along, lateral + ROCK_PROBE_M)
+			- _base_at(along, lateral - ROCK_PROBE_M) - _rock_at(along, lateral - ROCK_PROBE_M)) / (2.0 * ROCK_PROBE_M)
+	return Vector3(-slope.x, 1.0, -slope.y).normalized()
+
+
+func _world(along: float, lateral: float, height: float) -> Vector3:
+	return Vector3(_profile_origin.x, 0.0, _profile_origin.y) + downstream * along + across * lateral + Vector3.UP * height
+
+
+static func _horizontal(a: Vector3, b: Vector3) -> float:
+	return Vector2(a.x - b.x, a.z - b.z).length()
+
+
+func _height(point: Vector2) -> float:
+	return ground.call(point) + (obstacles.call(point) if obstacles.is_valid() else 0.0)
+
+
+func _rock(along: float) -> float:
+	if not obstacles.is_valid():
+		return 0.0
+	var position := maxf((along + inlet_m) / PROFILE_STEP_M, 0.0)
+	var index := int(position)
+	while _rock_profile.size() <= index + 1:
+		var point := _profile_origin + _flow * (_rock_profile.size() * PROFILE_STEP_M - inlet_m)
+		_rock_profile.append(obstacles.call(point))
+	return lerpf(_rock_profile[index], _rock_profile[index + 1], position - index)
 
 
 func _row_times(samples: PackedFloat32Array) -> PackedFloat32Array:
@@ -314,14 +416,14 @@ func _normal(state: PackedFloat32Array) -> Vector3:
 
 func _surface_point(origin: Vector2, state: PackedFloat32Array, thickness: float) -> Vector3:
 	var local := Vector2(state[1], state[2]) + _local_normal(state) * thickness
-	return Vector3(origin.x, 0.0, origin.y) + downstream * local.x + Vector3.UP * local.y
+	return Vector3(origin.x, 0.0, origin.y) + downstream * local.x + across * state[10] + Vector3.UP * local.y
 
 
 func _skirt(origin: Vector2, state: PackedFloat32Array, side: float) -> Variant:
 	var bed := _surface_point(origin, state, 0.0) + across * side * EDGE_TUCK_M
-	if ground.call(Vector2(bed.x, bed.z)) < state[2] - 0.01:
+	if _height(Vector2(bed.x, bed.z)) < state[2] - 0.01:
 		return null
 	var surface := _surface_point(origin, state, state[5])
 	var beside := surface + across * side * EDGE_TUCK_M
-	var terrain: float = ground.call(Vector2(beside.x, beside.z))
+	var terrain := _height(Vector2(beside.x, beside.z))
 	return Vector3(beside.x, minf(surface.y, terrain - 0.05), beside.z)
