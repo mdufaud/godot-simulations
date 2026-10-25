@@ -25,12 +25,7 @@ uniform mat4 reflection_projection_2;
 uniform mat4 reflection_view_3;
 uniform mat4 reflection_projection_3;
 uniform int reflection_planes = 1;
-uniform bool waterfall_enabled = false;
-uniform vec4 waterfall_geometry = vec4(6.0, 6.0, 4.0, 0.0);
-uniform float waterfall_bed_depth_m;
-uniform vec3 waterfall_grid;
-uniform sampler2D waterfall_surface : filter_nearest, repeat_disable;
-uniform sampler2D waterfall_boundary : filter_nearest, repeat_disable;
+uniform vec2 reflection_levels_m = vec2(0.0);
 uniform vec4 terrace_heights_m = vec4(0.0);
 uniform float surface_slope = 0.0;
 uniform float surface_detail = 0.0;
@@ -60,8 +55,15 @@ uniform bool foam_enabled = true;
 uniform bool foam_detail = true;
 uniform vec4 geometry_region_m = vec4(-6.0, -7.0, 16.0, 24.0);
 
+const vec2 RUN_UP_SLOPE = vec2(0.7, 1.2);
+const float SPLASH_RADIUS_M = 0.35;
+// Spill step vertices move this close to their face, so the wall between two pools is a sliver.
+const float SPILL_FACE_GAP_M = 0.002;
+const float LANDING_FOAM_M_S = 0.3;
+
 varying vec3 world_position;
 varying vec3 surface_normal;
+varying float spill_step;
 
 vec2 domain_uv(vec2 point) {
 	return (point - domain_origin_m) / domain_m + 0.5;
@@ -77,86 +79,29 @@ float live_share(vec2 point) {
 	return weight;
 }
 
-float waterfall_submerged_run() {
-	return waterfall_geometry.w * max((waterfall_geometry.y - waterfall_bed_depth_m - water_level_m) / waterfall_geometry.y, 0.0);
-}
-
-float waterfall_receiver(float x) {
-	if (waterfall_clock_enabled) {
-		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);
-		if (boundary.y > 0.0 && waterfall_geometry.w > 0.0) return boundary.z;
-	}
-	return waterfall_geometry.z - max(waterfall_submerged_run(), 0.125);
-}
-
-float waterfall_wet_end() {
-	float clearance = 0.125;
-	if (waterfall_clock_enabled && waterfall_geometry.w == 0.0) {
-		clearance += swe_region_m.w / float(textureSize(swe_surface, 0).y);
-	}
-	return waterfall_geometry.z - max(waterfall_submerged_run(), clearance);
-}
-
-float waterfall_pool_end(float x) {
-	return waterfall_geometry.z - 0.05;
-}
-
-float waterfall_source_active(float x) {
-	if (!waterfall_clock_enabled) return step(0.001, speed_m_s);
-	vec4 clock = texture(waterfall_clock, vec2(0.5));
-	float row = waterfall_geometry.w > 0.0 ? 0.5 / waterfall_grid.y : (clock.g + 0.5) / waterfall_grid.z;
-	return step(0.0001, texture(waterfall_surface,
-		vec2(clamp(x / waterfall_geometry.x + 0.5, 0.0, 1.0), row)).w) * step(0.001, clock.r);
-}
-
-float waterfall_impact(vec2 point) {
-	float impact_z = waterfall_geometry.z - (waterfall_geometry.w > 0.0
-		? waterfall_submerged_run()
-		: speed_m_s * sqrt(2.0 * waterfall_geometry.y / 9.81));
-	if (waterfall_clock_enabled) {
-		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(point.x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);
-		if (boundary.y > 0.0) impact_z = boundary.z;
-	}
-	float downstream = max(impact_z - point.y, 0.0);
-	float band = exp(-pow((point.y - impact_z) / 0.65, 2.0)) + 0.6 * exp(-downstream / (2.5 + speed_m_s * 1.5)) * step(point.y, impact_z);
-	return min(band, 1.0) * waterfall_source_active(point.x)
-		* (1.0 - smoothstep(waterfall_geometry.x * 0.5 - 0.3, waterfall_geometry.x * 0.5 + 0.2, abs(point.x)));
-}
-
 float basin_height(vec2 point) {
-	if (waterfall_enabled) {
-		bool upper = point.y >= waterfall_geometry.z - 0.0001;
-		float end_z = waterfall_wet_end();
-		float source_start = waterfall_geometry.z
-			+ (waterfall_geometry.w == 0.0 ? waterfall_geometry.z - end_z : 0.125);
-		point.y = upper ? max(point.y, source_start)
-			: min(point.y, end_z);
-		float level = water_level_m + (upper ? waterfall_geometry.y : 0.0);
-		float height = river_swe_height(point, level);
-		if (upper || !waterfall_clock_enabled) return height;
-		vec4 boundary = textureLod(waterfall_boundary, vec2(clamp(point.x / waterfall_geometry.x + 0.5, 0.0, 1.0), 0.5), 0.0);
-		float near = boundary.y > 0.0 ? 1.0 - smoothstep(1.0, 2.2, abs(point.y - boundary.z)) : 0.0;
-		if (near <= 0.0) return height;
-		float total = 0.0;
-		for (int i = -2; i <= 2; i++) {
-			total += river_swe_height(vec2(point.x, min(point.y + float(i) * 0.25, end_z)), level);
-		}
-		float pool = river_swe_height(vec2(point.x, boundary.z - 2.5), level);
-		return mix(height, min(total / 5.0, pool + 0.06), near);
-	}
 	float original = texture(bed_height_texture, domain_uv(point)).g;
 	float weight = live_share(point);
 	return weight > 0.0 ? mix(original, texture(swe_surface, river_swe_uv(point)).z, weight) : original;
 }
 
+// Where spilled water lands, as a depth rate in m/s, spread over the splash around the landing cells.
+float spill_landing(vec2 point) {
+	float total = 0.0;
+	for (int i = 0; i < 5; i++) {
+		vec2 offset = i == 0 ? vec2(0.0) : vec2(float(i == 1) - float(i == 2), float(i == 3) - float(i == 4)) * SPLASH_RADIUS_M;
+		total += texture(swe_spill, river_swe_uv(point + offset)).g;
+	}
+	return total / 5.0;
+}
+
 vec2 flow_uv(vec2 position, vec2 flow, float phase) {
-	float distance_m = waterfall_clock_enabled ? river_render_time(simulation_time_s) * speed_m_s : flow_distance_m;
-	return position - flow * phase * 1.5 + vec2(0.0, distance_m * 0.18);
+	return position - flow * phase * 1.5 + vec2(0.0, flow_distance_m * 0.18);
 }
 
 float moving_noise(vec2 position, vec2 flow, float scale, float mip) {
 	float phase_offset = textureLod(turbulence_texture, position * 0.009, 2.0).r;
-	float phase = fract((waterfall_clock_enabled ? river_render_time(simulation_time_s) * speed_m_s : flow_distance_m) / 1.5 + phase_offset);
+	float phase = fract(flow_distance_m / 1.5 + phase_offset);
 	float second = fract(phase + 0.5);
 	float first_noise = textureLod(turbulence_texture, flow_uv(position, flow, phase) * scale, mip).r;
 	float second_noise = textureLod(turbulence_texture, flow_uv(position, flow, second) * scale, mip).r;
@@ -217,32 +162,33 @@ vec4 planar_sample(int index, vec3 position) {
 
 void vertex() {
 	vec2 point = VERTEX.xz;
-	if (waterfall_enabled && UV2.x < 0.5) point.y = mix(domain_origin_m.y - domain_m.y * 0.5, waterfall_pool_end(point.x), UV2.y);
-	VERTEX.z = point.y;
 	vec4 field = texture(flow_map, domain_uv(point));
 	float weight = live_share(point);
 	vec4 live = texture(swe_surface, river_swe_uv(point));
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), weight);
 	float h = basin_height(point)
 		+ ripple(point, field.rg, field.b) * field.a * mix(1.0, 0.25, weight);
+	// A vertex beside a spill face keeps its own pool's height but moves onto the face, so the pools meet there.
+	int faces = river_spill_faces(point);
+	faces = (faces | (faces >> 4)) & 15;
+	ivec2 toward = ivec2(int((faces & 1) != 0) - int((faces & 2) != 0), int((faces & 4) != 0) - int((faces & 8) != 0));
+	spill_step = float(faces != 0);
+	vec2 cell_m = swe_spill_enabled ? swe_region_m.zw / vec2(textureSize(swe_spill, 0)) : vec2(0.0);
+	VERTEX.xz = point + vec2(toward) * max(cell_m * 0.5 - SPILL_FACE_GAP_M, vec2(0.0));
 	VERTEX.y = h;
-	if (waterfall_enabled && !swe_enabled) VERTEX.y = water_level_m + (point.y >= waterfall_geometry.z ? waterfall_geometry.y : 0.0);
-	vec2 right = point + vec2(0.08, 0.0);
-	vec2 down = point + vec2(0.0, 0.08);
-	float dx = (basin_height(right)
-		+ ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(right)) - h) / 0.08;
-	float dz = (basin_height(down)
-		+ ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(down)) - h) / 0.08;
+	vec2 step_m = mix(vec2(0.08), vec2(-0.08), vec2(greaterThan(toward, ivec2(0))));
+	vec2 right = point + vec2(step_m.x, 0.0);
+	vec2 down = point + vec2(0.0, step_m.y);
+	float dx = (faces & 3) == 3 ? 0.0 : (basin_height(right)
+		+ ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(right)) - h) / step_m.x;
+	float dz = (faces & 12) == 12 ? 0.0 : (basin_height(down)
+		+ ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(down)) - h) / step_m.y;
 	surface_normal = normalize(vec3(-dx, 1.0, -dz));
-	if (waterfall_enabled && !swe_enabled) surface_normal = vec3(0.0, 1.0, 0.0);
 	world_position = VERTEX;
 }
 
 void fragment() {
-	if (waterfall_enabled && abs(world_position.x) < waterfall_geometry.x * 0.5 + 0.01
-		&& world_position.z < waterfall_geometry.z + 0.001 && world_position.z > waterfall_pool_end(world_position.x) - 0.001) { discard; }
 	vec2 sample_point = world_position.xz;
-	if (waterfall_enabled && sample_point.y < waterfall_geometry.z) sample_point.y = min(sample_point.y, waterfall_wet_end());
 	vec2 field_uv = domain_uv(sample_point);
 	vec4 field = texture(flow_map, field_uv);
 	float live_weight = live_share(sample_point);
@@ -256,20 +202,28 @@ void fragment() {
 	if (swe_enabled) {
 		vec2 bed = guided_bed.xy;
 		bed.x = texture(bed_height_texture, domain_uv(world_position.xz)).r;
-		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, river_swe_uv(world_position.xz)).r, 0.0));
+		vec2 terrain_uv = spill_step > 0.0 ? river_swe_cell_uv(world_position.xz) : river_swe_uv(world_position.xz);
+		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, terrain_uv).r, 0.0));
 		float depth = mix(max(bed.y - bed.x, 0.0), live_depth, live_weight);
 		float edge_width = max(fwidth(depth), 0.002);
 		wet_coverage = mix(wet_coverage, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
+		// Past this triangle slope the heightfield climbs a rock or steps down a crest: what is behind shows instead.
+		// With spilling, water down a bed up to the spill slope stays drawn; past it a triangle climbs a rock, and at a
+		// spill face it is the wall between two pools.
+		vec3 facet = cross(dFdx(world_position), dFdy(world_position));
+		float slope = length(facet.xz) / max(abs(facet.y), 1.0e-6);
+		vec2 run_up = swe_spill_enabled && spill_step <= 0.0 ? vec2(1.0, 1.6) * swe_spill_slope : RUN_UP_SLOPE;
+		wet_coverage *= 1.0 - smoothstep(run_up.x, run_up.y, slope) * live_weight;
 	}
 	if (wet_coverage <= 0.0) { discard; }
 	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), live_weight);
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
-	float fall_impact = waterfall_enabled && world_position.z < waterfall_geometry.z ? waterfall_impact(world_position.xz) : 0.0;
+	float fall_impact = swe_spill_enabled ? smoothstep(0.0, LANDING_FOAM_M_S, spill_landing(world_position.xz)) * live_weight : 0.0;
 	field.b = max(field.b, fall_impact);
 	field.a = mix(field.a, smoothstep(0.004, 0.04, live.w), live_weight);
 	float phase_offset = texture(turbulence_texture, world_position.xz * 0.009).r;
-	float phase = fract((waterfall_clock_enabled ? river_render_time(simulation_time_s) * speed_m_s : flow_distance_m) / 1.5 + phase_offset);
+	float phase = fract(flow_distance_m / 1.5 + phase_offset);
 	float phase2 = fract(phase + 0.5);
 	vec2 p = world_position.xz;
 	vec2 uv1 = flow_uv(p, field.rg, phase) * 0.7;
@@ -302,6 +256,13 @@ void fragment() {
 	behind.xyz /= behind.w;
 	float behind_m = max(-behind.z + VERTEX.z, 0.0);
 	float thickness = max(behind_m, body_min_thickness_m * field.a);
+	// Seen from below, the straight ray climbs out of the water at once: the refracted one runs down to the bed.
+	vec3 view_ray = -normalize((INV_VIEW_MATRIX * vec4(VIEW, 0.0)).xyz);
+	if (view_ray.y > 0.0) {
+		float water_m = max(world_position.y - mix(guided_bed.x, texture(swe_terrain, live_uv).r, live_weight), 0.0);
+		vec3 refracted = refract(view_ray, faceforward(normal_world, view_ray, normal_world), 0.75);
+		thickness = min(thickness, water_m / max(-refracted.y, 0.1));
+	}
 	vec2 edge_fade = smoothstep(vec2(0.0), vec2(0.04), SCREEN_UV) * (1.0 - smoothstep(vec2(0.96), vec2(1.0), SCREEN_UV));
 	vec2 refracted_uv = SCREEN_UV + NORMAL.xy * 0.015 * smoothstep(0.0, 0.3, thickness) * edge_fade.x * edge_fade.y;
 	vec4 refracted_depth = INV_PROJECTION_MATRIX * vec4(refracted_uv * 2.0 - 1.0, texture(depth_texture, refracted_uv).r, 1.0);
@@ -327,11 +288,13 @@ void fragment() {
 		* mix(0.12, 1.5, surface_detail) * smoothstep(0.0, 12.0, length(VERTEX));
 	vec4 reflection = vec4(0.0);
 	if (reflection_enabled) {
-		if (!waterfall_enabled || reflection_planes > 1 || world_position.z < waterfall_geometry.z) {
-			reflection = planar_sample(0, reflected_point);
-		}
-		if (reflection_planes == 2 && world_position.z > waterfall_geometry.z) {
-			reflection = planar_sample(1, reflected_point);
+		reflection = planar_sample(0, reflected_point);
+		if (reflection_planes == 2) {
+			// A pool plane mirrors only for a viewer above it; seen from below, its water reflects the sky.
+			vec2 seen = step(reflection_levels_m, vec2(CAMERA_POSITION_WORLD.y));
+			reflection.a *= seen.x;
+			float upper = smoothstep(0.25, 0.75, (world_position.y - reflection_levels_m.x) / max(reflection_levels_m.y - reflection_levels_m.x, 0.001));
+			if (upper > 0.001) { reflection = mix(reflection, planar_sample(1, reflected_point) * vec4(1.0, 1.0, 1.0, seen.y), upper); }
 		}
 		if (reflection_planes == 4) {
 			float terrace = texture(bed_height_texture, field_uv).g - water_level_m - p.y * surface_slope;
@@ -352,22 +315,15 @@ void fragment() {
 		float impact = fall_impact * foam_amount;
 		foam_history = max(foam_history, vec2(impact * 0.9, impact));
 	}
-	if (waterfall_enabled && world_position.z >= waterfall_geometry.z) {
-		float source_active = waterfall_source_active(world_position.x);
-		float lip = (1.0 - smoothstep(0.05, 0.4, world_position.z - waterfall_geometry.z)) * 0.6
-			* (1.0 - smoothstep(waterfall_geometry.x * 0.5 - 0.1, waterfall_geometry.x * 0.5 + 0.4, abs(world_position.x)))
-			* source_active * sqrt(max(foam_amount, 0.0));
-		foam_history = max(foam_history, vec2(lip * 0.85, lip));
-	}
 	float coverage = foam_history.r;
 	float breakup = moving_noise(p + vec2(11.0, 29.0), field.rg, 0.09, 0.0);
 	float foam = smoothstep(0.18, 0.8, coverage) * smoothstep(0.3, 0.62, breakup);
 	float turbulent = whitewater_strength * smoothstep(0.12, 0.65, field.b);
 	foam = max(foam, turbulent * smoothstep(0.4, 0.65, breakup) * 0.55 * foam_amount);
 	if (foam_detail) {
-		float foam_phase = fract(river_render_time(simulation_time_s) / 1.5);
+		float foam_phase = fract(simulation_time_s / 1.5);
 		float foam_phase2 = fract(foam_phase + 0.5);
-		vec2 foam_position = p - foam_reference_flow * (waterfall_clock_enabled ? river_render_time(simulation_time_s) * speed_m_s : flow_distance_m);
+		vec2 foam_position = p - foam_reference_flow * flow_distance_m;
 		vec2 foam_relative_velocity = flow_velocity - foam_reference_flow * speed_m_s;
 		float foam_offset = 0.5 * (1.0 - live_weight);
 		vec2 foam_uv1 = (foam_position - foam_relative_velocity * (foam_phase - foam_offset) * 1.5) * vec2(0.28, 0.2);
@@ -380,7 +336,7 @@ void fragment() {
 		float phase_weight = abs(foam_phase * 2.0 - 1.0);
 		float second_weight = foam_selection(selection_point, phase_weight);
 		float density = max(coverage, turbulent * 0.4 * foam_amount);
-		float dense_threshold = waterfall_enabled ? mix(0.58, 0.5, fresh_weight) : mix(0.36, 0.24, fresh_weight);
+		float dense_threshold = swe_spill_enabled ? mix(0.58, 0.5, fresh_weight) : mix(0.36, 0.24, fresh_weight);
 		float threshold = mix(0.84, dense_threshold, smoothstep(0.04, 0.9, density));
 		float aa1 = max(fwidth(pattern1) * 1.1, 0.015);
 		float aa2 = max(fwidth(pattern2) * 1.1, 0.015);

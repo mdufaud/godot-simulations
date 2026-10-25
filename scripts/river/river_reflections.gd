@@ -67,9 +67,12 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 	if views.is_empty() or _source_camera == null or not enabled:
 		return
 	var anchors := field.reflection_anchors_m
+	var levels := Vector2.ZERO
 	for index in views.size():
-		var anchor := anchor_z_m if plane_count == 1 and field.waterfall == null else anchors[index]
+		var anchor := anchor_z_m if plane_count == 1 and not field.reflection_pools else anchors[index]
 		var plane := field.reflection_plane(level_m, anchor)
+		if index < 2:
+			levels[index] = plane.d
 		var origin := _source_camera.global_position - 2.0 * plane.distance_to(_source_camera.global_position) * plane.normal
 		var forward := -_source_camera.global_basis.z
 		var up := _source_camera.global_basis.y
@@ -81,7 +84,7 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		camera.keep_aspect = _source_camera.keep_aspect
 		camera.near = _source_camera.near
 		camera.far = _source_camera.far
-		camera.cull_mask = 1 | (reflection_layer << index if field.waterfall != null else reflection_layer) | (4 if include_grass else 0)
+		camera.cull_mask = 1 | (reflection_layer << index if field.reflection_pools else reflection_layer) | (4 if include_grass else 0)
 		var rect := _crop_rect(index, render_size, level_m) if plane_count > 1 else Rect2(Vector2.ZERO, Vector2(render_size))
 		views[index].render_target_update_mode = SubViewport.UPDATE_ALWAYS if enabled and rect.has_area() else SubViewport.UPDATE_DISABLED
 		if not rect.has_area():
@@ -103,6 +106,8 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		_set_slot(index, "reflection_view", camera.global_transform.affine_inverse())
 		_set_slot(index, "reflection_projection", camera.get_camera_projection())
 		_set_slot(index, "reflection_texture", views[index].get_texture())
+	if _material != null and plane_count == 2:
+		_material.set_shader_parameter("reflection_levels_m", levels)
 
 
 func set_profiling(value: bool) -> void:
@@ -125,7 +130,7 @@ func _crop_rect(index: int, size: Vector2i, level_m: float) -> Rect2:
 	var rect := Rect2()
 	var first := true
 	for point in field.surface_points:
-		if field.waterfall != null:
+		if field.reflection_pools:
 			if field.water_zone(Vector2(point.x, point.z)) != index + 1:
 				continue
 		else:

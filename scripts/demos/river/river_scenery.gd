@@ -2,6 +2,8 @@ extends RefCounted
 
 const Tufts := preload("res://scripts/grass/grass_multimesh_builder.gd")
 const TorrentLandscape := preload("res://scripts/demos/river/river_torrent_landscape.gd")
+const WaterfallLandscape := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
+const CascadeLandscape := preload("res://scripts/demos/river/river_cascade_landscape.gd")
 const ROCK_PATHS := [
 	"res://resources/rocks/boulder_01/boulder_01_2k.gltf",
 	"res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
@@ -12,6 +14,18 @@ const BOULDER_PATHS := [
 	"res://resources/rocks/namaqualand_boulder_03/namaqualand_boulder_03_2k.gltf",
 ]
 const OUTER_EXTENT_M := 150.0
+const DROPPED_HEIGHT_RATIO := 1.25
+const DROP_CLEARANCE_M := 0.05
+const ROCK_DENSITY_KG_M3 := 2600.0
+const ROCK_FRICTION := 0.9
+const ROCK_BOUNCE := 0.1
+const SETTLE_TIMEOUT_S := 10.0
+const CREST_ROCK_SETBACK_M := 0.45
+# The cliff below a vertical crest is a ground row this far downstream of it, so the face stands upright.
+const CLIFF_SEAM_M := 0.01
+# Ground triangles steeper than this, about 82 degrees, are the steps a spilling field falls from.
+const CLIFF_SLOPE := 7.0
+const CLIFF_SPAN_M := 0.4
 
 var field: RiverField = RiverLandscape.new()
 var materials: Array[ShaderMaterial] = []
@@ -31,6 +45,8 @@ var _grass_meshes: Array[ArrayMesh] = []
 var _host: Node3D
 var _rng := RandomNumberGenerator.new()
 var _collision_shapes: Dictionary = {}
+var _hull_points: Dictionary = {}
+var _falling: Dictionary[RigidBody3D, float] = {}
 
 
 func build(host: Node3D, selected_field: RiverField = null) -> void:
@@ -47,19 +63,15 @@ func build(host: Node3D, selected_field: RiverField = null) -> void:
 	_build_ground()
 	LoadingPump.stage("Placing rocks")
 	_build_rocks()
-	if field.waterfall != null:
-		field.bake_obstacles()
 	LoadingPump.stage("Planting grass")
 	_build_grass()
-	if field.waterfall != null and field.waterfall.is_vertical():
-		LoadingPump.stage("Building cliff")
-		_build_cliff()
 
 
 func clear() -> void:
 	if dropped_rocks > 0 and field != null:
 		field.solver_terrain_image = null
 	dropped_rocks = 0
+	_falling.clear()
 	if is_instance_valid(root):
 		root.free()
 	root = null
@@ -71,6 +83,7 @@ func clear() -> void:
 	_grass_tiles.clear()
 	_grass_meshes.clear()
 	_collision_shapes.clear()
+	_hull_points.clear()
 
 
 func set_water_level(level_m: float) -> void:
@@ -80,12 +93,11 @@ func set_water_level(level_m: float) -> void:
 		material.set_shader_parameter("river_reflection_layer", RiverSystem.REFLECTION_LAYER)
 		material.set_shader_parameter("river_height_texture", field.bed_texture)
 		material.set_shader_parameter("river_domain_m", field.domain_m)
-		material.set_shader_parameter("river_waterfall", field.waterfall != null)
-		if field.waterfall != null:
-			var profile := field.waterfall
-			material.set_shader_parameter("river_pool_levels_m", Vector2(level_m, level_m + profile.height_m))
-			material.set_shader_parameter("river_fall_geometry", Vector4(profile.width_m, profile.height_m, profile.crest_z_m, profile.run_m()))
-			material.set_shader_parameter("river_fall_bed_depth_m", profile.bed_depth_m)
+		material.set_shader_parameter("river_pool_planes", field.reflection_pools)
+		if field.reflection_pools:
+			var anchors := field.reflection_anchors_m
+			material.set_shader_parameter("river_pool_levels_m", Vector2(field.reflection_plane(level_m, anchors.x).d,
+				field.reflection_plane(level_m, anchors.y).d))
 
 
 func set_water_detail(value: float) -> void:
@@ -165,35 +177,45 @@ func _build_ground() -> void:
 
 func _ground_mesh() -> ArrayMesh:
 	var torrent := field is TorrentLandscape
-	var size := Vector2i(field.domain_m / (0.25 if torrent else 0.5)) + Vector2i.ONE if field.waterfall == null else Vector2i(97, 193)
-	field.ground_rows_m.clear()
+	var fall := field as WaterfallLandscape
 	var rows := PackedFloat32Array()
-	for z in size.y:
-		rows.append(-field.domain_m.y * 0.5 + float(z) / float(size.y - 1) * field.domain_m.y)
-	if field.waterfall != null:
-		if not field.waterfall.is_vertical():
-			var crest := field.waterfall.crest_z_m
-			var lower_end := crest - field.waterfall.run_m()
-			var round_m := minf(0.35, field.waterfall.run_m() * 0.2)
-			for z in [lower_end, lower_end + round_m, crest - round_m, crest]:
+	var columns := PackedFloat32Array()
+	var size := Vector2i.ZERO
+	if field is CascadeLandscape:
+		# One vertex per solver cell centre, so a lip between two cells stands as one upright quad.
+		size = Vector2i(field.domain_m / CascadeLandscape.GRID_CELL_M)
+		for z in size.y:
+			rows.append(-field.domain_m.y * 0.5 + (z + 0.5) * CascadeLandscape.GRID_CELL_M)
+		for x in size.x:
+			columns.append(-field.domain_m.x * 0.5 + (x + 0.5) * CascadeLandscape.GRID_CELL_M)
+	else:
+		size = Vector2i(field.domain_m / (0.25 if torrent or fall != null else 0.5)) + Vector2i.ONE
+		for z in size.y:
+			rows.append(-field.domain_m.y * 0.5 + float(z) / float(size.y - 1) * field.domain_m.y)
+		for x in size.x:
+			columns.append(-field.domain_m.x * 0.5 + float(x) / float(size.x - 1) * field.domain_m.x)
+	if fall != null:
+		var crest := fall.CREST_Z_M
+		if fall.is_vertical():
+			rows.append_array(PackedFloat32Array([crest - CLIFF_SEAM_M, crest]))
+		else:
+			var lower_end := crest - fall.run_m()
+			var round_m := minf(fall.RAMP_ROUND_M, fall.run_m() * 0.2)
+			for z in [lower_end - round_m, lower_end, lower_end + round_m, crest - round_m, crest, crest + round_m]:
 				rows.append(z)
 			for step in range(1, 64):
 				rows.append(lerpf(lower_end, crest, float(step) / 64.0))
 		rows.sort()
+		var unique := PackedFloat32Array()
 		for z in rows:
-			if field.ground_rows_m.is_empty() or z != field.ground_rows_m[-1]:
-				field.ground_rows_m.append(z)
-		rows = field.ground_rows_m.duplicate()
+			if unique.is_empty() or z != unique[-1]:
+				unique.append(z)
+		rows = unique
 		size.y = rows.size()
-	var columns := PackedFloat32Array()
-	for x in size.x:
-		columns.append(-field.domain_m.x * 0.5 + float(x) / float(size.x - 1) * field.domain_m.x)
-	columns = _pad_outward(columns, field.domain_m.x / float(size.x - 1))
+	columns = _pad_outward(columns, CascadeLandscape.GRID_CELL_M if field is CascadeLandscape else field.domain_m.x / float(size.x - 1))
 	rows = _pad_outward(rows, field.domain_m.y / float(size.y - 1))
 	var count := Vector2i(columns.size(), rows.size())
-	var inner := (count - size) / 2
-	var cell_size := field.domain_m / Vector2(size - Vector2i.ONE)
-	var height_image := field.waterfall != null
+	var spills := field.spills
 	var vertex_rows := []
 	vertex_rows.resize(count.y)
 	var vertex_task := WorkerThreadPool.add_group_task(func(z: int) -> void:
@@ -201,71 +223,67 @@ func _ground_mesh() -> ArrayMesh:
 		var row_normals := PackedVector3Array()
 		var row_uvs := PackedVector2Array()
 		var row_tangents := PackedFloat32Array()
-		var row_heights := PackedFloat32Array()
 		for x in count.x:
 			var point := Vector2(columns[x], rows[z])
-			var dx := (_terrain(point + Vector2(0.05, 0.0)) - _terrain(point - Vector2(0.05, 0.0))) / 0.1
-			var dz := (_terrain(point + Vector2(0.0, 0.05)) - _terrain(point - Vector2(0.0, 0.05))) / 0.1
-			if field.waterfall != null and field.waterfall.is_vertical() \
-					and absf(point.x) <= field.channel_half_width(point.y) + 0.5 \
-					and absf(point.y - field.waterfall.crest_z_m) < 0.4:
-				dz = 0.0
 			var height := _terrain(point)
+			var dx := _ground_slope(_terrain(point + Vector2(0.05, 0.0)) - height, height - _terrain(point - Vector2(0.05, 0.0)), spills)
+			var dz := _ground_slope(_terrain(point + Vector2(0.0, 0.05)) - height, height - _terrain(point - Vector2(0.0, 0.05)), spills)
 			row_vertices.append(Vector3(point.x, height, point.y))
-			var image_cell := Vector2i(x, z) - inner
-			if height_image and image_cell.x >= 0 and image_cell.y >= 0 and image_cell.x < size.x and image_cell.y < size.y:
-				row_heights.append_array(PackedFloat32Array([height, point.y, 0.0, 1.0]))
 			row_normals.append(Vector3(-dx, 1.0, -dz).normalized())
 			row_uvs.append(point)
 			var tangent := Vector3(1.0, dx, 0.0).normalized()
 			row_tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, 1.0]))
-		vertex_rows[z] = [row_vertices, row_normals, row_uvs, row_tangents, row_heights], count.y)
+		vertex_rows[z] = [row_vertices, row_normals, row_uvs, row_tangents], count.y)
 	LoadingPump.wait_for_group(vertex_task)
 	var vertices := PackedVector3Array()
 	var normals := PackedVector3Array()
 	var uvs := PackedVector2Array()
 	var tangents := PackedFloat32Array()
-	var heights := PackedFloat32Array()
 	for row: Array in vertex_rows:
 		vertices.append_array(row[0])
 		normals.append_array(row[1])
 		uvs.append_array(row[2])
 		tangents.append_array(row[3])
-		heights.append_array(row[4])
-	if height_image:
-		field.ground_height_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, heights.to_byte_array())
 	var index_rows := []
 	index_rows.resize(count.y - 1)
 	var index_task := WorkerThreadPool.add_group_task(func(z: int) -> void:
 		var row := PackedInt32Array()
+		var cliffs := PackedInt32Array()
 		for x in count.x - 1:
-			if _inside_cliff_gap(Vector2(columns[x] + columns[x + 1], rows[z] + rows[z + 1]) * 0.5):
-				continue
 			var i := z * count.x + x
-			if torrent and absf(vertices[i].y - vertices[i + count.x + 1].y) < absf(vertices[i + 1].y - vertices[i + count.x].y):
-				row.append_array(PackedInt32Array([i, i + 1, i + count.x + 1, i, i + count.x + 1, i + count.x]))
-			else:
-				row.append_array(PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x]))
-		index_rows[z] = row, count.y - 1)
+			var quad := PackedInt32Array([i, i + 1, i + count.x + 1, i, i + count.x + 1, i + count.x]) \
+				if torrent and absf(vertices[i].y - vertices[i + count.x + 1].y) < absf(vertices[i + 1].y - vertices[i + count.x].y) \
+				else PackedInt32Array([i, i + 1, i + count.x, i + 1, i + count.x + 1, i + count.x])
+			for t in 2:
+				var triangle := quad.slice(t * 3, t * 3 + 3)
+				var facet := (vertices[triangle[1]] - vertices[triangle[0]]).cross(vertices[triangle[2]] - vertices[triangle[0]])
+				if spills and Vector2(facet.x, facet.z).length() > CLIFF_SLOPE * absf(facet.y):
+					cliffs.append_array(triangle)
+				else:
+					row.append_array(triangle)
+		index_rows[z] = [row, cliffs], count.y - 1)
 	LoadingPump.wait_for_group(index_task)
 	var indices := PackedInt32Array()
-	for row: PackedInt32Array in index_rows:
-		indices.append_array(row)
-	if field.waterfall != null and field.waterfall.is_vertical():
-		var crest := field.waterfall.crest_z_m
-		for side: float in [-1.0, 1.0]:
-			for x in size.x - 1:
-				var x0 := -field.domain_m.x * 0.5 + x * cell_size.x
-				var x1 := x0 + cell_size.x
-				var z0 := crest - cell_size.y if side < 0.0 else crest
-				var z1 := crest if side < 0.0 else crest + cell_size.y
-				var base := vertices.size()
-				for point: Vector2 in [Vector2(x0, z0), Vector2(x1, z0), Vector2(x0, z1), Vector2(x1, z1)]:
-					vertices.append(Vector3(point.x, _bed(Vector2(point.x, crest + side * 0.001)), point.y))
-					normals.append(Vector3.UP)
-					uvs.append(point)
-					tangents.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 1.0]))
-				indices.append_array(PackedInt32Array([base, base + 1, base + 2, base + 1, base + 3, base + 2]))
+	var cliffs := PackedInt32Array()
+	for row: Array in index_rows:
+		indices.append_array(row[0])
+		cliffs.append_array(row[1])
+	# A cliff triangle gets its own vertices, shared ones would shade the wall like the ground above it. It faces down
+	# the slope smoothed over CLIFF_SPAN_M, so a lip across the cell staircase does not shade as stripes.
+	for c in range(0, cliffs.size(), 3):
+		var corners := [vertices[cliffs[c]], vertices[cliffs[c + 1]], vertices[cliffs[c + 2]]]
+		var centre: Vector3 = (corners[0] + corners[1] + corners[2]) / 3.0
+		var point := Vector2(centre.x, centre.z)
+		var facing := Vector2(_terrain(point - Vector2(CLIFF_SPAN_M, 0.0)) - _terrain(point + Vector2(CLIFF_SPAN_M, 0.0)),
+			_terrain(point - Vector2(0.0, CLIFF_SPAN_M)) - _terrain(point + Vector2(0.0, CLIFF_SPAN_M)))
+		var normal: Vector3 = Vector3(facing.x, 0.0, facing.y).normalized() if facing.length() > 0.01 \
+			else (corners[2] - corners[0]).cross(corners[1] - corners[0]).normalized()
+		for corner: Vector3 in corners:
+			indices.append(vertices.size())
+			vertices.append(corner)
+			normals.append(normal)
+			uvs.append(Vector2(corner.x, corner.z))
+			tangents.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 1.0]))
 	var arrays := []
 	arrays.resize(Mesh.ARRAY_MAX)
 	arrays[Mesh.ARRAY_VERTEX] = vertices
@@ -276,6 +294,14 @@ func _ground_mesh() -> ArrayMesh:
 	var mesh := ArrayMesh.new()
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
+
+
+# Slope from the forward and backward differences: their mean on smooth ground, the gentler one where they disagree
+# by a step, so a vertex at the foot or top of a cliff keeps the slope of its own side.
+static func _ground_slope(forward_m: float, backward_m: float, spills: bool) -> float:
+	if spills and absf(forward_m - backward_m) > CLIFF_SLOPE * 0.05:
+		return (forward_m if absf(forward_m) < absf(backward_m) else backward_m) / 0.05
+	return (forward_m + backward_m) / 0.1
 
 
 func _pad_outward(values: PackedFloat32Array, step: float) -> PackedFloat32Array:
@@ -315,11 +341,14 @@ func _terrain(point: Vector2) -> float:
 
 
 func _build_rocks() -> void:
-	if field.waterfall != null:
+	if field is WaterfallLandscape:
 		_build_waterfall_bank_rocks()
 		return
 	if field is TorrentLandscape:
 		_build_torrent_rocks()
+		return
+	if field is CascadeLandscape:
+		_build_cascade_rocks()
 		return
 	if not field is RiverLandscape:
 		return
@@ -348,10 +377,10 @@ func _build_rocks() -> void:
 
 
 func _build_waterfall_bank_rocks() -> void:
-	var profile := field.waterfall
-	var crest := profile.crest_z_m
+	var profile := field as WaterfallLandscape
+	var crest := profile.CREST_Z_M
 	var foot := crest - profile.run_m()
-	var half := profile.width_m * 0.5
+	var half := profile.WIDTH_M * 0.5
 	if fall_rocks:
 		_build_fall_rocks()
 	for side: float in [-1.0, 1.0]:
@@ -368,25 +397,19 @@ func _build_waterfall_bank_rocks() -> void:
 
 
 func _build_fall_rocks() -> void:
-	var profile := field.waterfall
-	var crest := profile.crest_z_m
-	var lip := profile.height_m - profile.bed_depth_m
+	var profile := field as WaterfallLandscape
+	var crest := profile.CREST_Z_M
+	var lip := profile.HEIGHT_M - profile.BED_DEPTH_M
 	var cliff := profile.angle_degrees >= 70.0
-	var crest_point := Vector2(-1.7, crest + 0.1)
-	_add_rock(crest_point, 0.6, lip - 0.3, profile.height_m + 0.42 - (lip - 0.3), BOULDER_PATHS)
+	var crest_point := Vector2(-1.7, crest + CREST_ROCK_SETBACK_M)
+	_add_rock(crest_point, 0.6, lip - 0.3, profile.HEIGHT_M + 0.42 - (lip - 0.3), BOULDER_PATHS)
 	# (x m, fraction of the drop below the lip, radius m, top above the face m)
-	var face_rocks := [Vector4(1.2, 0.36, 0.62, 0.45), Vector4(-1.0, 0.72, 0.72, 0.25)] if cliff \
-		else [Vector4(1.1, 0.33, 0.6, 0.8), Vector4(-0.95, 0.62, 0.5, 0.5)]
+	var face_rocks := [] if cliff else [Vector4(1.1, 0.33, 0.6, 0.8), Vector4(-0.95, 0.62, 0.5, 0.5)]
 	for rock: Vector4 in face_rocks:
-		var face_y := lip - rock.y * profile.height_m
-		var face_z := crest - rock.y * profile.run_m()
-		if cliff:
-			var point := Vector2(rock.x, face_z - rock.z * 0.45)
-			_add_rock(point, rock.z, face_y - 0.8, 0.8 + rock.w, BOULDER_PATHS)
-		else:
-			var point := Vector2(rock.x, face_z)
-			var base := maxf(_footprint_floor(point, rock.z), face_y - rock.z * 1.2) - 0.15
-			_add_rock(point, rock.z, base, face_y + rock.w - base, BOULDER_PATHS)
+		var face_y := lip - rock.y * profile.HEIGHT_M
+		var point := Vector2(rock.x, crest - rock.y * profile.run_m())
+		var base := maxf(_footprint_floor(point, rock.z), face_y - rock.z * 1.2) - 0.15
+		_add_rock(point, rock.z, base, face_y + rock.w - base, BOULDER_PATHS)
 	var impact := crest - (profile.run_m() if not cliff else 0.9)
 	for rock: Vector4 in [Vector4(2.0, impact - 0.7, 0.6, 0.45), Vector4(-2.25, impact - 2.1, 0.5, 0.32)]:
 		var point := Vector2(rock.x, rock.y)
@@ -439,6 +462,31 @@ func _build_torrent_rocks() -> void:
 	field.obstacle_meshes.resize(wet_meshes)
 
 
+func _build_cascade_rocks() -> void:
+	var cascade := field as CascadeLandscape
+	for river in cascade.rivers:
+		for k in river.lips_m.size():
+			for spur_across: float in river.spurs_m[k]:
+				var point: Vector2 = river.line_point(river.lips_m[k] - 0.4, spur_across)
+				var radius := _rng.randf_range(0.3, 0.45)
+				_add_rock(point, radius, _footprint_floor(point, radius) - 0.1, radius * _rng.randf_range(0.9, 1.4), BOULDER_PATHS)
+	for rock: Vector3 in [Vector3(-4.5, -15.0, 0.8), Vector3(2.5, -16.5, 0.6), Vector3(-2.5, -18.0, 0.7), Vector3(4.0, -9.5, 0.5)]:
+		_add_stream_rock(Vector2(rock.x, rock.y), rock.z, _rng.randf_range(0.15, 0.45))
+	var wet_meshes := field.obstacle_meshes.size()
+	var inner := field.domain_rect().grow(-1.5)
+	for i in 60:
+		var point := Vector2(_rng.randf_range(inner.position.x, inner.end.x), _rng.randf_range(inner.position.y, inner.end.y))
+		if cascade.channel_edge_m(point) < 1.2:
+			continue
+		var radius := lerpf(0.2, 1.2, pow(_rng.randf(), 2.0))
+		_add_rock(point, radius, _footprint_floor(point, radius) - radius * 0.2, radius * _rng.randf_range(0.7, 1.3), BOULDER_PATHS)
+	for i in 30:
+		var point := Vector2.from_angle(_rng.randf() * TAU) * _rng.randf_range(field.domain_m.y * 0.55, 95.0)
+		var radius := _rng.randf_range(1.4, 3.6)
+		_add_rock(point, radius, _footprint_floor(point, radius) - radius * 0.3, radius * _rng.randf_range(0.7, 1.2), BOULDER_PATHS, 0.3)
+	field.obstacle_meshes.resize(wet_meshes)
+
+
 func _add_stream_rock(point: Vector2, radius: float, emergence_m: float) -> void:
 	var base := _footprint_floor(point, radius) - 0.2
 	var top := field.sample_height(point, 0.06) + emergence_m
@@ -454,57 +502,83 @@ func _footprint_floor(point: Vector2, radius: float) -> float:
 	return lowest
 
 
-func _build_cliff() -> void:
-	var config: RiverWaterfallConfig = field.waterfall
-	var z := config.crest_z_m
-	var width := field.domain_m.x
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in 96:
-		var x0 := -width * 0.5 + width * i / 96.0
-		var x1 := -width * 0.5 + width * (i + 1) / 96.0
-		var a := Vector3(x0, _bed(Vector2(x0, z - 0.25)), z)
-		var b := Vector3(x1, _bed(Vector2(x1, z - 0.25)), z)
-		var c := Vector3(x0, _bed(Vector2(x0, z + 0.25)), z)
-		var d := Vector3(x1, _bed(Vector2(x1, z + 0.25)), z)
-		for point: Vector3 in [a, b, c, b, d, c]:
-			surface.set_uv(Vector2(point.x, point.z))
-			surface.set_normal(Vector3.FORWARD)
-			surface.add_vertex(point)
-	surface.generate_tangents()
-	var face := MeshInstance3D.new()
-	face.name = "WaterfallCliffFace"
-	face.mesh = surface.commit()
-	face.material_override = materials[0]
-	_host.add_child(face)
-	face.create_trimesh_collision()
-
-
-func add_dropped_rock(hit: Vector3, normal: Vector3) -> Array[MeshInstance3D]:
+func add_dropped_rock(hit: Vector3, normal: Vector3) -> void:
 	var radius := _rng.randf_range(0.45, 0.75)
+	var height := radius * DROPPED_HEIGHT_RATIO
 	dropped_rocks += 1
-	if normal.y > 0.5:
-		return _add_rock(Vector2(hit.x, hit.z), radius, hit.y - radius * 0.35, radius * 1.3, BOULDER_PATHS)
-	var outward := Vector2(normal.x, normal.z).normalized()
-	return _add_rock(Vector2(hit.x, hit.z) + outward * radius * 0.5, radius, hit.y - radius * 0.6, radius * 1.2, BOULDER_PATHS)
+	var rock := _make_rock(radius, height, BOULDER_PATHS, 0.0)
+	rock.name = "Rock"
+	var meshes: Array[MeshInstance3D] = []
+	_collect_meshes(rock, meshes)
+	rock.position -= rock.transform * _rock_bounds(meshes).get_center()
+	var points := PackedVector3Array()
+	for mesh in meshes:
+		if not _hull_points.has(mesh.mesh):
+			_hull_points[mesh.mesh] = (mesh.mesh.create_convex_shape(true, true) as ConvexPolygonShape3D).points
+		for point: Vector3 in _hull_points[mesh.mesh]:
+			points.append(rock.transform * (mesh.transform * point))
+	var hull := ConvexPolygonShape3D.new()
+	hull.points = points
+	var shape := CollisionShape3D.new()
+	shape.shape = hull
+	var body := RigidBody3D.new()
+	body.name = "FallingRock"
+	body.mass = ROCK_DENSITY_KG_M3 * TAU / 3.0 * radius * radius * height
+	body.continuous_cd = true
+	body.physics_material_override = PhysicsMaterial.new()
+	body.physics_material_override.friction = ROCK_FRICTION
+	body.physics_material_override.bounce = ROCK_BOUNCE
+	body.add_child(shape)
+	body.add_child(rock)
+	_host.add_child(body)
+	body.global_position = hit + normal * (maxf(radius, height * 0.5) + DROP_CLEARANCE_M)
+	_falling[body] = 0.0
+
+
+func settle_rocks(delta: float, frozen: bool) -> Array[MeshInstance3D]:
+	var settled: Array[MeshInstance3D] = []
+	for body: RigidBody3D in _falling.keys():
+		body.freeze = frozen
+		if frozen:
+			continue
+		_falling[body] += delta
+		if not body.sleeping and _falling[body] < SETTLE_TIMEOUT_S:
+			continue
+		_falling.erase(body)
+		var rock := body.get_node("Rock") as Node3D
+		var pose := rock.global_transform
+		body.remove_child(rock)
+		_host.add_child(rock)
+		rock.global_transform = pose
+		body.queue_free()
+		settled.append_array(_anchor_rock(rock))
+	return settled
+
+
+func falling_rocks() -> int:
+	return _falling.size()
 
 
 func _add_rock(point: Vector2, radius: float, base: float, height: float, paths: Array = ROCK_PATHS, tilt_rad := 0.0) -> Array[MeshInstance3D]:
+	var rock := _make_rock(radius, height, paths, tilt_rad)
+	rock.position += Vector3(point.x, base, point.y)
+	_host.add_child(rock)
+	return _anchor_rock(rock)
+
+
+func _make_rock(radius: float, height: float, paths: Array, tilt_rad: float) -> Node3D:
 	var scene := load(paths[_rng.randi_range(0, paths.size() - 1)]) as PackedScene
 	var rock := scene.instantiate() as Node3D
 	var meshes: Array[MeshInstance3D] = []
 	_collect_meshes(rock, meshes)
-	var bounds := AABB()
-	for i in meshes.size():
-		var box := meshes[i].transform * meshes[i].get_aabb()
-		bounds = box if i == 0 else bounds.merge(box)
+	var bounds := _rock_bounds(meshes)
 	var scale := Vector3(radius * 2.0 / maxf(bounds.size.x, 0.01), height / maxf(bounds.size.y, 0.01), radius * 2.0 / maxf(bounds.size.z, 0.01))
 	rock.scale = scale
 	rock.rotation.y = _rng.randf_range(0.0, TAU)
 	if tilt_rad > 0.0:
 		rock.rotation.x = _rng.randf_range(-tilt_rad, tilt_rad)
 		rock.rotation.z = _rng.randf_range(-tilt_rad, tilt_rad)
-	rock.position = Vector3(point.x, base - bounds.position.y * scale.y, point.y)
+	rock.position = Vector3(0.0, -bounds.position.y * scale.y, 0.0)
 	for mesh in meshes:
 		for surface in mesh.mesh.get_surface_count():
 			var original := mesh.get_active_material(surface) as StandardMaterial3D
@@ -518,7 +592,12 @@ func _add_rock(point: Vector2, radius: float, base: float, height: float, paths:
 				material.set_shader_parameter("albedo_tint", original.albedo_color)
 			mesh.set_surface_override_material(surface, material)
 			materials.append(material)
-	_host.add_child(rock)
+	return rock
+
+
+func _anchor_rock(rock: Node3D) -> Array[MeshInstance3D]:
+	var meshes: Array[MeshInstance3D] = []
+	_collect_meshes(rock, meshes)
 	for mesh in meshes:
 		if not _collision_shapes.has(mesh.mesh):
 			_collision_shapes[mesh.mesh] = mesh.mesh.create_trimesh_shape()
@@ -529,6 +608,14 @@ func _add_rock(point: Vector2, radius: float, base: float, height: float, paths:
 		body.add_child(shape)
 	field.obstacle_meshes.append_array(meshes)
 	return meshes
+
+
+func _rock_bounds(meshes: Array[MeshInstance3D]) -> AABB:
+	var bounds := AABB()
+	for i in meshes.size():
+		var box := meshes[i].transform * meshes[i].get_aabb()
+		bounds = box if i == 0 else bounds.merge(box)
+	return bounds
 
 
 func _collect_meshes(node: Node, meshes: Array[MeshInstance3D]) -> void:
@@ -562,11 +649,12 @@ func _build_grass() -> void:
 				if _rng.randf() > edge_density:
 					continue
 				var edge := (field as TorrentLandscape).channel_edge_m(point) if field is TorrentLandscape \
-					else absf(point.x - _center_x(point.y)) - _half_width(point.y)
-				var band := Vector2(0.6, 18.0) if field is TorrentLandscape else Vector2(2.0, 9.0)
+					else ((field as CascadeLandscape).channel_edge_m(point) if field is CascadeLandscape \
+					else absf(point.x - _center_x(point.y)) - _half_width(point.y))
+				var band := Vector2(0.6, 18.0) if field is TorrentLandscape or field is CascadeLandscape else Vector2(2.0, 9.0)
 				if edge < band.x or edge > band.y or _rng.randf() < 0.14 + 0.1 * sin(point.x * 0.7 + point.y * 0.4):
 					continue
-				if field.waterfall != null and absf(point.y - field.waterfall.crest_z_m) < 4.0:
+				if field is WaterfallLandscape and absf(point.y - WaterfallLandscape.CREST_Z_M) < 4.0:
 					continue
 				if _bed(point) < field.sample_height(point, 0.65) + 0.08:
 					continue
@@ -613,9 +701,3 @@ func _center_x(z: float) -> float:
 
 func _half_width(z: float) -> float:
 	return RiverLandscape.half_width(z) if field is RiverLandscape else field.channel_half_width(z)
-
-
-func _inside_cliff_gap(point: Vector2) -> bool:
-	return field.waterfall != null and field.waterfall.is_vertical() \
-		and absf(point.x) <= field.domain_m.x * 0.5 \
-		and absf(point.y - field.waterfall.crest_z_m) <= 0.125

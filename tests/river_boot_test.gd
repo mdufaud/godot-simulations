@@ -52,35 +52,36 @@ func _run() -> void:
 	_check(demo.river.submit_body_queries(PackedVector3Array([Vector3(0.0, 0.1, 0.0)])),
 		"River scene switch test must queue a CPU body-query batch")
 	demo._menu_builder.scene_action.pressed.emit()
-	_check(demo.scene_index == 1 and demo.river.field.waterfall.angle_degrees == 50.0
+	_check(demo.scene_index == 1 and demo.river.field.angle_degrees == 50.0
 		and demo.river.waterfall != null,
 		"Scene selector must install the 50-degree waterfall through the player controller")
 	_check(demo.river.query_generation > generation and demo.river.take_query_batch().is_empty(),
 		"Changing river scenes must cancel a pending body-query batch")
-	var scene_key := InputEventKey.new()
-	scene_key.physical_keycode = KEY_4
-	scene_key.pressed = true
-	demo.menu._unhandled_input(scene_key)
-	_check(demo.scene_index == 2 and demo.river.field.waterfall.angle_degrees == 90.0
-		and actions.get_child_count() == 5 and demo._menu_builder.scene_option.selected == 2,
-		"Scene selector must install the vertical waterfall and retain the native action bar")
+	demo._menu_builder.angle_slider.value = 67.5
+	_check(is_equal_approx(demo.river.field.angle_degrees, 67.5) and demo.river.field.spills
+		and demo.river.waterfall != null and demo._menu_builder.angle_slider.editable,
+		"Runtime angle control must rebuild terrain, solver and spill rendering for an intermediate incline")
+	demo._menu_builder.angle_slider.value = 90.0
+	_check(is_equal_approx(demo.river.field.angle_degrees, 90.0) and demo.river.waterfall != null,
+		"Runtime angle control must rebuild the vertical endpoint")
 	var height: float = demo.config.water_level_m + 6.0
 	var age := sqrt(2.0 * (height - 3.0) / 9.81)
 	_check(demo.river.submit_body_queries(PackedVector3Array([Vector3(0.0, height, 8.0),
 		Vector3(0.0, demo.config.water_level_m, -4.0), Vector3(0.0, 3.0, 4.0 - demo.config.speed_m_s * age),
-		Vector3(0.0, 9.0, -4.0)])), "Guided waterfall must accept pool, curtain and air queries")
+		Vector3(0.0, 9.0, -4.0)])), "Guided waterfall must accept pool, sheet and air queries")
 	var contacts: Dictionary = demo.river.take_query_batch()
-	_check(contacts.values[7] == 1.0 and contacts.values[19] == 1.0 and contacts.values[31] == 3.0
+	_check(contacts.values[7] == 1.0 and contacts.values[19] == 1.0 and contacts.values[31] == 0.0
 		and contacts.values[43] == 0.0,
-		"Guided waterfall must distinguish both pools, the detached sheet and dry air")
-	demo._menu_builder.angle_slider.value = 67.5
-	_check(is_equal_approx(demo.river.field.waterfall.angle_degrees, 67.5)
-		and demo.river.waterfall.material.get_shader_parameter("free_fall") == false
-		and demo._menu_builder.angle_slider.editable,
-		"Runtime angle control must rebuild terrain, solver and material for an intermediate incline")
-	demo._menu_builder.angle_slider.value = 90.0
-	_check(demo.river.waterfall.material.get_shader_parameter("free_fall") == true,
-		"Runtime angle control must restore ballistic transport at the vertical endpoint")
+		"Guided waterfall must find both pools and no water in the air")
+	var scene_key := InputEventKey.new()
+	scene_key.physical_keycode = KEY_4
+	scene_key.pressed = true
+	demo.menu._unhandled_input(scene_key)
+	_check(demo.scene_index == demo.CASCADE_SCENE and demo.river.field.get_script() == demo.CascadeLandscape
+		and demo.river.field.spills and demo.river.waterfall != null and demo.river.reflection_scale == 0.0
+		and not demo._menu_builder.angle_slider.editable and demo._menu_builder.mist_slider.editable
+		and actions.get_child_count() == 5 and demo._menu_builder.scene_option.selected == demo.CASCADE_SCENE,
+		"Scene selector must install the cascades, spilling with no planar reflection, and retain the native action bar")
 	demo._menu_builder.scene_action.pressed.emit()
 	_check(demo.scene_index == demo.STEEP_SCENE and demo.river.waterfall == null
 		and demo.river.swe_window_m == Vector2.ZERO and demo.river.swe_range_m == 0.0
@@ -222,6 +223,19 @@ func _run() -> void:
 		and is_equal_approx(float(demo.river.water_material.get_shader_parameter("surface_detail")), 1.0)
 		and is_equal_approx(float(demo._scenery.materials[0].get_shader_parameter("water_detail")), 1.0),
 		"Normal Ultra boot must apply detailed water and caustics without temporal foam trails")
+	demo.waterfall_angles[demo.WATERFALL_SCENE] = 70.0
+	demo.set_scene(demo.CASCADE_SCENE)
+	manager.call("go_to_menu")
+	await process_frame
+	await process_frame
+	await manager.call("load_demo", "river_demo")
+	await process_frame
+	await process_frame
+	demo = current_scene as Node3D
+	_check(demo.scene_index == demo.CASCADE_SCENE and demo.river.field.get_script() == demo.CascadeLandscape
+		and demo.river.reflection_scale == 0.0 and demo._menu_builder.scene_option.selected == demo.CASCADE_SCENE
+		and is_equal_approx(demo.waterfall_angles[demo.WATERFALL_SCENE], 70.0),
+		"Player re-entry must restore the last river scene and waterfall angle")
 	manager.call("go_to_menu")
 	await process_frame
 	await process_frame

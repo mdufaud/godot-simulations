@@ -35,6 +35,10 @@ var build_foam := false
 var foam_cap := 0
 var foam_tex_width := 1024
 var foam_billboard_size := 0.05
+## Shifts the three prepass layers for a host scene that already draws on layers 2, 4 or 8.
+var layer_shift := 0
+## Particles whose attribute is at or below this value are not drawn.
+var cull_attribute_max := -1e20
 
 var mm: MultiMesh
 var foam_mm: MultiMesh
@@ -76,7 +80,7 @@ func start() -> void:
 	if domain_aabb.size == Vector3(16.0, 16.0, 16.0):
 		domain_aabb = AABB(config.domain_origin, config.domain_size_m)
 	assert(camera != null, "ScreenSpaceFluidRenderer.camera must be set before start()")
-	camera.cull_mask = 0xFFFFF & ~(LAYER_DEPTH | LAYER_THICK | LAYER_FOAM)
+	camera.cull_mask &= ~((LAYER_DEPTH | LAYER_THICK | LAYER_FOAM) << layer_shift)
 	mm = _build_multimesh()
 	_setup_prepass()
 	_setup_filters()
@@ -315,17 +319,19 @@ func _setup_prepass() -> void:
 	thick_mat.shader = load("res://shaders/fluid/fluid_thickness.gdshader")
 	thick_mat.set_shader_parameter("tex_width", tex_width)
 	thick_mat.set_shader_parameter("particle_radius", radius)
+	depth_mat.set_shader_parameter("cull_attribute_max", cull_attribute_max)
+	thick_mat.set_shader_parameter("cull_attribute_max", cull_attribute_max)
 
 	depth_mmi = MultiMeshInstance3D.new()
 	depth_mmi.multimesh = mm
 	depth_mmi.material_override = depth_mat
-	depth_mmi.layers = LAYER_DEPTH
+	depth_mmi.layers = LAYER_DEPTH << layer_shift
 	depth_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(depth_mmi)
 	thick_mmi = MultiMeshInstance3D.new()
 	thick_mmi.multimesh = mm
 	thick_mmi.material_override = thick_mat
-	thick_mmi.layers = LAYER_THICK
+	thick_mmi.layers = LAYER_THICK << layer_shift
 	thick_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	add_child(thick_mmi)
 
@@ -338,7 +344,7 @@ func _setup_prepass() -> void:
 	depth_vp.positional_shadow_atlas_size = 0
 	depth_vp.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(depth_vp)
-	depth_cam = _make_prepass_cam(LAYER_DEPTH)
+	depth_cam = _make_prepass_cam(LAYER_DEPTH << layer_shift)
 	depth_vp.add_child(depth_cam)
 	depth_cam.current = true
 
@@ -350,7 +356,7 @@ func _setup_prepass() -> void:
 	thick_vp.positional_shadow_atlas_size = 0
 	thick_vp.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(thick_vp)
-	thick_cam = _make_prepass_cam(LAYER_THICK)
+	thick_cam = _make_prepass_cam(LAYER_THICK << layer_shift)
 	thick_vp.add_child(thick_cam)
 	thick_cam.current = true
 
@@ -466,7 +472,7 @@ func _setup_foam_render() -> void:
 	foam_mmi = MultiMeshInstance3D.new()
 	foam_mmi.multimesh = foam_mm
 	foam_mmi.material_override = foam_mat
-	foam_mmi.layers = LAYER_FOAM
+	foam_mmi.layers = LAYER_FOAM << layer_shift
 	foam_mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	foam_mmi.custom_aabb = AABB(Vector3(-1e4, -1e4, -1e4), Vector3(2e4, 2e4, 2e4))
 	foam_mmi.visible = false
@@ -483,7 +489,7 @@ func _setup_foam_render() -> void:
 	foam_vp.positional_shadow_atlas_size = 0
 	foam_vp.msaa_3d = Viewport.MSAA_DISABLED
 	add_child(foam_vp)
-	foam_cam = _make_prepass_cam(LAYER_FOAM)
+	foam_cam = _make_prepass_cam(LAYER_FOAM << layer_shift)
 	foam_vp.add_child(foam_cam)
 	foam_cam.current = true
 

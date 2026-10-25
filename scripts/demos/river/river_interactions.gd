@@ -8,7 +8,7 @@ var camera: Camera3D
 var crates: Array[RigidBody3D] = []
 var _slots: Array[WeakRef] = []
 var _pending := false
-var _pending_waterfall := false
+var _pending_body_query := false
 var _pending_generation := -1
 var _pending_field: RiverField
 
@@ -47,14 +47,13 @@ func _physics_process(_delta: float) -> void:
 					var body: RigidBody3D = _slots[slot].get_ref()
 					if not is_instance_valid(body):
 						continue
-					body.water_level_m = river.config.water_level_m
-					if _pending_waterfall and bool(batch.get("body", false)):
+					if _pending_body_query and bool(batch.get("body", false)):
 						var contacts := PackedFloat32Array()
 						var offset := slot * Body.PROBES.size() * 12
 						for value_index in Body.PROBES.size() * 12:
 							contacts.append(values[offset + value_index])
 						body.set_water_contacts(contacts, _pending_field)
-					elif not _pending_waterfall and not bool(batch.get("body", false)):
+					elif not _pending_body_query and not bool(batch.get("body", false)):
 						var samples := PackedVector4Array()
 						var offset := slot * Body.PROBES.size() * 4
 						for index in Body.PROBES.size():
@@ -62,32 +61,32 @@ func _physics_process(_delta: float) -> void:
 							samples.append(Vector4(values[sample_offset], values[sample_offset + 1], values[sample_offset + 2], values[sample_offset + 3]))
 						body.set_water_samples(samples)
 			_reset_pending()
-	var waterfall := river.field.waterfall != null
+	# Spilling fields keep pools at several heights over the same ground, so bodies query the water in 3D.
+	var body_query := river.field.spills
 	var body_points := PackedVector3Array()
 	var points := PackedVector2Array()
 	var slots: Array[WeakRef] = []
 	for body in crates:
 		body.freeze = river.frozen
-		body.water_level_m = river.config.water_level_m
 		for point in body.probe_positions():
-			if waterfall:
+			if body_query:
 				body_points.append(point)
 			else:
 				points.append(Vector2(point.x, point.z))
 		slots.append(weakref(body))
 	if not _pending:
-		var submitted := river.submit_body_queries(body_points) if waterfall else river.submit_queries(points)
+		var submitted := river.submit_body_queries(body_points) if body_query else river.submit_queries(points)
 		if submitted:
 			_slots = slots
 			_pending = true
-			_pending_waterfall = waterfall
+			_pending_body_query = body_query
 			_pending_generation = river.query_generation
 			_pending_field = river.field
 
 
 func _reset_pending() -> void:
 	_pending = false
-	_pending_waterfall = false
+	_pending_body_query = false
 	_pending_generation = -1
 	_pending_field = null
 	_slots.clear()

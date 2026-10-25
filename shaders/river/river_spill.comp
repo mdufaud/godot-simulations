@@ -1,0 +1,215 @@
+#version 450
+
+// Water that spilled over a steep bed edge, carried as ballistic particles until it lands back on the grid.
+layout(local_size_x = 64) in;
+
+layout(rgba32f, set = 0, binding = 0) uniform readonly image2D terrain;
+layout(rgba32f, set = 0, binding = 1) uniform readonly image2D state;
+// Per particle: position + volume units, velocity + age, emission cell index + foam share of the water it left (SLID
+// once it slid down a face) + height it last left the ground at + emission height.
+layout(std430, set = 0, binding = 2) buffer Particles { vec4 data[]; } particles;
+layout(std430, set = 0, binding = 3) buffer SpillDeposits { int deposits[]; } spill_deposits;
+layout(std430, set = 0, binding = 4) buffer SpillOutflow { vec4 outflow[]; } spill_outflow;
+// Words: 0 slot counter, 2-3 emitted, 4-5 deposited, 6-7 left the domain, 8-9 overwritten (low, high),
+// 12 spill slope, 13 volume unit in m3, 14 emitted particle count.
+layout(std430, set = 0, binding = 5) buffer SpillState { uint words[]; } spill;
+// Drawn particles: position and the drop its look reads, 0 when unused or left out of a thin stream. That is the
+// free-fall drop since the particle last left the ground, (spray.z / units)^spray.w longer for a stream thinner than
+// the reference, plus its foam share of the break-up length breakup.x as foamy water leaves already aerated; for water
+// broken up sliding down a face, breakup.x plus its whole descent. A particle is drawn up to impact.w lower until it
+// has dropped that far from its lip, so a fresh sphere does not bulge over the water it left.
+layout(rgba32f, set = 0, binding = 6) uniform writeonly image2D positions;
+// Per impact tile: water landings then hits on dry ground, each as weight (volume units over impact.z),
+// weighted x and z velocity, weighted height. A landing weighs in by its drop, ramping over spray.xy metres.
+layout(std430, set = 0, binding = 7) buffer Impacts { int tiles[]; } impacts;
+layout(push_constant, std430) uniform Params {
+    vec4 domain;
+    vec4 grid;
+    vec4 motion;
+    vec4 impact;
+    vec4 spray;
+    vec4 breakup;
+} params;
+
+const float WET_DEPTH_M = 0.004;
+// The drawn drop starts above zero so a particle that just left the ground is not taken for an unused slot.
+const float DROP_OFFSET_M = 0.01;
+// A stream this many times thinner than the reference already breaks up as soon as the thinnest ones do.
+const float MAX_THINNING = 64.0;
+// Down to this share of the reference a stream is drawn whole; a thinner one covers less of its path, so only that
+// share of its particles is drawn and a trickle shows as scattered drops instead of a column as thick as a sheet.
+const float WHOLE_STREAM_SHARE = 0.25;
+// Above any foam share: marks water that slid down a face.
+const float SLID = 2.0;
+
+void ledger_add(int index, uint units) {
+    uint old = atomicAdd(spill.words[index], units);
+    if (old > 0xFFFFFFFFu - units) atomicAdd(spill.words[index + 1], 1u);
+}
+
+float bed_at(ivec2 cell) {
+    return imageLoad(terrain, clamp(cell, ivec2(0), ivec2(params.grid.xy) - 1)).x;
+}
+
+// Bilinear bed height and its gradient at a position in cell units.
+vec3 ground(vec2 cell) {
+    vec2 c = cell - 0.5;
+    ivec2 lo = ivec2(floor(c));
+    vec2 f = c - vec2(lo);
+    float a = bed_at(lo);
+    float b = bed_at(lo + ivec2(1, 0));
+    float d = bed_at(lo + ivec2(0, 1));
+    float e = bed_at(lo + ivec2(1, 1));
+    float height = mix(mix(a, b, f.x), mix(d, e, f.x), f.y);
+    vec2 gradient = vec2(mix(b - a, e - d, f.y), mix(d - a, e - b, f.x)) / params.domain.z;
+    return vec3(height, gradient);
+}
+
+void record_impact(vec3 position, vec3 velocity, float units, int kind) {
+    int columns = int(ceil(params.grid.x * params.domain.z / params.impact.x));
+    ivec2 tile = ivec2(floor((position.xz - params.domain.xy) / params.impact.x));
+    int base = (tile.y * columns + tile.x) * 8 + kind * 4;
+    float weight = units / params.impact.z;
+    if (weight < 0.5) return;
+    atomicAdd(impacts.tiles[base], int(round(weight)));
+    atomicAdd(impacts.tiles[base + 1], int(round(weight * velocity.x)));
+    atomicAdd(impacts.tiles[base + 2], int(round(weight * velocity.z)));
+    atomicAdd(impacts.tiles[base + 3], int(round(weight * position.y)));
+}
+
+void deposit_cell(ivec2 cell, float units, vec3 velocity) {
+    int index = cell.y * int(params.grid.x) + cell.x;
+    atomicAdd(spill_deposits.deposits[index * 4], int(units));
+    atomicAdd(spill_deposits.deposits[index * 4 + 1], int(round(units * velocity.x)));
+    atomicAdd(spill_deposits.deposits[index * 4 + 2], int(round(units * velocity.z)));
+}
+
+// Bilinear share over the four cells around the particle, among those whose bed is under the landing surface:
+// a one-cell deposit raises a spike, and water never lands on top of the wall it fell from.
+void deposit(vec2 cell_position, float surface, float units, vec3 velocity) {
+    vec2 c = cell_position - 0.5;
+    ivec2 lo = ivec2(floor(c));
+    vec2 f = c - vec2(lo);
+    vec4 share = vec4(0.0);
+    int largest = 0;
+    for (int k = 0; k < 4; ++k) {
+        ivec2 corner = ivec2(k & 1, k >> 1);
+        ivec2 n = lo + corner;
+        bool inside = all(greaterThanEqual(n, ivec2(0))) && all(lessThan(n, ivec2(params.grid.xy)));
+        vec2 w = mix(1.0 - f, f, vec2(corner));
+        share[k] = inside && bed_at(n) <= surface ? w.x * w.y : 0.0;
+        if (share[k] > share[largest]) largest = k;
+    }
+    float total = share.x + share.y + share.z + share.w;
+    float left = units;
+    for (int k = 0; k < 4; ++k) {
+        if (k == largest || share[k] <= 0.0) continue;
+        float part = floor(units * share[k] / total);
+        left -= part;
+        if (part > 0.0) deposit_cell(lo + ivec2(k & 1, k >> 1), part, velocity);
+    }
+    deposit_cell(lo + ivec2(largest & 1, largest >> 1), left, velocity);
+    ledger_add(4, uint(units));
+}
+
+void integrate(uint i) {
+    vec4 body = particles.data[i * 3u];
+    if (body.w <= 0.0) return;
+    vec4 motion = particles.data[i * 3u + 1u];
+    float dt = params.grid.z;
+    motion.y -= params.domain.w * dt;
+    body.xyz += motion.xyz * dt;
+    motion.w += dt;
+    vec2 cell_position = (body.xz - params.domain.xy) / params.domain.z;
+    ivec2 cell = ivec2(floor(cell_position));
+    if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, ivec2(params.grid.xy)))) {
+        ledger_add(6, uint(body.w));
+        particles.data[i * 3u].w = 0.0;
+        return;
+    }
+    float depth = imageLoad(state, cell).x;
+    bool wet = depth > WET_DEPTH_M && body.y <= bed_at(cell) + depth;
+    bool landed = wet || motion.w > params.motion.y;
+    vec3 bed = ground(cell_position);
+    if (!landed && body.y <= bed.x) {
+        vec3 normal = normalize(vec3(-bed.y, 1.0, -bed.z));
+        if (-dot(motion.xyz, normal) > params.impact.y) record_impact(body.xyz, motion.xyz, body.w, 1);
+        // Gentle ground keeps the water; a face steeper than the spill slope lets it slide down.
+        if (length(bed.yz) < uintBitsToFloat(spill.words[12])) {
+            landed = true;
+        } else {
+            body.y = bed.x;
+            motion.xyz -= normal * min(dot(motion.xyz, normal), 0.0);
+            motion.xyz *= exp(-params.motion.x * dt);
+            particles.data[i * 3u + 2u].yz = vec2(SLID, body.y);
+        }
+    }
+    if (landed) {
+        float drop = particles.data[i * 3u + 2u].z - body.y;
+        if (wet) record_impact(body.xyz, motion.xyz, body.w * smoothstep(params.spray.x, params.spray.y, drop), 0);
+        deposit(cell_position, bed_at(cell) + depth, body.w, motion.xyz);
+        particles.data[i * 3u].w = 0.0;
+        return;
+    }
+    particles.data[i * 3u] = body;
+    particles.data[i * 3u + 1u] = motion;
+}
+
+uint hash(uint value) {
+    value = value * 747796405u + 2891336453u;
+    value = ((value >> ((value >> 28u) + 4u)) ^ value) * 277803737u;
+    return (value >> 22u) ^ value;
+}
+
+// One particle per spilling cell and emission period, in whole volume units; the remainder waits for the next one.
+// Each leaves with a random sideways share motion.w of its speed: the sheet is never issued perfectly smooth.
+void emit(uint index) {
+    vec4 sums = spill_outflow.outflow[index * 2u];
+    if (sums.x <= 0.0) return;
+    float unit = uintBitsToFloat(spill.words[13]);
+    float units = floor(sums.x / unit);
+    if (units < 1.0) return;
+    vec4 outlets = spill_outflow.outflow[index * 2u + 1u];
+    float kept = 1.0 - units * unit / sums.x;
+    spill_outflow.outflow[index * 2u] = sums * kept;
+    spill_outflow.outflow[index * 2u + 1u] = outlets * kept;
+    uint slot = atomicAdd(spill.words[0], 1u) % uint(params.grid.w);
+    float replaced = particles.data[slot * 3u].w;
+    if (replaced > 0.0) ledger_add(8, uint(replaced));
+    vec3 position = vec3(outlets.x, outlets.z, outlets.y) / sums.x;
+    particles.data[slot * 3u] = vec4(position, units);
+    vec2 velocity = sums.yz / sums.x;
+    uint seed = hash(spill.words[14] + index * 9781u);
+    float angle = float(seed & 0xFFFFu) / 65535.0 * 6.2831853;
+    float share = float(seed >> 16u) / 65535.0 * params.motion.w;
+    velocity += vec2(cos(angle), sin(angle)) * share * length(velocity);
+    particles.data[slot * 3u + 1u] = vec4(velocity.x, 0.0, velocity.y, 0.0);
+    vec4 source = imageLoad(state, ivec2(int(index % uint(params.grid.x)), int(index / uint(params.grid.x))));
+    particles.data[slot * 3u + 2u] = vec4(float(index), clamp(source.w / max(source.x, WET_DEPTH_M), 0.0, 1.0), position.y, position.y);
+    ledger_add(2, uint(units));
+    atomicAdd(spill.words[14], 1u);
+}
+
+void draw(uint i) {
+    int width = imageSize(positions).x;
+    vec4 body = particles.data[i * 3u];
+    vec4 origin = particles.data[i * 3u + 2u];
+    float drop = max(origin.z - body.y, 0.0);
+    vec3 drawn = body.xyz - vec3(0.0, max(params.impact.w - (origin.w - body.y), 0.0), 0.0);
+    float thinning = body.w > 0.0 ? pow(clamp(params.spray.z / body.w, 1.0, MAX_THINNING), params.spray.w) : 1.0;
+    float look = origin.y >= SLID ? params.breakup.x + max(origin.w - body.y, 0.0) : drop * thinning + origin.y * params.breakup.x;
+    float drawn_share = params.spray.z > 0.0 ? body.w / (params.spray.z * WHOLE_STREAM_SHARE) : 1.0;
+    bool shown = body.w > 0.0 && float(hash(i) & 0xFFFFu) / 65535.0 <= drawn_share;
+    imageStore(positions, ivec2(int(i) % width, int(i) / width), shown ? vec4(drawn, look + DROP_OFFSET_M) : vec4(0.0));
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (params.motion.z < 0.5) {
+        if (i < uint(params.grid.w)) integrate(i);
+    } else if (params.motion.z < 1.5) {
+        if (i < uint(params.grid.x * params.grid.y)) emit(i);
+    } else if (i < uint(params.grid.w)) {
+        draw(i);
+    }
+}

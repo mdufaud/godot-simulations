@@ -22,17 +22,17 @@ var live: bool:
 	get: return active and _running
 var materials: Array[ShaderMaterial] = []
 var available := false
-var enabled := true
+## A spilling field always runs live: its falls are drawn from the particles this solver runs.
+var enabled := true:
+	set(value):
+		enabled = value or (field != null and field.spills)
 var profiling := false
 var initialized := false
 var solver := Solver.new()
 var surface_texture := Texture2DRD.new()
 var foam_texture := Texture2DRD.new()
 var terrain_texture := Texture2DRD.new()
-var waterfall_surface := Texture2DRD.new()
-var waterfall_velocity := Texture2DRD.new()
-var waterfall_clock := Texture2DRD.new()
-var waterfall_boundary := Texture2DRD.new()
+var spill_texture := Texture2DRD.new()
 var _spray: GPUParticles3D
 var _spray_material: ShaderMaterial
 var _reset := true
@@ -64,7 +64,7 @@ func move_domain() -> void:
 
 
 func _windowed() -> bool:
-	return window_m != Vector2.ZERO and field.waterfall == null
+	return window_m != Vector2.ZERO and not field.spills
 
 
 func _region() -> Rect2:
@@ -94,7 +94,7 @@ func _update_lod(frame_s: float) -> void:
 		region_m = region
 		solver.region_m = region
 		_bind()
-	var near := range_m <= 0.0 or field.waterfall != null or _water_within_range()
+	var near := range_m <= 0.0 or field.spills or _water_within_range()
 	if near and not _running:
 		_running = true
 		_reset = true
@@ -156,11 +156,7 @@ func tick(step_s: float, frame_s: float, time_s: float) -> void:
 		surface_texture.texture_rd_rid = status.surface
 		foam_texture.texture_rd_rid = status.foam
 		terrain_texture.texture_rd_rid = status.terrain
-		if status.has("waterfall_surface"):
-			waterfall_surface.texture_rd_rid = status.waterfall_surface
-			waterfall_velocity.texture_rd_rid = status.waterfall_velocity
-			waterfall_clock.texture_rd_rid = status.waterfall_clock
-			waterfall_boundary.texture_rd_rid = status.waterfall_boundary
+		spill_texture.texture_rd_rid = status.spill
 		_bind()
 		state_changed.emit()
 	if not initialized:
@@ -189,19 +185,16 @@ func stop() -> void:
 	initialized = false
 	for material in materials:
 		material.set_shader_parameter("swe_enabled", false)
-		material.set_shader_parameter("waterfall_enabled", false)
-		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "waterfall_surface", "waterfall_velocity", "waterfall_clock", "waterfall_boundary"]:
+		material.set_shader_parameter("swe_spill_enabled", false)
+		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "swe_spill"]:
 			material.set_shader_parameter(parameter, null)
 	if _spray_material != null:
-		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "waterfall_surface", "waterfall_velocity", "waterfall_clock", "waterfall_boundary"]:
+		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "swe_spill"]:
 			_spray_material.set_shader_parameter(parameter, null)
 	surface_texture.texture_rd_rid = RID()
 	foam_texture.texture_rd_rid = RID()
 	terrain_texture.texture_rd_rid = RID()
-	waterfall_surface.texture_rd_rid = RID()
-	waterfall_velocity.texture_rd_rid = RID()
-	waterfall_clock.texture_rd_rid = RID()
-	waterfall_boundary.texture_rd_rid = RID()
+	spill_texture.texture_rd_rid = RID()
 	solver.stop()
 	for child in get_children():
 		child.free()
@@ -217,12 +210,9 @@ func _bind() -> void:
 		material.set_shader_parameter("swe_surface", surface_texture)
 		material.set_shader_parameter("swe_foam", foam_texture)
 		material.set_shader_parameter("swe_terrain", terrain_texture)
-		material.set_shader_parameter("waterfall_surface", waterfall_surface)
-		material.set_shader_parameter("waterfall_velocity", waterfall_velocity)
-		material.set_shader_parameter("waterfall_clock", waterfall_clock)
-		material.set_shader_parameter("waterfall_boundary", waterfall_boundary)
-		material.set_shader_parameter("waterfall_enabled", field.waterfall != null)
-		material.set_shader_parameter("waterfall_clock_enabled", field.waterfall != null and active)
+		material.set_shader_parameter("swe_spill", spill_texture)
+		material.set_shader_parameter("swe_spill_enabled", field.spills and active)
+		material.set_shader_parameter("swe_spill_slope", Solver.SPILL_SLOPE)
 		material.set_shader_parameter("swe_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
 		if material != _spray_material:
 			material.set_shader_parameter("swe_enabled", active)

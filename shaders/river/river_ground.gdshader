@@ -33,10 +33,6 @@ vec3 triplanar_weights(vec3 normal) {
 void fragment() {
 	if (river_reflection_clipped(world_position, CAMERA_VISIBLE_LAYERS)) { discard; }
 	vec2 uv = world_position.xz * 0.48;
-	if (river_waterfall && river_fall_geometry.w > 0.0
-		&& world_position.z < river_fall_geometry.z && world_position.z > river_fall_geometry.z - river_fall_geometry.w) {
-		uv.y = (world_position.z - river_fall_geometry.z) * length(river_fall_geometry.yw) / river_fall_geometry.w * 0.48;
-	}
 	float variation = sin(world_position.x * 0.9 + sin(world_position.z * 0.47));
 	float height = world_position.y - river_surface_height(world_position);
 	float vegetation = smoothstep(0.55, 1.0, height - river_plane.w + variation * 0.08);
@@ -87,9 +83,4 @@ void fragment() {
 	NORMAL = normalize(mix(NORMAL, (VIEW_MATRIX * vec4(rock_normal_world, 0.0)).xyz, rock));
 	ROUGHNESS = mix(mix(mix(texture(gravel_roughness, uv).r, texture(grass_roughness, uv * 0.9).r, vegetation), rock_rough, rock), 0.22, wet * 0.7);
 	SPECULAR = mix(0.3, 0.55, wet);
-	if (river_waterfall && river_fall_geometry.w > 0.0 && abs(world_position.x) < river_fall_geometry.x * 0.5
-		&& world_position.z < river_fall_geometry.z && world_position.z > river_fall_geometry.z - river_fall_geometry.w) {
-		ROUGHNESS = max(ROUGHNESS, 0.58);
-		SPECULAR = 0.18;
-	}
 }

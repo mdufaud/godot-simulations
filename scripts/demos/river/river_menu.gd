@@ -1,6 +1,6 @@
 extends RefCounted
 
-const SCENES := ["River", "Waterfall 50°", "Waterfall 90°", "Steep channel"]
+const SCENES := ["River", "Waterfall 50°", "Cascades", "Steep channel"]
 
 var preset_option: OptionButton
 var scene_option: OptionButton
@@ -76,7 +76,7 @@ func build(menu: SimMenu, controller: Node, presets: Array) -> void:
 	sync_scene(controller.scene_index, controller.waterfall_angles)
 	sync_flow(controller.river.swe)
 	menu.settings_reset.connect(func():
-		controller.waterfall_angles = PackedFloat32Array([0.0, 50.0, 90.0])
+		controller.waterfall_angles = PackedFloat32Array([0.0, 50.0])
 		controller.set_scene(0)
 		sync_scene(0, controller.waterfall_angles)
 		controller.apply_preset(1))
@@ -97,9 +97,9 @@ func sync_scene(index: int, angles: PackedFloat32Array) -> void:
 		scene_option.set_item_text(i, "Waterfall %.1f°" % angles[i])
 	scene_option.select(index)
 	var steep := index == SCENES.size() - 1
-	angle_slider.editable = index > 0 and not steep
-	mist_slider.editable = index > 0 and not steep
-	rocks_toggle.disabled = index == 0 or steep
+	angle_slider.editable = index == 1
+	mist_slider.editable = index == 1 or index == 2
+	rocks_toggle.disabled = index != 1
 	drop_action.disabled = steep
 	drop_action.tooltip_text = "Drop a boulder where the view is centred · Shift+click drops one under the cursor"
 	grade_option.disabled = not steep
@@ -113,6 +113,6 @@ func sync_scene(index: int, angles: PackedFloat32Array) -> void:
 func sync_flow(swe: Node3D) -> void:
 	var live: bool = swe.active
 	_menu.set_action_label(flow_action, "SWE" if live else "Guided flow")
-	flow_action.disabled = not swe.available
+	flow_action.disabled = not swe.available or swe.field.spills
 	flow_action.tooltip_text = "Compare live flow around the rocks with guided flow"
 	crate_action.tooltip_text = "Throw a floating crate into the current"

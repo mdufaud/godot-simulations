@@ -66,8 +66,6 @@ func start() -> void:
 		return
 	assert(config != null and field != null and camera != null and scene_world != null)
 	var error := config.validate()
-	if field.waterfall != null:
-		error += field.waterfall.validate()
 	if not error.is_empty():
 		push_error(error)
 		return
@@ -76,12 +74,6 @@ func start() -> void:
 	water_material.shader = WaterShader
 	water_material.set_shader_parameter("domain_m", field.domain_m)
 	water_material.set_shader_parameter("domain_origin_m", field.origin_m)
-	water_material.set_shader_parameter("waterfall_enabled", field.waterfall != null)
-	if field.waterfall != null:
-		var profile := field.waterfall
-		water_material.set_shader_parameter("waterfall_geometry", Vector4(profile.width_m, profile.height_m, profile.crest_z_m, profile.run_m()))
-		water_material.set_shader_parameter("waterfall_bed_depth_m", profile.bed_depth_m)
-		water_material.set_shader_parameter("waterfall_grid", Vector3(profile.lane_count, profile.film_cells, profile.packet_capacity))
 	water_material.set_shader_parameter("micro_normal", micro_normal)
 	water_material.set_shader_parameter("foam_filaments", foam_filaments)
 	water_material.set_shader_parameter("foam_bubbles", foam_bubbles if foam_bubbles != null else foam_filaments)
@@ -130,22 +122,22 @@ func start() -> void:
 		_sync_surface())
 	_report_stage("Starting water solver")
 	swe.start()
-	if field.waterfall != null:
-		waterfall = WaterfallSystem.new()
-		waterfall.config = field.waterfall
-		waterfall.field = field
-		waterfall.water = config
-		waterfall.swe = swe
-		waterfall.turbulence_texture = _turbulence_texture
-		waterfall.reflection_layer = REFLECTION_LAYER
-		waterfall.quality_tier = waterfall_quality
-		add_child(waterfall)
-		_report_stage("Starting waterfall")
-		waterfall.start()
 	_started = true
 	set_process(true)
 	_report_stage("Baking flow map")
 	apply_config(config)
+	if field.spills:
+		# Started once the flow map is baked: the particle size follows the field's height range.
+		waterfall = WaterfallSystem.new()
+		waterfall.field = field
+		waterfall.water = config
+		waterfall.swe = swe
+		waterfall.camera = camera
+		waterfall.turbulence_texture = _turbulence_texture
+		waterfall.quality_tier = waterfall_quality
+		add_child(waterfall)
+		_report_stage("Starting waterfall")
+		waterfall.start()
 	_sync_surface()
 	process_priority = 20
 
@@ -161,8 +153,6 @@ func apply_config(value: RiverConfig) -> void:
 	if previous_level == null or not is_equal_approx(float(previous_level), config.water_level_m):
 		_bake_field()
 		_reset_frames = 2
-		if field.waterfall != null:
-			_sync_surface()
 	water_material.set_shader_parameter("water_level_m", config.water_level_m)
 	water_material.set_shader_parameter("speed_m_s", config.speed_m_s)
 	var reference_flow := field.sample_solver(field.origin_m, config.water_level_m)
@@ -173,32 +163,24 @@ func apply_config(value: RiverConfig) -> void:
 	water_material.set_shader_parameter("deep_color", config.deep_color)
 	water_material.set_shader_parameter("whitewater_strength", config.whitewater_strength)
 	water_material.set_shader_parameter("foam_amount", config.foam_amount)
-	for material in scenery_materials:
-		material.set_shader_parameter("river_fall_speed", config.speed_m_s)
-		material.set_shader_parameter("river_fall_foam", config.foam_amount)
 	if waterfall != null:
 		waterfall.apply_config(config)
 	set_reflection_enabled(_reflection_requested)
 
 
-# Call after appending rock meshes to `field.obstacle_meshes`: the solver bed, the
-# waterfall rock map and the sheet adapt without resetting the water.
+# Call after appending rock meshes to `field.obstacle_meshes`: the solver bed adapts without resetting the water.
 func obstacles_added(meshes: Array[MeshInstance3D]) -> void:
 	if not _started:
 		return
-	if field.waterfall != null:
-		field.bake_obstacles()
 	swe.add_obstacles(meshes, simulation_time_s)
-	if waterfall != null:
-		waterfall.refresh_obstacles()
 
 
 func move_domain(origin_m: Vector2) -> void:
 	if not _started:
 		field.origin_m = origin_m
 		return
-	if field.waterfall != null:
-		push_error("RiverSystem.move_domain() does not support waterfalls")
+	if field.spills:
+		push_error("RiverSystem.move_domain() does not support spilling fields")
 		return
 	var was_dry := not field.has_water
 	_foam_shift_uv = (origin_m - field.origin_m) / field.domain_m
@@ -278,8 +260,16 @@ func reflection_gpu_ms() -> float:
 func set_surface_cell_size_m(value: float) -> void:
 	surface_cell_size_m = value
 	if _surface_mesh != null:
-		_surface_mesh.subdivide_width = maxi(ceili(field.domain_m.x / value) - 1, 0)
-		_surface_mesh.subdivide_depth = maxi(ceili(field.domain_m.y / value) - 1, 0)
+		if field.spills:
+			# One vertex per solver cell centre, so the step vertices of a spill face can meet on it.
+			var cells := Vector2i((field.domain_m / swe_cell_m).round())
+			_surface_mesh.size = field.domain_m - Vector2.ONE * swe_cell_m
+			_surface_mesh.subdivide_width = maxi(cells.x - 2, 0)
+			_surface_mesh.subdivide_depth = maxi(cells.y - 2, 0)
+		else:
+			_surface_mesh.size = field.domain_m
+			_surface_mesh.subdivide_width = maxi(ceili(field.domain_m.x / value) - 1, 0)
+			_surface_mesh.subdivide_depth = maxi(ceili(field.domain_m.y / value) - 1, 0)
 		if _surface != null:
 			_sync_surface()
 
@@ -287,33 +277,8 @@ func set_surface_cell_size_m(value: float) -> void:
 func _sync_surface() -> void:
 	var region := field.domain_rect()
 	water_material.set_shader_parameter("geometry_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
-	_surface.mesh = _pool_mesh() if field.waterfall != null else _surface_mesh
+	_surface.mesh = _surface_mesh
 	simulation_changed.emit()
-
-
-func _pool_mesh() -> ArrayMesh:
-	var surface := SurfaceTool.new()
-	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var count := Vector2i((field.domain_m / surface_cell_size_m).ceil())
-	var step := field.domain_m / Vector2(count)
-	var profile := field.waterfall
-	var cut_low := profile.crest_z_m - 0.05
-	var cut_high := profile.crest_z_m
-	var rows: Array[float] = [-field.domain_m.y * 0.5, cut_low - field.origin_m.y, cut_high - field.origin_m.y, field.domain_m.y * 0.5]
-	for band in [0, 2]:
-		var start_z := rows[band]
-		var end_z := rows[band + 1]
-		var row_count := maxi(1, ceili((end_z - start_z) / step.y))
-		for z in row_count:
-			for x in count.x:
-				var lo := Vector2(-field.domain_m.x * 0.5 + x * step.x, lerpf(start_z, end_z, float(z) / row_count))
-				var hi := Vector2(lo.x + step.x, lerpf(start_z, end_z, float(z + 1) / row_count))
-				for point: Vector2 in [lo, Vector2(hi.x, lo.y), Vector2(lo.x, hi.y), Vector2(hi.x, lo.y), hi, Vector2(lo.x, hi.y)]:
-					surface.set_uv(point / field.domain_m + Vector2.ONE * 0.5)
-					surface.set_uv2(Vector2(float(band), (point.y - start_z) / (end_z - start_z)))
-					surface.set_normal(Vector3.UP)
-					surface.add_vertex(Vector3(point.x, 0.0, point.y))
-	return surface.commit()
 
 
 func set_waterfall_quality(tier: int) -> void:
@@ -487,14 +452,9 @@ func submit_body_queries(points: PackedVector3Array) -> bool:
 		var values := PackedFloat32Array()
 		for point in points:
 			var contact: Array[Vector4] = []
-			if waterfall != null:
-				contact = waterfall.guided_contact(point)
 			var p := Vector2(point.x, point.z)
-			var zone := field.water_zone(p)
-			var lower_overlap := field.waterfall != null and not field.waterfall.is_vertical() \
-				and p.y < field.waterfall.crest_z_m - field.waterfall.receiver_run_m(config.water_level_m)
-			if contact.is_empty() and zone != 0 and (zone != 3 or lower_overlap):
-				var height := config.water_level_m if lower_overlap else field.sample_height(p, config.water_level_m)
+			if field.water_zone(p) != 0:
+				var height := field.sample_height(p, config.water_level_m)
 				var flow := field.sample(p, config.water_level_m)
 				var wet := field.domain_rect().has_point(p) and flow.a > 0.0 \
 					and point.y < height + 0.8 and point.y > field.sample_bed(p) - 0.8

@@ -14,6 +14,8 @@ const OceanCoastalProbe := preload("res://tests/ocean_coastal_probe.gd")
 const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
 const SlopeLandscape := preload("res://scripts/demos/river/river_slope_landscape.gd")
+const CascadeField := preload("res://scripts/demos/river/river_cascade_landscape.gd")
+const SweSolver := preload("res://scripts/river/river_swe_solver.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -1680,24 +1682,23 @@ func _run_river_waterfall() -> void:
 		_finish("river_waterfall")
 		return
 	demo.set_capture_fixed_delta(1.0 / 60.0)
-	for scene: int in [1, 2]:
-		demo.set_scene(scene)
+	var crest := WaterfallField.CREST_Z_M
+	for angle: float in [50.0, 90.0]:
+		var scene := 2 if angle >= 90.0 else 1
+		demo.set_scene(1)
+		demo.set_waterfall_angle(angle)
 		deadline = Time.get_ticks_msec() + 30000
 		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 			await process_frame
 		var river: RiverSystem = demo.river
-		var angle := 50.0 if scene == 1 else 90.0
-		_check(demo.capture_ready() and river.swe.active and river.waterfall != null
-			and is_equal_approx(river.field.waterfall.angle_degrees, angle),
-			"river_waterfall: controller must boot the selected waterfall through the live SWE system")
+		_check(demo.capture_ready() and river.swe.active and river.waterfall != null and river.field.spills
+			and is_equal_approx((river.field as WaterfallField).angle_degrees, angle),
+			"river_waterfall: controller must boot the selected waterfall through the live spilling solver")
 		if not river.swe.initialized:
 			continue
-		var field: RiverField = river.field
-		var config: RiverWaterfallConfig = field.waterfall
-		var sample_points := [Vector2.ZERO, Vector2(0.0, config.crest_z_m),
-			Vector2(config.width_m * 0.5, config.crest_z_m), Vector2(0.0, -field.domain_m.y * 0.5),
-			Vector2(0.0, field.domain_m.y * 0.5)]
-		for point: Vector2 in sample_points:
+		var field := river.field as WaterfallField
+		for point: Vector2 in [Vector2.ZERO, Vector2(0.0, crest), Vector2(WaterfallField.WIDTH_M * 0.5, crest),
+				Vector2(0.0, -field.domain_m.y * 0.5), Vector2(0.0, field.domain_m.y * 0.5)]:
 			var sample: Color = field.sample(point, river.config.water_level_m)
 			_check(Vector4(sample.r, sample.g, sample.b, sample.a).is_finite() and is_finite(field.sample_bed(point))
 				and is_finite(field.sample_height(point, river.config.water_level_m)),
@@ -1706,143 +1707,70 @@ func _run_river_waterfall() -> void:
 		demo.set_frozen(true)
 		await _boot_frames(3)
 		var status: Dictionary = river.swe.solver.snapshot()
-		print("RIVER WATERFALL scene=%d removed=%.6f received=%.6f transport=%.6f cfl=%.5f backlog=%.5f overflow=%d time=%.3f" % [scene,
-			status.volume_removed, status.volume_received, status.transport_volume, status.cfl_max, status.backlog_s, status.overflow, status.time_s])
-		_check(status.volume_removed > 0.0 and is_finite(status.volume_removed)
-			and is_finite(status.volume_received) and is_finite(status.transport_volume)
-			and is_finite(status.level_relaxation_volume) and is_finite(status.boundary_volume)
-			and is_finite(status.backlog_s) and is_finite(status.cfl_max)
-			and int(status.overflow) == 0,
-			"river_waterfall: GPU transport diagnostics must be finite and remain within capacity")
-		var volume_error := absf(float(status.volume_removed) - float(status.volume_received)
-			- float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
-		_check(volume_error <= 0.005,
-			"river_waterfall: removed volume must equal received plus transported volume within 0.5 percent")
-		var grid: Vector2i = river.swe.solver.grid
-		var waterfall_size := Vector2i(config.lane_count,
-			config.packet_capacity if config.is_vertical() else config.film_cells)
-		var surface_before: PackedByteArray = await TextureReadback.new().read_layer(
-			status.surface, 0, grid.x * grid.y * 16)
-		var fall_before: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_surface, 0, waterfall_size.x * waterfall_size.y * 16)
-		var velocity_before: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_velocity, 0, waterfall_size.x * waterfall_size.y * 16)
-		var clock_before: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_clock, 0, 16)
-		var boundary_bytes: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_boundary, 0, config.lane_count * 16)
-		var boundaries := boundary_bytes.to_float32_array()
-		var valid_boundaries := boundaries.size() == config.lane_count * 4
-		for lane in config.lane_count:
-			var offset := lane * 4
-			valid_boundaries = valid_boundaries and Vector4(boundaries[offset], boundaries[offset + 1],
-				boundaries[offset + 2], boundaries[offset + 3]).is_finite() and boundaries[offset + 1] > 0.0
-		_check(valid_boundaries, "river_waterfall: GPU reception boundaries must publish finite source heights, lengths, receivers and pool heights")
-		if not config.is_vertical():
-			var ds := config.length_m() / config.film_cells
-			for lane in config.lane_count:
-				var bottom := Vector2((float(lane) + 0.5) / config.lane_count * config.width_m - config.width_m * 0.5,
-					config.crest_z_m - config.run_m())
-				var cell := Vector2i(((bottom - river.swe.region_m.position) / river.swe.cell_m).floor()).clamp(Vector2i.ZERO, grid - Vector2i.ONE)
-				var offset := (cell.y * grid.x + cell.x) * 16
-				var lower := surface_before.decode_float(offset + 8) if surface_before.decode_float(offset + 12) > 0.02 else river.config.water_level_m
-				var last := clampi(floori((config.height_m - config.bed_depth_m - lower) / sin(deg_to_rad(angle)) / ds), 1, config.film_cells - 1)
-				_check(absf(boundaries[lane * 4 + 1] - float(last + 1) * ds) < 0.00001,
-					"river_waterfall: film reception must follow the simulated pool height, including drawdown below Level")
-		var finite_buffers := true
-		for value in surface_before.to_float32_array() + fall_before.to_float32_array() \
-				+ velocity_before.to_float32_array() + clock_before.to_float32_array():
-			finite_buffers = finite_buffers and is_finite(value)
-		_check(finite_buffers, "river_waterfall: GPU surface and waterfall state must remain finite")
-		var sheet_state: PackedFloat32Array = fall_before.to_float32_array()
-		var clearance := INF
-		for offset in range(0, sheet_state.size(), 4):
-			if sheet_state[offset + 3] <= 0.00001:
-				continue
-			var point := Vector2(sheet_state[offset], sheet_state[offset + 2])
-			clearance = minf(clearance, sheet_state[offset + 1] - field.sample_ground_height(point))
-		_check(clearance >= 0.0099, "river_waterfall: both transports must stay above the actual collision triangles")
-		print("RIVER WATERFALL scene=%d ground_clearance=%.6f" % [scene, clearance])
+		var books: Dictionary = await _spill_books(status)
+		print("RIVER WATERFALL scene=%d %s" % [scene, books.summary])
+		_check(books.balanced, "river_waterfall: spilled water must be accounted for: emitted = landed + in flight, and landed = taken by the grid")
 		if scene == 2:
-			var sheet: PackedFloat32Array = fall_before.to_float32_array()
-			var sheet_point := Vector3.ZERO
-			for row in config.packet_capacity:
-				var offset := (row * config.lane_count + config.lane_count / 2) * 4
-				if sheet[offset + 3] > 0.00001 and sheet[offset + 1] > 2.0 and sheet[offset + 1] < 4.0:
-					sheet_point = Vector3(sheet[offset], sheet[offset + 1], sheet[offset + 2])
-					break
-			_check(river.submit_body_queries(PackedVector3Array([sheet_point])), "river_waterfall: body query must accept a rendered sheet point")
-			var body_batch := river.take_query_batch()
-			deadline = Time.get_ticks_msec() + 5000
-			while body_batch.is_empty() and Time.get_ticks_msec() < deadline:
-				await process_frame
-				body_batch = river.take_query_batch()
-			_check(not body_batch.is_empty() and body_batch.values[7] == 3.0 and absf(body_batch.values[11]) < 0.00001,
-				"river_waterfall: free-sheet queries must describe the same finite volume as the rendered sheet")
-		_check(status.cfl_max <= 0.4001 and volume_error < 0.005,
-			"river_waterfall: CFL must remain below the configured limit")
+			_check(books.emitted > 0 and books.alive > 100, "river_waterfall: the vertical crest must pour as spill particles")
+		var grid: Vector2i = river.swe.solver.grid
+		var surface_before: PackedByteArray = await TextureReadback.new().read_layer(status.surface, 0, grid.x * grid.y * 16)
+		var positions_size := SweSolver.SPILL_CAPACITY * 16
+		var drawn_before: PackedByteArray = await TextureReadback.new().read_layer(status.spill_positions, 0, positions_size)
+		var finite := true
+		for value in surface_before.to_float32_array() + drawn_before.to_float32_array():
+			finite = finite and is_finite(value)
+		_check(finite, "river_waterfall: GPU surface and drawn spill must remain finite")
+		var landing := Vector2(0.0, crest - field.run_m() - 2.0)
+		var cell := Vector2i(((landing - river.swe.region_m.position) / river.swe.cell_m).floor())
+		var pool_depth := surface_before.decode_float((cell.y * grid.x + cell.x) * 16 + 12)
+		print("RIVER WATERFALL scene=%d pool_depth=%.3f" % [scene, pool_depth])
+		_check(pool_depth > 0.3, "river_waterfall: the pool below the fall must stay full")
 		var time_before := river.simulation_time_s
-		demo.set_frozen(true)
 		await _boot_frames(3)
 		status = river.swe.solver.snapshot()
-		var surface_after: PackedByteArray = await TextureReadback.new().read_layer(
-			status.surface, 0, surface_before.size())
-		var fall_after: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_surface, 0, fall_before.size())
-		var velocity_after: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_velocity, 0, velocity_before.size())
-		var clock_after: PackedByteArray = await TextureReadback.new().read_layer(
-			status.waterfall_clock, 0, clock_before.size())
-		_check(is_equal_approx(time_before, river.simulation_time_s)
-			and surface_before == surface_after and fall_before == fall_after
-			and velocity_before == velocity_after and clock_before == clock_after,
-			"river_waterfall: pause must freeze both pool and waterfall GPU state byte-for-byte")
+		var surface_after: PackedByteArray = await TextureReadback.new().read_layer(status.surface, 0, surface_before.size())
+		var drawn_after: PackedByteArray = await TextureReadback.new().read_layer(status.spill_positions, 0, positions_size)
+		_check(is_equal_approx(time_before, river.simulation_time_s) and surface_before == surface_after and drawn_before == drawn_after,
+			"river_waterfall: pause must freeze both the pools and the spilled water byte-for-byte")
 		demo.set_frozen(false)
 		for preset in 4:
 			demo.apply_preset(preset)
-			demo.set_speed(4.0)
+			demo.set_speed(4.0 if preset % 2 == 0 else 0.0)
 			demo.set_level(0.65 if preset % 2 == 0 else -0.2)
 			await _boot_frames(90)
-			status = river.swe.solver.snapshot()
-			volume_error = absf(float(status.volume_removed) - float(status.volume_received)
-				- float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
-			_check(is_finite(status.volume_removed) and is_finite(status.transport_volume)
-				and status.cfl_max <= 0.4001 and volume_error < 0.005 and status.overflow == 0,
-				"river_waterfall: every preset must retain stable conservative transport at control extremes")
-			print("RIVER WATERFALL extreme scene=%d preset=%d error=%.7f cfl=%.5f" % [scene, preset, volume_error, status.cfl_max])
-			var admitted: float = status.volume_removed
-			demo.set_speed(0.0)
-			await _boot_frames(180)
-			status = river.swe.solver.snapshot()
-			print("RIVER WATERFALL closed scene=%d preset=%d admitted=%.5f removed=%.5f remaining=%.7f" % [scene, preset, admitted, status.volume_removed, status.transport_volume])
-			_check(float(status.transport_volume) < 0.03,
-				"river_waterfall: closing the flow must retain and drain all transported water")
+			demo.set_frozen(true)
+			await _boot_frames(3)
+			books = await _spill_books(river.swe.solver.snapshot())
+			print("RIVER WATERFALL extreme scene=%d preset=%d %s" % [scene, preset, books.summary])
+			_check(books.balanced and books.finite, "river_waterfall: every preset must keep the spill finite and accounted for at control extremes")
+			demo.set_frozen(false)
 		demo.apply_preset(1)
 		demo.reset_river()
 		_check(is_zero_approx(river.simulation_time_s), "river_waterfall: reset must restart the runtime clock")
 		var generation: int = river.query_generation
-		_check(river.submit_body_queries(PackedVector3Array([Vector3(0.0, 2.0, config.crest_z_m)])),
+		_check(river.submit_body_queries(PackedVector3Array([Vector3(0.0, 2.0, crest)])),
 			"river_waterfall: live solver must accept a body batch before scene switching")
-		demo.set_scene(2 if scene == 1 else 1)
+		demo.set_scene(0)
 		_check(river.query_generation > generation and river.take_query_batch().is_empty(),
 			"river_waterfall: reset and scene switching must cancel outstanding asynchronous body queries")
-		demo.set_scene(scene)
+		demo.set_scene(1)
 		deadline = Time.get_ticks_msec() + 30000
 		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 			await process_frame
 		if demo.capture_ready():
+			field = demo.river.field as WaterfallField
 			var Body := preload("res://scripts/river/river_buoyant_body.gd")
 			var crate: RigidBody3D = Body.new()
 			demo.interactions.add_child(crate)
 			demo.interactions.crates.append(crate)
-			crate.global_position = Vector3(0.0, demo.config.water_level_m + 6.3, config.crest_z_m + 2.0)
+			crate.global_position = Vector3(0.0, demo.config.water_level_m + 6.3, crest + 2.0)
 			crate.linear_velocity = Vector3(0.0, 0.0, -demo.config.speed_m_s)
 			var reached_ramp := false
 			deadline = Time.get_ticks_msec() + 18000
-			while Time.get_ticks_msec() < deadline and (crate.global_position.z > config.crest_z_m - config.run_m() - 1.0 or crate.global_position.y > demo.config.water_level_m + 0.7):
+			while Time.get_ticks_msec() < deadline and (crate.global_position.z > crest - field.run_m() - 1.0 or crate.global_position.y > demo.config.water_level_m + 0.7):
 				await physics_frame
-				reached_ramp = reached_ramp or demo.river.field.water_zone(Vector2(crate.global_position.x, crate.global_position.z)) == WaterfallField.ZONE_RAMP
-			_check((reached_ramp or scene == 2) and crate.global_position.z < config.crest_z_m - config.run_m() - 1.0
+				reached_ramp = reached_ramp or field.water_zone(Vector2(crate.global_position.x, crate.global_position.z)) == WaterfallField.ZONE_RAMP
+			_check((reached_ramp or scene == 2) and crate.global_position.z < crest - field.run_m() - 1.0
 				and crate.global_position.y < demo.config.water_level_m + 1.0,
 				"river_waterfall: floating body must descend from the upper pool down the ramp into the basin")
 			print("RIVER WATERFALL crate scene=%d position=%s velocity=%s support=%s" % [scene, crate.global_position, crate.linear_velocity, crate.last_support_force_n])
@@ -1866,29 +1794,55 @@ func _run_river_waterfall() -> void:
 		await _boot_frames(180)
 		demo.set_frozen(true)
 		await _boot_frames(3)
-		var status: Dictionary = demo.river.swe.solver.snapshot()
-		var error := absf(float(status.volume_removed) - float(status.volume_received) - float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
-		var profile: RiverWaterfallConfig = demo.river.field.waterfall
-		var rows := profile.packet_capacity if profile.is_vertical() else profile.film_cells
-		var bytes: PackedByteArray = await TextureReadback.new().read_layer(status.waterfall_surface, 0, profile.lane_count * rows * 16)
-		var values := bytes.to_float32_array()
-		var finite := true
-		var clearance := INF
-		for offset in range(0, values.size(), 4):
-			finite = finite and Vector4(values[offset], values[offset + 1], values[offset + 2], values[offset + 3]).is_finite()
-			if values[offset + 3] > 0.00001:
-				clearance = minf(clearance, values[offset + 1] - demo.river.field.sample_ground_height(Vector2(values[offset], values[offset + 2])))
-		_check(finite and clearance >= 0.0099 and error < 0.005 and status.cfl_max <= 0.4001
-			and status.overflow == 0 and status.volume_removed > 0.0,
-			"river_waterfall: every supported angle must retain finite, conservative transport above the collision mesh")
-		_check(demo.river.waterfall.material.get_shader_parameter("free_fall") == profile.is_vertical(),
-			"river_waterfall: render mode must match the actual transport at every angle")
-		print("RIVER WATERFALL angle=%.1f error=%.7f cfl=%.5f clearance=%.6f rows=%d" % [angle, error, status.cfl_max, clearance, rows])
+		var books: Dictionary = await _spill_books(demo.river.swe.solver.snapshot())
+		print("RIVER WATERFALL angle=%.1f %s" % [angle, books.summary])
+		_check(books.balanced and books.finite, "river_waterfall: every supported angle must keep the spill finite and accounted for")
+		if tan(deg_to_rad(angle)) > SweSolver.SPILL_SLOPE:
+			_check(books.emitted > 0, "river_waterfall: a face steeper than the spill slope must pour as spill particles")
 		demo.set_frozen(false)
 	demo.queue_free()
 	await _boot_frames(2)
 	manager.set_setting("river_quality_profile", 1)
 	_finish("river_waterfall")
+
+
+# Spill ledgers of a frozen solver: emitted = deposited + lost + overwritten + in flight, deposited = consumed + pending.
+func _spill_books(snapshot: Dictionary) -> Dictionary:
+	if not snapshot.has("spill_state"):
+		return {"balanced": false, "finite": false, "emitted": 0, "alive": 0, "particles": PackedFloat32Array(), "summary": "no spill buffers"}
+	var buffers := {}
+	RenderingServer.call_on_render_thread(func() -> void:
+		var rd := RenderingServer.get_rendering_device()
+		buffers.state = rd.buffer_get_data(snapshot.spill_state)
+		buffers.deposits = rd.buffer_get_data(snapshot.spill_deposits)
+		buffers.particles = rd.buffer_get_data(snapshot.spill_particles))
+	while not buffers.has("particles"):
+		await process_frame
+	var state: PackedByteArray = buffers.state
+	var ledger := func(word: int) -> int: return state.decode_u32(word * 4) + (state.decode_u32(word * 4 + 4) << 32)
+	var books := {"emitted": ledger.call(2), "deposited": ledger.call(4), "lost": ledger.call(6),
+		"overwritten": ledger.call(8), "consumed": ledger.call(10), "pending": 0, "flying": 0, "alive": 0, "finite": true}
+	var deposits: PackedInt32Array = buffers.deposits.to_int32_array()
+	for i in range(0, deposits.size(), 4):
+		books.pending += deposits[i]
+	var particles: PackedFloat32Array = buffers.particles.to_float32_array()
+	for i in range(0, particles.size(), 12):
+		if particles[i + 3] <= 0.0:
+			continue
+		books.alive += 1
+		books.flying += int(particles[i + 3])
+		books.finite = books.finite and Vector4(particles[i], particles[i + 1], particles[i + 2], particles[i + 4]).is_finite()
+	books.particles = particles
+	var emitted: int = books.emitted
+	var deposited: int = books.deposited
+	var drift := absi(emitted - deposited - books.lost - books.overwritten - books.flying)
+	var landing := absi(deposited - books.consumed - books.pending)
+	books.balanced = drift <= emitted / 100 and landing <= maxi(deposited / 100, 1) and books.lost + books.overwritten <= emitted / 100
+	var unit := SweSolver.SPILL_VOLUME_UNIT_M3
+	books.summary = "emitted_m3=%.4f deposited_m3=%.4f consumed_m3=%.4f pending_m3=%.6f flying_m3=%.4f lost_m3=%.6f overwritten_m3=%.6f alive=%d" % [
+		emitted * unit, deposited * unit, books.consumed * unit, books.pending * unit, books.flying * unit, books.lost * unit,
+		books.overwritten * unit, books.alive]
+	return books
 
 
 func _run_river_rocks() -> void:
@@ -1902,64 +1856,63 @@ func _run_river_rocks() -> void:
 	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 		await process_frame
 	demo.set_capture_fixed_delta(1.0 / 60.0)
-	for scene: int in [1, 2]:
-		demo.set_scene(scene)
+	var crest := WaterfallField.CREST_Z_M
+	var crest_rock := Vector2(-1.7, crest + demo._scenery.CREST_ROCK_SETBACK_M)
+	for angle: float in [50.0, 90.0]:
+		var scene := 2 if angle >= 90.0 else 1
+		demo.set_scene(1)
+		demo.set_waterfall_angle(angle)
 		deadline = Time.get_ticks_msec() + 30000
 		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 			await process_frame
 		var river: RiverSystem = demo.river
 		var field: RiverField = river.field
-		var config: RiverWaterfallConfig = field.waterfall
-		_check(demo.capture_ready() and river.swe.active and field.obstacle_image != null
-			and field.sample_obstacle_excess(Vector2(-1.7, config.crest_z_m + 0.1)) > 0.5,
-			"river_rocks: waterfall scenes must boot live with their fall rocks baked")
-		_check(not river.waterfall.curtain_rock_impacts().is_empty(),
-			"river_rocks: the sheet must find the rocks it falls on")
+		_check(demo.capture_ready() and river.swe.active and _solver_bed(field, crest_rock) > field.sample_bed(crest_rock) + 0.5,
+			"river_rocks: waterfall scenes must boot live with their fall rocks in the solver bed")
 		if scene == 2:
 			demo.set_capture_view("front")
 			await _boot_frames(2)
 			var before: int = field.obstacle_meshes.size()
-			var impacts_before: int = river.waterfall.curtain_rock_impacts().size()
+			var centre := root.get_visible_rect().size * 0.5
+			var origin: Vector3 = demo.camera.project_ray_origin(centre)
+			var aim: Dictionary = demo.camera.get_world_3d().direct_space_state.intersect_ray(
+				PhysicsRayQueryParameters3D.create(origin, origin + demo.camera.project_ray_normal(centre) * 200.0))
 			demo.drop_rock()
-			await _boot_frames(20)
+			await _settle_rocks(demo)
 			var dropped: MeshInstance3D = field.obstacle_meshes[field.obstacle_meshes.size() - 1]
-			print("RIVER ROCKS dropped at=%s impacts=%d->%d" % [dropped.global_position, impacts_before, river.waterfall.curtain_rock_impacts().size()])
-			_check(field.obstacle_meshes.size() > before and demo._scenery.dropped_rocks == 1,
-				"river_rocks: Drop rock must add a boulder under the view centre")
+			var bottom := (dropped.global_transform * dropped.get_aabb()).position.y
+			print("RIVER ROCKS aim=%s normal=%s dropped at=%s bottom=%.3f" % [aim.get("position"), aim.get("normal"), dropped.global_position, bottom])
+			_check(field.obstacle_meshes.size() > before and demo._scenery.dropped_rocks == 1 and demo._scenery.falling_rocks() == 0,
+				"river_rocks: Drop rock must add a boulder under the view centre once it is at rest")
+			_check(not aim.is_empty() and absf(aim.normal.y) < 0.5 and bottom < aim.position.y - 1.0,
+				"river_rocks: a rock dropped on the cliff face must fall and come to rest below it")
 		await _boot_frames(300)
 		demo.set_frozen(true)
 		await _boot_frames(3)
-		var status: Dictionary = river.swe.solver.snapshot()
-		var rows := config.packet_capacity if config.is_vertical() else config.film_cells
-		var surface: PackedFloat32Array = (await TextureReadback.new().read_layer(status.waterfall_surface, 0, config.lane_count * rows * 16)).to_float32_array()
-		var velocity: PackedFloat32Array = (await TextureReadback.new().read_layer(status.waterfall_velocity, 0, config.lane_count * rows * 16)).to_float32_array()
-		var error := absf(float(status.volume_removed) - float(status.volume_received) - float(status.transport_volume)) / maxf(float(status.volume_removed), 0.0001)
-		print("RIVER ROCKS scene=%d error=%.7f cfl=%.5f overflow=%d removed=%.4f" % [scene, error, status.cfl_max, status.overflow, status.volume_removed])
-		_check(error < 0.005 and status.cfl_max <= 0.4001 and status.overflow == 0 and status.volume_removed > 0.0,
-			"river_rocks: rocks must keep the transport conservative, CFL-bounded and within capacity")
+		var books: Dictionary = await _spill_books(river.swe.solver.snapshot())
+		var particles: PackedFloat32Array = books.particles
 		var lateral := 0.0
-		var clearance := INF
-		for index in config.lane_count * rows:
-			if surface[index * 4 + 3] <= 0.00001:
-				continue
-			lateral = maxf(lateral, absf(velocity[index * 4]))
-			clearance = minf(clearance, surface[index * 4 + 1] - field.sample_ground_height(Vector2(surface[index * 4], surface[index * 4 + 2])))
-		print("RIVER ROCKS scene=%d max_lateral=%.3f clearance=%.5f" % [scene, lateral, clearance])
-		_check(lateral > 0.2 and clearance >= 0.0099,
-			"river_rocks: water must be deflected sideways by rocks and stay above every rock surface")
-		if not config.is_vertical():
-			var lane := int((-1.7 + config.width_m * 0.5) / config.width_m * config.lane_count)
-			var top := surface[lane * 4 + 3]
-			var low := surface[(rows / 2 * config.lane_count + lane) * 4 + 3]
-			for row in range(0, rows, 3):
-				var line := ""
-				for column in config.lane_count:
-					var depth := surface[(row * config.lane_count + column) * 4 + 3]
-					line += " " if depth < 0.0005 else ("." if depth < 0.01 else ("o" if depth < 0.04 else ("O" if depth < 0.1 else "#")))
-				print("RIVER ROCKS film row=%02d |%s|" % [row, line])
-			_check(top < 0.0005 and low > 0.002,
-				"river_rocks: the lane behind the crest rock must start dry and be refilled by lateral spreading")
+		for i in range(0, particles.size(), 12):
+			if particles[i + 3] > 0.0:
+				lateral = maxf(lateral, absf(particles[i + 4]))
+		print("RIVER ROCKS scene=%d %s max_lateral=%.3f rock_hits=%d" % [scene, books.summary, lateral, river.waterfall.rock_impacts().size()])
+		_check(books.balanced and books.finite, "river_rocks: rocks must keep the spill finite and accounted for")
+		if scene == 2:
+			_check(lateral > 0.2, "river_rocks: water must be deflected sideways by the crest rock as it spills")
 		demo.set_frozen(false)
+		if scene == 2:
+			var clean_ms: float = await _solver_gpu_ms(river)
+			for drop: Vector2 in [Vector2(-1.2, 0.25), Vector2(0.9, 0.25), Vector2(0.0, 0.9)]:
+				var from := Vector3(drop.x, 30.0, crest + drop.y)
+				var hit: Dictionary = demo.camera.get_world_3d().direct_space_state.intersect_ray(
+					PhysicsRayQueryParameters3D.create(from, from + Vector3.DOWN * 60.0))
+				if not hit.is_empty():
+					demo._scenery.add_dropped_rock(hit.position, hit.normal)
+			await _settle_rocks(demo)
+			var rocks_ms: float = await _solver_gpu_ms(river)
+			print("RIVER ROCKS crest drops solver_gpu_ms=%.2f->%.2f" % [clean_ms, rocks_ms])
+			_check(clean_ms > 0.0 and rocks_ms < maxf(clean_ms * 2.0, clean_ms + 3.0),
+				"river_rocks: rocks dropped on the crest must not multiply the solver GPU cost")
 	demo.set_scene(0)
 	deadline = Time.get_ticks_msec() + 30000
 	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
@@ -1968,11 +1921,10 @@ func _run_river_rocks() -> void:
 	var river_field: RiverField = demo.river.field
 	var count := river_field.obstacle_meshes.size()
 	demo.drop_rock()
-	await _boot_frames(4)
+	await _settle_rocks(demo)
 	var rock: MeshInstance3D = river_field.obstacle_meshes[river_field.obstacle_meshes.size() - 1]
 	var center := Vector2(rock.global_position.x, rock.global_position.z)
-	var cell := Vector2i(((center - river_field.domain_rect().position) / demo.river.swe.cell_m).floor())
-	var stamped := river_field.solver_terrain_image.get_pixelv(cell).r
+	var stamped := _solver_bed(river_field, center)
 	print("RIVER ROCKS river drop at=%s stamped_bed=%.3f ground=%.3f" % [rock.global_position, stamped, river_field.sample_bed(center)])
 	_check(river_field.obstacle_meshes.size() > count and stamped > river_field.sample_bed(center) + 0.2,
 		"river_rocks: a rock dropped in the river must be stamped into the live solver bed")
@@ -1989,11 +1941,34 @@ func _run_river_rocks() -> void:
 	deadline = Time.get_ticks_msec() + 30000
 	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
 		await process_frame
-	_check(demo.river.field.sample_obstacle_excess(Vector2(-1.7, demo.river.field.waterfall.crest_z_m + 0.1)) == 0.0
+	_check(_solver_bed(demo.river.field, crest_rock) < demo.river.field.sample_bed(crest_rock) + 0.01
 		and demo._scenery.dropped_rocks == 0, "river_rocks: turning the fall rocks off must rebuild a clear waterfall")
 	demo.queue_free()
 	await _boot_frames(2)
 	_finish("river_rocks")
+
+
+func _solver_bed(field: RiverField, point: Vector2) -> float:
+	var cell := Vector2i(((point - field.domain_rect().position) / SweSolver.CELL_M).floor())
+	return field.solver_terrain_image.get_pixelv(cell).r
+
+
+func _settle_rocks(demo: Node) -> void:
+	await _boot_frames(2)
+	var deadline := Time.get_ticks_msec() + 9000
+	while demo._scenery.falling_rocks() > 0 and Time.get_ticks_msec() < deadline:
+		await process_frame
+
+
+func _solver_gpu_ms(river: RiverSystem) -> float:
+	river.swe.profiling = true
+	await _boot_frames(30)
+	var total := 0.0
+	for i in 30:
+		await process_frame
+		total += river.swe.gpu_ms()
+	river.swe.profiling = false
+	return total / 30.0
 
 
 func _run_river_shutdown() -> void:
@@ -7236,6 +7211,248 @@ func _river_slope_case(scene: Node3D, camera: Camera3D, grade: float, heading: V
 	ground.queue_free()
 	await _boot_frames(2)
 	return passed
+
+
+func _run_river_spill() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var seconds := 20.0
+	var spills := true
+	var domain_m := 24.0
+	for arg in _extra:
+		var pair := arg.split("=", true, 1)
+		if pair[0] == "seconds":
+			seconds = float(pair[1])
+		elif pair[0] == "spill":
+			spills = pair[1] != "0"
+		elif pair[0] == "domain":
+			domain_m = float(pair[1])
+	var scene := _river_probe_stage()
+	var camera := scene.get_node("Camera") as Camera3D
+	camera.global_transform = Transform3D(Basis.from_euler(Vector3(-PI * 0.5, 0.0, 0.0)), Vector3(0.0, 30.0, 0.0))
+	var lips := _spill_probe_lips()
+	var field := _spill_probe_field(lips, domain_m)
+	field.spills = spills
+	var config := RiverConfig.new()
+	config.water_level_m = 0.0
+	config.speed_m_s = 0.5
+	var river := _river_probe_system(field, config, camera)
+	river.fixed_delta_s = 1.0 / 60.0
+	scene.add_child(river)
+	river.start()
+	var deadline := Time.get_ticks_msec() + 30000
+	while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(river.swe.initialized, "river_spill: solver must initialize")
+	river.swe.profiling = true
+	var gpu_ms := 0.0
+	var frames := roundi(seconds * 60.0)
+	for frame in frames:
+		await process_frame
+		if frame >= frames / 2:
+			gpu_ms += river.swe.gpu_ms() / float(frames - frames / 2)
+	river.frozen = true
+	await _boot_frames(3)
+	var snapshot: Dictionary = river.swe.solver.snapshot()
+	_check(snapshot.has("spill_state"), "river_spill: a spilling field must run the spill particles")
+	if not snapshot.has("spill_state"):
+		print("RIVER SPILL FAIL no spill buffers (spill=%s)" % spills)
+		scene.queue_free()
+		_finish("river_spill")
+		return
+	var books: Dictionary = await _spill_books(snapshot)
+	var particles: PackedFloat32Array = books.particles
+	var sides := {}
+	var stray := 0
+	for i in range(0, particles.size(), 12):
+		if particles[i + 3] <= 0.0:
+			continue
+		var side := _spill_probe_side(lips, _spill_origin(river.swe, particles[i + 8]))
+		if side.is_empty():
+			stray += 1
+		else:
+			sides[side] = int(sides.get(side, 0)) + 1
+	print("RIVER SPILL %s lip_sides=%d/%d stray=%d gpu_ms=%.2f cells=%d" % [books.summary, sides.size(), lips.size() * 4, stray, gpu_ms,
+		river.swe.solver.grid.x * river.swe.solver.grid.y])
+	for lip in lips.size():
+		print("RIVER SPILL lip=%d height=%.1f sides=%s" % [lip, lips[lip][2], ["n", "e", "s", "w"].map(func(name: String) -> int: return int(sides.get("%d%s" % [lip, name], 0)))])
+	_check(books.emitted > 0, "river_spill: steep lips must spill")
+	_check(books.balanced, "river_spill: spilled water must be accounted for within 1%: emitted = landed + in flight, landed = taken by the grid, none lost")
+	_check(sides.size() == lips.size() * 4, "river_spill: every side of every lip must spill, whatever its orientation and height")
+	_check(stray == 0, "river_spill: gentle slopes and flat water must not spill")
+	_check(gpu_ms <= 3.0, "river_spill: solver with spill must stay within 3 ms of GPU")
+	scene.queue_free()
+	_finish("river_spill")
+
+
+func _run_river_cascade() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var seconds := 20.0
+	for arg in _extra:
+		var pair := arg.split("=", true, 1)
+		if pair[0] == "seconds":
+			seconds = float(pair[1])
+	var scene := _river_probe_stage()
+	var camera := scene.get_node("Camera") as Camera3D
+	camera.global_transform = Transform3D(Basis.from_euler(Vector3(-PI * 0.5, 0.0, 0.0)), Vector3(0.0, 40.0, 0.0))
+	var started := Time.get_ticks_usec()
+	var field = CascadeField.new()
+	print("RIVER CASCADE build_ms=%.0f" % ((Time.get_ticks_usec() - started) / 1000.0))
+	var river: RiverSystem = null
+	var all_pass := true
+	for preset: String in ["calm", "natural_flow", "rapids", "high_water"]:
+		var config := (load("res://resources/river/presets/%s.tres" % preset) as RiverConfig).duplicate() as RiverConfig
+		if river == null:
+			river = _river_probe_system(field, config, camera)
+			river.fixed_delta_s = 1.0 / 60.0
+			scene.add_child(river)
+			river.start()
+			var deadline := Time.get_ticks_msec() + 30000
+			while not river.swe.initialized and Time.get_ticks_msec() < deadline:
+				await process_frame
+			_check(river.swe.initialized, "river_cascade: solver must initialize")
+		else:
+			river.apply_config(config)
+			river.reset()
+		river.frozen = false
+		river.swe.profiling = true
+		var gpu_ms := 0.0
+		var frames := roundi(seconds * 60.0)
+		for frame in frames:
+			await process_frame
+			if frame >= frames / 2:
+				gpu_ms += river.swe.gpu_ms() / float(frames - frames / 2)
+		river.frozen = true
+		await _boot_frames(3)
+		var snapshot: Dictionary = river.swe.solver.snapshot()
+		var books: Dictionary = await _spill_books(snapshot)
+		var particles: PackedFloat32Array = books.particles
+		var curtains := {}
+		var stray := 0
+		var stray_spots := {}
+		for i in range(0, particles.size(), 12):
+			if particles[i + 3] <= 0.0:
+				continue
+			var origin := _spill_origin(river.swe, particles[i + 8])
+			var curtain := _cascade_curtain(field, origin)
+			if curtain.is_empty():
+				stray += 1
+				var spot := Vector2i(origin.round())
+				stray_spots[spot] = int(stray_spots.get(spot, 0)) + 1
+			else:
+				curtains[curtain] = int(curtains.get(curtain, 0)) + 1
+		var lips := 0
+		var spilling := {}
+		for r in field.rivers.size():
+			for k in field.rivers[r].lips_m.size():
+				lips += 1
+				for curtain: String in curtains:
+					if curtain.begins_with("%d.%d." % [r, k]):
+						spilling["%d.%d" % [r, k]] = true
+		var grid: Vector2i = river.swe.solver.grid
+		var surface: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.surface, 0, grid.x * grid.y * 16)).to_float32_array()
+		var finite := true
+		var fastest := 0.0
+		for i in range(0, surface.size(), 4):
+			finite = finite and is_finite(surface[i]) and is_finite(surface[i + 1]) and is_finite(surface[i + 3])
+			if surface[i + 3] > 0.02:
+				fastest = maxf(fastest, Vector2(surface[i], surface[i + 1]).length())
+		var worst_level := 0.0
+		var levels := ""
+		for river_line in field.rivers:
+			for reach in river_line.levels_m.size() - 1:
+				var start: float = river_line.lips_m[reach - 1] if reach > 0 else river_line.lips_m[0] - 6.0
+				var point: Vector2 = river_line.line_point((start + river_line.lips_m[reach]) * 0.5, 0.0)
+				var cell := Vector2i(((point - river.swe.region_m.position) / river.swe.cell_m).floor())
+				var index := (cell.y * grid.x + cell.x) * 4
+				var error: float = surface[index + 2] - river_line.levels_m[reach] - config.water_level_m
+				worst_level = maxf(worst_level, absf(error))
+				levels += " %+.3f" % error
+		var keys := curtains.keys()
+		keys.sort()
+		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d" % [
+			preset, books.summary, spilling.size(), lips, keys.map(func(key: String) -> String: return "%s:%d" % [key, curtains[key]]),
+			stray, fastest, levels.strip_edges(), gpu_ms, grid.x * grid.y])
+		if stray > 0:
+			var spots := stray_spots.keys()
+			spots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return stray_spots[a] > stray_spots[b])
+			print("RIVER CASCADE stray_spots=%s" % [spots.slice(0, 12).map(func(spot: Vector2i) -> String: return "%s:%d" % [spot, stray_spots[spot]])])
+		var passed: bool = books.balanced and books.finite and finite and spilling.size() == lips and stray == 0 \
+			and fastest <= 8.0 and worst_level <= 0.3 and gpu_ms <= 3.0
+		all_pass = all_pass and passed
+	_check(all_pass, "river_cascade: every lip must spill and only lips, volume must balance, reaches must hold their level, speed and solver time must stay bounded")
+	scene.queue_free()
+	_finish("river_cascade")
+
+
+# "<river>.<lip>.<curtain>" for an emission point within 2 m of a cascade lip: water landing on a spur flank spills again. "" when on none.
+# Centre of the cell a spill particle was emitted from (its emission cell index).
+func _spill_origin(swe: Node3D, cell_index: float) -> Vector2:
+	var columns: int = swe.solver.grid.x
+	var cell := Vector2(int(cell_index) % columns, int(cell_index) / columns)
+	return swe.region_m.position + (cell + Vector2.ONE * 0.5) * swe.cell_m
+
+
+func _cascade_curtain(field, origin: Vector2) -> String:
+	for r in field.rivers.size():
+		var river_line = field.rivers[r]
+		var at: Vector4 = river_line.locate(origin)
+		if absf(at.y) > river_line.half_width_m + 2.0:
+			continue
+		for k in river_line.lips_m.size():
+			if absf(at.x - river_line.lip_m(k, at.y)) < 2.0:
+				var curtain := 0
+				for spur: float in river_line.spurs_m[k]:
+					curtain += int(spur < at.y)
+				return "%d.%d.%d" % [r, k, curtain]
+	return ""
+
+
+# Six rectangular plateaus on a ring, each turned to its own heading, from 0.5 to 6 m above the pool floor.
+func _spill_probe_lips() -> Array:
+	var lips := []
+	var turns: Array[float] = [17.0, 63.0, 128.0, 205.0, 251.0, 322.0]
+	var heights: Array[float] = [0.5, 1.0, 2.0, 3.0, 4.5, 6.0]
+	for i in 6:
+		lips.append([Vector2.from_angle(TAU * i / 6.0) * 7.0, deg_to_rad(turns[i]), heights[i]])
+	return lips
+
+
+func _spill_probe_field(lips: Array, domain_m: float) -> RiverField:
+	var field := RiverField.new()
+	field.domain_m = Vector2(domain_m, domain_m)
+	var size := Vector2i(field.domain_m / 0.125)
+	var values := PackedFloat32Array()
+	for y in size.y:
+		for x in size.x:
+			var point := field.domain_rect().position + (Vector2(x, y) + Vector2.ONE * 0.5) * 0.125
+			# Pool floor with a slow current, and a wet 45 degree pyramid that must never spill.
+			var bed := clampf(1.5 - maxf(maxf(absf(point.x), absf(point.y)) - 1.0, 0.0), 0.0, 1.5)
+			var level := 0.3 if bed <= 0.0 else bed + 0.1
+			var flow := Vector2(0.3, 0.0) if bed <= 0.0 else Vector2.ZERO
+			for lip: Array in lips:
+				var local: Vector2 = (point - lip[0]).rotated(-lip[1])
+				if absf(local.x) <= 1.0 and absf(local.y) <= 0.75:
+					bed = lip[2]
+					level = bed + 0.12
+					flow = Vector2.ZERO
+			values.append_array([bed, level, flow.x, flow.y])
+	field.solver_terrain_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGBAF, values.to_byte_array())
+	return field
+
+
+# "<lip><side>" for an emission point just outside one side of a plateau, "" when it is near none.
+func _spill_probe_side(lips: Array, origin: Vector2) -> String:
+	for i in lips.size():
+		var local: Vector2 = (origin - lips[i][0]).rotated(-lips[i][1])
+		if absf(local.x) > 1.4 or absf(local.y) > 1.15:
+			continue
+		var reach := Vector2(absf(local.x) - 1.0, absf(local.y) - 0.75)
+		if reach.x >= reach.y:
+			return "%d%s" % [i, "e" if local.x > 0.0 else "w"]
+		return "%d%s" % [i, "n" if local.y > 0.0 else "s"]
+	return ""
 
 
 func _river_probe_stage() -> Node3D:

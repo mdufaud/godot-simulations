@@ -24,7 +24,7 @@ void fragment() {
 	vec2 inside = step(vec2(0.0), previous_uv) * step(previous_uv, vec2(1.0));
 	float history = texture(previous_foam, clamp(previous_uv, vec2(0.0), vec2(1.0))).r;
 	history *= inside.x * inside.y;
-	float noise = texture(turbulence_texture, (position - field.rg * river_render_time(simulation_time_s) * speed_m_s) * 0.24).r;
+	float noise = texture(turbulence_texture, (position - field.rg * simulation_time_s * speed_m_s) * 0.24).r;
 	float breakup = mix(0.25, 1.0, smoothstep(0.3, 0.7, noise));
 	float source = field.b * breakup * foam_amount * sqrt(max(speed_m_s, 0.0)) * (1.0 + whitewater_strength);
 	float wet = field.a;

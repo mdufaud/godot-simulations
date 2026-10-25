@@ -23,6 +23,7 @@ render_mode unshaded, cull_disabled;
 uniform sampler2D position_tex : filter_nearest;
 uniform int tex_width = 256;
 uniform float particle_radius = 0.12;
+uniform float cull_attribute_max = -1e20;
 uniform vec2 clip_z_m = vec2(-1e20, 1e20);
 uniform bool diagnostic_color_enabled = false;
 
@@ -37,10 +38,14 @@ void vertex() {
 	vec3 particle_pos = particle.xyz;
 	particle_z = particle_pos.z;
 	attrib = particle.w;
-	quad_uv = UV * 2.0 - 1.0;
-	center_view = (VIEW_MATRIX * vec4(particle_pos, 1.0)).xyz;
-	vec3 view_pos = center_view + vec3(quad_uv * particle_radius, particle_radius);
-	POSITION = PROJECTION_MATRIX * vec4(view_pos, 1.0);
+	if (attrib <= cull_attribute_max) {
+		POSITION = vec4(2.0, 2.0, 2.0, 1.0);
+	} else {
+		quad_uv = UV * 2.0 - 1.0;
+		center_view = (VIEW_MATRIX * vec4(particle_pos, 1.0)).xyz;
+		vec3 view_pos = center_view + vec3(quad_uv * particle_radius, particle_radius);
+		POSITION = PROJECTION_MATRIX * vec4(view_pos, 1.0);
+	}
 }
 
 void fragment() {

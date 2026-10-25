@@ -3,6 +3,9 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 const float MAX_ARRIVAL_SPEED_M_S = 2.0;
+const float SPILL_CLEARANCE_M = 0.02;
+// Current over the guided one beyond which the level guidance lets go.
+const vec2 LEVEL_SPEEDUP = vec2(1.2, 2.0);
 
 layout(rgba32f, set = 0, binding = 0) uniform image2D state_in;
 layout(rgba32f, set = 0, binding = 1) uniform image2D state_out;
@@ -12,30 +15,25 @@ layout(rgba32f, set = 0, binding = 4) uniform image2D foam_out;
 layout(set = 0, binding = 5) uniform sampler2D source_terrain;
 layout(std430, set = 0, binding = 6) readonly buffer QueryPoints { vec4 points[]; };
 layout(std430, set = 0, binding = 7) writeonly buffer QueryResults { vec4 results[]; };
-layout(std430, set = 0, binding = 8) buffer Cascade {
-    vec4 lane_input[48];
-    vec4 packets[24576];
-    vec4 arrivals[96];
-    vec4 totals[48];
-} cascade;
-layout(std430, set = 0, binding = 9) buffer Control { uint words[]; } control;
-layout(rgba32f, set = 0, binding = 10) uniform readonly image2D waterfall_surface;
-layout(rgba32f, set = 0, binding = 11) uniform readonly image2D waterfall_velocity;
-layout(rgba32f, set = 0, binding = 12) uniform writeonly image2D waterfall_clock;
-layout(rgba32f, set = 0, binding = 13) uniform image2D balance;
-shared vec2 balance_sums[64];
+// Per cell: volume units, then x and z momentum in volume units times m/s, then units landed since the last output.
+layout(std430, set = 0, binding = 8) buffer SpillDeposits { int deposits[]; } spill_deposits;
+layout(std430, set = 0, binding = 9) buffer SpillOutflow { vec4 outflow[]; } spill_outflow;
+// Spill state words: 10-11 consumed volume (low, high), 12 spill slope (0 = off), 13 volume unit in m3,
+// 15 spilling faces summed over outputs, 16 outputs.
+layout(std430, set = 0, binding = 10) buffer SpillState { uint words[]; } spill;
+// Per cell: bits 0-3 the east, west, north and south faces this cell spills over, bits 4-7 the faces spilling onto it;
+// then the landing rate in m/s of depth, then 1 where the cell spills over any face, for smooth sampling.
+layout(rgba32f, set = 0, binding = 11) uniform writeonly image2D spill_out;
 layout(push_constant, std430) uniform Params {
     vec4 domain;
     vec4 grid;
     vec4 water;
     vec4 source_domain;
     vec4 control;
-    vec4 waterfall;
-    vec4 cascade_params;
     vec4 relaxation;
 } params;
 
-float bed_depth_m() { return params.relaxation.z; }
+const ivec2 FACES[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
 
 ivec2 bound_cell(ivec2 p) {
     return clamp(p, ivec2(0), ivec2(params.grid.xy) - 1);
@@ -48,36 +46,14 @@ vec2 velocity(vec4 q) {
 vec4 seed_state(ivec2 p) {
     vec4 bed = imageLoad(terrain, bound_cell(p));
     float depth = max(bed.y + params.water.x - bed.x, 0.0);
-    float time = params.waterfall.x > 0.0 ? uintBitsToFloat(control.words[2]) : params.water.w;
+    float time = params.water.w;
     float pulse = params.control.y * (sin(time * 0.9) + 0.35 * sin(time * 1.73));
     vec2 v = bed.zw * params.grid.w * (1.0 + pulse * 0.08);
     return vec4(depth, v * depth, 0.0);
 }
 
 vec4 read_state(ivec2 p) {
-    if (params.waterfall.x > 0.0 && control.words[19] != 0u) return imageLoad(state_out, bound_cell(p));
     return imageLoad(state_in, bound_cell(p));
-}
-
-void store_next(ivec2 p, vec4 q) {
-    if (params.waterfall.x > 0.0 && control.words[19] != 0u) imageStore(state_in, p, q);
-    else imageStore(state_out, p, q);
-}
-
-void store_current(ivec2 p, vec4 q) {
-    if (control.words[19] != 0u) imageStore(state_out, p, q);
-    else imageStore(state_in, p, q);
-}
-
-float receiver_z() {
-    float run = params.waterfall.x < 90.0
-        ? max(params.waterfall.y - bed_depth_m() - params.water.x, 0.0) / tan(radians(params.waterfall.x)) : 0.0;
-    return params.waterfall.w - max(run, params.domain.z);
-}
-
-bool detached(vec2 world) {
-    return params.waterfall.x > 0.0
-        && world.y < params.waterfall.w && world.y > receiver_z();
 }
 
 vec4 source_bed(vec2 world) {
@@ -94,35 +70,25 @@ vec4 interpolate_surface(vec2 cell, ivec2 size) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-int waterfall_lane(vec2 world) {
-    if (params.waterfall.x <= 0.0) return -1;
-    float lane = (world.x + params.waterfall.z * 0.5) / params.waterfall.z * params.cascade_params.x;
-    return lane >= 0.0 && lane < params.cascade_params.x ? int(lane) : -1;
+// The bed drops steeper than the spill slope and the low side's water stays below the high bed (Chentanez & Mueller).
+bool spills(float high_bed, float low_bed, float low_depth) {
+    float slope = uintBitsToFloat(spill.words[12]);
+    return slope > 0.0 && high_bed - low_bed > slope * params.domain.z && high_bed > low_bed + low_depth;
 }
 
-bool source_cell(vec2 world) {
-    return world.y >= params.waterfall.w && world.y - params.domain.z < params.waterfall.w;
-}
-
-bool receiver_cell(vec2 world) {
-    return world.y < params.waterfall.w && world.y + params.domain.z >= params.waterfall.w;
-}
-
-bool seam_cell(vec2 world) {
-    return params.waterfall.x > 0.0 && world.y < params.waterfall.w + 2.0
-        && world.y > receiver_z() - 2.0;
-}
-
-vec4 face_flux(ivec2 p, ivec2 other, vec2 normal) {
+// spill_side: 1 when this cell spills over the face, -1 when water spills onto it, 0 otherwise.
+vec4 face_flux(ivec2 p, ivec2 other, vec2 normal, out int spill_side) {
+    spill_side = 0;
     vec4 ql = read_state(p);
-    vec2 self_world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
-    vec2 other_world = params.domain.xy + (vec2(other) + 0.5) * params.domain.z;
-    bool crosses_crest = params.waterfall.x > 0.0
-        && ((self_world.y >= params.waterfall.w) != (other_world.y >= params.waterfall.w));
-    if (crosses_crest || detached(other_world)) return vec4(0.0, normal * 0.5 * params.domain.w * ql.x * ql.x, 0.0);
     vec4 qr = read_state(other);
     float zl = imageLoad(terrain, bound_cell(p)).x;
     float zr = imageLoad(terrain, bound_cell(other)).x;
+    // A spill face is a wall for the cell below; the cell above loses its outflow to particles instead.
+    if (spills(zr, zl, ql.x)) {
+        spill_side = -1;
+        return vec4(0.0, normal * 0.5 * params.domain.w * ql.x * ql.x, 0.0);
+    }
+    spill_side = spills(zl, zr, qr.x) ? 1 : 0;
     float high_bed = max(zl, zr);
     float hl = max(ql.x + zl - high_bed, 0.0);
     float hr = max(qr.x + zr - high_bed, 0.0);
@@ -182,13 +148,49 @@ float agitation(ivec2 p, vec4 q) {
         * smoothstep(0.015, 0.08, q.x) * smoothstep(0.1, 0.7, length(v));
 }
 
+// Spill particles that landed in this cell during the previous particle pass, in whole volume units.
+vec4 consume_deposit(int cell, vec4 q) {
+    ivec3 units = ivec3(spill_deposits.deposits[cell * 4], spill_deposits.deposits[cell * 4 + 1], spill_deposits.deposits[cell * 4 + 2]);
+    if (units.x <= 0) return q;
+    for (int i = 0; i < 3; ++i) spill_deposits.deposits[cell * 4 + i] = 0;
+    spill_deposits.deposits[cell * 4 + 3] += units.x;
+    uint old = atomicAdd(spill.words[10], uint(units.x));
+    if (old > 0xFFFFFFFFu - uint(units.x)) atomicAdd(spill.words[11], 1u);
+    float scale = uintBitsToFloat(spill.words[13]) / (params.domain.z * params.domain.z);
+    float h = float(units.x) * scale;
+    vec2 momentum = vec2(units.yz) * scale;
+    q.x += h;
+    q.yz += momentum * min(1.0, MAX_ARRIVAL_SPEED_M_S * h / max(length(momentum), 1.0e-9));
+    q.w += h * clamp(params.water.y, 0.0, 1.0);
+    return q;
+}
+
+// Spill faces of this cell (see spill_out) and its landing rate since the last output, which runs once per frame.
+vec3 spill_record(ivec2 p, vec4 q, float bed) {
+    int cell = p.y * int(params.grid.x) + p.x;
+    int faces = 0;
+    for (int i = 0; i < 4; ++i) {
+        ivec2 other = p + FACES[i];
+        if (any(lessThan(other, ivec2(0))) || any(greaterThanEqual(other, ivec2(params.grid.xy)))) continue;
+        vec4 qo = imageLoad(state_in, other);
+        float other_bed = imageLoad(terrain, other).x;
+        if (q.x > 0.004 && spills(bed, other_bed, qo.x)) faces |= 1 << i;
+        if (qo.x > 0.004 && spills(other_bed, bed, q.x)) faces |= 16 << i;
+    }
+    float landed = float(spill_deposits.deposits[cell * 4 + 3]) * uintBitsToFloat(spill.words[13])
+        / (params.domain.z * params.domain.z);
+    spill_deposits.deposits[cell * 4 + 3] = 0;
+    if ((faces & 15) != 0) atomicAdd(spill.words[15], uint(bitCount(faces & 15)));
+    if (cell == 0) atomicAdd(spill.words[16], 1u);
+    return vec3(float(faces), landed / max(params.grid.z, 1.0e-4), float((faces & 15) != 0));
+}
+
 float surface_height(ivec2 p, vec4 q, vec4 bed) {
     if (q.x > 0.02) return bed.x + q.x;
     float sum = 0.0;
     float weight = 0.0;
-    ivec2 offsets[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
     for (int i = 0; i < 4; ++i) {
-        ivec2 cell = bound_cell(p + offsets[i]);
+        ivec2 cell = bound_cell(p + FACES[i]);
         vec4 neighbor = read_state(cell);
         float wet = step(0.02, neighbor.x);
         sum += (imageLoad(terrain, cell).x + neighbor.x) * wet;
@@ -199,16 +201,16 @@ float surface_height(ivec2 p, vec4 q, vec4 bed) {
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    bool spilling = uintBitsToFloat(spill.words[12]) > 0.0;
     if (params.control.x > 7.5) {
         if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
         vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
         vec4 bed = source_bed(world);
-        if (params.waterfall.x > 0.0) bed.y = world.y >= params.waterfall.w ? params.waterfall.y : 0.0;
         vec4 q = read_state(p);
         float depth = max(q.x - max(bed.x - imageLoad(terrain, p).x, 0.0), 0.0);
         q = depth > 0.004 ? vec4(depth, q.yzw * (depth / max(q.x, 0.004))) : vec4(0.0);
         imageStore(terrain, p, bed);
-        if (params.waterfall.x > 0.0) store_current(p, q); else imageStore(state_in, p, q);
+        imageStore(state_in, p, q);
         return;
     }
     if (params.control.x > 6.5) {
@@ -225,25 +227,6 @@ void main() {
         }
         imageStore(terrain, p, bed);
         imageStore(state_out, p, q);
-        return;
-    }
-    if (params.control.x > 5.5) {
-        uint lane = gl_LocalInvocationIndex;
-        vec2 sum = vec2(0.0);
-        int width = int(params.grid.x);
-        for (int i = int(lane); i < width * int(params.grid.y); i += 64) {
-            sum += imageLoad(balance, ivec2(i % width, i / width)).rg;
-        }
-        balance_sums[lane] = sum;
-        barrier();
-        for (uint stride = 32u; stride > 0u; stride >>= 1u) {
-            if (lane < stride) balance_sums[lane] += balance_sums[lane + stride];
-            barrier();
-        }
-        if (lane == 0u) {
-            control.words[29] = floatBitsToUint(balance_sums[0].x);
-            control.words[30] = floatBitsToUint(balance_sums[0].y);
-        }
         return;
     }
     if (params.control.x > 3.5 && params.control.x < 4.5) {
@@ -273,33 +256,6 @@ void main() {
                 normals = vec4(0.0, 1.0, 0.0, query.y - pool.z);
             }
         }
-        if (params.waterfall.x > 0.0 && !(motion.w == 1.0 && query.y < contacts.y)) {
-            ivec2 size = imageSize(waterfall_surface);
-            int lane = clamp(waterfall_lane(query.xz), 0, size.x - 1);
-            float best = motion.w == 1.0 ? dot(contacts.xyz - query, contacts.xyz - query) : 1.0e20;
-            for (int y = 0; y < size.y; ++y) {
-                for (int x = max(lane - 1, 0); x <= min(lane + 1, size.x - 1); ++x) {
-                    vec4 surface = imageLoad(waterfall_surface, ivec2(x, y));
-                    if (surface.w <= 0.0) continue;
-                    vec4 speed = imageLoad(waterfall_velocity, ivec2(x, y));
-                    vec3 n = params.waterfall.x < 90.0
-                        ? normalize(vec3(0.0, cos(radians(params.waterfall.x)), -sin(radians(params.waterfall.x))))
-                        : normalize(cross(vec3(1.0, 0.0, 0.0), speed.xyz));
-                    vec3 point = surface.xyz + n * (params.waterfall.x < 90.0 ? surface.w : 0.0);
-                    float d2 = dot(point - query, point - query);
-                    if (d2 < best) {
-                        best = d2;
-                        contacts = vec4(point, surface.w);
-                        motion = vec4(speed.xyz, params.waterfall.x < 90.0 ? 2.0 : 3.0);
-                        normals = vec4(n, dot(query - point, n));
-                    }
-                }
-            }
-            if (best > 0.64) {
-                contacts.w = 0.0;
-                motion = vec4(0.0);
-            }
-        }
         results[index * 3] = contacts;
         results[index * 3 + 1] = motion;
         results[index * 3 + 2] = normals;
@@ -309,42 +265,16 @@ void main() {
     vec2 world = params.domain.xy + (vec2(p) + 0.5) * params.domain.z;
     vec4 bed = imageLoad(terrain, p);
     vec4 q = read_state(p);
-    if (params.control.x > 2.5) {
-        if (params.waterfall.x > 0.0 && abs(world.x) < params.waterfall.z * 0.5 + 1.0
-                && world.y < params.waterfall.w && world.y > receiver_z() - 8.0) {
-            for (int i = 0; i < int(params.cascade_params.x); ++i) {
-                vec4 arrival = cascade.arrivals[i * 2];
-                if (arrival.x <= 0.0) continue;
-                vec2 cell = (arrival.zy - params.domain.xy) / params.domain.z - 0.5;
-                ivec2 low = ivec2(floor(cell));
-                vec2 fraction = fract(cell);
-                ivec2 offset = p - low;
-                if (any(lessThan(offset, ivec2(0))) || any(greaterThan(offset, ivec2(1)))) continue;
-                float weight = (offset.x == 0 ? 1.0 - fraction.x : fraction.x)
-                    * (offset.y == 0 ? 1.0 - fraction.y : fraction.y);
-                vec4 incoming = cascade.arrivals[i * 2 + 1];
-                float h = arrival.x * weight / (params.domain.z * params.domain.z);
-                float speed = length(incoming.xy);
-                q.x += h;
-                q.yz += h * incoming.xy * min(1.0, MAX_ARRIVAL_SPEED_M_S / max(speed, 0.0001));
-                q.w += h * clamp(incoming.z * params.water.y, 0.0, 1.0);
-            }
-            store_current(p, q);
-        }
-        return;
-    }
     if (params.control.x < 0.5) {
         bed = source_bed(world);
-        if (params.waterfall.x > 0.0) bed.y = world.y >= params.waterfall.w ? params.waterfall.y : 0.0;
         imageStore(terrain, p, bed);
         float depth = max(bed.y + params.water.x - bed.x, 0.0);
-        if (detached(world)) depth = 0.0;
         q = vec4(depth, bed.zw * params.grid.w * depth, 0.0);
         imageStore(state_in, p, q);
         imageStore(state_out, p, q);
         imageStore(surface_out, p, vec4(velocity(q), q.x > 0.02 ? bed.x + q.x : bed.y + params.water.x, q.x));
         imageStore(foam_out, p, vec4(0.0));
-        if (params.waterfall.x > 0.0) imageStore(balance, p, vec4(0.0));
+        if (spilling) imageStore(spill_out, p, vec4(0.0));
         return;
     }
     float activity = params.control.x > 1.5 ? agitation(p, q) : imageLoad(foam_out, p).b;
@@ -353,54 +283,52 @@ void main() {
         imageStore(surface_out, p, vec4(velocity(q), surface_height(p, q, bed), q.x));
         imageStore(foam_out, p, vec4(clamp(q.w / max(q.x, 0.004), 0.0, 1.0),
             source / (1.0 + source), clamp(activity, 0.0, 1.0), q.x));
-        if (all(equal(p, ivec2(0))) && params.waterfall.x > 0.0) {
-            imageStore(waterfall_clock, ivec2(0), vec4(uintBitsToFloat(control.words[2]),
-                float(control.words[4]), uintBitsToFloat(control.words[6]), uintBitsToFloat(control.words[7])));
-        }
+        if (spilling) imageStore(spill_out, p, vec4(spill_record(p, q, bed.x), 0.0));
         return;
     }
-    float dt = params.waterfall.x > 0.0 ? uintBitsToFloat(control.words[3]) : params.grid.z;
-    if (detached(world)) { store_next(p, vec4(0.0)); return; }
+    float dt = params.grid.z;
+    int cell = p.y * int(params.grid.x) + p.x;
+    if (spilling) q = consume_deposit(cell, q);
     float reference_depth = max(bed.y + params.water.x - bed.x, 0.0);
     if (q.x <= 0.004 && read_state(p + ivec2(1, 0)).x <= 0.004
         && read_state(p - ivec2(1, 0)).x <= 0.004 && read_state(p + ivec2(0, 1)).x <= 0.004
         && read_state(p - ivec2(0, 1)).x <= 0.004 && reference_depth <= 0.004) {
-        store_next(p, vec4(0.0));
+        imageStore(state_out, p, vec4(0.0));
         return;
     }
-    int lane = waterfall_lane(world);
-    vec4 east_flux = face_flux(p, p + ivec2(1, 0), vec2(1, 0));
-    vec4 west_flux = face_flux(p, p - ivec2(1, 0), vec2(-1, 0));
-    vec4 north_flux = face_flux(p, p + ivec2(0, 1), vec2(0, 1));
-    vec4 south_flux = face_flux(p, p - ivec2(0, 1), vec2(0, -1));
-    float discharge = 0.0;
-    if (lane >= 0 && source_cell(world)) {
+    ivec4 spill_sides;
+    vec4 east_flux = face_flux(p, p + ivec2(1, 0), vec2(1, 0), spill_sides.x);
+    vec4 west_flux = face_flux(p, p - ivec2(1, 0), vec2(-1, 0), spill_sides.y);
+    vec4 north_flux = face_flux(p, p + ivec2(0, 1), vec2(0, 1), spill_sides.z);
+    vec4 south_flux = face_flux(p, p - ivec2(0, 1), vec2(0, -1), spill_sides.w);
+    bvec4 spill_faces = equal(spill_sides, ivec4(1));
+    if (any(spill_faces)) {
+        vec4 outgoing = max(vec4(east_flux.x, west_flux.x, north_flux.x, south_flux.x), 0.0) * vec4(spill_faces);
         vec2 v = velocity(q);
-        bool capacity = params.waterfall.x < 90.0
-            || cascade.packets[(lane * 256 + int((control.words[4] + 1u) % 256u)) * 2].x <= 0.0;
-        discharge = capacity && params.grid.w > 0.0001 ? q.x * max(-v.y, 0.0) : 0.0;
-        south_flux = vec4(discharge, discharge * v + vec2(0.0, -0.5 * params.domain.w * q.x * q.x),
-            discharge * q.w / max(q.x, 0.004));
+        vec4 sums = vec4(0.0);
+        vec4 outlets = vec4(0.0);
+        for (int i = 0; i < 4; ++i) {
+            if (outgoing[i] <= 0.0) continue;
+            vec2 normal = vec2(FACES[i]);
+            float volume = outgoing[i] * dt * params.domain.z;
+            // The sheet leaves the brink at least as fast as the face flux carries it.
+            vec2 brink = v + normal * max(outgoing[i] / max(q.x, 0.004) - dot(v, normal), 0.0);
+            vec2 outlet = world + normal * (0.5 * params.domain.z + SPILL_CLEARANCE_M);
+            sums += vec4(volume, volume * brink, volume * clamp(q.w / max(q.x, 0.004), 0.0, 1.0));
+            outlets += vec4(volume * outlet.x, volume * outlet.y, volume * (bed.x + 0.5 * q.x), 0.0);
+        }
+        spill_outflow.outflow[cell * 2] += sums;
+        spill_outflow.outflow[cell * 2 + 1] += outlets;
     }
     vec4 flux = east_flux + west_flux + north_flux + south_flux;
     vec4 next = q - dt / params.domain.z * flux;
-    if (lane >= 0 && source_cell(world)) {
-        vec2 v = velocity(q);
-        float volume = discharge * dt * params.domain.z;
-        vec4 transfer = cascade.lane_input[lane];
-        transfer.yz = (transfer.yz * transfer.x + vec2(max(-v.y, 0.0), v.x) * volume)
-            / max(transfer.x + volume, 1.0e-12);
-        transfer.x += volume;
-        transfer.w = (transfer.w * (transfer.x - volume) + (bed.x + q.x) * volume) / max(transfer.x, 1.0e-12);
-        cascade.lane_input[lane] = transfer;
-        cascade.totals[lane].x += volume;
-    }
     next.x = max(next.x, 0.0);
     vec2 reference_gradient = vec2(
         imageLoad(terrain, bound_cell(p + ivec2(1, 0))).y - imageLoad(terrain, bound_cell(p - ivec2(1, 0))).y,
         imageLoad(terrain, bound_cell(p + ivec2(0, 1))).y - imageLoad(terrain, bound_cell(p - ivec2(0, 1))).y
     ) / (2.0 * params.domain.z);
-    if (!seam_cell(world)) next.yz += dt * params.domain.w * next.x * reference_gradient;
+    // Terraces are held by the reference surface. A spilling field has none: its steps spill and its slopes run.
+    if (!spilling) next.yz += dt * params.domain.w * next.x * reference_gradient;
     if (next.x > 0.004) {
         next.yz += dt * params.relaxation.x * (bed.zw * params.grid.w * next.x - next.yz);
         next.yz /= 1.0 + dt * (0.06 + 0.018 * length(velocity(next)) / max(next.x, 0.05));
@@ -408,8 +336,11 @@ void main() {
         foam = 1.0 - (1.0 - foam) * exp(-source * dt * 2.0);
         next.w = foam * next.x;
     } else next.yzw = vec3(0.0);
-    float relaxed_depth = seam_cell(world) ? next.x : mix(next.x, reference_depth, 1.0 - exp(-dt * params.relaxation.y));
-    float relaxation_volume = (relaxed_depth - next.x) * params.domain.z * params.domain.z;
+    // Water speeding up towards a lip draws down instead of being refilled to the reference level, so a fall carries
+    // what flows in rather than what the level guidance pumps.
+    float speedup = length(velocity(next)) / max(length(bed.zw) * params.grid.w, 0.05);
+    float level_rate = params.relaxation.y * (spilling ? 1.0 - smoothstep(LEVEL_SPEEDUP.x, LEVEL_SPEEDUP.y, speedup) : 1.0);
+    float relaxed_depth = mix(next.x, reference_depth, 1.0 - exp(-dt * level_rate));
     next.yzw *= relaxed_depth / max(next.x, 0.004);
     next.x = relaxed_depth;
     float edge = min(min(float(p.x), params.grid.x - 1.0 - float(p.x)),
@@ -429,10 +360,5 @@ void main() {
         float restore = edge < params.domain.z ? 1.0 : 1.0 - exp(-dt * sponge * incoming * 5.0);
         next = mix(next, seed_state(p), restore);
     }
-    if (params.waterfall.x > 0.0) {
-        vec4 ledger = imageLoad(balance, p);
-        ledger.xy += vec2(relaxation_volume, (next.x - relaxed_depth) * params.domain.z * params.domain.z);
-        imageStore(balance, p, ledger);
-    }
-    store_next(p, next);
+    imageStore(state_out, p, next);
 }

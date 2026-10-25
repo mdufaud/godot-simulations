@@ -1,7 +1,5 @@
 class_name RiverField extends RefCounted
 
-const OBSTACLE_CELL_M := 0.0625
-
 var domain_m := Vector2(72.0, 160.0)
 var origin_m := Vector2.ZERO
 var surface_slope := 0.0
@@ -16,11 +14,10 @@ var flow_image: Image
 var bed_image: Image
 var height_range_m := Vector2.ZERO
 var has_water := true
-var ground_height_image: Image
-var ground_rows_m := PackedFloat32Array()
-var waterfall: RiverWaterfallConfig
-var obstacle_image: Image
-var _obstacle_stamp := RiverObstacleStamp.new()
+## Water crossing a bed face steeper than the solver's spill slope leaves the height field as particles.
+var spills := false
+## With two reflection planes, each mirrors the pool of its water zone (1 then 2) at its anchor and hides what lies below.
+var reflection_pools := false
 var _baked_key: Array = []
 var _baked: Array = []
 
@@ -31,79 +28,6 @@ func sample_bed(point: Vector2) -> float:
 
 func sample_height(point: Vector2, level_m: float) -> float:
 	return (_sample_data(point).g if solver_terrain_image != null else point.y * surface_slope) + level_m
-
-
-func sample_ground_height(point: Vector2) -> float:
-	return sample_base_ground_height(point) + sample_obstacle_excess(point)
-
-
-func sample_obstacle_excess(point: Vector2) -> float:
-	if obstacle_image == null:
-		return 0.0
-	var size := obstacle_image.get_size()
-	var cell := (point - domain_rect().position) / (domain_m / Vector2(size)) - Vector2.ONE * 0.5
-	var low := Vector2i(cell.floor())
-	var fraction := cell - Vector2(low)
-	var last := size - Vector2i.ONE
-	var a := obstacle_image.get_pixelv(low.clamp(Vector2i.ZERO, last)).r
-	var b := obstacle_image.get_pixelv((low + Vector2i(1, 0)).clamp(Vector2i.ZERO, last)).r
-	var c := obstacle_image.get_pixelv((low + Vector2i(0, 1)).clamp(Vector2i.ZERO, last)).r
-	var d := obstacle_image.get_pixelv((low + Vector2i.ONE).clamp(Vector2i.ZERO, last)).r
-	return lerpf(lerpf(a, b, fraction.x), lerpf(c, d, fraction.x), fraction.y)
-
-
-func bake_obstacles() -> void:
-	obstacle_image = null
-	var size := Vector2i((domain_m / OBSTACLE_CELL_M).round())
-	var origin := domain_rect().position
-	var tops := PackedFloat32Array()
-	tops.resize(size.x * size.y)
-	tops.fill(-INF)
-	var areas: Array[Rect2i] = []
-	for instance in obstacle_meshes:
-		areas.append(_obstacle_stamp.stamp(tops, 1, size, origin, domain_m.x / size.x, instance))
-	var data := PackedFloat32Array()
-	data.resize(size.x * size.y * 2)
-	for area in areas:
-		for y in range(area.position.y, area.end.y):
-			for x in range(area.position.x, area.end.x):
-				var index := y * size.x + x
-				if tops[index] == -INF or data[index * 2 + 1] != 0.0:
-					continue
-				var ground := sample_base_ground_height(origin + (Vector2(x, y) + Vector2.ONE * 0.5) * domain_m / Vector2(size))
-				data[index * 2] = maxf(tops[index] - ground, 0.0)
-				data[index * 2 + 1] = ground
-	obstacle_image = Image.create_from_data(size.x, size.y, false, Image.FORMAT_RGF, data.to_byte_array())
-
-
-func sample_base_ground_height(point: Vector2) -> float:
-	if ground_height_image == null:
-		return sample_bed(point)
-	var last := ground_height_image.get_size() - Vector2i.ONE
-	var cell := (((point - origin_m) / domain_m + Vector2.ONE * 0.5) * Vector2(last)).clamp(Vector2.ZERO, Vector2(last))
-	if not ground_rows_m.is_empty():
-		var upper := ground_rows_m.bsearch(point.y)
-		var low_y := 0
-		var fraction_y := 0.0
-		if upper >= ground_rows_m.size():
-			low_y = ground_rows_m.size() - 1
-		elif ground_rows_m[upper] == point.y:
-			low_y = upper
-		elif upper > 0:
-			low_y = upper - 1
-			fraction_y = clampf((point.y - ground_rows_m[low_y]) / (ground_rows_m[upper] - ground_rows_m[low_y]), 0.0, 1.0)
-		cell.y = float(low_y) + fraction_y
-	var low := Vector2i(cell.floor())
-	var fraction := cell - Vector2(low)
-	if waterfall != null and waterfall.is_vertical() and point.y < waterfall.crest_z_m \
-			and ground_height_image.get_pixel(0, mini(low.y + 1, last.y)).g >= waterfall.crest_z_m:
-		fraction.y = 0.0
-	var a := ground_height_image.get_pixelv(low).r
-	var b := ground_height_image.get_pixelv((low + Vector2i.RIGHT).min(last)).r
-	var c := ground_height_image.get_pixelv((low + Vector2i.DOWN).min(last)).r
-	var d := ground_height_image.get_pixelv((low + Vector2i.ONE).min(last)).r
-	return a + (b - a) * fraction.x + (c - a) * fraction.y if fraction.x + fraction.y <= 1.0 \
-		else d + (c - d) * (1.0 - fraction.x) + (b - d) * (1.0 - fraction.y)
 
 
 func sample(point: Vector2, level_m: float) -> Color:

@@ -2,22 +2,22 @@ class_name RiverWaterfallSpray
 extends Node3D
 ## Impact effects at the foot of a waterfall: a churning foam boil, a rising mist
 ## cloud that shows a rainbow when the sun is behind the viewer, elongated splash
-## sheets and a volumetric mist volume. Emitters follow the impact points of a
-## RiverWaterfallCurtain; its rock impacts get their own splash and puffs. The volume only renders when the host Environment has
+## sheets and a volumetric mist volume. Emitters follow the landing points of the
+## waterfall transport; its rock impacts get their own splash and puffs. The volume only renders when the host Environment has
 ## volumetric fog enabled; keep its base density at 0 so only this volume adds fog.
 ##
 ##   var spray := RiverWaterfallSpray.new()
 ##   spray.noise_texture = seamless_noise           # tileable 2D noise
 ##   add_child(spray)
 ##   spray.start()
-##   spray.set_impacts(curtain.impact_points, curtain.downstream, curtain.across, curtain.width_m)
-##   spray.set_rock_impacts(curtain.rock_impacts, curtain.downstream)
+##   spray.set_impacts(landing_points, downstream, across, width_m)
+##   spray.set_rock_impacts(rock_hits, downstream)           # Vector4(x, y, z, rate)
 ##   spray.tick(intensity, false)                    # every frame, intensity in [0, 1]
 
 const BOIL_COUNT := [36, 60, 96, 144]
 const MIST_COUNT := [10, 16, 24, 32]
 const SPLASH_COUNT := [48, 128, 192, 288]
-const ROCK_SPLASH_COUNT := [32, 96, 160, 240]
+const ROCK_SPLASH_COUNT := [16, 40, 64, 96]
 const ROCK_PUFF_COUNT := [10, 20, 32, 48]
 const ROCK_PUFF_OPACITY := 0.45
 const BOIL_LIFETIME_S := 2.6
@@ -28,7 +28,7 @@ const BOIL_INSET := 0.95
 const MIST_OFFSETS_M := [0.6, 2.0]
 const BOIL_OPACITY := 0.5
 const MIST_OPACITY := 0.2
-const FOG_DENSITY := 4.0
+const FOG_DENSITY := 1.0
 const FOG_MARGIN_M := Vector3(4.0, 4.5, 6.0)
 const VISIBILITY_MARGIN_M := 6.0
 const ACTIVE_INTENSITY := 0.08
@@ -89,11 +89,11 @@ func start() -> void:
 	splash.scale_max = 1.4
 	splash.particle_flag_align_y = true
 	splash.color_ramp = _fade([Vector2(0.05, 0.9), Vector2(0.7, 0.6)])
-	_rock_splash = _particles("RockSplash", SPLASH_LIFETIME_S, droplet, Vector2(0.04, 0.24))
+	_rock_splash = _particles("RockSplash", SPLASH_LIFETIME_S, droplet, Vector2(0.03, 0.12))
 	var rock_splash := _rock_splash.process_material as ParticleProcessMaterial
-	rock_splash.spread = 70.0
-	rock_splash.initial_velocity_min = 1.5
-	rock_splash.initial_velocity_max = 4.5
+	rock_splash.spread = 55.0
+	rock_splash.initial_velocity_min = 1.0
+	rock_splash.initial_velocity_max = 3.0
 	rock_splash.gravity = Vector3(0.0, -9.81, 0.0)
 	rock_splash.scale_min = 0.5
 	rock_splash.scale_max = 1.2

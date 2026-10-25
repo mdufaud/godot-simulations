@@ -56,7 +56,6 @@ declare -a SUITES=(
 	"portal_math|cpu|-|-s res://tests/portal_math_test.gd"
 	"river_field|cpu|-|-s res://tests/river_field_test.gd"
 	"river_boot|cpu|-|-s res://tests/river_boot_test.gd"
-	"river_waterfall_curtain|cpu|-|-s res://tests/river_waterfall_curtain_test.gd"
 	"growing_corridor_state|cpu|-|-s res://tests/growing_corridor_state_test.gd"
 	"apparent_scale|cpu|-|-s res://tests/apparent_scale_test.gd"
 	"wrap_world_state|cpu|-|-s res://tests/wrap_world_state_test.gd"

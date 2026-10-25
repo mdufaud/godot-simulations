@@ -92,6 +92,8 @@ physics_test_display_start() {
 	if ! physics_test_display_lock_acquire; then
 		return 1
 	fi
+	# Holding the lock, any other compositor of ours lost its launcher (flock dies with it): reap only those.
+	pkill -KILL -f -- "--virtual.*physics-test-wayland" 2>/dev/null || true
 
 	runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/physics-test-wayland.XXXXXX")"
 	chmod 700 "$runtime_dir"
@@ -108,7 +110,7 @@ physics_test_display_start() {
 		--height "$height" \
 		--no-lockscreen \
 		--no-global-shortcuts \
-		>"$log_file" 2>&1 &
+		>"$log_file" 2>&1 8>&- 9>&- &
 	PHYSICS_TEST_DISPLAY_PID=$!
 	PHYSICS_TEST_DISPLAY_RUNTIME="$runtime_dir"
 	PHYSICS_TEST_DISPLAY_SOCKET="$socket_name"
@@ -161,7 +163,7 @@ physics_test_xvfb_start() {
 	# -displayfd picks a free display number and writes it once the server
 	# accepts connections, so no polling of a guessed socket.
 	Xvfb -displayfd 3 -screen 0 "${width}x${height}x24" -nolisten tcp \
-		3>"$runtime_dir/display" >"$log_file" 2>&1 &
+		3>"$runtime_dir/display" >"$log_file" 2>&1 8>&- 9>&- &
 	PHYSICS_TEST_DISPLAY_PID=$!
 	PHYSICS_TEST_DISPLAY_RUNTIME="$runtime_dir"
 
@@ -345,7 +347,9 @@ physics_test_run_process() {
 
 	local data_dir
 	data_dir="$(mktemp -d "${output_file}.data.XXXXXX")" || return 1
-	XDG_DATA_HOME="$data_dir" setsid "$@" >"$output_file" 2>&1 &
+	# The engine carries its own deadline and none of the launcher's locks: a launcher killed outright leaves
+	# nothing that runs on or holds the display.
+	XDG_DATA_HOME="$data_dir" setsid timeout --signal=TERM --kill-after=20 "$((timeout_seconds + 30))" "$@" >"$output_file" 2>&1 8>&- 9>&- &
 	process_pid=$!
 	local pidfile
 	pidfile="$(physics_test_pidfile)"
