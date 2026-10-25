@@ -65,6 +65,7 @@ var composite_mi: MeshInstance3D
 
 var pos_texture: Texture2DRD
 var foam_pos_texture: Texture2DRD
+var flow_texture: Texture2DRD
 var _tex_bound := false
 var _foam_bound := false
 var _foam_visible := false
@@ -209,6 +210,7 @@ func rebind() -> void:
 		pos_texture.texture_rd_rid = RID()
 	if foam_pos_texture != null:
 		foam_pos_texture.texture_rd_rid = RID()
+	bind_flow(RID())
 	_tex_bound = false
 	_foam_bound = false
 	# The impostors keep drawing until the next update() re-raises the count,
@@ -267,11 +269,24 @@ func _update_foam_viewport() -> void:
 		composite_mat.set_shader_parameter("foam_enabled", active)
 
 
+## Per-particle horizontal velocity texture laid out like positions, weighed into thickness G B; RID() turns it off.
+func bind_flow(flow_tex_rid: RID) -> void:
+	if flow_texture == null:
+		if not flow_tex_rid.is_valid():
+			return
+		flow_texture = Texture2DRD.new()
+		thick_mat.set_shader_parameter("flow_tex", flow_texture)
+	flow_texture.texture_rd_rid = flow_tex_rid
+	thick_mat.set_shader_parameter("flow_enabled", flow_tex_rid.is_valid())
+
+
 func _exit_tree() -> void:
 	if pos_texture != null:
 		pos_texture.texture_rd_rid = RID()
 	if foam_pos_texture != null:
 		foam_pos_texture.texture_rd_rid = RID()
+	if flow_texture != null:
+		flow_texture.texture_rd_rid = RID()
 
 
 # --- Render chain (built once) --------------------------------------------

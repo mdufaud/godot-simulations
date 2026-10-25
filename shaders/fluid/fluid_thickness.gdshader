@@ -8,16 +8,21 @@ uniform int tex_width = 256;
 uniform float particle_radius = 0.12;
 uniform float cull_attribute_max = -1e20;
 uniform vec2 clip_z_m = vec2(-1e20, 1e20);
+// Optional per-particle horizontal velocity, laid out like position_tex.
+uniform sampler2D flow_tex : filter_nearest;
+uniform bool flow_enabled = false;
 
 varying vec2 quad_uv;
 varying float attrib;
 varying float particle_z;
+varying vec2 flow;
 
 void vertex() {
 	ivec2 texel = ivec2(int(INSTANCE_ID) % tex_width, int(INSTANCE_ID) / tex_width);
 	vec4 particle = texelFetch(position_tex, texel, 0);
 	particle_z = particle.z;
 	attrib = particle.w;
+	flow = flow_enabled ? texelFetch(flow_tex, texel, 0).xy : vec2(0.0);
 	if (attrib <= cull_attribute_max) {
 		POSITION = vec4(2.0, 2.0, 2.0, 1.0);
 	} else {
@@ -34,7 +39,7 @@ void fragment() {
 	if (r2 > 1.0) {
 		discard;
 	}
-	// R = thickness, G = attrib-weighted thickness (lava: temperature)
+	// R = thickness, G = attrib-weighted thickness (lava: temperature), or G B = flow-weighted thickness
 	float t = sqrt(1.0 - r2) * particle_radius * 2.0;
-	ALBEDO = vec3(t, t * attrib, 0.0);
+	ALBEDO = flow_enabled ? vec3(t, t * flow) : vec3(t, t * attrib, 0.0);
 }

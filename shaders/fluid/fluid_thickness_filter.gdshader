@@ -4,21 +4,21 @@
 // Run twice: direction (1,0) then (0,1). Empty samples (thickness 0, i.e. no
 // fluid) are skipped rather than smeared into the edges, same convention as
 // the depth filter. R = thickness, G = attribute-weighted thickness (lava
-// temperature).
+// temperature) or, with B, flow-weighted thickness.
 shader_type canvas_item;
 
 uniform sampler2D thickness_tex : filter_nearest;
 uniform vec2 direction = vec2(1.0, 0.0);
 
 void fragment() {
-	vec2 c0 = texture(thickness_tex, UV).rg;
+	vec3 c0 = texture(thickness_tex, UV).rgb;
 	vec2 texel = direction / vec2(textureSize(thickness_tex, 0));
-	vec2 sum = c0;
+	vec3 sum = c0;
 	float wsum = 1.0;
 	for (int i = 1; i <= 5; i++) {
 		float w = exp(-float(i * i) / 9.0);
-		vec2 ca = texture(thickness_tex, UV + texel * float(i)).rg;
-		vec2 cb = texture(thickness_tex, UV - texel * float(i)).rg;
+		vec3 ca = texture(thickness_tex, UV + texel * float(i)).rgb;
+		vec3 cb = texture(thickness_tex, UV - texel * float(i)).rgb;
 		if (ca.r > 0.001) {
 			sum += ca * w;
 			wsum += w;
@@ -28,5 +28,5 @@ void fragment() {
 			wsum += w;
 		}
 	}
-	COLOR = vec4(sum / wsum, 0.0, 1.0);
+	COLOR = vec4(sum / wsum, 1.0);
 }

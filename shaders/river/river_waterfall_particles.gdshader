@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode cull_disabled, depth_draw_never, depth_test_disabled, fog_disabled;
 #include "res://shaders/river/river_swe.gdshaderinc"
 
-// Spilled water composite: fluid_depth_tex = eye depth (R + G) and free-fall drop (B), thickness_tex = optical depth.
+// Spilled water composite: fluid_depth_tex = eye depth (R + G), drop (B); thickness_tex = optical depth (R), flow (G, B).
 
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_nearest;
 uniform sampler2D fluid_depth_tex : filter_nearest;
@@ -17,6 +17,10 @@ const vec2 COVERAGE_SAMPLES = vec2(0.25, 2.0);
 const float NORMAL_SPAN_TEXELS = 3.0;
 // Drop below which a spill is a splash off a rock rather than a fall, and the height above a pool where it merges.
 const vec2 SHORT_SPILL_M = vec2(0.4, 1.0);
+// Where the water meets rock or its pool it fades over this depth instead of cutting along pixels and cells.
+const float SOFT_EDGE_M = 0.05;
+// Horizontal speed over which the flow direction takes over the streak axis from the sheet's normal.
+const vec2 FLOW_SPEED_M_S = vec2(0.1, 0.3);
 
 void vertex() {
 	POSITION = vec4(VERTEX.xy, 1.0, 1.0);
@@ -46,6 +50,22 @@ float fluid_depth(vec2 uv) {
 	return rg.x + rg.y;
 }
 
+// Bilinear share of the four nearest depth texels drawn on, so the half-resolution edge fades instead of stepping.
+float coverage(vec2 uv) {
+	ivec2 size = textureSize(fluid_depth_tex, 0);
+	vec2 c = uv * vec2(size) - 0.5;
+	ivec2 lo = ivec2(floor(c));
+	vec2 f = c - vec2(lo);
+	float share = 0.0;
+	for (int k = 0; k < 4; k++) {
+		ivec2 corner = ivec2(k & 1, k >> 1);
+		vec2 rg = texelFetch(fluid_depth_tex, clamp(lo + corner, ivec2(0), size - 1), 0).rg;
+		vec2 w = mix(1.0 - f, f, vec2(corner));
+		share += w.x * w.y * float(rg.x + rg.y > 0.001);
+	}
+	return share;
+}
+
 vec3 eye_position(vec2 uv, float eye_depth, mat4 inv_projection) {
 	vec4 ray = inv_projection * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
 	vec3 direction = ray.xyz / ray.w;
@@ -58,7 +78,7 @@ void fragment() {
 	float scene_depth = -scene.z / scene.w;
 	vec2 texel = 1.0 / vec2(textureSize(fluid_depth_tex, 0));
 	float depth = fluid_depth(SCREEN_UV);
-	// The half-resolution depth is grown by one texel so the edge alpha comes from the smooth thickness instead.
+	// The half-resolution depth is grown by one texel so the faded edge has a depth to shade with.
 	if (depth <= 0.001) {
 		for (int i = 0; i < 4; i++) {
 			vec2 offset = vec2(float(i == 0) - float(i == 1), float(i == 2) - float(i == 3)) * texel;
@@ -67,6 +87,7 @@ void fragment() {
 		}
 	}
 	if (depth <= 0.001 || depth > scene_depth) { discard; }
+	float edge = smoothstep(0.0, SOFT_EDGE_M, scene_depth - depth);
 
 	// One-sided differences, the smaller side on each axis, so silhouettes keep their normals.
 	vec3 center = eye_position(SCREEN_UV, depth, INV_PROJECTION_MATRIX);
@@ -91,14 +112,18 @@ void fragment() {
 	vec2 swe_uv = river_swe_uv(world.xz);
 	vec4 pool = texture(swe_surface, swe_uv);
 	float source = texture(swe_spill, swe_uv).b;
-	if (under_cells(world.xz, world.y) > 0.5
-		|| (pool.w > 0.004 && world.y < pool.z + source * sample_diameter_m * 0.5)) { discard; }
+	edge *= 1.0 - smoothstep(0.35, 0.65, under_cells(world.xz, world.y));
+	if (pool.w > 0.004) { edge *= smoothstep(0.0, SOFT_EDGE_M, world.y - pool.z - source * sample_diameter_m * 0.5); }
+	if (edge <= 0.0) { discard; }
 
 	float drop_m = texture(fluid_depth_tex, SCREEN_UV).b;
 	vec3 world_normal = (INV_VIEW_MATRIX * vec4(view_normal, 0.0)).xyz;
-	// The sheet runs across its horizontal normal, so its streaks follow that axis.
+	vec3 thickness = texture(thickness_tex, SCREEN_UV).rgb;
+	// Streaks run along the water's horizontal flow; water dropping too straight down to tell runs across its normal.
+	vec2 flow = thickness.gb / max(thickness.r, 0.0001);
 	float facing_x = smoothstep(0.3, 0.7, abs(world_normal.x) / max(abs(world_normal.x) + abs(world_normal.z), 0.001));
-	float across_m = mix(world.x, world.z, facing_x);
+	float across_m = mix(mix(world.x, world.z, facing_x), dot(world.xz, normalize(vec2(-flow.y, flow.x) + 1e-6)),
+		smoothstep(FLOW_SPEED_M_S.x, FLOW_SPEED_M_S.y, length(flow)));
 	float above_pool_m = world.y - (pool.w > 0.004 ? pool.z : texture(swe_terrain, swe_uv).r);
 	WaterfallLook look = waterfall_look(world, view_normal, drop_m, across_m, above_pool_m, VIEW_MATRIX, VIEW, SCREEN_UV);
 	NORMAL = look.normal;
@@ -108,8 +133,8 @@ void fragment() {
 	ROUGHNESS = look.roughness;
 	SPECULAR = look.specular;
 	BACKLIGHT = look.backlight;
-	float samples = (texture(thickness_tex, SCREEN_UV).r + look.fray * 0.04 * look.thin) / sample_diameter_m;
+	float samples = (thickness.r + look.fray * 0.04 * look.thin) / sample_diameter_m;
 	// Water spilling a short way off a rock into a pool merges with it; a long fall keeps its sheet down to the pool.
 	float merged = 1.0 - max(smoothstep(0.0, SHORT_SPILL_M.x, above_pool_m), smoothstep(SHORT_SPILL_M.x, SHORT_SPILL_M.y, drop_m));
-	ALPHA = smoothstep(COVERAGE_SAMPLES.x, COVERAGE_SAMPLES.y, samples) * (1.0 - merged);
+	ALPHA = smoothstep(COVERAGE_SAMPLES.x, COVERAGE_SAMPLES.y, samples) * (1.0 - merged) * coverage(SCREEN_UV) * edge;
 }

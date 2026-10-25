@@ -22,6 +22,8 @@ layout(rgba32f, set = 0, binding = 6) uniform writeonly image2D positions;
 // Per impact tile: water landings then hits on dry ground, each as weight (volume units over impact.z),
 // weighted x and z velocity, weighted height. A landing weighs in by its drop, ramping over spray.xy metres.
 layout(std430, set = 0, binding = 7) buffer Impacts { int tiles[]; } impacts;
+// Drawn particles: horizontal velocity (x, z), so the streaks run along the flow.
+layout(rgba32f, set = 0, binding = 8) uniform writeonly image2D flows;
 layout(push_constant, std430) uniform Params {
     vec4 domain;
     vec4 grid;
@@ -200,7 +202,9 @@ void draw(uint i) {
     float look = origin.y >= SLID ? params.breakup.x + max(origin.w - body.y, 0.0) : drop * thinning + origin.y * params.breakup.x;
     float drawn_share = params.spray.z > 0.0 ? body.w / (params.spray.z * WHOLE_STREAM_SHARE) : 1.0;
     bool shown = body.w > 0.0 && float(hash(i) & 0xFFFFu) / 65535.0 <= drawn_share;
-    imageStore(positions, ivec2(int(i) % width, int(i) / width), shown ? vec4(drawn, look + DROP_OFFSET_M) : vec4(0.0));
+    ivec2 texel = ivec2(int(i) % width, int(i) / width);
+    imageStore(positions, texel, shown ? vec4(drawn, look + DROP_OFFSET_M) : vec4(0.0));
+    imageStore(flows, texel, shown ? vec4(particles.data[i * 3u + 1u].xz, 0.0, 0.0) : vec4(0.0));
 }
 
 void main() {
