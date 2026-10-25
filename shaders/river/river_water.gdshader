@@ -176,12 +176,6 @@ void vertex() {
 	vec2 cell_m = swe_spill_enabled ? swe_region_m.zw / vec2(textureSize(swe_spill, 0)) : vec2(0.0);
 	VERTEX.xz = point + vec2(toward) * max(cell_m * 0.5 - SPILL_FACE_GAP_M, vec2(0.0));
 	VERTEX.y = h;
-	// Where a pool pours over a face its surface drops to the brink depth of a free overfall.
-	if ((spilled & 15) != 0) {
-		vec4 own = texelFetch(swe_surface, river_swe_cell(point), 0);
-		float discharge = length(own.xy) * own.w;
-		VERTEX.y -= (own.w - min(own.w, swe_brink_depth_ratio * pow(discharge * discharge / swe_gravity_m_s2, 1.0 / 3.0))) * weight;
-	}
 	vec2 step_m = mix(vec2(0.08), vec2(-0.08), vec2(greaterThan(toward, ivec2(0))));
 	vec2 right = point + vec2(step_m.x, 0.0);
 	vec2 down = point + vec2(0.0, step_m.y);

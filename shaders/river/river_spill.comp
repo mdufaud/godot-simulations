@@ -34,6 +34,8 @@ layout(push_constant, std430) uniform Params {
 } params;
 
 const float WET_DEPTH_M = 0.004;
+// A particle leaves this far past the face it spills over.
+const float SPILL_CLEARANCE_M = 0.02;
 // The drawn drop starts above zero so a particle that just left the ground is not taken for an unused slot.
 const float DROP_OFFSET_M = 0.01;
 // A stream this many times thinner than the reference already breaks up as soon as the thinnest ones do.
@@ -166,29 +168,43 @@ uint hash(uint value) {
 }
 
 // One particle per spilling cell and emission period, in whole volume units; the remainder waits for the next one.
-// Each leaves with a random sideways share motion.w of its speed: the sheet is never issued perfectly smooth.
+// It leaves over a face picked in proportion to the volume over it, from a point drawn uniformly across the face
+// (Chentanez & Mueller), with a random sideways share motion.w of its speed. It leaves at the water surface: drawn
+// at random heights, the particles of a stream lose their even spacing down the fall and the sheet tears open.
 void emit(uint index) {
     vec4 sums = spill_outflow.outflow[index * 2u];
     if (sums.x <= 0.0) return;
     float unit = uintBitsToFloat(spill.words[13]);
     float units = floor(sums.x / unit);
     if (units < 1.0) return;
-    vec4 outlets = spill_outflow.outflow[index * 2u + 1u];
+    vec4 faces = spill_outflow.outflow[index * 2u + 1u];
     float kept = 1.0 - units * unit / sums.x;
     spill_outflow.outflow[index * 2u] = sums * kept;
-    spill_outflow.outflow[index * 2u + 1u] = outlets * kept;
+    spill_outflow.outflow[index * 2u + 1u] = faces * kept;
     uint slot = atomicAdd(spill.words[0], 1u) % uint(params.grid.w);
     float replaced = particles.data[slot * 3u].w;
     if (replaced > 0.0) ledger_add(8, uint(replaced));
-    vec3 position = vec3(outlets.x, outlets.z, outlets.y) / sums.x;
+    ivec2 cell = ivec2(int(index % uint(params.grid.x)), int(index / uint(params.grid.x)));
+    vec4 source = imageLoad(state, cell);
+    uint seed = hash(spill.words[14] + index * 9781u);
+    float pick = float(hash(seed) & 0xFFFFu) / 65535.0 * dot(faces, vec4(1.0));
+    int face = 0;
+    while (face < 3 && pick > faces[face]) {
+        pick -= faces[face];
+        face++;
+    }
+    vec2 normal = face < 2 ? vec2(float(1 - 2 * face), 0.0) : vec2(0.0, float(5 - 2 * face));
+    // Along the face this slot leaves at the point its streaks read (see draw), clear of the cell it leaves.
+    vec2 jitter = vec2(hash(slot * 2u + 1u) & 0xFFFFu, hash(slot * 2u + 2u) & 0xFFFFu) / 65535.0;
+    vec2 point = params.domain.xy + (vec2(cell) + 0.5) * params.domain.z
+        + normal * (0.5 * params.domain.z + SPILL_CLEARANCE_M) + (jitter - 0.5) * params.domain.z * abs(normal.yx);
+    vec3 position = vec3(point.x, bed_at(cell) + source.x, point.y);
     particles.data[slot * 3u] = vec4(position, units);
     vec2 velocity = sums.yz / sums.x;
-    uint seed = hash(spill.words[14] + index * 9781u);
     float angle = float(seed & 0xFFFFu) / 65535.0 * 6.2831853;
     float share = float(seed >> 16u) / 65535.0 * params.motion.w;
     velocity += vec2(cos(angle), sin(angle)) * share * length(velocity);
     particles.data[slot * 3u + 1u] = vec4(velocity.x, 0.0, velocity.y, 0.0);
-    vec4 source = imageLoad(state, ivec2(int(index % uint(params.grid.x)), int(index / uint(params.grid.x))));
     particles.data[slot * 3u + 2u] = vec4(float(index), clamp(source.w / max(source.x, WET_DEPTH_M), 0.0, 1.0), position.y, position.y);
     ledger_add(2, uint(units));
     atomicAdd(spill.words[14], 1u);
@@ -207,7 +223,7 @@ void draw(uint i) {
     ivec2 texel = ivec2(int(i) % width, int(i) / width);
     imageStore(positions, texel, shown ? vec4(drawn, look + DROP_OFFSET_M) : vec4(0.0));
     float radius = params.spray.z > 0.0 ? clamp(sqrt(body.w / params.spray.z), MIN_RADIUS_SHARE, 1.0) : 1.0;
-    // The emission cell, jittered over its width.
+    // The lip point it left: its emission cell with the jitter that placed it along its face.
     uint cell = uint(origin.x);
     vec2 jitter = vec2(hash(i * 2u + 1u) & 0xFFFFu, hash(i * 2u + 2u) & 0xFFFFu) / 65535.0;
     vec2 left = params.domain.xy + (vec2(cell % uint(params.grid.x), cell / uint(params.grid.x)) + jitter) * params.domain.z;

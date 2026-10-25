@@ -7,8 +7,6 @@ const MAX_SUBSTEPS := 64
 const MAX_QUERIES := 32
 # Bed slope across a face beyond which the flow leaves the height field (Chentanez & Mueller, US8878856).
 const SPILL_SLOPE := 1.5
-# End depth of a free overfall over its critical depth (Rouse 1936): where the sheet leaves the lip.
-const SPILL_BRINK_DEPTH_RATIO := 0.715
 const SPILL_VOLUME_UNIT_M3 := 1.0e-9
 const SPILL_EMISSION_HZ := 60.0
 const SPILL_CAPACITY := 65536
@@ -292,7 +290,6 @@ func _spill_header(slope: float) -> PackedByteArray:
 	bytes.resize(SPILL_STATE_BYTES)
 	bytes.encode_float(48, slope)
 	bytes.encode_float(52, SPILL_VOLUME_UNIT_M3)
-	bytes.encode_float(68, SPILL_BRINK_DEPTH_RATIO)
 	return bytes
 
 

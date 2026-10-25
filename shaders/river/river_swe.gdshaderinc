@@ -7,9 +7,6 @@ uniform bool swe_enabled = false;
 uniform bool swe_spill_enabled = false;
 // Bed slope past which the solver pours the water as particles: no live water surface is steeper.
 uniform float swe_spill_slope = 1.5;
-// Brink depth of a free overfall over its critical depth.
-uniform float swe_brink_depth_ratio = 0.715;
-uniform float swe_gravity_m_s2 = 9.81;
 uniform float swe_blend = 1.0;
 
 vec2 river_swe_uv(vec2 point) {

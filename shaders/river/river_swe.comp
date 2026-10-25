@@ -3,7 +3,6 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 const float MAX_ARRIVAL_SPEED_M_S = 2.0;
-const float SPILL_CLEARANCE_M = 0.02;
 // Current over the guided one beyond which the level guidance lets go.
 const vec2 LEVEL_SPEEDUP = vec2(1.2, 2.0);
 
@@ -17,9 +16,10 @@ layout(std430, set = 0, binding = 6) readonly buffer QueryPoints { vec4 points[]
 layout(std430, set = 0, binding = 7) writeonly buffer QueryResults { vec4 results[]; };
 // Per cell: volume units, then x and z momentum in volume units times m/s, then units landed since the last output.
 layout(std430, set = 0, binding = 8) buffer SpillDeposits { int deposits[]; } spill_deposits;
+// Per cell: volume, then x and z velocity and foam share, each times volume; then the volume over each face.
 layout(std430, set = 0, binding = 9) buffer SpillOutflow { vec4 outflow[]; } spill_outflow;
 // Spill state words: 10-11 consumed volume (low, high), 12 spill slope (0 = off), 13 volume unit in m3,
-// 15 spilling faces summed over outputs, 16 outputs, 17 brink depth over critical depth.
+// 15 spilling faces summed over outputs, 16 outputs.
 layout(std430, set = 0, binding = 10) buffer SpillState { uint words[]; } spill;
 // Per cell: bits 0-3 the east, west, north and south faces this cell spills over, bits 4-7 the faces spilling onto it;
 // then the landing rate in m/s of depth, then 1 where the cell spills over any face, for smooth sampling.
@@ -306,21 +306,16 @@ void main() {
         vec4 outgoing = max(vec4(east_flux.x, west_flux.x, north_flux.x, south_flux.x), 0.0) * vec4(spill_faces);
         vec2 v = velocity(q);
         vec4 sums = vec4(0.0);
-        vec4 outlets = vec4(0.0);
         for (int i = 0; i < 4; ++i) {
             if (outgoing[i] <= 0.0) continue;
             vec2 normal = vec2(FACES[i]);
             float volume = outgoing[i] * dt * params.domain.z;
             // The sheet leaves the brink at least as fast as the face flux carries it.
             vec2 brink = v + normal * max(outgoing[i] / max(q.x, 0.004) - dot(v, normal), 0.0);
-            vec2 outlet = world + normal * (0.5 * params.domain.z + SPILL_CLEARANCE_M);
             sums += vec4(volume, volume * brink, volume * clamp(q.w / max(q.x, 0.004), 0.0, 1.0));
-            // The sheet leaves at the middle of the brink depth of a free overfall, below the depth upstream.
-            float brink_depth = min(q.x, uintBitsToFloat(spill.words[17]) * pow(outgoing[i] * outgoing[i] / params.domain.w, 1.0 / 3.0));
-            outlets += vec4(volume * outlet.x, volume * outlet.y, volume * (bed.x + 0.5 * brink_depth), 0.0);
         }
         spill_outflow.outflow[cell * 2] += sums;
-        spill_outflow.outflow[cell * 2 + 1] += outlets;
+        spill_outflow.outflow[cell * 2 + 1] += outgoing * dt * params.domain.z;
     }
     vec4 flux = east_flux + west_flux + north_flux + south_flux;
     vec4 next = q - dt / params.domain.z * flux;

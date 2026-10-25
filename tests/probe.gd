@@ -7369,19 +7369,40 @@ func _run_river_cascade() -> void:
 				var error: float = surface[index + 2] - river_line.levels_m[reach] - config.water_level_m
 				worst_level = maxf(worst_level, absf(error))
 				levels += " %+.3f" % error
+		# A sheet leaves over its whole face, from the bed up to the surface: every spilling cell has water in the air,
+		# and its highest live emission reaches near its surface, so no wall shows between the pool and the sheet.
+		var bed: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.terrain, 0, grid.x * grid.y * 16)).to_float32_array()
+		var faces: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.spill, 0, grid.x * grid.y * 16)).to_float32_array()
+		var highest := {}
+		for i in range(0, particles.size(), 12):
+			if particles[i + 3] > 0.0:
+				var emitted_from := int(particles[i + 8])
+				highest[emitted_from] = maxf(float(highest.get(emitted_from, -INF)), particles[i + 11])
+		var lip_cells := 0
+		var aired := 0
+		var reaching := 0
+		for cell in grid.x * grid.y:
+			if (int(faces[cell * 4] + 0.5) & 15) == 0 or surface[cell * 4 + 3] < 0.05:
+				continue
+			lip_cells += 1
+			if highest.has(cell):
+				aired += 1
+				reaching += int(highest[cell] - bed[cell * 4] >= 0.8 * surface[cell * 4 + 3])
+		var aired_share := aired / maxf(lip_cells, 1.0)
+		var reaching_share := reaching / maxf(aired, 1.0)
 		var keys := curtains.keys()
 		keys.sort()
-		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d" % [
+		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d lip_cells=%d aired=%.3f reaching=%.3f" % [
 			preset, books.summary, spilling.size(), lips, keys.map(func(key: String) -> String: return "%s:%d" % [key, curtains[key]]),
-			stray, fastest, levels.strip_edges(), gpu_ms, grid.x * grid.y])
+			stray, fastest, levels.strip_edges(), gpu_ms, grid.x * grid.y, lip_cells, aired_share, reaching_share])
 		if stray > 0:
 			var spots := stray_spots.keys()
 			spots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return stray_spots[a] > stray_spots[b])
 			print("RIVER CASCADE stray_spots=%s" % [spots.slice(0, 12).map(func(spot: Vector2i) -> String: return "%s:%d" % [spot, stray_spots[spot]])])
 		var passed: bool = books.balanced and books.finite and finite and spilling.size() == lips and stray == 0 \
-			and fastest <= 8.0 and worst_level <= 0.3 and gpu_ms <= 3.0
+			and fastest <= 8.0 and worst_level <= 0.3 and gpu_ms <= 3.0 and reaching_share >= 0.85
 		all_pass = all_pass and passed
-	_check(all_pass, "river_cascade: every lip must spill and only lips, volume must balance, reaches must hold their level, speed and solver time must stay bounded")
+	_check(all_pass, "river_cascade: every lip must spill and only lips, from the bed up to its surface, volume must balance, reaches must hold their level, speed and solver time must stay bounded")
 	scene.queue_free()
 	_finish("river_cascade")
 
