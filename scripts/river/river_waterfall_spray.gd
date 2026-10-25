@@ -23,6 +23,9 @@ const ROCK_PUFF_OPACITY := 0.45
 const BOIL_LIFETIME_S := 2.6
 const MIST_LIFETIME_S := 8.0
 const SPLASH_LIFETIME_S := 0.7
+# A droplet streaks over one 1/60 s exposure at its top speed; wider or longer it reads as a white stick.
+const SPLASH_STREAK_M := Vector2(0.012, 0.1)
+const ROCK_SPLASH_STREAK_M := Vector2(0.01, 0.05)
 const BOIL_OFFSETS_M := [0.0, 0.35, 0.8]
 const BOIL_INSET := 0.95
 const MIST_OFFSETS_M := [0.6, 2.0]
@@ -79,7 +82,7 @@ func start() -> void:
 	droplet.shader = load("res://shaders/river/river_waterfall_droplet.gdshader")
 	droplet.render_priority = 2
 	droplet.set_shader_parameter("noise_texture", noise_texture)
-	_splash = _particles("Splash", SPLASH_LIFETIME_S, droplet, Vector2(0.035, 0.22))
+	_splash = _particles("Splash", SPLASH_LIFETIME_S, droplet, SPLASH_STREAK_M)
 	var splash := _splash.process_material as ParticleProcessMaterial
 	splash.spread = 50.0
 	splash.initial_velocity_min = 3.0
@@ -89,7 +92,7 @@ func start() -> void:
 	splash.scale_max = 1.4
 	splash.particle_flag_align_y = true
 	splash.color_ramp = _fade([Vector2(0.05, 0.9), Vector2(0.7, 0.6)])
-	_rock_splash = _particles("RockSplash", SPLASH_LIFETIME_S, droplet, Vector2(0.03, 0.12))
+	_rock_splash = _particles("RockSplash", SPLASH_LIFETIME_S, droplet, ROCK_SPLASH_STREAK_M)
 	var rock_splash := _rock_splash.process_material as ParticleProcessMaterial
 	rock_splash.spread = 55.0
 	rock_splash.initial_velocity_min = 1.0

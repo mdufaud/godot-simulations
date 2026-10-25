@@ -156,7 +156,7 @@ func tick(time_s: float, frozen: bool) -> void:
 	_material.set_shader_parameter("simulation_time_s", time_s)
 	if rid != _particles_rid:
 		_particles.rebind()
-		_particles.bind_flow(status.get("spill_flows", RID()))
+		_particles.bind_particle_data(status.get("spill_streaks", RID()))
 		_particles_rid = rid
 	_particles.update(rid, _particles.particle_count if rid.is_valid() else 0)
 	if int(status.get("spill_impact_serial", -1)) != _impact_serial:

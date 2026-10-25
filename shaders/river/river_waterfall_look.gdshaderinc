@@ -18,6 +18,7 @@ const float GRAVITY_M_S2 = 9.81;
 const float AERATION_ONSET = 0.1;
 const float AERATION_FULL = 1.0;
 const float STREAKS_PER_M = 0.17;
+const float STREAK_SPEED_M_S = 4.0;
 const float THREADS_PER_M = 0.6;
 const float IMPACT_FOAM_M = 0.6;
 const float REFRACTION = 0.025;
@@ -39,8 +40,8 @@ WaterfallLook waterfall_look(vec3 world, vec3 view_normal, float fall_m, float a
 		mat4 view_matrix, vec3 view, vec2 screen_uv) {
 	float speed = sqrt(source_speed_m_s * source_speed_m_s + 2.0 * GRAVITY_M_S2 * fall_m);
 	float film_m = unit_discharge_m2_s / max(speed, 0.05);
-	float time = sqrt(2.0 * fall_m / GRAVITY_M_S2);
-	float flow_s = time - simulation_time_s;
+	// Streaks scroll down the water's height: its drawn drop jumps between particles and would swirl them.
+	float flow_s = -world.y / STREAK_SPEED_M_S - simulation_time_s;
 	float strength = smoothstep(0.0, 0.5, foam_amount);
 
 	float warp = texture(turbulence_texture, vec2(across_m * 0.16, flow_s * 0.35)).r - 0.5;

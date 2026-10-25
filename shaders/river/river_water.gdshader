@@ -169,13 +169,19 @@ void vertex() {
 	float h = basin_height(point)
 		+ ripple(point, field.rg, field.b) * field.a * mix(1.0, 0.25, weight);
 	// A vertex beside a spill face keeps its own pool's height but moves onto the face, so the pools meet there.
-	int faces = river_spill_faces(point);
-	faces = (faces | (faces >> 4)) & 15;
+	int spilled = river_spill_faces(point);
+	int faces = (spilled | (spilled >> 4)) & 15;
 	ivec2 toward = ivec2(int((faces & 1) != 0) - int((faces & 2) != 0), int((faces & 4) != 0) - int((faces & 8) != 0));
 	spill_step = float(faces != 0);
 	vec2 cell_m = swe_spill_enabled ? swe_region_m.zw / vec2(textureSize(swe_spill, 0)) : vec2(0.0);
 	VERTEX.xz = point + vec2(toward) * max(cell_m * 0.5 - SPILL_FACE_GAP_M, vec2(0.0));
 	VERTEX.y = h;
+	// Where a pool pours over a face its surface drops to the brink depth of a free overfall.
+	if ((spilled & 15) != 0) {
+		vec4 own = texelFetch(swe_surface, river_swe_cell(point), 0);
+		float discharge = length(own.xy) * own.w;
+		VERTEX.y -= (own.w - min(own.w, swe_brink_depth_ratio * pow(discharge * discharge / swe_gravity_m_s2, 1.0 / 3.0))) * weight;
+	}
 	vec2 step_m = mix(vec2(0.08), vec2(-0.08), vec2(greaterThan(toward, ivec2(0))));
 	vec2 right = point + vec2(step_m.x, 0.0);
 	vec2 down = point + vec2(0.0, step_m.y);
@@ -214,6 +220,12 @@ void fragment() {
 		float slope = length(facet.xz) / max(abs(facet.y), 1.0e-6);
 		vec2 run_up = swe_spill_enabled && spill_step <= 0.0 ? vec2(1.0, 1.6) * swe_spill_slope : RUN_UP_SLOPE;
 		wet_coverage *= 1.0 - smoothstep(run_up.x, run_up.y, slope) * live_weight;
+		// Beside a spill face a pool ends where the cells at its level stop outweighing the others, between the cells.
+		if (spill_step > 0.0) {
+			vec2 spill_cell_m = swe_region_m.zw / vec2(textureSize(swe_spill, 0));
+			float level_share = river_swe_level_share(world_position.xz, world_position.y, swe_spill_slope * spill_cell_m.x * 0.5);
+			wet_coverage *= mix(1.0, smoothstep(0.35, 0.65, level_share), live_weight);
+		}
 	}
 	if (wet_coverage <= 0.0) { discard; }
 	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);

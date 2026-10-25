@@ -26,11 +26,15 @@ uniform float particle_radius = 0.12;
 uniform float cull_attribute_max = -1e20;
 uniform vec2 clip_z_m = vec2(-1e20, 1e20);
 uniform bool diagnostic_color_enabled = false;
+// Optional per-particle data laid out like position_tex: z scales the sphere radius.
+uniform sampler2D particle_data_tex : filter_nearest;
+uniform bool particle_data_enabled = false;
 
 varying vec2 quad_uv;
 varying vec3 center_view;
 varying float attrib;
 varying float particle_z;
+varying float radius;
 
 void vertex() {
 	ivec2 texel = ivec2(int(INSTANCE_ID) % tex_width, int(INSTANCE_ID) / tex_width);
@@ -41,9 +45,11 @@ void vertex() {
 	if (attrib <= cull_attribute_max) {
 		POSITION = vec4(2.0, 2.0, 2.0, 1.0);
 	} else {
+		float share = particle_data_enabled ? texelFetch(particle_data_tex, texel, 0).z : 0.0;
+		radius = particle_radius * (share > 0.0 ? share : 1.0);
 		quad_uv = UV * 2.0 - 1.0;
 		center_view = (VIEW_MATRIX * vec4(particle_pos, 1.0)).xyz;
-		vec3 view_pos = center_view + vec3(quad_uv * particle_radius, particle_radius);
+		vec3 view_pos = center_view + vec3(quad_uv * radius, radius);
 		POSITION = PROJECTION_MATRIX * vec4(view_pos, 1.0);
 	}
 }
@@ -55,7 +61,7 @@ void fragment() {
 		discard;
 	}
 	float nz = sqrt(1.0 - r2);
-	vec3 sphere_view = center_view + vec3(quad_uv, nz) * particle_radius;
+	vec3 sphere_view = center_view + vec3(quad_uv, nz) * radius;
 	// Split eye depth into integer + fraction: 16F render target quantizes a
 	// raw depth to ~1.6cm at 20m, destroying reconstructed normals. The split
 	// itself stays exact only while floor(d) fits half-float integers, so clamp

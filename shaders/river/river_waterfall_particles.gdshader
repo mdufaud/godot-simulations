@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode cull_disabled, depth_draw_never, depth_test_disabled, fog_disabled;
 #include "res://shaders/river/river_swe.gdshaderinc"
 
-// Spilled water composite: fluid_depth_tex = eye depth (R + G), drop (B); thickness_tex = optical depth (R), flow (G, B).
+// Spilled water composite: fluid_depth_tex = eye depth (R + G); thickness_tex = optical depth (R), lip point (G), drop (B).
 
 uniform sampler2D DEPTH_TEXTURE : hint_depth_texture, filter_nearest;
 uniform sampler2D fluid_depth_tex : filter_nearest;
@@ -19,8 +19,6 @@ const float NORMAL_SPAN_TEXELS = 3.0;
 const vec2 SHORT_SPILL_M = vec2(0.4, 1.0);
 // Where the water meets rock or its pool it fades over this depth instead of cutting along pixels and cells.
 const float SOFT_EDGE_M = 0.05;
-// Horizontal speed over which the flow direction takes over the streak axis from the sheet's normal.
-const vec2 FLOW_SPEED_M_S = vec2(0.1, 0.3);
 
 void vertex() {
 	POSITION = vec4(VERTEX.xy, 1.0, 1.0);
@@ -116,14 +114,11 @@ void fragment() {
 	if (pool.w > 0.004) { edge *= smoothstep(0.0, SOFT_EDGE_M, world.y - pool.z - source * sample_diameter_m * 0.5); }
 	if (edge <= 0.0) { discard; }
 
-	float drop_m = texture(fluid_depth_tex, SCREEN_UV).b;
-	vec3 world_normal = (INV_VIEW_MATRIX * vec4(view_normal, 0.0)).xyz;
 	vec3 thickness = texture(thickness_tex, SCREEN_UV).rgb;
-	// Streaks run along the water's horizontal flow; water dropping too straight down to tell runs across its normal.
-	vec2 flow = thickness.gb / max(thickness.r, 0.0001);
-	float facing_x = smoothstep(0.3, 0.7, abs(world_normal.x) / max(abs(world_normal.x) + abs(world_normal.z), 0.001));
-	float across_m = mix(mix(world.x, world.z, facing_x), dot(world.xz, normalize(vec2(-flow.y, flow.x) + 1e-6)),
-		smoothstep(FLOW_SPEED_M_S.x, FLOW_SPEED_M_S.y, length(flow)));
+	// Streaks and aeration come from what each particle carries, averaged over the water: the lip point it left and its
+	// drawn drop. Read off the drawn surface or its front particle, both jump from bump to bump and swirl into rings.
+	float across_m = thickness.g / max(thickness.r, 0.0001);
+	float drop_m = thickness.b / max(thickness.r, 0.0001);
 	float above_pool_m = world.y - (pool.w > 0.004 ? pool.z : texture(swe_terrain, swe_uv).r);
 	WaterfallLook look = waterfall_look(world, view_normal, drop_m, across_m, above_pool_m, VIEW_MATRIX, VIEW, SCREEN_UV);
 	NORMAL = look.normal;

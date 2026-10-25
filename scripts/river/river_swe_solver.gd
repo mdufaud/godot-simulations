@@ -7,6 +7,8 @@ const MAX_SUBSTEPS := 64
 const MAX_QUERIES := 32
 # Bed slope across a face beyond which the flow leaves the height field (Chentanez & Mueller, US8878856).
 const SPILL_SLOPE := 1.5
+# End depth of a free overfall over its critical depth (Rouse 1936): where the sheet leaves the lip.
+const SPILL_BRINK_DEPTH_RATIO := 0.715
 const SPILL_VOLUME_UNIT_M3 := 1.0e-9
 const SPILL_EMISSION_HZ := 60.0
 const SPILL_CAPACITY := 65536
@@ -60,7 +62,7 @@ var _spill_outflow := RID()
 var _spill_state := RID()
 var _spill_out := RID()
 var _spill_positions := RID()
-var _spill_flows := RID()
+var _spill_streaks := RID()
 var _spill_impacts := RID()
 var _spill_phase_s := 0.0
 var _impact_window_s := 0.0
@@ -242,7 +244,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 		"state": _states[0], "gpu_ms": 0.0, "time_s": 0.0}
 	if spilling:
 		_status["spill_positions"] = _spill_positions
-		_status["spill_flows"] = _spill_flows
+		_status["spill_streaks"] = _spill_streaks
 	_mutex.unlock()
 
 
@@ -254,7 +256,7 @@ func _init_spill_render(size: Vector2i) -> void:
 	_spill_shader = _rd.shader_create_from_spirv(spirv)
 	_spill_pipeline = _rd.compute_pipeline_create(_spill_shader)
 	_spill_positions = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
-	_spill_flows = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
+	_spill_streaks = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
 	_spill_impacts = _rd.storage_buffer_create(_impact_bytes(size))
 	for index in 2:
 		var uniforms: Array[RDUniform] = [
@@ -266,7 +268,7 @@ func _init_spill_render(size: Vector2i) -> void:
 			_uniform(5, _spill_state, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER),
 			_uniform(6, _spill_positions, RenderingDevice.UNIFORM_TYPE_IMAGE),
 			_uniform(7, _spill_impacts, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER),
-			_uniform(8, _spill_flows, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(8, _spill_streaks, RenderingDevice.UNIFORM_TYPE_IMAGE),
 		]
 		_spill_sets.append(_rd.uniform_set_create(uniforms, _spill_shader, 0))
 
@@ -290,6 +292,7 @@ func _spill_header(slope: float) -> PackedByteArray:
 	bytes.resize(SPILL_STATE_BYTES)
 	bytes.encode_float(48, slope)
 	bytes.encode_float(52, SPILL_VOLUME_UNIT_M3)
+	bytes.encode_float(68, SPILL_BRINK_DEPTH_RATIO)
 	return bytes
 
 
@@ -559,7 +562,7 @@ func _free_render() -> void:
 	_spill_outflow = RID()
 	_spill_state = RID()
 	_spill_impacts = RID()
-	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _spill_positions, _spill_flows, _sampler, _query_points, _query_results]:
+	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _spill_positions, _spill_streaks, _sampler, _query_points, _query_results]:
 		if texture.is_valid():
 			_rd.free_rid(texture)
 	_states.clear()
@@ -570,7 +573,7 @@ func _free_render() -> void:
 	_spill_shader = RID()
 	_spill_out = RID()
 	_spill_positions = RID()
-	_spill_flows = RID()
+	_spill_streaks = RID()
 	_terrain = RID()
 	_surface = RID()
 	_foam = RID()

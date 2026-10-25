@@ -22,8 +22,8 @@ layout(rgba32f, set = 0, binding = 6) uniform writeonly image2D positions;
 // Per impact tile: water landings then hits on dry ground, each as weight (volume units over impact.z),
 // weighted x and z velocity, weighted height. A landing weighs in by its drop, ramping over spray.xy metres.
 layout(std430, set = 0, binding = 7) buffer Impacts { int tiles[]; } impacts;
-// Drawn particles: horizontal velocity (x, z), so the streaks run along the flow.
-layout(rgba32f, set = 0, binding = 8) uniform writeonly image2D flows;
+// Drawn particles: where it left its lip (x, y = world x, z) so a streak travels with it, radius share (z), drawn drop (w).
+layout(rgba32f, set = 0, binding = 8) uniform writeonly image2D streaks;
 layout(push_constant, std430) uniform Params {
     vec4 domain;
     vec4 grid;
@@ -41,6 +41,8 @@ const float MAX_THINNING = 64.0;
 // Down to this share of the reference a stream is drawn whole; a thinner one covers less of its path, so only that
 // share of its particles is drawn and a trickle shows as scattered drops instead of a column as thick as a sheet.
 const float WHOLE_STREAM_SHARE = 0.25;
+// A stream's cross-section follows its discharge, so a thinner one is drawn with smaller spheres, down to this share.
+const float MIN_RADIUS_SHARE = 0.35;
 // Above any foam share: marks water that slid down a face.
 const float SLID = 2.0;
 
@@ -204,7 +206,12 @@ void draw(uint i) {
     bool shown = body.w > 0.0 && float(hash(i) & 0xFFFFu) / 65535.0 <= drawn_share;
     ivec2 texel = ivec2(int(i) % width, int(i) / width);
     imageStore(positions, texel, shown ? vec4(drawn, look + DROP_OFFSET_M) : vec4(0.0));
-    imageStore(flows, texel, shown ? vec4(particles.data[i * 3u + 1u].xz, 0.0, 0.0) : vec4(0.0));
+    float radius = params.spray.z > 0.0 ? clamp(sqrt(body.w / params.spray.z), MIN_RADIUS_SHARE, 1.0) : 1.0;
+    // The emission cell, jittered over its width.
+    uint cell = uint(origin.x);
+    vec2 jitter = vec2(hash(i * 2u + 1u) & 0xFFFFu, hash(i * 2u + 2u) & 0xFFFFu) / 65535.0;
+    vec2 left = params.domain.xy + (vec2(cell % uint(params.grid.x), cell / uint(params.grid.x)) + jitter) * params.domain.z;
+    imageStore(streaks, texel, shown ? vec4(left, radius, look + DROP_OFFSET_M) : vec4(0.0));
 }
 
 void main() {

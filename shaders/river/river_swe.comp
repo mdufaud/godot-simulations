@@ -19,7 +19,7 @@ layout(std430, set = 0, binding = 7) writeonly buffer QueryResults { vec4 result
 layout(std430, set = 0, binding = 8) buffer SpillDeposits { int deposits[]; } spill_deposits;
 layout(std430, set = 0, binding = 9) buffer SpillOutflow { vec4 outflow[]; } spill_outflow;
 // Spill state words: 10-11 consumed volume (low, high), 12 spill slope (0 = off), 13 volume unit in m3,
-// 15 spilling faces summed over outputs, 16 outputs.
+// 15 spilling faces summed over outputs, 16 outputs, 17 brink depth over critical depth.
 layout(std430, set = 0, binding = 10) buffer SpillState { uint words[]; } spill;
 // Per cell: bits 0-3 the east, west, north and south faces this cell spills over, bits 4-7 the faces spilling onto it;
 // then the landing rate in m/s of depth, then 1 where the cell spills over any face, for smooth sampling.
@@ -315,7 +315,9 @@ void main() {
             vec2 brink = v + normal * max(outgoing[i] / max(q.x, 0.004) - dot(v, normal), 0.0);
             vec2 outlet = world + normal * (0.5 * params.domain.z + SPILL_CLEARANCE_M);
             sums += vec4(volume, volume * brink, volume * clamp(q.w / max(q.x, 0.004), 0.0, 1.0));
-            outlets += vec4(volume * outlet.x, volume * outlet.y, volume * (bed.x + 0.5 * q.x), 0.0);
+            // The sheet leaves at the middle of the brink depth of a free overfall, below the depth upstream.
+            float brink_depth = min(q.x, uintBitsToFloat(spill.words[17]) * pow(outgoing[i] * outgoing[i] / params.domain.w, 1.0 / 3.0));
+            outlets += vec4(volume * outlet.x, volume * outlet.y, volume * (bed.x + 0.5 * brink_depth), 0.0);
         }
         spill_outflow.outflow[cell * 2] += sums;
         spill_outflow.outflow[cell * 2 + 1] += outlets;

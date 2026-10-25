@@ -65,7 +65,7 @@ var composite_mi: MeshInstance3D
 
 var pos_texture: Texture2DRD
 var foam_pos_texture: Texture2DRD
-var flow_texture: Texture2DRD
+var particle_data_texture: Texture2DRD
 var _tex_bound := false
 var _foam_bound := false
 var _foam_visible := false
@@ -210,7 +210,7 @@ func rebind() -> void:
 		pos_texture.texture_rd_rid = RID()
 	if foam_pos_texture != null:
 		foam_pos_texture.texture_rd_rid = RID()
-	bind_flow(RID())
+	bind_particle_data(RID())
 	_tex_bound = false
 	_foam_bound = false
 	# The impostors keep drawing until the next update() re-raises the count,
@@ -269,15 +269,18 @@ func _update_foam_viewport() -> void:
 		composite_mat.set_shader_parameter("foam_enabled", active)
 
 
-## Per-particle horizontal velocity texture laid out like positions, weighed into thickness G B; RID() turns it off.
-func bind_flow(flow_tex_rid: RID) -> void:
-	if flow_texture == null:
-		if not flow_tex_rid.is_valid():
+## Per-particle texture laid out like positions: x and y are averaged into thickness G and B, z scales the radius.
+## RID() turns it off.
+func bind_particle_data(data_tex_rid: RID) -> void:
+	if particle_data_texture == null:
+		if not data_tex_rid.is_valid():
 			return
-		flow_texture = Texture2DRD.new()
-		thick_mat.set_shader_parameter("flow_tex", flow_texture)
-	flow_texture.texture_rd_rid = flow_tex_rid
-	thick_mat.set_shader_parameter("flow_enabled", flow_tex_rid.is_valid())
+		particle_data_texture = Texture2DRD.new()
+		thick_mat.set_shader_parameter("particle_data_tex", particle_data_texture)
+		depth_mat.set_shader_parameter("particle_data_tex", particle_data_texture)
+	particle_data_texture.texture_rd_rid = data_tex_rid
+	thick_mat.set_shader_parameter("particle_data_enabled", data_tex_rid.is_valid())
+	depth_mat.set_shader_parameter("particle_data_enabled", data_tex_rid.is_valid())
 
 
 func _exit_tree() -> void:
@@ -285,8 +288,8 @@ func _exit_tree() -> void:
 		pos_texture.texture_rd_rid = RID()
 	if foam_pos_texture != null:
 		foam_pos_texture.texture_rd_rid = RID()
-	if flow_texture != null:
-		flow_texture.texture_rd_rid = RID()
+	if particle_data_texture != null:
+		particle_data_texture.texture_rd_rid = RID()
 
 
 # --- Render chain (built once) --------------------------------------------
