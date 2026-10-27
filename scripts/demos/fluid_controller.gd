@@ -110,8 +110,9 @@ func _setup_ui() -> void:
 	menu.settings_reset.connect(_reset_fluid)
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on), false)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
+	# Applied on release: each step reallocates the seven screen-space targets.
 	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
-		func(v): fluid.set_render_scale(v))
+		func(v): fluid.set_render_scale(v), true, 0.0, true)
 	quality.bind("water_scale", water_scale, fluid.set_render_scale)
 	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)
