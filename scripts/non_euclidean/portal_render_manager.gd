@@ -115,7 +115,10 @@ func _preserve_capped_portals(keep: int) -> void:
 
 
 func set_portal_view_scale(scale: float) -> void:
-	portal_view_scale = clampf(scale, 0.25, 1.0)
+	var clamped := clampf(scale, 0.25, 1.0)
+	if is_equal_approx(clamped, portal_view_scale):
+		return
+	portal_view_scale = clamped
 	_resize_pool()
 
 
@@ -231,14 +234,23 @@ func _configure_camera(camera: Camera3D, portal: Portal3D, eye: Transform3D) -> 
 	camera.cull_mask = VIEW_LAYERS & ~portal.linked_portal.exit_hidden_layers
 
 
-## Aperture bounds on screen in UV, the space every view shares; a corner
-## behind the eye leaves the whole screen.
+## Aperture bounds on screen in UV, the space every view shares. An aperture
+## wholly behind the eye is off screen (empty rect: the view is not rendered,
+## e.g. the door just walked through); one straddling the eye plane may cover
+## any of it, so it keeps the whole screen.
 func _screen_rect(eye: Camera3D, portal: Portal3D) -> Rect2:
 	var size := eye.get_viewport().get_visible_rect().size
 	var points := PackedVector2Array()
-	for corner in portal.get_aperture_corners():
+	var corners := portal.get_aperture_corners()
+	var behind := 0
+	for corner in corners:
 		if eye.is_position_behind(corner):
-			return Rect2(Vector2.ZERO, Vector2.ONE)
+			behind += 1
+	if behind == corners.size():
+		return Rect2()
+	if behind > 0:
+		return Rect2(Vector2.ZERO, Vector2.ONE)
+	for corner in corners:
 		points.append(eye.unproject_position(corner) / size)
 	var bounds := Rect2(points[0], Vector2.ZERO)
 	for point in points:

@@ -42,8 +42,10 @@ func build(host, exhibit_names: Array) -> void:
 		func(v: float) -> void: host.render_manager.set_max_views(int(v)))
 	host.quality.bind("portal_views", views_slider,
 		func(v: float) -> void: host.render_manager.set_max_views(int(v)))
+	# Applied on release: each step resizes every portal SubViewport.
 	var view_scale_slider: HSlider = _menu.add_slider("Portal view scale", 0.4, 1.0,
-		host.render_manager.portal_view_scale, host.render_manager.set_portal_view_scale)
+		host.render_manager.portal_view_scale, host.render_manager.set_portal_view_scale,
+		true, 0.0, true)
 	host.quality.bind("portal_view_scale", view_scale_slider,
 		host.render_manager.set_portal_view_scale)
 	host.quality.attach_menu_option(_menu)
