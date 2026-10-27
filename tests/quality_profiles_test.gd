@@ -102,6 +102,9 @@ func _test_fire_render_scale_ownership() -> void:
 	for level in FireQuality.AUTO_MAX_LEVEL + 1:
 		_check(FireQuality.auto_values(level).has("render_scale"),
 			"Fire Auto level %d must retain adaptive render scale" % level)
+		# A pool key rebuilds the whole GPU side whenever the ladder reasserts a level.
+		_check(not FireQuality.auto_values(level).has("pool"),
+			"Fire Auto level %d must leave the user's atlas alone" % level)
 
 
 func _test_ocean_tables() -> void:
