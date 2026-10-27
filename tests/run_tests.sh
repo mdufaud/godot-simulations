@@ -65,6 +65,7 @@ declare -a SUITES=(
 	"fire_clock|cpu|-|-s res://tests/fire_clock_test.gd"
 	"fire_vorticity|cpu|-|-s res://tests/fire_vorticity_test.gd"
 	"cell_propagation|cpu|-|-s res://tests/cell_propagation_test.gd"
+	"wildfire_system|cpu|-|-s res://tests/wildfire_system_test.gd"
 	"fire_ssot|cpu|-|-s res://tests/fire_ssot_test.gd"
 	"fire_fuels|cpu|-|-s res://tests/fire_fuels_test.gd"
 	"wood_pyrolysis|cpu|-|-s res://tests/wood_pyrolysis_test.gd"

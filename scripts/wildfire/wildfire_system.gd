@@ -206,6 +206,16 @@ func remove_fire(id: int) -> void:
 	if record == null:
 		return
 	_fires_by_id.erase(id)
+	# add_fire gives a cluster one fog cloud, owned by its first fire. Hand it to a
+	# neighbour still burning, or the cluster loses its fog when that fire goes out.
+	if record.fog != null:
+		for other: FireRecord in _fires_by_id.values():
+			if other.fog == null and other.preset == record.preset \
+					and other.pos.distance_to(record.pos) < record.preset.haze_radius_m:
+				other.fog = record.fog
+				record.fog = null
+				_apply_wind(other)
+				break
 	_drop_extras(record)
 
 

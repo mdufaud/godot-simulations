@@ -18,6 +18,7 @@ func _initialize() -> void:
 	_test_fuel_burnout()
 	_test_budget_cap()
 	_test_inert_cells_stop_fire()
+	_test_setup_resets_burn_state()
 	_finish("cell_propagation")
 
 
@@ -157,3 +158,28 @@ func _test_inert_cells_stop_fire() -> void:
 		_check(grid.state_of(cell) == CellPropagation.STATE_INTACT,
 			"inert border cell untouched at %s" % cell)
 	_check(not grid.ignite_at(Vector3(0.5, 0.0, 2.5), 100.0), "inert cell refuses ignition")
+
+
+# The wildfire demo's Reset calls setup() again on the same grid. Every cell must
+# come back intact and lightable, with no burning timer or count carried over.
+func _test_setup_resets_burn_state() -> void:
+	var config := _make_config(5, 100)
+	var grid: CellPropagation = CellPropagationScript.new()
+	grid.setup(config, Vector3.ZERO, 11)
+	_check(grid.ignite_at(Vector3(2.5, 0.0, 2.5), 100.0), "first run ignited")
+	_run(grid, 25)
+	_check(grid.burned_count() > 0, "first run burned something")
+	_check(grid.burning_count() > 0, "first run still burning at reset")
+	grid.setup(config, Vector3.ZERO, 11)
+	var leftover := 0
+	for x in 5:
+		for z in 5:
+			if grid.state_of(Vector2i(x, z)) != CellPropagation.STATE_INTACT:
+				leftover += 1
+	_check(leftover == 0, "re-setup left %d cells burning or burned" % leftover)
+	_check(grid.burning_count() == 0 and grid.burned_count() == 0, "re-setup zeroed the counts")
+	_watch(grid)
+	_run(grid, 30)
+	_check(grid.burning_count() == 0 and _ignited_steps.is_empty(),
+		"no fire spreads from a carried-over burning cell")
+	_check(grid.ignite_at(Vector3(2.5, 0.0, 2.5), 100.0), "a burned cell relights after re-setup")

@@ -45,9 +45,13 @@ func setup(config: CellPropagationConfig, origin: Vector3, seed_value: int = -1)
 	_origin = origin
 	points_left = config.spreading_points
 	var count := config.grid_size.x * config.grid_size.y
+	# resize() keeps the old contents when the size is unchanged, so a reset on the
+	# same grid would otherwise inherit every BURNED cell and burning timer.
 	_state.resize(count)
+	_state.fill(STATE_INTACT)
 	_hitpoints.resize(count)
 	_life.resize(count)
+	_life.fill(0.0)
 	_material.resize(count)
 	_material.fill(MATERIAL_GRASS)
 	_hitpoints.fill(config.material_hitpoints[MATERIAL_GRASS])
