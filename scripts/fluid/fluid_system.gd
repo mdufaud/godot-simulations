@@ -152,7 +152,13 @@ func set_flow(value: float) -> void:
 func _launch_speed() -> float:
 	var speed := 6.0 if scenario == Scenario.BASIN else 2.0
 	var per_second := float(sph_solver.particle_count) * flow_rate / sph_solver.emission_cycle_seconds
-	return minf(speed, per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width))
+	var extrusion := per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width)
+	# Honey is a rope: it leaves at exactly the speed that carries the flux at rest
+	# density. Capping it below that packed successive layers closer than the rest
+	# spacing, and the rope burst sideways under its own pressure at high flow.
+	if mode == FluidKind.HONEY:
+		return extrusion
+	return minf(speed, extrusion)
 
 
 func set_particle_count(n: int) -> void:

@@ -60,8 +60,13 @@ void main() {
 		}
 		if (params.material == MATERIAL_HONEY) {
 			float separation = max(dot(velocities_snap.data[j].xyz - vel_i, dir), 0.0);
+			// The pair's mean density over rest stands in for "how many neighbours
+			// share the pull": the same for both partners, so their pulls are
+			// equal and opposite, and as strong in a thin rope as the old
+			// per-particle neighbour count made it.
+			float crowding = max(0.5 * (density + dj) / params.sim.y, 0.05);
 			extension += dir * separation * smoothstep(0.2, 0.65, dst / params.kernel.x)
-				* (1.0 - smoothstep(0.8, 1.0, dst / params.kernel.x));
+				* (1.0 - smoothstep(0.8, 1.0, dst / params.kernel.x)) / crowding;
 		}
 		if (params.material == MATERIAL_SPECTRAL_GEL) {
 			vec4 other = gel_reference.data[uint(round(velocities_snap.data[j].w))];
@@ -88,7 +93,11 @@ void main() {
 	// when the near term divided by the near density.
 	vec3 accel = (force + near_force + surface_force) / max(density, 1e-6);
 	if (params.material == MATERIAL_HONEY) {
-		accel += extension * params.sim2.w / max(float(neighbours), 1.0);
+		// Each pair term was divided by a symmetric crowding factor above, so
+		// only the constant rest neighbour count is left: momentum is conserved,
+		// which dividing by this particle's own neighbour count broke at every
+		// surface.
+		accel += extension * params.sim2.w / max(scene.fluid_rheology.y, 1.0);
 	}
 	if (params.material == MATERIAL_SPECTRAL_GEL) {
 		accel += elastic_force * params.sim2.w;

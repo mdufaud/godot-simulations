@@ -170,6 +170,9 @@ var _target_density := 1.0
 ## own density like the regular term (SebLague); this keeps the near stiffness of
 ## a particle at rest exactly what it was when it divided by the near density.
 var _near_calibration := 1.0
+## Neighbours a particle of the spawn lattice has within h: the constant that
+## normalises pairwise terms so both partners of a pair get the same push.
+var _rest_neighbours := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
 var _gel_cohort := 0
@@ -275,6 +278,7 @@ func init_render() -> void:
 		return
 	_target_density = _compute_rest_density()
 	_near_calibration = _target_density / _compute_rest_near_density()
+	_rest_neighbours = _count_rest_neighbours()
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
@@ -823,7 +827,8 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	# (13 affine_inverse on the cascade) reruns only when a static input does.
 	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
 		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
-		stiffness_scale, collision_inflation, freeze_heat, yield_stress, scene_id, config.domain_origin,
+		stiffness_scale, collision_inflation, freeze_heat, yield_stress, _rest_neighbours,
+		scene_id, config.domain_origin,
 		config.domain_size_m])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
@@ -855,6 +860,7 @@ func _pack_scene_ubo_static() -> PackedByteArray:
 	b.encode_float(1192, collision_inflation)
 	b.encode_float(1196, freeze_heat)
 	b.encode_float(1248, yield_stress)
+	b.encode_float(1252, _rest_neighbours)
 	b.encode_s32(1200, scene_id)
 	var upper := config.domain_origin + config.domain_size_m
 	for axis in 3:
@@ -932,6 +938,19 @@ func _compute_rest_density() -> float:
 					var v := h - r
 					sum += k_sp2 * v * v
 	return sum
+
+
+# Neighbours of a rest-lattice particle within h, itself excluded.
+func _count_rest_neighbours() -> float:
+	var count := 0
+	var steps := int(ceil(h / spacing))
+	for x in range(-steps, steps + 1):
+		for y in range(-steps, steps + 1):
+			for z in range(-steps, steps + 1):
+				var r := (Vector3(x, y, z) * spacing).length()
+				if r > 0.0 and r < h:
+					count += 1
+	return float(maxi(count, 1))
 
 
 # Near density (SpikyPow3 kernel) of the same rest lattice.

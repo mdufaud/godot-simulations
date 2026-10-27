@@ -56,10 +56,7 @@ void main() {
 		supported = supported || (yield_decel > 0.0 && predicted.data[j].w >= PLUG_ANCHORED);
 		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
 		float weight = 1.0;
-		if (params.material == MATERIAL_HONEY) {
-			float shear = length(relative) / params.kernel.x;
-			weight = 0.25 + 0.75 / (1.0 + 0.15 * shear);
-		} else if (params.material == MATERIAL_OIL && abs(carried - predicted.data[j].w) > 0.5) {
+		if (params.material == MATERIAL_OIL && abs(carried - predicted.data[j].w) > 0.5) {
 			weight = 0.1;
 		}
 		float kernel_weight = sph_poly6(r2) * weight;
@@ -97,6 +94,9 @@ void main() {
 		crust = freeze * smoothstep(2.0, 8.0, float(neighbours));
 	}
 	vec3 v;
+	// Share of the relative velocity viscosity removes this sub-step; a wall the
+	// particle touches is coupled the same way (see the no-slip block below).
+	float wall_blend = 0.0;
 	if (params.material == MATERIAL_HONEY || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_SPECTRAL_GEL || params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
 		float rate = params.material == MATERIAL_HONEY ? 150.0 : params.material == MATERIAL_ASTRAL ? 100.0 : is_lava() ? 200.0 : params.material == MATERIAL_PRISMATIC_SLIME ? 35.0 : params.material == MATERIAL_LIGHT_PASTE ? 40.0 : 20.0;
 		vec3 target = vi_snap + visc / max(weight_sum, 1e-6);
@@ -109,6 +109,8 @@ void main() {
 		// `blend` of this sub-step's pressure and cohesion push -- a share that
 		// depends on the sub-step length.
 		v = v_live + blend * (target - vi_snap);
+		// Lava keeps its own bed model (LAVA_BED_RATE, freezing crust) below.
+		wall_blend = is_lava() ? 0.0 : blend;
 	} else {
 		// XSPH smoothing (Monaghan 1989): relax toward the kernel-weighted
 		// neighbour mean at rate viscosity * sum(W), integrated exactly over the
@@ -118,15 +120,10 @@ void main() {
 		float blend = 1.0 - exp(-viscosity * weight_sum * params.sim.x);
 		v = v_live + blend * visc / max(weight_sum, 1e-6);
 	}
-	if (params.material == MATERIAL_HONEY || is_lava()) {
+	if (is_lava()) {
 		float floor_distance = pos.y - params.grid_origin.y;
 		float floor_contact = 1.0 - smoothstep(0.12, 1.6, floor_distance);
-		float drag = is_lava() ? 0.08 * viscosity * viscosity : viscosity;
-		v.xz *= exp(-10.0 * drag * floor_contact * params.sim.x);
-	}
-	if (params.material == MATERIAL_PRISMATIC_SLIME) {
-		float contact = 1.0 - smoothstep(0.04, 0.3, pos.y - params.grid_origin.y);
-		v.xz *= exp(-3.0 * viscosity * contact * params.sim.x);
+		v.xz *= exp(-10.0 * 0.08 * viscosity * viscosity * floor_contact * params.sim.x);
 	}
 	v *= 1.0 - crust * (1.0 - smoothstep(0.5 * LAVA_STICK_SPEED, LAVA_STICK_SPEED, length(v)));
 	if (yield_decel > 0.0 && supported) {
@@ -165,6 +162,18 @@ void main() {
 	}
 	if (is_lava() && p != p_free) {
 		v *= (1.0 - freeze) * exp(-LAVA_BED_RATE * viscosity * viscosity * params.sim.x);
+	}
+	// No-slip walls for the viscous materials: where a wall or obstacle pushed
+	// back, the tangential velocity relaxes toward the wall's (at rest) exactly as
+	// viscosity relaxes it toward a resting neighbour, so a viscous film grips the
+	// surface it flows over (boundary viscosity, after Akinci et al. 2012).
+	if (wall_blend > 0.0 && p != p_free) {
+		vec3 impulse = before_collision - v;
+		float push = length(impulse);
+		if (push > 1e-6) {
+			vec3 normal = impulse / push;
+			v -= wall_blend * (v - dot(v, normal) * normal);
+		}
 	}
 	bool nitrogen_contact = params.material == MATERIAL_LIQUID_NITROGEN && p != p_free;
 	bool nitrogen_boil = nitrogen_contact && length(before_collision - v) > NITROGEN_BOIL_IMPACT;

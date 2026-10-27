@@ -3715,6 +3715,12 @@ func _run_fluid_honey_fall() -> void:
 			not demo.fluid.active_solver.initialized):
 		await process_frame
 	var pour_speed: float = demo.fluid.sph_solver.emitter_velocity.y
+	# Honey is extruded as a rope: it leaves at the speed that carries the
+	# emitted volume at rest density, whatever the particle tier.
+	var pour_solver: SphFluidSolver = demo.fluid.sph_solver
+	var extrusion: float = float(pour_solver.particle_count) * demo.fluid.flow_rate \
+		/ pour_solver.emission_cycle_seconds * pour_solver.spacing \
+		/ float(pour_solver.emitter_width * pour_solver.emitter_width)
 	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.POOL)
 	deadline = Time.get_ticks_msec() + 30000
 	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
@@ -3732,8 +3738,8 @@ func _run_fluid_honey_fall() -> void:
 	var vy: float = float(state.get("vy", 0.0))
 	print("FLUHONEY y=%.3f vy=%.3f pour_vy=%.1f sim=%.2f" % [
 		y, vy, pour_speed, solver._sim_time])
-	_check(is_equal_approx(pour_speed, -6.0),
-		"fluid_honey_fall: Basin honey emitter has a different launch speed")
+	_check(is_equal_approx(pour_speed, -extrusion),
+		"fluid_honey_fall: Basin honey rope does not leave at its rest-density extrusion speed")
 	_check(y < 9.0 and vy < -4.0,
 		"fluid_honey_fall: honey free-fall is damped by its material viscosity")
 	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.CASCADE)
@@ -3783,8 +3789,12 @@ func _read_honey_stream(solver: SphFluidSolver, result: Dictionary) -> void:
 		if positions[i * 4 + 1] < 10.5:
 			continue
 		airborne += 1
-		if absf(positions[i * 4] - solver.emitter_origin.x) > 1.0 or \
-				absf(positions[i * 4 + 2] - solver.emitter_origin.z) > 1.0:
+		# Outside the top chute's footprint: past its side rails (half-width 1.9 m)
+		# or beyond the ramp's ends. Honey pooling on the ramp itself -- it heaps
+		# around the impact and creeps uphill against the stop -- is not spray.
+		var along := positions[i * 4] - solver.emitter_origin.x
+		if absf(positions[i * 4 + 2] - solver.emitter_origin.z) > 1.9 \
+				or along < -3.4 or along > 4.2:
 			escaped += 1
 	result["airborne"] = airborne
 	result["escaped"] = escaped

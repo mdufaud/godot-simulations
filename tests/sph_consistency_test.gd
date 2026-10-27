@@ -23,6 +23,7 @@ func _run() -> void:
 		return
 	await _test_viscous_column_is_substep_independent()
 	await _test_viscosity_slider_is_stable()
+	await _test_viscous_blob_translates_freely()
 	_finish("sph_consistency")
 
 
@@ -74,14 +75,40 @@ func _test_viscosity_slider_is_stable() -> void:
 		await _free_solver(solver)
 
 
-func _make_column(kind: int, substeps: int, viscosity := -1.0) -> SphFluidSolver:
+# Galilean invariance: a weightless blob of any material, far from every wall,
+# moving as one piece has no relative motion, so viscosity, yield and friction
+# must all leave it alone. Honey used to damp horizontal velocity everywhere.
+func _test_viscous_blob_translates_freely() -> void:
+	for kind in [FluidSystem.FluidKind.HONEY, FluidSystem.FluidKind.LIGHT_PASTE,
+			FluidSystem.FluidKind.PRISMATIC_SLIME, FluidSystem.FluidKind.LAVA]:
+		var solver := await _make_column(kind, 3, -1.0, false)
+		var state := await _read_state(solver)
+		var moving: PackedFloat32Array = state.velocities.duplicate()
+		for i in COUNT:
+			moving[i * 4] = 0.5
+			moving[i * 4 + 1] = 0.0
+			moving[i * 4 + 2] = 0.0
+		await _write_velocities(solver, moving)
+		await _step(solver, 12)
+		state = await _read_state(solver)
+		var drift := 0.0
+		for i in COUNT:
+			drift += state.velocities[i * 4]
+		drift /= float(COUNT)
+		print("SPH DRIFT material=%d mean_vx=%.5f" % [kind, drift])
+		_check(absf(drift - 0.5) < 0.002,
+			"material %d slowed a freely translating blob: %s m/s" % [kind, str(drift)])
+		await _free_solver(solver)
+
+
+func _make_column(kind: int, substeps: int, viscosity := -1.0, boxed := true) -> SphFluidSolver:
 	var spec := FluidMaterial.for_kind(kind)
 	var solver := SphFluidSolver.new()
 	solver.particle_count = COUNT
 	solver.active_count = COUNT
 	solver.material = kind
 	solver.substeps = substeps
-	solver.gravity = Vector3(0.0, -9.8, 0.0)
+	solver.gravity = Vector3(0.0, -9.8, 0.0) if boxed else Vector3.ZERO
 	solver.foam_enabled = false
 	solver.viscosity_strength = spec.viscosity if viscosity < 0.0 else viscosity
 	solver.cohesion_strength = spec.cohesion
@@ -92,19 +119,24 @@ func _make_column(kind: int, substeps: int, viscosity := -1.0) -> SphFluidSolver
 	solver.config.default_particle_count = COUNT
 	solver.config.particle_counts = [COUNT]
 	solver.config.texture_width = 32
-	solver.config.grid_dims = Vector3i(8, 16, 8)
-	solver.config.grid_origin = Vector3(-1.0, 0.0, -1.0)
-	# The box fits the column: the block cannot spread, only compress.
-	var half := 0.5 * SIDE * SPACING + 0.02
-	solver.config.domain_origin = Vector3(-half, 0.0, -half)
-	solver.config.domain_size_m = Vector3(2.0 * half, 4.0, 2.0 * half)
+	solver.config.grid_dims = Vector3i(8, 16, 8) if boxed else Vector3i(24, 16, 24)
+	solver.config.grid_origin = Vector3(-1.0, 0.0, -1.0) if boxed else Vector3(-3.0, 0.0, -3.0)
+	if boxed:
+		# The box fits the column: the block cannot spread, only compress.
+		var half := 0.5 * SIDE * SPACING + 0.02
+		solver.config.domain_origin = Vector3(-half, 0.0, -half)
+		solver.config.domain_size_m = Vector3(2.0 * half, 4.0, 2.0 * half)
+	else:
+		# Free blob: walls and floor far away (it drifts ~0.1 m in this test).
+		solver.config.domain_origin = solver.config.grid_origin
+		solver.config.domain_size_m = Vector3(6.0, 4.0, 6.0)
 	solver.config.cell_size_m = 0.25
 	var positions := PackedFloat32Array()
 	positions.resize(COUNT * 4)
 	for i in COUNT:
 		positions[i * 4] = -0.54 + float(i % SIDE) * SPACING
 		@warning_ignore("integer_division")
-		positions[i * 4 + 1] = 0.06 + float((i / SIDE) % SIDE) * SPACING
+		positions[i * 4 + 1] = (0.06 if boxed else 1.8) + float((i / SIDE) % SIDE) * SPACING
 		@warning_ignore("integer_division")
 		positions[i * 4 + 2] = -0.54 + float(i / (SIDE * SIDE)) * SPACING
 	solver.set_seed_positions(positions)
