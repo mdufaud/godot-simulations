@@ -20,7 +20,7 @@ void main() {
         uint rp = stage % 2u;        // read half
         uint wp = (stage + 1u) % 2u; // write half
         vec4 bf = butterfly[stage * MAP_SIZE + col];
-        uvec2 read_indices = floatBitsToUint(bf.xy);
+        uvec2 read_indices = uvec2(round(bf.xy)); // exact floats: ocean_fft_butterfly.comp
         vec2 upper = row_shared[rp * MAP_SIZE + read_indices.x];
         vec2 lower = row_shared[rp * MAP_SIZE + read_indices.y];
         row_shared[wp * MAP_SIZE + col] = upper + mul_complex(lower, bf.zw);
