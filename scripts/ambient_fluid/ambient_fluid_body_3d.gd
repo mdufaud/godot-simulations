@@ -688,6 +688,10 @@ func _finite_vector(value: Vector3) -> bool:
 
 
 func _finite_array(values: PackedFloat64Array) -> bool:
+	# The math helpers signal failure (singular matrix, size mismatch) with an
+	# empty array; treating that as finite let the caller index it and crash.
+	if values.is_empty():
+		return false
 	for value in values:
 		if not is_finite(value):
 			return false

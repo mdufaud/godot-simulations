@@ -3,6 +3,8 @@ extends RefCounted
 
 const MATRIX_SIZE := 6
 const MATRIX_SCALARS := MATRIX_SIZE * MATRIX_SIZE
+## Relative to the matrix's largest entry: an absolute floor rejected every
+## millimetre-scale body (inertia ~ s^5 falls under 1e-12) and froze it.
 const PIVOT_EPSILON := 1.0e-12
 
 static var _native := Native.kernel(&"AmbientFluidKernels")
@@ -114,6 +116,7 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 		return PackedFloat64Array()
 	if Native.enabled and _native != null:
 		return _native.matrix_inverse(matrix, MATRIX_SIZE, PIVOT_EPSILON)
+	var threshold := PIVOT_EPSILON * _max_abs(matrix)
 	var augmented := PackedFloat64Array()
 	augmented.resize(MATRIX_SIZE * MATRIX_SIZE * 2)
 	for row in MATRIX_SIZE:
@@ -129,7 +132,7 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			if candidate > pivot_abs:
 				pivot_abs = candidate
 				pivot_row = row
-		if pivot_abs <= PIVOT_EPSILON:
+		if not (pivot_abs > threshold):
 			return PackedFloat64Array()
 		if pivot_row != pivot:
 			for col in MATRIX_SIZE * 2:
@@ -144,7 +147,9 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			if row == pivot:
 				continue
 			var factor := augmented[row * MATRIX_SIZE * 2 + pivot]
-			if is_zero_approx(factor):
+			# Only an exact zero may skip: is_zero_approx (1e-5) dropped the real
+			# coupling terms of small bodies and corrupted their inverse.
+			if factor == 0.0:
 				continue
 			for col in MATRIX_SIZE * 2:
 				augmented[row * MATRIX_SIZE * 2 + col] -= factor * augmented[pivot * MATRIX_SIZE * 2 + col]
@@ -153,6 +158,19 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 	for row in MATRIX_SIZE:
 		for col in MATRIX_SIZE:
 			result[row * MATRIX_SIZE + col] = augmented[row * MATRIX_SIZE * 2 + MATRIX_SIZE + col]
+	return result
+
+
+## Largest |entry|, the scale the pivot threshold is relative to. A NaN entry
+## returns NaN, which fails every pivot test, so the inverse comes back empty
+## rather than poisoned. Mirrored bit for bit by the native kernel.
+static func _max_abs(matrix: PackedFloat64Array) -> float:
+	var result := 0.0
+	for value in matrix:
+		var magnitude := absf(value)
+		if is_nan(magnitude):
+			return magnitude
+		result = maxf(result, magnitude)
 	return result
 
 
@@ -166,7 +184,7 @@ static func cholesky(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			for k in col:
 				value -= lower[row * MATRIX_SIZE + k] * lower[col * MATRIX_SIZE + k]
 			if row == col:
-				if value <= PIVOT_EPSILON:
+				if not (value > PIVOT_EPSILON * absf(matrix[row * MATRIX_SIZE + row])):
 					return PackedFloat64Array()
 				lower[row * MATRIX_SIZE + col] = sqrt(value)
 			else:

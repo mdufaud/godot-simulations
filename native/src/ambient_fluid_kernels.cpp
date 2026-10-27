@@ -192,6 +192,10 @@ PackedFloat64Array AmbientFluidKernels::matrix_vector_multiply(const PackedFloat
     const std::span<const double> m = view(matrix);
     const std::span<const double> v = view(vector);
     const size_t size = v.size();
+    // Bound directly to ClassDB: a caller that skips the GDScript wrapper must not
+    // be able to read past the matrix.
+    if (m.size() != size * size)
+        return {};
     PackedFloat64Array result_out;
     result_out.resize(vector.size());
     double *result = result_out.ptrw();
@@ -210,8 +214,23 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
                                                        double pivot_epsilon) const
 {
     const std::span<const double> m = view(matrix);
+    if (size < 0 || m.size() != static_cast<size_t>(size) * static_cast<size_t>(size))
+        return {};
     const auto n = static_cast<size_t>(size);
     const size_t width = n * 2;
+    // Pivot threshold relative to the largest entry, as AmbientFluidMath does.
+    double scale = 0.0;
+    for (const double value : m)
+    {
+        const double magnitude = std::abs(value);
+        if (std::isnan(magnitude))
+        {
+            scale = magnitude;
+            break;
+        }
+        scale = std::max(scale, magnitude);
+    }
+    const double threshold = pivot_epsilon * scale;
     std::vector<double> augmented(n * width);
     for (size_t row = 0; row < n; ++row)
     {
@@ -235,7 +254,7 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
                 pivot_row = row;
             }
         }
-        if (pivot_abs <= pivot_epsilon)
+        if (!(pivot_abs > threshold))
             return {};
         if (pivot_row != pivot)
             std::swap_ranges(augmented.begin() + static_cast<std::ptrdiff_t>(pivot * width),
@@ -250,7 +269,7 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
             if (row == pivot)
                 continue;
             const double factor = augmented[row * width + pivot];
-            if (Math::is_zero_approx(factor))
+            if (factor == 0.0)
                 continue;
             for (size_t col = 0; col < width; ++col)
                 augmented[row * width + col] -= factor * augmented[pivot * width + col];

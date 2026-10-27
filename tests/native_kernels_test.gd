@@ -24,6 +24,7 @@ func _initialize() -> void:
 	if _failures == 0:
 		_rng.seed = 20261022
 		_test_matrices()
+		_test_matrix_size_guards()
 		_test_clip()
 		_test_pressure()
 		_test_fractal()
@@ -55,6 +56,19 @@ func _random_array(size: int, span: float) -> PackedFloat64Array:
 func _random_vector(span: float) -> Vector3:
 	return Vector3(_rng.randf_range(-span, span), _rng.randf_range(-span, span),
 		_rng.randf_range(-span, span))
+
+
+# The kernels are bound straight to ClassDB, so a caller can bypass the GDScript
+# size checks: mismatched sizes must come back empty, not read past the buffer.
+func _test_matrix_size_guards() -> void:
+	var kernels: Object = ClassDB.instantiate(&"AmbientFluidKernels")
+	var short_matrix := PackedFloat64Array([1.0, 2.0, 3.0, 4.0, 5.0])
+	_check((kernels.matrix_vector_multiply(short_matrix, _random_array(6, 1.0)) as PackedFloat64Array).is_empty(),
+		"matrix_vector_multiply accepted a 5-element matrix for a 6-vector")
+	_check((kernels.matrix_inverse(PackedFloat64Array([1.0]), 6, 1.0e-12) as PackedFloat64Array).is_empty(),
+		"matrix_inverse accepted a 1-element matrix of size 6")
+	_check((kernels.matrix_inverse(_random_array(36, 1.0), -6, 1.0e-12) as PackedFloat64Array).is_empty(),
+		"matrix_inverse accepted a negative size")
 
 
 func _test_matrices() -> void:

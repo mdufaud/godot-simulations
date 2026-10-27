@@ -38,6 +38,17 @@ func _test_matrix_operations() -> void:
 	_check(MATH.is_positive_definite(diagonal), "positive diagonal matrix is not positive definite")
 	_check(MATH.matrix_inverse(MATH.zero_matrix()).is_empty(),
 		"singular 6x6 matrix was inverted")
+	# A 1 mm, 35 kg/m^3 body: inertia ~1e-13 kg.m^2, mass ~1e-7 kg, with a small
+	# coupling term. The pivot floor is relative, so this must invert and Cholesky
+	# like any other well-conditioned matrix instead of freezing the body.
+	var tiny := MATH.diagonal_matrix(Vector3(1.4e-13, 1.4e-13, 1.4e-13), 1.5e-7)
+	tiny[0 * MATH.MATRIX_SIZE + 4] = 2.0e-12
+	tiny[4 * MATH.MATRIX_SIZE + 0] = 2.0e-12
+	var tiny_inverse := MATH.matrix_inverse(tiny)
+	_check(tiny_inverse.size() == MATH.MATRIX_SCALARS, "millimetre-scale matrix was rejected")
+	_check(_array_near(MATH.matrix_multiply(tiny, tiny_inverse), MATH.identity_matrix(), 1.0e-9),
+		"millimetre-scale inverse product is not identity")
+	_check(MATH.is_positive_definite(tiny), "millimetre-scale SPD matrix failed Cholesky")
 
 
 func _test_profile_and_tensor() -> void:
