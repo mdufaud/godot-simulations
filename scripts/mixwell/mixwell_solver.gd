@@ -926,10 +926,19 @@ func update_metrics(force := false) -> void:
 		return
 	var result := Diagnostics.analyse_reduced_metrics(reduced_values, _diagnostic_group_count,
 		DIAGNOSTIC_REDUCTION_STRIDE, _size, snapshot, sample_index)
-	var diagnostic_values := _readback_rgba16f(_textures.diagnostic)
-	var zone_values := _rd.texture_get_data(_textures.diagnostic_zone, 0)
-	result.merge(Diagnostics.analyse_zone_metrics(diagnostic_values, zone_values, _size))
+	# The per-zone p99/mean keys need the whole frame read back and a per-pixel
+	# GDScript pass (~1M iterations at 720p, blocking the render thread), and
+	# nothing reads them live: the panel shows only the GPU-reduced keys above.
+	# Run that pass once the accumulation reaches its target (or when forced) and
+	# carry the last zone values in between.
+	if force or get_sample_count() >= config.target_spp:
+		var diagnostic_values := _readback_rgba16f(_textures.diagnostic)
+		var zone_values := _rd.texture_get_data(_textures.diagnostic_zone, 0)
+		result.merge(Diagnostics.analyse_zone_metrics(diagnostic_values, zone_values, _size))
 	_metrics_mutex.lock()
+	for key in _metrics:
+		if not result.has(key):
+			result[key] = _metrics[key]
 	_metrics = result
 	_metrics_mutex.unlock()
 

@@ -267,8 +267,9 @@ func _setup_ui() -> void:
 	var budget_slider: HSlider = menu.add_slider("GPU budget (ms)", 0.5, 33.0,
 		config.gpu_budget_ms, _set_gpu_budget)
 	quality.bind("gpu_budget_ms", budget_slider, _set_gpu_budget)
+	# Applied on release: each step frees and reallocates every render target.
 	var final_slider: HSlider = menu.add_slider("Final scale", 0.5, 1.0,
-		config.final_scale, _set_final_scale)
+		config.final_scale, _set_final_scale, true, 0.0, true)
 	quality.bind("final_scale", final_slider, _set_final_scale)
 	quality.bind("max_render_pixels", null, _set_max_render_pixels)
 	quality.attach_menu_option(menu)
