@@ -86,9 +86,10 @@ func _run() -> void:
 		"mass-fraction closure reached %s (renormalisation should hold the simplex)"
 			% str(mass_fraction_max))
 
-	# Same identity on a q_f = -2 fuel: each reaction burns two moles of butane, and
-	# both the heat release and the fuel mass booked must count them (the heat used
-	# to count one, so these fuels burned at half their heating value).
+	# Same identity on a q_f = -2 fuel, where each reaction burns two moles of butane.
+	# The ledger books the species update's |q_f| moles, so this pins the heat to
+	# the fuel actually consumed. It cannot catch a factor missing from both sides:
+	# heat and ledger used to count one mole per reaction and still balanced.
 	var butane := -1
 	for index in FireSolver.FUELS.size():
 		if str(FireSolver.FUELS[index]["name"]).begins_with("Butane"):
