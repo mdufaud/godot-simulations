@@ -6,8 +6,10 @@ const TornadoWindField = preload("res://scripts/tornado/tornado_wind_field.gd")
 const PRESETS := [
 	{name = "Classic EF4", model = TornadoWindField.Model.BURGERS_ROTT, r0 = 45.0, u = 85.0,
 		h = 550.0, flare = 2.5, a = 0.15, s = 0.15, dust = 1.0, dark = 0.55},
+	# Sullivan's eye downdraft is twice the Burgers-Rott axial updraft at the same
+	# a_bar (published b = 3), hence the gentler suction.
 	{name = "Wedge / Typhoon", model = TornadoWindField.Model.SULLIVAN, r0 = 160.0, u = 70.0,
-		h = 500.0, flare = 0.8, a = 0.25, s = 0.05, dust = 1.1, dark = 0.6},
+		h = 500.0, flare = 0.8, a = 0.12, s = 0.05, dust = 1.1, dark = 0.6},
 	{name = "S-curve rope", model = TornadoWindField.Model.BURGERS_ROTT, r0 = 22.0, u = 75.0,
 		h = 600.0, flare = 3.5, a = 0.12, s = 0.85, dust = 0.7, dark = 0.45},
 ]
@@ -460,7 +462,8 @@ func _setup_ui() -> void:
 			_update_funnel_bounds())
 	_sliders["u"] = menu.add_slider("Intensity (m/s)", 20.0, 140.0, field.u_max,
 		func(v: float) -> void: field.u_max = v)
-	_sliders["a"] = menu.add_slider("Suction", 0.05, 0.6, field.a_bar,
+	# The axial updraft scales as 2 a_bar UPDRAFT_DEPTH u_max: 0.35 keeps it near 2 u_max.
+	_sliders["a"] = menu.add_slider("Suction", 0.05, 0.35, field.a_bar,
 		func(v: float) -> void: field.a_bar = v)
 	_sliders["flare"] = menu.add_slider("Flare", 0.0, 4.0, field.flare,
 		func(v: float) -> void:

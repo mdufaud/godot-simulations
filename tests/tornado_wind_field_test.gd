@@ -17,6 +17,9 @@ func _initialize() -> void:
 	_test_top_fade()
 	_test_camera_framing()
 	_test_bake_follows_parameters()
+	_test_divergence_free()
+	_test_vertical_wind_bounded()
+	_test_published_core_structure()
 	_finish("tornado_wind_field")
 
 
@@ -123,11 +126,12 @@ func _test_tangential_peaks_at_core_radius() -> void:
 			"peak tangential wind equals u_max (model %d)" % model)
 
 
-## Inflow: |v_r| max near the surface ~0.5-0.65 u_max just outside the RMW, weaker aloft.
+## Inflow: |v_r| max at the surface ~0.5-0.65 u_max just outside the RMW, weaker aloft.
 func _test_inflow_profile() -> void:
 	var field := _new_field()
 	field.model = TornadoWindField.Model.BURGERS_ROTT
-	var y_low := 2.0
+	# At the surface proper: the inflow layer is ~0.6 core radii deep.
+	var y_low := 0.02 * field.r_core0
 	var max_low := 0.0
 	var r_peak := 0.0
 	for i in 24:
@@ -206,3 +210,96 @@ func _test_bake_follows_parameters() -> void:
 	field.bake_wind_grid()
 	_check(not field.sample_wind_grid(1.0, y).is_equal_approx(after),
 		"a direct height write rebakes the grid")
+
+
+## Cartesian divergence by central differences, of the full wind or of its
+## meridional (radial + vertical) part only.
+func _divergence(field: TornadoWindField, p: Vector3, h: float, meridional: bool) -> float:
+	var at := func(q: Vector3) -> Vector3:
+		return _meridional_wind(field, q) if meridional else field.wind_at(q)
+	var dx: float = at.call(p + Vector3(h, 0.0, 0.0)).x - at.call(p - Vector3(h, 0.0, 0.0)).x
+	var dy: float = at.call(p + Vector3(0.0, h, 0.0)).y - at.call(p - Vector3(0.0, h, 0.0)).y
+	var dz: float = at.call(p + Vector3(0.0, 0.0, h)).z - at.call(p - Vector3(0.0, 0.0, h)).z
+	return (dx + dy + dz) / (2.0 * h)
+
+
+func _meridional_wind(field: TornadoWindField, p: Vector3) -> Vector3:
+	var c := field.centerline_at(p.y)
+	var rel := Vector2(p.x - c.x, p.z - c.z)
+	var w := field.cylindrical_wind(rel.length() / field.core_radius_at(p.y), p.y)
+	var r_dir := Vector3(rel.x, 0.0, rel.y).normalized()
+	return (r_dir * w.x + Vector3.UP * w.z) * field.u_max
+
+
+# Mass conservation: the radial and vertical winds come from a stream function, so
+# div u must vanish everywhere inside the funnel, for every model and with a flared
+# core. The old field's inflow and updraft did not match (|div| ~ u_max / r_core).
+# The swirl is axisymmetric and divergence-free whatever its profile, but Sullivan's
+# is a piecewise-linear table whose kinks a finite-difference stencil misreads, so
+# the full field is checked on the two analytic profiles and the meridional flow on
+# all three.
+func _test_divergence_free() -> void:
+	for model in ALL_MODELS:
+		var field := _new_field()
+		field.model = model
+		field.flare = 2.0
+		for meridional in [true, false]:
+			if not meridional and model == TornadoWindField.Model.SULLIVAN:
+				continue
+			var rng := RandomNumberGenerator.new()
+			rng.seed = 1234
+			var worst := 0.0
+			for i in 200:
+				var y := rng.randf_range(0.02, 0.98) * field.height
+				var r_bar := rng.randf_range(0.05, 7.8)
+				var angle := rng.randf_range(0.0, TAU)
+				var r_core := field.core_radius_at(y)
+				var p := field.centerline_at(y) \
+					+ Vector3(cos(angle), 0.0, sin(angle)) * r_bar * r_core
+				# Relative to the field's own gradient scale u_max / r_core.
+				worst = maxf(worst, absf(_divergence(field, p, 0.002 * r_core, meridional))
+					* r_core / field.u_max)
+			_check(worst < 2e-3, "wind field is divergence-free (model %d, %s): worst %s"
+				% [model, "meridional" if meridional else "full", str(worst)])
+
+
+# L(y) saturates, so the updraft stays bounded however tall the funnel: on the axis
+# at most 2 a_bar UPDRAFT_DEPTH u_max (Burgers-Rott, Vatistas), twice that downward
+# in Sullivan's eye.
+func _test_vertical_wind_bounded() -> void:
+	for model in ALL_MODELS:
+		var field := _new_field()
+		field.model = model
+		field.height = 600.0
+		var axial := 4.0 if model == TornadoWindField.Model.SULLIVAN else 2.0
+		var bound := 1.05 * axial * field.a_bar * TornadoWindField.UPDRAFT_DEPTH * field.u_max
+		var worst := 0.0
+		for yi in 60:
+			for ri in 40:
+				var w := field.cylindrical_wind(0.2 * ri, field.height * (yi + 0.5) / 60.0)
+				worst = maxf(worst, absf(w.z) * field.u_max)
+		_check(worst <= bound, "vertical wind bounded (model %d): %.1f > %.1f m/s"
+			% [model, worst, bound])
+
+
+# Near the axis and the ground the secondary flow is the published model with
+# strain a = a_bar * INFLOW_ONSET: Burgers-Rott's v_z / z = -2 v_r / r, and
+# Sullivan's two cells (axial downdraft inside, updraft ring outside).
+func _test_published_core_structure() -> void:
+	var field := _new_field()
+	field.flare = 0.0
+	field.model = TornadoWindField.Model.BURGERS_ROTT
+	var y := 0.01 * field.r_core0
+	var w := field.cylindrical_wind(0.05, y)
+	var strain := -w.x / 0.05
+	var stretch := w.z / (y / field.r_core0)
+	_check(absf(stretch - 2.0 * strain) < 0.03 * stretch,
+		"Burgers-Rott core: v_z/z = -2 v_r/r (%.3f vs %.3f)" % [stretch, 2.0 * strain])
+	_check(absf(strain - field.a_bar * TornadoWindField.INFLOW_ONSET) < 0.03 * strain,
+		"Burgers-Rott strain is a_bar * INFLOW_ONSET")
+	field.model = TornadoWindField.Model.SULLIVAN
+	y = 0.3 * field.r_core0
+	_check(field.cylindrical_wind(0.2, y).z < 0.0, "Sullivan: downdraft in the eye")
+	_check(field.cylindrical_wind(0.9, y).z > 0.0, "Sullivan: updraft ring around the eye")
+	_check(field.cylindrical_wind(0.2, y).x > 0.0 and field.cylindrical_wind(2.0, y).x < 0.0,
+		"Sullivan: outflow from the eye, inflow outside")
