@@ -82,9 +82,11 @@ void main() {
 			trapped_air += rel_mag * converge * influence;
 		}
 	)
-	vec3 accel = force / max(density, 1e-6);
-	accel += near_force / max(near_density, 1e-6);
-	accel += surface_force / max(density, 1e-6);
+	// SebLague's double-density force: both pressure terms (and cohesion) are
+	// divided by the particle's own density. The solver folds the rest-lattice
+	// ratio into the near stiffness, so a particle at rest feels what it did
+	// when the near term divided by the near density.
+	vec3 accel = (force + near_force + surface_force) / max(density, 1e-6);
 	if (params.material == MATERIAL_HONEY) {
 		accel += extension * params.sim2.w / max(float(neighbours), 1.0);
 	}

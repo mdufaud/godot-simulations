@@ -165,6 +165,11 @@ var _sim_time := 0.0
 var _emit_cursor := 0
 var _emit_fraction := 0.0
 var _target_density := 1.0
+## Rest density over rest near-density of the spawn lattice (1 in the continuum
+## limit, 1.11 at h / spacing = 2.08). Near pressure now divides by the particle's
+## own density like the regular term (SebLague); this keeps the near stiffness of
+## a particle at rest exactly what it was when it divided by the near density.
+var _near_calibration := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
 var _gel_cohort := 0
@@ -269,6 +274,7 @@ func init_render() -> void:
 	if _rd == null:
 		return
 	_target_density = _compute_rest_density()
+	_near_calibration = _target_density / _compute_rest_near_density()
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
@@ -750,7 +756,7 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	pc.encode_float(64, dt)
 	pc.encode_float(68, _target_density)
 	pc.encode_float(72, pressure_mult)
-	pc.encode_float(76, near_pressure_mult)
+	pc.encode_float(76, near_pressure_mult * _near_calibration)
 	pc.encode_float(80, viscosity_strength)
 	pc.encode_float(84, collision_damping)
 	# The cohesion slider value is unscaled; the mercury kernel boost lives here,
@@ -925,4 +931,19 @@ func _compute_rest_density() -> float:
 				if r < h:
 					var v := h - r
 					sum += k_sp2 * v * v
+	return sum
+
+
+# Near density (SpikyPow3 kernel) of the same rest lattice.
+func _compute_rest_near_density() -> float:
+	var k_sp3 := 15.0 / (PI * pow(h, 6))
+	var sum := 0.0
+	var steps := int(ceil(h / spacing))
+	for x in range(-steps, steps + 1):
+		for y in range(-steps, steps + 1):
+			for z in range(-steps, steps + 1):
+				var r := (Vector3(x, y, z) * spacing).length()
+				if r < h:
+					var v := h - r
+					sum += k_sp3 * v * v * v
 	return sum
