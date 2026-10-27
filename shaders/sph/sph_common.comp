@@ -184,7 +184,7 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 	vec4 domain_min;
 	vec4 domain_max;
-	vec4 fluid_rheology; // x = yield deceleration in m/s^2 (0 = flows freely), y = rest-lattice neighbour count, zw = pad
+	vec4 fluid_rheology; // x = Bingham yield stress in Pa (0 = flows freely), y = rest-lattice neighbour count, zw = pad
 }
 scene;
 
@@ -203,6 +203,13 @@ layout(std430, set = 0, binding = 23) restrict buffer GelReference {
 	vec4 data[];
 }
 gel_reference;
+
+// Post-pressure velocity v* of the implicit yield solve (binding 24): fixed while
+// sph_yield_iter sweeps the iterate between velocities_snap and velocities.
+layout(std430, set = 0, binding = 24) restrict buffer VelocitiesStar {
+	vec4 data[];
+}
+velocities_star;
 
 // Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
 // request, so it can read past the cap for the rest of the frame.

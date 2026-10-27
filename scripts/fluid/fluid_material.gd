@@ -11,7 +11,9 @@ var cohesion := 0.0
 var collision_damping := 0.15
 ## Honey-only stretch term, applied in the pressure pass (0 = no kernel work).
 var extension_strength := 0.0
-## Bingham plug: yield deceleration (m/s^2) of supported fluid; 0 = flows freely.
+## Bingham yield stress (Pa); 0 = flows freely. Solved implicitly with
+## Papanastasiou regularisation (shaders/sph/sph_viscosity.comp); the solve is
+## converged up to ~600 Pa at the default sweep count (SphFluidSolver.YIELD_SWEEPS).
 var yield_stress := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
@@ -64,7 +66,6 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 9000.0
 			spec.collision_damping = 0.02
 			spec.extension_strength = 24.0
-			spec.yield_stress = 6.0
 			spec.radius = 0.24
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.WATER_OIL:
@@ -86,14 +87,14 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.PRISMATIC_SLIME:
 			spec.viscosity = 2.6
-			spec.yield_stress = 12.0
+			spec.yield_stress = 120.0
 			spec.cohesion = 1800.0
 			spec.collision_damping = 0.06
 			spec.radius = 0.22
 			spec.emission_cycle_seconds = 48.0
 		FluidSystem.FluidKind.LIGHT_PASTE:
 			spec.viscosity = 0.45
-			spec.yield_stress = 30.0
+			spec.yield_stress = 300.0
 			spec.cohesion = 2200.0
 			spec.collision_damping = 0.03
 			spec.radius = 0.23

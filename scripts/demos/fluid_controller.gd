@@ -101,8 +101,8 @@ func _setup_ui() -> void:
 			fluid.set_sph_foam_life, false, 1.0), fluid.get_sph_foam_life],
 	]
 	yield_group = menu.add_group()
-	_parameter_pairs.append([menu.add_slider("Yield threshold", 0.0, 160.0,
-		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 0.5), fluid.get_sph_yield_stress])
+	_parameter_pairs.append([menu.add_slider("Yield stress (Pa)", 0.0, 600.0,
+		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 5.0), fluid.get_sph_yield_stress])
 	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Performance")

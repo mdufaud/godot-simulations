@@ -10,8 +10,14 @@ const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_b
 const STAGES: Array[String] = [
 	"grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back", "grid_scatter",
 	"sph_vel_snap", "sph_external", "sph_density", "sph_pressure", "sph_viscosity",
+	"sph_vel_star", "sph_yield_iter",
 	"sph_emit", "foam_prepare", "foam_update", "foam_compact",
 ]
+## Stages compiled from another stage's source with a define prepended.
+const STAGE_VARIANTS := {"sph_yield_iter": ["sph_viscosity", "#define YIELD_ITERATION\n"]}
+## Jacobi sweeps per sub-step of the implicit yield-stress viscosity solve. The
+## velocity carries over between sub-steps, so the solve is warm-started.
+const YIELD_SWEEPS := 12
 const WG := 256
 const MATERIAL_SPECTRAL_GEL := 6
 const FOAM_UBO_SIZE := 112
@@ -283,8 +289,11 @@ func init_render() -> void:
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
 		var stage_dir := SHARED_GRID_DIR if GRID_STAGES.has(stage) else SHADER_DIR
-		var stage_src := FileAccess.get_file_as_string(stage_dir + stage + ".comp")
-		var spirv := ShaderCache.compile(_rd, "sph_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
+		var source_name: String = STAGE_VARIANTS[stage][0] if STAGE_VARIANTS.has(stage) else stage
+		var defines: String = STAGE_VARIANTS[stage][1] if STAGE_VARIANTS.has(stage) else ""
+		var stage_src := FileAccess.get_file_as_string(stage_dir + source_name + ".comp")
+		var spirv := ShaderCache.compile(_rd, "sph_" + stage,
+			"#version 450\n" + defines + "\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("SPH stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return
@@ -326,6 +335,7 @@ func init_render() -> void:
 	# Race-free neighbour reads: refreshed from `velocities` after grid_scatter
 	# each sub-step, read by sph_pressure (foam metric) and sph_viscosity (XSPH).
 	_buffers["velocities_snap"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["velocities_star"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["gel_reference"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
 	_gel_cohort = 0
 	_buffers["cell_count"] = _rd.storage_buffer_create(cells * 4, zero_cells)
@@ -398,11 +408,13 @@ func _build_uniform_sets() -> void:
 		["positions_a", "velocities_a", "predicted_a", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_b", "velocities_b",
 			"", "predicted_b", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference",
+			"velocities_star"],
 		["positions_b", "velocities_b", "predicted_b", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_a", "velocities_a",
 			"", "predicted_a", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference",
+			"velocities_star"],
 	]
 	var field: RID = planet_field if planet_field.is_valid() else _dummy_field
 	for stage in _uniform_sets:
@@ -544,6 +556,17 @@ func step_render(dt: float) -> void:
 		cl = _mark(cl, "sph/density")
 		_dispatch(cl, "sph_pressure", pc, n_groups)
 		cl = _mark(cl, "sph/pressure")
+		if yield_stress > 0.0:
+			# Implicit yield-stress viscosity: Jacobi sweeps from the post-pressure
+			# velocity v* (see sph_viscosity.comp), then a snapshot of the solution
+			# for the strain rate the final pass reads. Without a yield, viscosity
+			# keeps relaxing by increment against the pre-pressure snapshot.
+			_dispatch(cl, "sph_vel_star", pc, n_groups)
+			for _sweep in YIELD_SWEEPS:
+				_dispatch(cl, "sph_vel_snap", pc, n_groups)
+				_dispatch(cl, "sph_yield_iter", pc, n_groups)
+			_dispatch(cl, "sph_vel_snap", pc, n_groups)
+			cl = _mark(cl, "sph/yield")
 		_dispatch(cl, "sph_viscosity", pc, n_groups)
 		cl = _mark(cl, "sph/viscosity")
 		# White particles advance once per frame (full dt) against the grid the
