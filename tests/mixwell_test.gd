@@ -70,6 +70,7 @@ func _initialize() -> void:
 	_test_pattern_curve_and_transform_expansion()
 	_test_pattern_steps()
 	_test_pattern_snapshot_carries_pattern()
+	_test_affine_preset_keeps_stroke_radius()
 	_test_pattern_diagnostics_are_standalone()
 	_test_progressivity_r2_sequence()
 	_test_progressivity_spp_targets()
@@ -460,6 +461,23 @@ func _test_pattern_snapshot_carries_pattern() -> void:
 	_check(snapshot.pattern.operations[0].kind == "LINE" or
 			snapshot.pattern.operations[0].kind == "SEGMENT_CHAIN",
 		"snapshot operation exposes a scientific operation kind")
+	# BirdWing opens with a comb pass: a line family, not a segment chain.
+	_check(snapshot.pattern.operations[0].kind == "LINE",
+		"a LINE_COMB operation is labelled LINE, not SEGMENT_CHAIN")
+
+
+func _test_affine_preset_keeps_stroke_radius() -> void:
+	var solver := Solver.new()
+	solver.initialize(Vector2i(320, 180), null, Vector2i(640, 360))
+	solver.set_preset(Gallery.TWIST)
+	var snapshot = solver.create_render_snapshot()
+	_check(snapshot.affine_mode >= 0, "Twist renders in affine mode")
+	var stroke := {"type": Gallery.SEGMENT, "radius_px": 18.0}
+	_check(is_equal_approx(solver._operation_radius(stroke, snapshot), 18.0),
+		"a user stroke keeps its brush radius under an affine preset (the bake uses it)")
+	_check(is_equal_approx(solver._operation_radius({"type": Gallery.LINE}, snapshot),
+			snapshot.affine_radius_px),
+		"the affine brush itself still uses the affine radius")
 
 
 func _test_pattern_steps() -> void:

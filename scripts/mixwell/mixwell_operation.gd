@@ -31,8 +31,8 @@ var metadata := {}
 
 
 func set_from_dictionary(value: Dictionary) -> void:
-	var default_kind := TYPE_SEGMENT_CHAIN if int(value.get("type", 0)) == 2 \
-			or int(value.get("type", 0)) == 1 else TYPE_LINE
+	# LINE (0) and LINE_COMB (1) are line families; only SEGMENT (2) is a chain.
+	var default_kind := TYPE_SEGMENT_CHAIN if int(value.get("type", 0)) == 2 else TYPE_LINE
 	kind = str(value.get("kind", default_kind))
 	render_type = int(value.get("type", render_type))
 	origin = value.get("origin", origin)

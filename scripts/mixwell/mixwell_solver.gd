@@ -1518,7 +1518,7 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 	pc.encode_s32(8, index)
 	pc.encode_s32(12, active_snapshot.source_mode)
 	var brush_radius_px: float = active_snapshot.brush_radius_px if radius_px <= 0.0 else radius_px
-	if active_snapshot.affine_mode >= 0:
+	if active_snapshot.affine_mode >= 0 and not _is_user_segment(operation):
 		brush_radius_px = active_snapshot.affine_radius_px
 	var reference_min := mini(active_snapshot.reference_size.x, active_snapshot.reference_size.y)
 	var epsilon: float = brush_radius_px * 2.0 / float(maxi(reference_min, 1))
@@ -1576,13 +1576,21 @@ func _active_pattern_count() -> int:
 	return _pattern.operation_count() if _pattern_step < 0 else _pattern_step
 
 
+## The affine radius sizes the affine brush only. A user stroke (SEGMENT) keeps its
+## own brush radius: it is baked with that radius, so overriding it while live made
+## a stroke jump in width the moment it was baked.
 func _operation_radius(operation: Dictionary,
 		snapshot = null) -> float:
 	var active_snapshot = snapshot if snapshot != null else _render_snapshot
-	if active_snapshot != null and active_snapshot.affine_mode >= 0:
+	if active_snapshot != null and active_snapshot.affine_mode >= 0 \
+			and not _is_user_segment(operation):
 		return active_snapshot.affine_radius_px
 	var value := float(operation.get("radius_px", -1.0))
 	return config.brush_radius_px if value <= 0.0 else value
+
+
+static func _is_user_segment(operation: Dictionary) -> bool:
+	return int(operation.get("type", Gallery.LINE)) == Gallery.SEGMENT
 
 
 func get_periodic_domain_size() -> Vector2i:

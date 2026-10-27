@@ -300,6 +300,11 @@ func _setup_experience() -> void:
 		experience.visible = not open
 		if open:
 			_last_metrics_request = -1
+			# _input ignores everything while the panel is open, so a stroke in
+			# flight (Esc mid-drag) would never see its release: commit it now.
+			if _drawing and active_stroke != null:
+				_finish_stroke(active_stroke.points_px[-1])
+			_touch_points.clear()
 	)
 	_set_comparison_overlay(false)
 	_set_freehand_actions(false)
@@ -685,6 +690,10 @@ func _set_profiling(enabled: bool) -> void:
 func _run_periodic_gpu_ab() -> void:
 	if solver.is_initialized():
 		RenderingServer.call_on_render_thread(solver.verify_periodic_gpu_ab)
+		# The A/B ends with reset_accumulation(), which zeroes the solver's sample
+		# count: restart ours too, or refinement stalls at the old target (or, mid
+		# run, resumes on a cleared buffer and comes out dark).
+		_request_reset()
 
 
 func _set_final_scale(value: float) -> void:
@@ -863,7 +872,10 @@ func _input(event: InputEvent) -> void:
 		event_position = (event as InputEventScreenTouch).position
 	elif event is InputEventScreenDrag:
 		event_position = (event as InputEventScreenDrag).position
-	if event_position.x >= 0.0 and _is_ui_position(event_position):
+	# A release always reaches the stroke code, even over the panel: swallowing it
+	# left the stroke open, stuck at preview 1 spp and drawn by plain hovering.
+	if event_position.x >= 0.0 and _is_ui_position(event_position) \
+			and not _is_stroke_release(event):
 		return
 	if not _touch_points.is_empty() \
 			and (event is InputEventMouseButton or event is InputEventMouseMotion):
@@ -877,7 +889,13 @@ func _input(event: InputEvent) -> void:
 				_finish_stroke(button.position)
 			get_viewport().set_input_as_handled()
 	elif event is InputEventMouseMotion and _drawing:
-		_append_stroke_point((event as InputEventMouseMotion).position)
+		var motion := event as InputEventMouseMotion
+		if motion.button_mask & MOUSE_BUTTON_MASK_LEFT:
+			_append_stroke_point(motion.position)
+		elif active_stroke != null:
+			# The button came up somewhere we never heard about (outside the
+			# window): end the stroke where it was, not where the cursor hovers.
+			_finish_stroke(active_stroke.points_px[-1])
 		get_viewport().set_input_as_handled()
 	elif event is InputEventScreenTouch:
 		var touch := event as InputEventScreenTouch
@@ -896,6 +914,16 @@ func _input(event: InputEvent) -> void:
 		if _touch_points.size() == 1:
 			_append_stroke_point(drag.position)
 		get_viewport().set_input_as_handled()
+
+
+func _is_stroke_release(event: InputEvent) -> bool:
+	if event is InputEventMouseButton:
+		var button := event as InputEventMouseButton
+		return _drawing and button.button_index == MOUSE_BUTTON_LEFT and not button.pressed
+	if event is InputEventScreenTouch:
+		var touch := event as InputEventScreenTouch
+		return not touch.pressed and _touch_points.has(touch.index)
+	return false
 
 
 func _is_ui_position(position: Vector2) -> bool:
