@@ -491,8 +491,14 @@ func add_label(text: String) -> Label:
 	return label
 
 
+## [param apply_on_release]: while the grabber is dragged, only the value label
+## follows; [param cb] runs once on release (and immediately for clicks, keys and
+## restores). For callbacks that rebuild something heavy — resizing render
+## targets, regenerating a field, a synchronous GPU readback — which would
+## otherwise run on every one of the ~100 ticks of a drag.
 func add_slider(label_text: String, min_val: float, max_val: float, default_val: float,
-		cb: Callable, persist: bool = true, step_val: float = 0.0) -> HSlider:
+		cb: Callable, persist: bool = true, step_val: float = 0.0,
+		apply_on_release: bool = false) -> HSlider:
 	var hbox := HBoxContainer.new()
 	hbox.add_theme_constant_override("separation", 8)
 	hbox.custom_minimum_size.y = 30
@@ -523,8 +529,17 @@ func add_slider(label_text: String, min_val: float, max_val: float, default_val:
 	value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	hbox.add_child(value_label)
 
+	if apply_on_release:
+		# Slider has no is-dragging getter; drag_started/ended bracket the drag.
+		slider.drag_started.connect(func() -> void: slider.set_meta(&"_sim_dragging", true))
+		slider.drag_ended.connect(func(changed: bool) -> void:
+			slider.remove_meta(&"_sim_dragging")
+			if changed:
+				cb.call(slider.value)
+		)
 	slider.value_changed.connect(func(value: float) -> void:
-		cb.call(value)
+		if not (apply_on_release and slider.has_meta(&"_sim_dragging")):
+			cb.call(value)
 		value_label.text = _slider_value_text(value, slider.step)
 	)
 	var key := _register(label_text, slider, cb, "slider", default_val, persist)
