@@ -103,12 +103,12 @@ void main() {
 		float blend = 1.0 - exp(-rate * viscosity * params.sim.x);
 		if (is_lava()) {
 			blend = mix(blend, max(blend, 1.0 - exp(-LAVA_CRUST_RATE * params.sim.x)), crust);
-			v = v_live + blend * (target - vi_snap);
-		} else if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
-			v = v_live + blend * (target - vi_snap);
-		} else {
-			v = mix(v_live, target, blend);
 		}
+		// Relax by increment: the snapshot predates the pressure pass, so blending
+		// v_live itself toward a snapshot-based target would also undo a fraction
+		// `blend` of this sub-step's pressure and cohesion push -- a share that
+		// depends on the sub-step length.
+		v = v_live + blend * (target - vi_snap);
 	} else {
 		v = v_live + visc * viscosity * params.sim.x;
 	}
