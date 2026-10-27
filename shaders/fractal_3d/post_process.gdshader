@@ -4,7 +4,8 @@ uniform float aberration_strength : hint_range(0.0, 0.02) = 0.0;
 uniform float vignette_strength : hint_range(0.0, 2.0) = 0.35;
 uniform float grain_strength : hint_range(0.0, 0.2) = 0.0;
 
-uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear_mipmap;
+// Only LOD 0 is read: no mip chain needed for the screen copy.
+uniform sampler2D SCREEN_TEXTURE : hint_screen_texture, filter_linear;
 
 float hash(vec2 co) {
 	return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453);
