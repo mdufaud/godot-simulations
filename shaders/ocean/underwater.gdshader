@@ -3,7 +3,8 @@
 
 shader_type canvas_item;
 
-uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
+// Only LOD 0 is read: no mip chain needed for the screen copy.
+uniform sampler2D screen_texture : hint_screen_texture, filter_linear;
 uniform vec4 tint : source_color = vec4(0.1, 0.4, 0.5, 1.0);
 uniform float distortion = 0.004;
 uniform float darkness = 0.45;
