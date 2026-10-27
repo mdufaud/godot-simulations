@@ -87,6 +87,7 @@ declare -a SUITES=(
 	"ocean_coastal_config|cpu|-|-s res://tests/ocean_coastal_config_test.gd"
 	"ocean_ssot|cpu|-|-s res://tests/ocean_ssot_test.gd"
 	"alpine_terrain|cpu|-|-s res://tests/alpine_terrain_test.gd"
+	"surface_ball|cpu|-|-s res://tests/surface_ball_test.gd"
 	"smoke|cpu|-|-s res://tests/smoke_test.gd"
 	"non_euclidean|gpu|-|-s res://tests/non_euclidean_runner.gd"
 	"ocean_fft|gpu|600|-s res://tests/ocean_fft_test.gd"
