@@ -32,6 +32,16 @@ float torch_falloff(vec3 p, out float axis_t) {
 	return 1.0 - clamp(distance(p, cfg.torch.xyz + ab * axis_t) / max(radius, 1e-6), 0.0, 1.0);
 }
 
+bool inside_any_log(vec3 wc) {
+	for (int i = 0; i < MAX_LOGS; i++) {
+		float radius = cfg.wood[i].w;
+		if (radius > 0.0 && distance(wc, cfg.wood[i].xyz) <= radius) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void main() {
 	ivec3 c = cell_coord();
 	int mode_v = params.dims.w;
@@ -67,6 +77,12 @@ void main() {
 	}
 
 	if (out_of_grid(c)) {
+		return;
+	}
+	// The wood pass runs over every resident cell each substep, but only cells
+	// inside a log sphere change: elsewhere it loaded both scalar fields and
+	// stored them back untouched. Same test as the loop below (dist <= radius).
+	if (mode_v == 5 && !inside_any_log(cell_to_world(c))) {
 		return;
 	}
 
