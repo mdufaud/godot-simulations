@@ -369,10 +369,11 @@ func _physics_process(delta: float) -> void:
 			r_dir_x = rel_x / r
 			r_dir_z = rel_z / r
 		var t := TornadoWindField.tangent_from_radial(r_dir_x, r_dir_z, field.swirl_sign)
+		var lean := field.centerline_slope_at(bpos.y)
 		var v_wind := Vector3(
-			r_dir_x * v_cyl.x + t.x * v_cyl.y,
+			r_dir_x * v_cyl.x + t.x * v_cyl.y + lean.x * v_cyl.z,
 			v_cyl.z,
-			r_dir_z * v_cyl.x + t.y * v_cyl.y
+			r_dir_z * v_cyl.x + t.y * v_cyl.y + lean.y * v_cyl.z
 		)
 
 		var bvel := body.linear_velocity

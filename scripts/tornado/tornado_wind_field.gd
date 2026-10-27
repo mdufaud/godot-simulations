@@ -16,15 +16,16 @@ extends RefCounted
 ##   v_z =  (1/r) dpsi/dr,  v_r = -(1/r) dpsi/dy
 ## with s(y) the flared core radius. Phi carries the published near-core structure:
 ## Burgers-Rott rho^2 (v_r = -a rho, v_z = 2 a z near the axis and ground, with
-## a = a_bar * INFLOW_ONSET), Sullivan's
-## two-cell rho^2 - (3/R^2)(1 - e^-R^2 rho^2) (axial downdraft inside rho ~ 0.42) and
-## Vatistas' rho^2/(1 + rho^2); away from the core it decays like Baker & Sterling's
-## (2017) model, so the inflow peaks at INFLOW_PEAK_R and fades outward. L(y) replaces
-## the published models' unbounded linear z: it rises at INFLOW_ONSET per core radius
-## at the ground (the near-ground corner flow that lofts debris), saturates at
-## UPDRAFT_DEPTH, and closes to zero at the funnel top, where the updraft turns into
-## outflow. T(rho) closes the circulation between OUTER_TAPER_R and INFLUENCE_FACTOR
-## instead of cutting the field off.
+## a = a_bar * INFLOW_ONSET), Sullivan's two-cell rho^2 - (3/R^2)(1 - e^-R^2 rho^2)
+## (axial downdraft inside rho ~ 0.42) and Vatistas' rho^2/(1 + rho^2); away from
+## the core it decays like Baker & Sterling's (2017) model, so the inflow peaks at
+## INFLOW_PEAK_R and fades outward. L(y) replaces the published models' unbounded
+## linear z: it rises at INFLOW_ONSET per core radius at the ground (the near-ground
+## corner flow that lofts debris), saturates at UPDRAFT_DEPTH, and closes to zero at
+## the funnel top, where the updraft turns into outflow. T(rho) closes the
+## circulation between OUTER_TAPER_R and INFLUENCE_FACTOR instead of cutting the
+## field off. The vortex axis leans with height (centerline_at); the vertical wind
+## follows the lean (axis_direction_at), which keeps the field divergence-free.
 ##
 ## Optimisation: bake_wind_grid() precomputes (v_r, v_t, v_z) on a 2D (r_bar, y)
 ## grid once per parameter change. Debris then call sample_wind_grid() — a cheap
@@ -190,11 +191,33 @@ func core_radius_slope_at(y: float) -> float:
 	return r_core0 * flare * 1.5 * sqrt(y / height) / height
 
 
+## Vortex axis at height y: a Catmull-Rom spline through the slice offsets, so its
+## slope (centerline_slope_at, which the wind follows) is continuous.
 func centerline_at(y: float) -> Vector3:
+	var off := _axis_offset(y, false)
+	return base_pos + Vector3(off.x, y, off.y)
+
+
+## d(axis x, z)/dy: how far the axis leans per metre of height (0 outside the funnel).
+func centerline_slope_at(y: float) -> Vector2:
+	if y <= 0.0 or y >= height:
+		return Vector2.ZERO
+	return _axis_offset(y, true)
+
+
+func _axis_offset(y: float, derivative: bool) -> Vector2:
 	var t := clampf(y / height, 0.0, 1.0) * (NUM_SLICES - 1)
 	var i := clampi(int(t), 0, NUM_SLICES - 2)
-	var off := slice_offsets[i].lerp(slice_offsets[i + 1], t - i)
-	return base_pos + Vector3(off.x, y, off.y)
+	var u := t - i
+	var p0 := slice_offsets[maxi(i - 1, 0)]
+	var p1 := slice_offsets[i]
+	var p2 := slice_offsets[i + 1]
+	var p3 := slice_offsets[mini(i + 2, NUM_SLICES - 1)]
+	var c2 := 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3
+	var c3 := -p0 + 3.0 * p1 - 3.0 * p2 + p3
+	if derivative:
+		return 0.5 * ((p2 - p0) + 2.0 * c2 * u + 3.0 * c3 * u * u) * ((NUM_SLICES - 1) / height)
+	return 0.5 * (2.0 * p1 + (p2 - p0) * u + c2 * u * u + c3 * u * u * u)
 
 
 func influence_radius(y: float) -> float:
@@ -336,4 +359,13 @@ func wind_at(p: Vector3) -> Vector3:
 		r_dir = Vector3(rel.x, 0.0, rel.y) / r
 	var t := tangent_from_radial(r_dir.x, r_dir.z, swirl_sign)
 	var t_dir := Vector3(t.x, 0.0, t.y)
-	return (r_dir * w.x + t_dir * w.y + Vector3.UP * w.z) * u_max
+	return (r_dir * w.x + t_dir * w.y + axis_direction_at(p.y) * w.z) * u_max
+
+
+## Direction the vertical wind follows: up along the leaning axis. Carrying v_z
+## along (c'(y), 1) is the push-forward of the axisymmetric field through the
+## shear x -> x + c(y), whose Jacobian is 1, so the leaning field stays
+## divergence-free (debris and dust then rise along the visible funnel).
+func axis_direction_at(y: float) -> Vector3:
+	var slope := centerline_slope_at(y)
+	return Vector3(slope.x, 1.0, slope.y)

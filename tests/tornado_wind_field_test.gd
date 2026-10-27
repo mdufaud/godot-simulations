@@ -239,6 +239,8 @@ func _meridional_wind(field: TornadoWindField, p: Vector3) -> Vector3:
 # the full field is checked on the two analytic profiles and the meridional flow on
 # all three.
 func _test_divergence_free() -> void:
+	var noise := FastNoiseLite.new()
+	noise.seed = 3
 	for model in ALL_MODELS:
 		var field := _new_field()
 		field.model = model
@@ -246,6 +248,10 @@ func _test_divergence_free() -> void:
 		for meridional in [true, false]:
 			if not meridional and model == TornadoWindField.Model.SULLIVAN:
 				continue
+			# The full field also runs on a wandering, leaning axis: its vertical wind
+			# follows the lean, which keeps it divergence-free.
+			if not meridional:
+				field.update_centerline(5.0, 0.8, noise)
 			var rng := RandomNumberGenerator.new()
 			rng.seed = 1234
 			var worst := 0.0

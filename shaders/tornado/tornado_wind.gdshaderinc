@@ -36,11 +36,31 @@ float tw_core_radius_slope(float y) {
 	return r_core0 * flare * 1.5 * sqrt(y / funnel_height) / funnel_height;
 }
 
-// World-space vortex axis position at height y (slice lerp).
-vec3 tw_centerline(float y) {
+// Axis offset (xz) at height y, or its slope d/dy: Catmull-Rom through the slices
+// (TornadoWindField._axis_offset).
+vec2 tw_axis(float y, bool derivative) {
 	float t = clamp(y / funnel_height, 0.0, 1.0) * 7.0;
 	int i = int(min(t, 6.0));
-	return mix(centerline[i], centerline[i + 1], t - float(i));
+	float u = t - float(i);
+	vec2 p0 = centerline[max(i - 1, 0)].xz;
+	vec2 p1 = centerline[i].xz;
+	vec2 p2 = centerline[i + 1].xz;
+	vec2 p3 = centerline[min(i + 2, 7)].xz;
+	vec2 c2 = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
+	vec2 c3 = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+	if (derivative) {
+		if (y <= 0.0 || y >= funnel_height) {
+			return vec2(0.0);
+		}
+		return 0.5 * ((p2 - p0) + 2.0 * c2 * u + 3.0 * c3 * u * u) * (7.0 / funnel_height);
+	}
+	return 0.5 * (2.0 * p1 + (p2 - p0) * u + c2 * u * u + c3 * u * u * u);
+}
+
+// World-space vortex axis position at height y.
+vec3 tw_centerline(float y) {
+	vec2 axis = tw_axis(y, false);
+	return vec3(axis.x, y, axis.y);
 }
 
 // Normalized tangential profile (peak 1 at r_bar = 1, the RMW).
@@ -113,5 +133,7 @@ vec3 tw_wind(vec3 p) {
 	vec3 w = tw_cylindrical(r_bar, p.y);
 	vec3 r_dir = r > 1e-4 ? vec3(rel.x, 0.0, rel.y) / r : vec3(0.0);
 	vec3 t_dir = swirl_sign * cross(vec3(0.0, 1.0, 0.0), r_dir);
-	return (r_dir * w.x + t_dir * w.y + vec3(0.0, 1.0, 0.0) * w.z) * u_max;
+	// Vertical wind follows the leaning axis (TornadoWindField.axis_direction_at).
+	vec2 lean = tw_axis(p.y, true);
+	return (r_dir * w.x + t_dir * w.y + vec3(lean.x, 1.0, lean.y) * w.z) * u_max;
 }
