@@ -11,6 +11,8 @@ void main() {
 	}
 	velocities_src.data[i] = vec4(v, velocities_src.data[i].w);
 	vec3 pred = clamp_domain(pos + v * params.sim.x);
-	predicted_src.data[i] = vec4(pred, 0.0);
+	// w carries the particle's phase/plug flag into the sorted predicted buffer, so
+	// sph_viscosity can read its neighbours' flags from a buffer it never writes.
+	predicted_src.data[i] = vec4(pred, positions_src.data[i].w);
 	atomicAdd(cell_count.data[cell_index(cell_of(pred))], 1u);
 }

@@ -50,13 +50,16 @@ void main() {
 			continue;
 		}
 		neighbours++;
-		supported = supported || (yield_decel > 0.0 && positions.data[j].w >= PLUG_ANCHORED);
+		// Neighbour flags come from predicted.w (copied from positions.w by
+		// sph_external): this pass rewrites positions[i].w, so reading
+		// positions[j].w here raced the neighbour's own store.
+		supported = supported || (yield_decel > 0.0 && predicted.data[j].w >= PLUG_ANCHORED);
 		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
 		float weight = 1.0;
 		if (params.material == MATERIAL_HONEY) {
 			float shear = length(relative) / params.kernel.x;
 			weight = 0.25 + 0.75 / (1.0 + 0.15 * shear);
-		} else if (params.material == MATERIAL_OIL && abs(carried - positions.data[j].w) > 0.5) {
+		} else if (params.material == MATERIAL_OIL && abs(carried - predicted.data[j].w) > 0.5) {
 			weight = 0.1;
 		}
 		float kernel_weight = sph_poly6(r2) * weight;
