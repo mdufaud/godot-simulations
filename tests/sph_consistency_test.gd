@@ -22,6 +22,7 @@ func _run() -> void:
 		_finish("sph_consistency")
 		return
 	await _test_viscous_column_is_substep_independent()
+	await _test_viscosity_slider_is_stable()
 	_finish("sph_consistency")
 
 
@@ -47,7 +48,33 @@ func _test_viscous_column_is_substep_independent() -> void:
 			% [kind, str(heights)])
 
 
-func _make_column(kind: int, substeps: int) -> SphFluidSolver:
+# Viscosity relaxes neighbours toward their mean velocity. Integrated explicitly it
+# overshot once viscosity * sum(W) * dt passed 1 -- the Viscosity slider's top
+# value (3.0) at the default 3 sub-steps gives ~8 -- and the column blew up to NaN.
+# Stirred liquid at the slider maximum must settle like any other viscous fluid.
+func _test_viscosity_slider_is_stable() -> void:
+	for kind in [FluidSystem.FluidKind.WATER, FluidSystem.FluidKind.WATER_OIL,
+			FluidSystem.FluidKind.MERCURY, FluidSystem.FluidKind.LIQUID_NITROGEN]:
+		var solver := await _make_column(kind, 3, 3.0)
+		var state := await _read_state(solver)
+		var stirred: PackedFloat32Array = state.velocities.duplicate()
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 99
+		for i in COUNT:
+			for c in 3:
+				stirred[i * 4 + c] = rng.randf_range(-1.0, 1.0)
+		await _write_velocities(solver, stirred)
+		await _step(solver, 120)
+		state = await _read_state(solver)
+		var speed := _mean_speed(state.velocities)
+		print("SPH VISCOSITY material=%d slider=3.0 substeps=3 mean_speed=%.4f" % [kind, speed])
+		_check(_finite(state) and speed < 0.2,
+			"material %d: viscosity at the slider maximum is unstable (%s m/s)"
+				% [kind, str(speed)])
+		await _free_solver(solver)
+
+
+func _make_column(kind: int, substeps: int, viscosity := -1.0) -> SphFluidSolver:
 	var spec := FluidMaterial.for_kind(kind)
 	var solver := SphFluidSolver.new()
 	solver.particle_count = COUNT
@@ -56,7 +83,7 @@ func _make_column(kind: int, substeps: int) -> SphFluidSolver:
 	solver.substeps = substeps
 	solver.gravity = Vector3(0.0, -9.8, 0.0)
 	solver.foam_enabled = false
-	solver.viscosity_strength = spec.viscosity
+	solver.viscosity_strength = spec.viscosity if viscosity < 0.0 else viscosity
 	solver.cohesion_strength = spec.cohesion
 	solver.collision_damping = spec.collision_damping
 	solver.extension_strength = spec.extension_strength
@@ -102,6 +129,21 @@ func _read_state(solver: SphFluidSolver) -> Dictionary:
 	while not result.get("done", false):
 		await process_frame
 	return result
+
+
+func _write_velocities(solver: SphFluidSolver, velocities: PackedFloat32Array) -> void:
+	RenderingServer.call_on_render_thread(func():
+		var bytes := velocities.to_byte_array()
+		for parity in 2:
+			_rd.buffer_update(solver.parity_velocities_rid(parity), 0, bytes.size(), bytes))
+	await RenderingServer.frame_post_draw
+
+
+func _mean_speed(velocities: PackedFloat32Array) -> float:
+	var sum := 0.0
+	for i in COUNT:
+		sum += Vector3(velocities[i * 4], velocities[i * 4 + 1], velocities[i * 4 + 2]).length()
+	return sum / float(COUNT)
 
 
 func _mean_height(positions: PackedFloat32Array) -> float:

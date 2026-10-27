@@ -110,7 +110,13 @@ void main() {
 		// depends on the sub-step length.
 		v = v_live + blend * (target - vi_snap);
 	} else {
-		v = v_live + visc * viscosity * params.sim.x;
+		// XSPH smoothing (Monaghan 1989): relax toward the kernel-weighted
+		// neighbour mean at rate viscosity * sum(W), integrated exactly over the
+		// sub-step. Same as the explicit v += viscosity * dt * sum((v_j - v_i) W)
+		// while that step is small; the explicit form overshot (and blew up) once
+		// viscosity * sum(W) * dt passed 1, at the slider's top or on one sub-step.
+		float blend = 1.0 - exp(-viscosity * weight_sum * params.sim.x);
+		v = v_live + blend * visc / max(weight_sum, 1e-6);
 	}
 	if (params.material == MATERIAL_HONEY || is_lava()) {
 		float floor_distance = pos.y - params.grid_origin.y;
