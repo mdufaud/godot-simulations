@@ -40,6 +40,16 @@ func restart() -> void:
 	_hold = 0.0
 
 
+## Moves the zoom target along with the tour, keeping whatever offset a wheel or
+## pinch put on it (target - log). Overwriting the target with the tour's zoom
+## threw that input away every frame of DIVE and RISE; with no user input the
+## offset is zero and the target follows the tour exactly as before.
+func _carry_user_zoom(previous_log_zoom: float) -> void:
+	_camera.target_log_zoom = clampf(
+		_camera.log_zoom + (_camera.target_log_zoom - previous_log_zoom),
+		_camera.min_log_zoom(), _camera.max_log_zoom())
+
+
 func update(delta: float) -> void:
 	if not enabled:
 		return
@@ -49,7 +59,7 @@ func update(delta: float) -> void:
 			var rate := speed * FractalCamera.LN10 * head
 			var previous := _camera.log_zoom
 			_camera.log_zoom = minf(_camera.log_zoom + rate * delta, _poi_max_log_zoom)
-			_camera.target_log_zoom = _camera.log_zoom
+			_carry_user_zoom(previous)
 			# Pin the point on screen while zooming, with a gentle pull to centre
 			var ratio := exp(previous - _camera.log_zoom)
 			var pull := exp(-delta * 0.8)
@@ -65,9 +75,10 @@ func update(delta: float) -> void:
 		Phase.RISE:
 			var overview := FractalCamera.overview_log_zoom()
 			var head := clampf((_camera.log_zoom - overview) / 1.5, 0.08, 1.0)
+			var before := _camera.log_zoom
 			_camera.log_zoom = maxf(
 				_camera.log_zoom - speed * FractalCamera.LN10 * 2.5 * head * delta, overview)
-			_camera.target_log_zoom = _camera.log_zoom
+			_carry_user_zoom(before)
 			if _camera.log_zoom <= overview + 1e-6:
 				pick(_index + 1)
 				_phase = Phase.DIVE
