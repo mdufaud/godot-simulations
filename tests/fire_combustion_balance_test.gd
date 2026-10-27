@@ -86,8 +86,38 @@ func _run() -> void:
 		"mass-fraction closure reached %s (renormalisation should hold the simplex)"
 			% str(mass_fraction_max))
 
+	# Same identity on a q_f = -2 fuel: each reaction burns two moles of butane, and
+	# both the heat release and the fuel mass booked must count them (the heat used
+	# to count one, so these fuels burned at half their heating value).
+	var butane := -1
+	for index in FireSolver.FUELS.size():
+		if str(FireSolver.FUELS[index]["name"]).begins_with("Butane"):
+			butane = index
+	_check(butane >= 0 and absf(FireSolver.FUELS[butane]["q"][0]) == 2.0,
+		"fuel table has no q_f = -2 butane row")
+	demo.set_gas_fuel(butane)
+	demo.set_fuel_mode(true)
+	for frame in 90:
+		await process_frame
+	var gas_ratios: Array = []
+	for frame in SAMPLES:
+		await process_frame
+		var stats: Dictionary = solver.get_stats()
+		var mass: float = stats["diag_fuel_burned_kg"]
+		if mass > 1e-9:
+			var expected: float = absf(solver.current_fuel()["dch"]) \
+				* (mass / solver.current_fuel()["m_f"])
+			gas_ratios.append(stats["diag_chemical_heat_j"] / (solver.heat_efficiency * expected))
+	_check(gas_ratios.size() >= SAMPLES / 4,
+		"butane flame burned in only %d of %d sampled substeps" % [gas_ratios.size(), SAMPLES])
+	var gas_ratio := _median(gas_ratios) if not gas_ratios.is_empty() else 0.0
+	_check(absf(gas_ratio - 1.0) <= 0.015,
+		"butane heat ledger off the fuel ledger: median ratio %s over %d burning substeps" % [
+			str(gas_ratio), gas_ratios.size()])
+
 	demo.queue_free()
 	await process_frame
+	print("BALANCE butane ratio=%s over %d substeps" % [str(gas_ratio), gas_ratios.size()])
 	print(("BALANCE heat=%s J fuel=%s kg ratio=%s | activations/substep:"
 		+ " reactant_clamp med=%s temp_clamp med=%s renorm med=%s"
 		+ " | wood: pilot_heat=%s J cap_clipped=%s kg") % [

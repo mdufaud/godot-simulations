@@ -93,8 +93,12 @@ void combustion_body(ivec3 c) {
 		s2.y = min(s2.y + cfg.coeffs.z * abs(cfg.stoich.x) * cfg.fuel.y * scale, 1.0);
 
 		// Eq. 6 + Eq. 2. dcH is negative (exothermic) and phi is the heat
-		// efficiency, so J_c is positive and heats the cell.
-		float j_c = -cfg.coeffs.y * v_c * cfg.fuel.x;
+		// efficiency, so J_c is positive and heats the cell. dcH is per mole of
+		// FUEL (Eq. 4, pinned by fire_fuels_test) while v_c counts reactions,
+		// each of which burns |q_f| moles of fuel: without that factor the
+		// q_f = -2 fuels (acetylene, butane, cyclopropane) released half their heat.
+		float fuel_moles = abs(cfg.stoich.x) * v_c;
+		float j_c = -cfg.coeffs.y * fuel_moles * cfg.fuel.x;
 		temp += j_c * inv_rho / mixture_cp(s, s2) * dt;
 
 		// Diagnostic ledger: the chemical heat released and the fuel mass
@@ -108,7 +112,7 @@ void combustion_body(ivec3 c) {
 			atomicAdd(stats.data[STAT_DIAG + 3],
 				uint(clamp(j_c * vol * dt * STAT_SCALE, 0.0, 4.2e9)));
 			atomicAdd(stats.data[STAT_DIAG + 4],
-				uint(clamp(v_c * dt * cfg.fuel.y * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
+				uint(clamp(fuel_moles * dt * cfg.fuel.y * vol * STAT_MASS_SCALE, 0.0, 4.2e9)));
 		}
 	}
 
