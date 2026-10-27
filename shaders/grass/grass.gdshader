@@ -40,6 +40,9 @@ varying vec3 grass_world_root;
 varying float grass_color_variation;
 varying float grass_part;
 varying float cloud_transmittance;
+// Per-tuft constants taken once in vertex(): every vertex of a tuft shares its
+// root, so these are flat across it and the fragment stage need not refetch them.
+varying float grass_clump;
 
 mat3 rotate_y(float angle) {
 	float s = sin(angle);
@@ -215,6 +218,9 @@ void vertex() {
 	grass_world_root = blade_root;
 	grass_color_variation = INSTANCE_CUSTOM.a;
 	grass_part = floor(UV.x * 0.5);
+	grass_clump = broad_clump;
+	cloud_transmittance = texture(cloud_shadow_texture,
+		(blade_root.xz - cloud_shadow_center) / cloud_shadow_extent + 0.5).r;
 }
 
 void fragment() {
@@ -228,10 +234,14 @@ void fragment() {
 	vec3 stage_tip = mix(neutral_tip, tip_color, color_mix);
 	float tip_blend = smoothstep(0.12, 0.95, height_factor);
 	ALBEDO = mix(stage_base, stage_tip, tip_blend) * color_variation;
-	float clump_value = texture(clump_noise, grass_world_root.xz * 0.004).r;
-	ALBEDO *= mix(1.0, mix(0.9, 1.08, clump_value), feature_mix * clumping_factor);
+	ALBEDO *= mix(1.0, mix(0.9, 1.08, grass_clump), feature_mix * clumping_factor);
 	float head_part = step(0.5, grass_part) * (1.0 - step(1.5, grass_part));
-	vec4 plume = texture(plume_mask, vec2(UV.x - 2.0, 1.0 - clamp((UV.y - 0.75) * 4.0, 0.0, 1.0)));
+	// Only plume heads read the mask; elsewhere head_part zeroes both its uses.
+	// plume_mask has no mips, so the branch needs no derivatives.
+	vec4 plume = vec4(1.0);
+	if (head_part > 0.5) {
+		plume = texture(plume_mask, vec2(UV.x - 2.0, 1.0 - clamp((UV.y - 0.75) * 4.0, 0.0, 1.0)));
+	}
 	ALBEDO = mix(ALBEDO, plume.rgb * plume_color, head_part * color_mix);
 	ALBEDO = mix(ALBEDO, stage_base * 0.8, step(1.5, grass_part));
 	float chromatic_phase = grass_world_root.x * 0.013 + grass_world_root.z * 0.009;
@@ -241,8 +251,6 @@ void fragment() {
 	ALPHA_SCISSOR_THRESHOLD = 0.18;
 	AO = mix(0.55, 1.0, smoothstep(0.0, 0.7, height_factor));
 	ROUGHNESS = 0.94;
-	cloud_transmittance = texture(cloud_shadow_texture,
-		(grass_world_root.xz - cloud_shadow_center) / cloud_shadow_extent + 0.5).r;
 }
 
 void light() {

@@ -209,10 +209,11 @@ func _setup_ui() -> void:
 		set_sun_azimuth, true, 1.0)
 	menu.add_separator()
 	menu.add_section("🌿 Grass Properties")
+	# Applied on release: each step regenerates the whole field's MultiMeshes.
 	var density_slider: HSlider = menu.add_slider("Density", 0.0, 2.0, density_modifier,
 		func(value: float) -> void:
 			density_modifier = value
-			grass.set_density(value))
+			grass.set_density(value), true, 0.0, true)
 	quality.bind("density", density_slider,
 		func(value: float) -> void:
 			density_modifier = value
