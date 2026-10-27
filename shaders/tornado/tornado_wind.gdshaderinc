@@ -44,7 +44,9 @@ float tw_v_theta(float r_bar) {
 	if (wind_model == 1) {
 		return TW_BR_NORM * (1.0 - exp(-TW_BR_ALPHA * r_bar * r_bar)) / r_safe;
 	}
-	return texture(sullivan_curve, vec2(r_bar / 8.0, 0.5)).r;
+	// Texel centres hold r_bar = 8 i / 255 (TornadoWindField.build_sullivan_image).
+	float u = clamp(r_bar / 8.0, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0;
+	return texture(sullivan_curve, vec2(u, 0.5)).r;
 }
 
 // Full wind velocity (m/s) at world position p. Ground is y = 0.

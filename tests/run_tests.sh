@@ -97,6 +97,7 @@ declare -a SUITES=(
 	"scene_cycle|gpu|-|-s res://tests/scene_cycle_test.gd"
 	"smoke_gpu|gpu|-|-s res://tests/smoke_gpu_test.gd"
 	"tornado_boot_look|gpu|-|-s res://tests/probe.gd -- tornado_boot_look"
+	"tornado_wind_parity|gpu|-|-s res://tests/tornado_wind_parity_test.gd"
 	"terrain|gpu|300|-s res://tests/terrain_test.gd"
 	"fluid_foam|gpu|-|-s res://tests/probe.gd -- fluid_foam"
 	"fluid_tier|gpu|-|-s res://tests/probe.gd -- fluid_tier"

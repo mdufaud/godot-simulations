@@ -28,6 +28,8 @@ const SULLIVAN_RMW := 2.4976
 const BR_ALPHA := 1.2564312
 const BR_NORM := 1.3979525
 const R_BAR_MAX := 4.0
+const SULLIVAN_TABLE_SIZE := 256
+const SULLIVAN_TABLE_SPAN := 8.0
 ## Inflow shape: (r/1.5)*exp(1 - r/1.5) peaks at INFLOW_PEAK_R (just outside the RMW,
 ## as in tornado LES) with magnitude a_bar * R_BAR_MAX at the surface, then decays.
 const INFLOW_PEAK_R := 1.5
@@ -74,8 +76,13 @@ var swirl_sign := 1.0:
 var base_pos := Vector3.ZERO
 var slice_offsets := PackedVector2Array()
 
-var _sullivan_curve: Curve
-var _sullivan_tex: CurveTexture
+## Normalised Sullivan tangential profile, SULLIVAN_TABLE_SIZE samples over
+## r_bar in [0, SULLIVAN_TABLE_SPAN]. The CPU interpolates these exact values and
+## the GPU filters the same texels (half floats, filterable on every device).
+var _sullivan_table := PackedFloat32Array()
+var _sullivan_tex: ImageTexture
+## The integral behind the table is the same for every field: built once.
+static var _shared_sullivan_image: Image
 
 ## Precomputed wind grid: (v_r, v_t, v_z) in m/s at (r_bar, y) nodes.
 ## Layout: row-major, index = yi * WIND_GRID_R + ri.
@@ -85,20 +92,28 @@ var _baked_revision := -1
 
 func _init() -> void:
 	slice_offsets.resize(NUM_SLICES)
-	_sullivan_curve = build_sullivan_profile()
-	_sullivan_tex = CurveTexture.new()
-	_sullivan_tex.texture_mode = CurveTexture.TEXTURE_MODE_RED
-	_sullivan_tex.width = 256
-	_sullivan_tex.curve = _sullivan_curve
+	if _shared_sullivan_image == null:
+		_shared_sullivan_image = build_sullivan_image()
+	var image := _shared_sullivan_image
+	_sullivan_tex = ImageTexture.create_from_image(image)
+	_sullivan_table.resize(SULLIVAN_TABLE_SIZE)
+	for i in SULLIVAN_TABLE_SIZE:
+		_sullivan_table[i] = image.get_pixel(i, 0).r
 	_wind_grid.resize(WIND_GRID_R * WIND_GRID_Y)
 
 
-## Bakes the normalized Sullivan tangential profile v_theta(r_bar) for r_bar in [0, 8].
+## Bakes the normalised Sullivan tangential profile v_theta(r_bar), r_bar in
+## [0, SULLIVAN_TABLE_SPAN], into a 1-row half-float image.
 ## H(x) = int_0^x exp(-x' + 3*int_0^x' (1-e^-t)/t dt) dx'; the raw profile peaks at
 ## SULLIVAN_RMW viscous core radii, so the bake samples H(SULLIVAN_RMW^2 * r_bar^2)
-## and the baked curve peaks at r_bar = 1 like the other models.
-static func build_sullivan_profile() -> Curve:
-	var dx := 0.01
+## and normalises by the value at r_bar = 1, like the other models.
+##
+## Texel i holds r_bar = SPAN * i / (SIZE - 1): the GLSL mirror reads it at
+## u = (r_bar / SPAN) * (SIZE - 1) / SIZE + 0.5 / SIZE, i.e. exactly between texel
+## centres, which is the interpolation sullivan_profile() does on the CPU.
+static func build_sullivan_image() -> Image:
+	var dx := 0.005
+	# The integrand ~ x^3 e^-x is spent by x = 64: past it H is H(inf) to float precision.
 	var x_max := 64.0
 	var n := int(x_max / dx)
 	var g := 0.0
@@ -111,31 +126,35 @@ static func build_sullivan_profile() -> Curve:
 		g += 3.0 * (1.0 - exp(-x)) / x * dx
 		h += exp(-x + g) * dx
 		h_samples[i + 1] = h
-	var h_inf := h
-	var points := 128
-	var values := PackedFloat64Array()
-	values.resize(points + 1)
-	var v_peak := 0.0
-	var rmw2 := SULLIVAN_RMW * SULLIVAN_RMW
-	for i in points + 1:
-		var r_bar := 8.0 * i / points
-		var v := 0.0
-		if r_bar > 1e-4:
-			var idx := mini(int(rmw2 * r_bar * r_bar / dx), n)
-			v = h_samples[idx] / (SULLIVAN_RMW * r_bar * h_inf)
-		values[i] = v
-		v_peak = maxf(v_peak, v)
-	var curve := Curve.new()
-	curve.min_value = 0.0
-	curve.max_value = 1.0
-	curve.max_domain = 8.0
-	curve.bake_resolution = 256
-	for i in points + 1:
-		curve.add_point(Vector2(8.0 * i / points, values[i] / v_peak))
-	return curve
+	var v_peak := _sullivan_raw(1.0, h_samples, dx)
+	var image := Image.create_empty(SULLIVAN_TABLE_SIZE, 1, false, Image.FORMAT_RH)
+	for i in SULLIVAN_TABLE_SIZE:
+		var r_bar := SULLIVAN_TABLE_SPAN * i / float(SULLIVAN_TABLE_SIZE - 1)
+		image.set_pixel(i, 0, Color(_sullivan_raw(r_bar, h_samples, dx) / v_peak, 0.0, 0.0))
+	return image
 
 
-func get_sullivan_texture() -> CurveTexture:
+## H(R^2 r^2) / (R r) from the tabulated H, interpolated linearly in x.
+static func _sullivan_raw(r_bar: float, h_samples: PackedFloat64Array, dx: float) -> float:
+	if r_bar < 1e-4:
+		return 0.0
+	var x := SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar / dx
+	var h := h_samples[h_samples.size() - 1]
+	if x < h_samples.size() - 1:
+		var i := int(x)
+		h = lerpf(h_samples[i], h_samples[i + 1], x - i)
+	return h / (SULLIVAN_RMW * r_bar)
+
+
+## Normalised Sullivan tangential speed at r_bar (peak 1 at r_bar = 1), the same
+## linear interpolation the GPU's filtered lookup performs.
+func sullivan_profile(r_bar: float) -> float:
+	var x := clampf(r_bar / SULLIVAN_TABLE_SPAN, 0.0, 1.0) * (SULLIVAN_TABLE_SIZE - 1)
+	var i := mini(int(x), SULLIVAN_TABLE_SIZE - 2)
+	return lerpf(_sullivan_table[i], _sullivan_table[i + 1], x - i)
+
+
+func get_sullivan_texture() -> Texture2D:
 	return _sullivan_tex
 
 
@@ -214,7 +233,7 @@ func bake_wind_grid() -> void:
 					v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
 				Model.SULLIVAN:
 					var e := exp(-SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
-					v_t = _sullivan_curve.sample_baked(r_bar)
+					v_t = sullivan_profile(r_bar)
 					v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z
 						+ (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
 					v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) \
@@ -296,7 +315,7 @@ func wind_at(p: Vector3) -> Vector3:
 			v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
 		Model.SULLIVAN:
 			var e := exp(-sv2)
-			v_t = _sullivan_curve.sample_baked(r_bar)
+			v_t = sullivan_profile(r_bar)
 			v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z + (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
 			v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) * exp(-0.15 * sv2)
 
