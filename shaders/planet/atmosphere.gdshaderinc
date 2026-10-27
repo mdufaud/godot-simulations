@@ -54,18 +54,34 @@ float optical_depth_baked(vec3 ray_origin, vec3 ray_dir) {
 }
 
 // Differencing the table from both ends and blending keeps precision where either
-// single-ended difference would cancel to noise.
-float optical_depth_baked2(vec3 ray_origin, vec3 ray_dir, float ray_length) {
-	vec3 end_point = ray_origin + ray_dir * ray_length;
+// single-ended difference would cancel to noise. The origin-side lookups and the
+// blend weight depend only on the ray, so scatter_segment takes them once
+// (ViewRay) instead of re-fetching them at every in-scatter step.
+struct ViewRay {
+	vec3 origin;
+	vec3 dir;
+	float w;
+	float depth_forward;
+	float depth_backward;
+};
+
+ViewRay view_ray(vec3 ray_origin, vec3 ray_dir) {
+	ViewRay ray;
+	ray.origin = ray_origin;
+	ray.dir = ray_dir;
 	float d = dot(ray_dir, normalize(ray_origin - planet_centre));
-
 	const float blend_strength = 1.5;
-	float w = clamp(d * blend_strength + 0.5, 0.0, 1.0);
+	ray.w = clamp(d * blend_strength + 0.5, 0.0, 1.0);
+	ray.depth_forward = optical_depth_baked(ray_origin, ray_dir);
+	ray.depth_backward = optical_depth_baked(ray_origin, -ray_dir);
+	return ray;
+}
 
-	float d1 = optical_depth_baked(ray_origin, ray_dir) - optical_depth_baked(end_point, ray_dir);
-	float d2 = optical_depth_baked(end_point, -ray_dir) - optical_depth_baked(ray_origin, -ray_dir);
-
-	return mix(d2, d1, w);
+float optical_depth_baked2(ViewRay ray, float ray_length) {
+	vec3 end_point = ray.origin + ray.dir * ray_length;
+	float d1 = ray.depth_forward - optical_depth_baked(end_point, ray.dir);
+	float d2 = optical_depth_baked(end_point, -ray.dir) - ray.depth_backward;
+	return mix(d2, d1, ray.w);
 }
 
 vec3 scatter_segment(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 original_col,
@@ -76,12 +92,13 @@ vec3 scatter_segment(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 origi
 	vec3 in_scatter_point = ray_origin;
 	float step_size = ray_length / float(num_in_scattering_points - 1);
 	vec3 in_scattered_light = vec3(0.0);
+	ViewRay view = view_ray(ray_origin, ray_dir);
 
 	for (int i = 0; i < num_in_scattering_points; i++) {
 		float sun_ray_optical_depth = optical_depth_baked(
 				in_scatter_point + dir_to_sun * dither_strength, dir_to_sun);
 		float local_density = density_at_point(in_scatter_point);
-		float view_ray_optical_depth = optical_depth_baked2(ray_origin, ray_dir, step_size * float(i));
+		float view_ray_optical_depth = optical_depth_baked2(view, step_size * float(i));
 		vec3 transmittance = exp(-(sun_ray_optical_depth + view_ray_optical_depth) * scattering_coefficients);
 
 		in_scattered_light += local_density * transmittance;
@@ -90,7 +107,7 @@ vec3 scatter_segment(vec3 ray_origin, vec3 ray_dir, float ray_length, vec3 origi
 	in_scattered_light *= scattering_coefficients * intensity * step_size / planet_radius;
 	in_scattered_light += dither * 0.01 * min(length(scattering_coefficients), 1.0);
 
-	float view_depth = max(optical_depth_baked2(ray_origin, ray_dir, ray_length), 0.0);
+	float view_depth = max(optical_depth_baked2(view, ray_length), 0.0);
 	return original_col * exp(-view_depth * scattering_coefficients) + in_scattered_light;
 }
 
