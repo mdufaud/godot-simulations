@@ -16,6 +16,7 @@ func _initialize() -> void:
 	_test_inflow_profile()
 	_test_top_fade()
 	_test_camera_framing()
+	_test_bake_follows_parameters()
 	_finish("tornado_wind_field")
 
 
@@ -182,3 +183,26 @@ func _test_camera_framing() -> void:
 			var skirt := (3.2 + 1.2 * 2.0) * r0 * 1.05
 			_check(dist > skirt,
 				"camera outside the dust skirt (r0=%.0f aspect=%.2f)" % [r0, aspect])
+
+
+# The grid is rebuilt only when a wind input changes: a parameter edit must still
+# reach it (including a direct field write, as apply_preset does for height), and
+# moving the vortex must not invalidate it.
+func _test_bake_follows_parameters() -> void:
+	var field := _new_field()
+	field.bake_wind_grid()
+	var y := field.height * 0.4
+	var before := field.sample_wind_grid(1.0, y)
+	var revision := field.revision
+	field.base_pos = Vector3(50.0, 0.0, 20.0)
+	_check(field.revision == revision, "moving the vortex keeps the baked grid")
+	field.u_max *= 2.0
+	_check(field.revision != revision, "a wind parameter write bumps the revision")
+	field.bake_wind_grid()
+	var after := field.sample_wind_grid(1.0, y)
+	_check(after.is_equal_approx(before * 2.0),
+		"the grid rebakes after u_max doubles: %s -> %s" % [before, after])
+	field.height = 200.0
+	field.bake_wind_grid()
+	_check(not field.sample_wind_grid(1.0, y).is_equal_approx(after),
+		"a direct height write rebakes the grid")

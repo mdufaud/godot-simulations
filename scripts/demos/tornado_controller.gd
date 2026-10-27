@@ -187,10 +187,14 @@ func _process(delta: float) -> void:
 			_wander_noise.get_noise_2d(wt * 100.0, 500.0)
 		) * wander_radius
 		field.update_centerline(_time * 0.05, s_amount, _wander_noise)
-		field.bake_wind_grid()
-		_renderer.push_wind(field)
 		tornado_node.position = field.base_pos
 		_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
+	# Outside the Freeze gate: Freeze holds the vortex in place, but slider edits
+	# must still reach the grid the debris sample and the shaders' uniforms. Both
+	# calls are no-ops unless a wind parameter changed (or, for the centerline
+	# uniform, a single cheap array per frame).
+	field.bake_wind_grid()
+	_renderer.push_wind(field)
 	_update_lightning(delta)
 	if _debris_bar:
 		_debris_bar.value = debris_pool.active_count

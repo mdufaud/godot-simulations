@@ -40,13 +40,37 @@ const INFLUENCE_FACTOR := 8.0
 const WIND_GRID_R := 32
 const WIND_GRID_Y := 64
 
-var model: int = Model.BURGERS_ROTT
-var u_max := 85.0
-var r_core0 := 45.0
-var height := 550.0
-var flare := 2.5
-var a_bar := 0.15
-var swirl_sign := 1.0
+## Bumped by every write to a wind input below, so the baked grid and the
+## renderer's constant uniforms refresh only when a parameter actually changes.
+var revision := 0
+var model: int = Model.BURGERS_ROTT:
+	set(value):
+		model = value
+		revision += 1
+var u_max := 85.0:
+	set(value):
+		u_max = value
+		revision += 1
+var r_core0 := 45.0:
+	set(value):
+		r_core0 = value
+		revision += 1
+var height := 550.0:
+	set(value):
+		height = value
+		revision += 1
+var flare := 2.5:
+	set(value):
+		flare = value
+		revision += 1
+var a_bar := 0.15:
+	set(value):
+		a_bar = value
+		revision += 1
+var swirl_sign := 1.0:
+	set(value):
+		swirl_sign = value
+		revision += 1
 var base_pos := Vector3.ZERO
 var slice_offsets := PackedVector2Array()
 
@@ -56,6 +80,7 @@ var _sullivan_tex: CurveTexture
 ## Precomputed wind grid: (v_r, v_t, v_z) in m/s at (r_bar, y) nodes.
 ## Layout: row-major, index = yi * WIND_GRID_R + ri.
 var _wind_grid := PackedVector3Array()
+var _baked_revision := -1
 
 
 func _init() -> void:
@@ -152,9 +177,14 @@ func get_shader_centerline() -> PackedVector3Array:
 
 # ── Precomputed wind grid ────────────────────────────────────────────────────
 
-## Rebuilds the cylindrical wind grid.  Call once per frame after parameters
-## (u_max, a_bar, model, etc.) may have changed.  Cost: ~2K vortex evaluations.
+## Rebuilds the cylindrical wind grid when a wind input (u_max, a_bar, model,
+## etc.) changed since the last bake; otherwise returns at once, so calling it
+## every frame costs nothing. A rebuild is ~2K vortex evaluations in GDScript.
+## The grid does not depend on base_pos or the centerline.
 func bake_wind_grid() -> void:
+	if _baked_revision == revision:
+		return
+	_baked_revision = revision
 	var inv_gr: float = 1.0 / (WIND_GRID_R - 1)
 	var inv_gy: float = 1.0 / (WIND_GRID_Y - 1)
 
