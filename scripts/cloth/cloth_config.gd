@@ -6,7 +6,8 @@ class_name ClothConfig extends Resource
 @export_range(1, 64, 1) var iterations: int = 14
 @export_range(1, 32, 1) var substeps: int = 4
 @export var gravity_mps2 := Vector3(0.0, -9.8, 0.0)
-@export_range(0.0, 1.0, 0.001) var damping: float = 0.995
+## Velocity retained per 1/60 s; the solver spreads it across its substeps.
+@export_range(0.0, 1.0, 0.001) var damping: float = 0.98
 @export_range(0.0, 10.0, 0.01) var drag: float = 0.9
 
 
