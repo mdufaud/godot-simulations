@@ -187,9 +187,11 @@ func _test_lever_caps() -> void:
 	var smoke := SmokeQualityProfile
 	for tier in 4:
 		var values: Dictionary = smoke.values(tier)
+		# The dye fields put Ultra's grid at ~473 MiB (light volume excluded); the
+		# ceiling keeps it, and any further field, under half a gigabyte.
 		_check(values.grid_cell_budget * SmokeSolver.bytes_per_cell(values.maccormack)
-				<= 384 * 1024 * 1024,
-			"smoke tier %d grid above 384 MB" % tier)
+				<= 512 * 1024 * 1024,
+			"smoke tier %d grid above 512 MiB" % tier)
 		_check(values.grid_cell_budget in smoke.GRID_CELL_BUDGETS
 			and values.sim_rate_hz in smoke.SIM_RATES_HZ
 			and values.light_downsample in smoke.LIGHT_DOWNSAMPLES,
