@@ -199,6 +199,13 @@ func _test_added_scene_models() -> void:
 			cluster_inside_bound = false
 	_check(cluster.supports_self_gravity() and cluster.default_self_gravity(),
 		"globular cluster must start with direct particle self-gravity enabled")
+	# No attractor and no disk mass: without pair gravity nothing pulls the stars,
+	# so neither the toggle nor a test-particle tier may turn it off.
+	_check(cluster.attractors(solver).is_empty() and solver.disk_mass <= 0.0
+		and cluster.requires_self_gravity(),
+		"globular cluster has no other mass, so it must require self-gravity")
+	_check(not BlackHoleScene.new().requires_self_gravity(),
+		"scenes with a central mass keep self-gravity optional")
 	_check(is_equal_approx(seeded_mass, cluster.cluster_mass)
 		and cluster_inside_bound,
 		"globular cluster seed must conserve total mass inside its Plummer cutoff")
