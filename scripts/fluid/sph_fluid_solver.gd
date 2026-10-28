@@ -1,8 +1,24 @@
 class_name SphFluidSolver
 extends RefCounted
-## GPU dual-density SPH based on SebLague and Clavet's density equations. It uses
-## a dense counting-sort grid, a Texture2DRD position buffer and GPU profiling.
-## Particle velocity is reordered with position and preserved between frames.
+## GPU SPH after SebLague's fluid simulation: force-based double-density
+## relaxation (Clavet et al. 2005's density and near-density pressures with
+## spiky kernels), sub-stepped symplectic Euler on predicted positions. The
+## materials add published models on top:
+## - viscosity: XSPH (Monaghan 1989), integrated exactly over each sub-step; the
+##   viscous materials relax by increment toward the neighbour mean, with
+##   no-slip boundary viscosity (after Akinci et al. 2012);
+## - Light Paste and Prismatic Slime: Bingham yield stress with Papanastasiou
+##   regularisation, solved implicitly (Jacobi sweeps, Picard on the strain rate);
+## - Water + Oil: a two-phase mixture, with per-particle mass from the oil
+##   fraction (Solenthaler & Pajarola 2008) and sub-particle drift
+##   (Ren et al. 2014);
+## - cohesion: Akinci et al. 2013; foam: Ihmsen et al. 2012 diffuse particles.
+## Look models without a physical reference, kept as such: honey's stretch
+## term, the gel's rest springs, the astral and slime stress parameters, and
+## lava's heat, crust and bed drag.
+## It uses a dense counting-sort grid, a Texture2DRD position buffer and GPU
+## profiling. Particle velocity is reordered with position and preserved
+## between frames.
 
 const SHADER_DIR := "res://shaders/sph/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"

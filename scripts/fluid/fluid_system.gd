@@ -1,6 +1,6 @@
 class_name FluidSystem
 extends Node3D
-## Reusable GPU fluid: one dual-density SPH simulation with a screen-space surface
+## Reusable GPU fluid: one double-density SPH simulation with a screen-space surface
 ## and optional foam. Instance it in a scene, assign a camera, and call start().
 ## The host scene owns its camera, environment and ground; this node owns the fluid.
 
