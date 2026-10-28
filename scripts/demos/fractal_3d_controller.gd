@@ -103,6 +103,7 @@ func _ready() -> void:
 	_quality_profile = config.quality_profile
 	_renderer.setup(_fractal_box, _post_process)
 	_camera.de_query = _evaluate_de
+	_camera.move_speed = config.flight_speed_per_s
 
 	# FSR remains available for manual/adaptive scaling; maximum quality uses
 	# native resolution. UI/post-process always stay at native resolution.
@@ -116,6 +117,7 @@ func _ready() -> void:
 	_params["epsilon"] = config.epsilon_m
 	_setup_ui()
 	_add_hint_label()
+	_add_crosshair()
 	_select_fractal(0)
 	_apply_post()
 
@@ -130,7 +132,27 @@ func _add_hint_label() -> void:
 	$UI.add_child(hint)
 
 
+## Flight goes where the view centre points; with the cursor captured nothing
+## else shows it.
+func _add_crosshair() -> void:
+	# Dark ring around a white dot: readable on light and dark surfaces alike.
+	for layer in [[3.0, Color(0, 0, 0, 0.55)], [1.0, Color(1, 1, 1, 0.9)]]:
+		var half: float = layer[0]
+		var dot := ColorRect.new()
+		dot.color = layer[1]
+		dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		dot.set_anchors_preset(Control.PRESET_CENTER)
+		dot.offset_left = -half
+		dot.offset_top = -half
+		dot.offset_right = half
+		dot.offset_bottom = half
+		$UI.add_child(dot)
+
+
 func _process(delta: float) -> void:
+	# The raymarch box only gives the shader fragments to run: keep the camera
+	# inside it however far it flies.
+	_fractal_box.global_position = _camera.global_position
 	if absf(_speed_slider.value - _camera.move_speed) > 0.01:
 		_speed_slider.value = _camera.move_speed
 	_update_packing_animation(delta)

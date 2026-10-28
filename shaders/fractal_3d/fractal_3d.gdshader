@@ -157,7 +157,9 @@ float hit_epsilon(float t) {
 }
 
 vec3 calc_normal(vec3 p, float t) {
-	float e = max(hit_epsilon(t) * 2.0, pixel_angle * max(t, 0.01) * 0.12);
+	// Half a pixel footprint: finer offsets sample DE noise below the pixel and
+	// turn into grain on the surface.
+	float e = max(hit_epsilon(t) * 2.0, pixel_angle * max(t, 0.01) * 0.5);
 	vec2 k = vec2(1.0, -1.0);
 	return normalize(
 		k.xyy * scene_d(p + k.xyy * e) +
@@ -187,6 +189,7 @@ void fragment() {
 	float t = 0.0;
 	float d = 0.0;
 	bool hit = false;
+	bool escaped = false;
 	for (int i = 0; i < 1200; i++) {
 		if (i >= max_steps) break;
 		vec3 p = ro + rd * t;
@@ -194,9 +197,14 @@ void fragment() {
 		float eps = hit_epsilon(t);
 		if (d < eps) { hit = true; break; }
 		t += max(d * 0.75, 1e-6);
-		if (t > max_dist) break;
+		if (t > max_dist) { escaped = true; break; }
 	}
+	// Out of steps short of max_dist: the ray is crawling along a surface
+	// (grazing tunnels), not flying through empty space, so shade what it
+	// reached instead of punching a sky-coloured hole.
+	if (!hit && !escaped) hit = true;
 
+	vec3 fog_color = vec3(0.02, 0.01, 0.05);
 	vec3 col;
 	if (hit) {
 		vec3 p = ro + rd * t;
@@ -217,12 +225,13 @@ void fragment() {
 		col = base * diff * ao + vec3(spec);
 		col += base * fres * 0.5;                      // iridescent rim
 
+		// Full fog, the same colour misses get: surfaces fade into the void
+		// instead of ending at a darker hole at max_dist.
 		float fog = 1.0 - exp(-t * 0.03);
-		col = mix(col, vec3(0.02, 0.01, 0.05), fog * 0.6);
+		col = mix(col, fog_color, fog);
 		EMISSION = max(col - vec3(0.72), vec3(0.0)) * glow_strength * 0.35;
 	} else {
-		float sky = rd.y * 0.5 + 0.5;
-		col = mix(vec3(0.02, 0.01, 0.06), vec3(0.04, 0.02, 0.10), sky);
+		col = fog_color;
 	}
 	ALBEDO = col;
 }

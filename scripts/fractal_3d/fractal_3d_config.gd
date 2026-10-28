@@ -6,6 +6,8 @@ class_name Fractal3DConfig extends Resource
 @export_range(0.000001, 1.0, 0.000001) var epsilon_m: float = 0.0001
 @export_range(0.1, 10.0, 0.001) var render_scale: float = 0.75
 @export_range(0, 2, 1) var quality_profile: int = 0
+## Fraction of the free distance to the nearest surface flown per second.
+@export_range(0.1, 15.0, 0.1) var flight_speed_per_s: float = 1.5
 
 
 func validate() -> String:
@@ -15,4 +17,6 @@ func validate() -> String:
 		return "render_scale must be within (0, 1]"
 	if quality_profile < 0 or quality_profile > 2:
 		return "quality_profile is invalid"
+	if flight_speed_per_s <= 0.0:
+		return "flight_speed_per_s must be positive"
 	return ""

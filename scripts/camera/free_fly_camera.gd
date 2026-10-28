@@ -6,7 +6,10 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## cursor for the UI; click in the viewport recaptures it. No camera roll.
 ## Move: WASD + move_up/move_down, relative to the full look direction, with
 ## acceleration/damping smoothing (anti-nausea, no jerk).
-## If de_query is set, movement is kept outside nearby fractal surfaces.
+## If de_query is set, flight is scaled to the free distance it returns:
+## move_speed is then the fraction of that distance covered per second, so the
+## camera eases into any surface at any scale, and no step ever exceeds half
+## the distance (sphere-tracing bound), so it never passes through.
 
 # --- Look ---
 @export var mouse_sensitivity := 0.15
@@ -16,7 +19,7 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 @export var fov := 70.0
 
 # --- Movement ---
-@export var move_speed := 3.0       # cruise units/sec
+@export var move_speed := 3.0       # cruise units/sec, or free distances/sec with de_query
 @export var acceleration := 12.0    # ramp toward target velocity
 @export var damping := 8.0          # ramp toward zero on release
 
@@ -27,6 +30,14 @@ var pitch := 0.0
 var yaw := 0.0
 var velocity := Vector3.ZERO
 var motion_intensity := 0.0
+
+## Free distance below which the camera counts as touching a surface: flight
+## keeps this floor speed so it can always back out.
+const MIN_FLIGHT_DISTANCE := 1e-4
+## Seconds the speed takes to follow a free distance that opens up; a closing
+## one is followed at once.
+const DISTANCE_RISE_S := 0.25
+var _flight_distance := -1.0
 
 var _captured := false
 var _camera: Camera3D
@@ -147,6 +158,11 @@ func _process(delta: float) -> void:
 	var dist := -1.0
 	if de_query.is_valid():
 		dist = maxf(de_query.call(position) as float, 0.0)
+		if _flight_distance < 0.0 or dist < _flight_distance:
+			_flight_distance = dist
+		else:
+			_flight_distance = lerpf(dist, _flight_distance, exp(-delta / DISTANCE_RISE_S))
+		speed = move_speed * maxf(_flight_distance, MIN_FLIGHT_DISTANCE)
 
 	var target := Vector3.ZERO
 	if input_dir != Vector3.ZERO:
@@ -158,17 +174,14 @@ func _process(delta: float) -> void:
 	var decay := exp(-rate * delta)
 	velocity = target + (previous_velocity - target) * decay
 	motion_intensity = maxf(motion_intensity,
-		clampf(velocity.length() / maxf(move_speed, 0.001), 0.0, 1.0))
+		clampf(velocity.length() / maxf(speed, 1e-6), 0.0, 1.0))
 
 	var step := target * delta + (previous_velocity - target) * (1.0 - decay) / maxf(rate, 1e-6)
-	if dist >= 0.0 and step != Vector3.ZERO:
-		var midpoint_dist := maxf(de_query.call(position + step * 0.5) as float, 0.0)
-		var endpoint_dist := maxf(de_query.call(position + step) as float, 0.0)
-		var moving_away := midpoint_dist > dist and endpoint_dist > midpoint_dist
-		if not moving_away:
-			var max_len := maxf(dist * 0.35, 0.0001)
-			if step.length() > max_len:
-				step = step.normalized() * max_len
+	if dist >= MIN_FLIGHT_DISTANCE:
+		var max_len := dist * 0.5
+		if step.length() > max_len:
+			step = step.normalized() * max_len
+			velocity = velocity.limit_length(max_len / maxf(delta, 1e-6))
 	position += step
 	_update_transform()
 
@@ -199,6 +212,7 @@ func set_pose(pos: Vector3, new_yaw: float, new_pitch: float) -> void:
 	yaw = new_yaw
 	pitch = clampf(new_pitch, min_pitch, max_pitch)
 	velocity = Vector3.ZERO
+	_flight_distance = -1.0
 	motion_intensity = 0.0
 	_update_transform()
 
