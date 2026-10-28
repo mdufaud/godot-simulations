@@ -13,10 +13,10 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 	var value := point
 	if periodic:
 		value = Periodicity.wrap_coordinate(value, period)
-	var reference_min := float(maxi(mini(reference_size.x, reference_size.y), 1))
-	var epsilon := brush_radius_px * 2.0 / reference_min
+	var unit := Periodicity.units_per_pixel(reference_size)
+	var epsilon := brush_radius_px * unit
 	if affine_mode >= 0:
-		var affine_radius := affine_radius_px * 2.0 / reference_min
+		var affine_radius := affine_radius_px * unit
 		value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
 			affine_strength, affine_radius, cutoff_gamma)
 		return Periodicity.wrap_coordinate(value, period) if periodic else value
@@ -28,7 +28,7 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var operation_radius := float(operation.get("radius_px", -1.0))
 			var operation_epsilon := (brush_radius_px if operation_radius <= 0.0 else operation_radius) \
-					* 2.0 / reference_min
+					* unit
 			var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
 					+ perpendicular * float(operation.get("phase", 0.0))
 			var gap := float(operation.get("pitch", 0.0))
@@ -58,7 +58,7 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 				segment = _periodic_segment_at(segment, value, operation.get("period", Vector2.ZERO))
 			var radius := float(operation.get("radius_px", -1.0))
 			var segment_epsilon := (brush_radius_px if radius <= 0.0 else radius) \
-					* 2.0 / reference_min
+					* unit
 			var drift := Math.rd_segment(Math.point(value.x, value.y), segment_epsilon,
 					Math.point(segment.x, segment.y), Math.point(segment.z, segment.w),
 					midpoint_alpha)
@@ -346,8 +346,8 @@ static func _area_category(pixel: Vector2i, size: Vector2i, snapshot) -> String:
 				Vector2(segment.x, segment.y) + edge * parameter))
 		elif operation_type != Gallery.BAKED_MAP:
 			nearest = minf(nearest, pattern_nearest_distance(operation, coordinate))
-	var epsilon: float = snapshot.brush_radius_px * 2.0 / float(maxi(
-			mini(snapshot.reference_size.x, snapshot.reference_size.y), 1))
+	var epsilon: float = snapshot.brush_radius_px \
+			* Periodicity.units_per_pixel(snapshot.reference_size)
 	if nearest < epsilon * 0.5:
 		return "singularity"
 	if nearest <= epsilon * snapshot.cutoff_gamma:

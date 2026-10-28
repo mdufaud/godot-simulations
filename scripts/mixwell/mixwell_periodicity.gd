@@ -18,6 +18,12 @@ static func canonical_period(reference_size: Vector2i) -> Vector2:
 	return Vector2(2.0 * float(width) / float(height), 2.0)
 
 
+## Canvas units per pixel: the canvas spans 2 units over its height, whatever
+## its orientation (the display and every operation share this scale).
+static func units_per_pixel(reference_size: Vector2i) -> float:
+	return 2.0 / float(maxi(reference_size.y, 1))
+
+
 static func quantize_period(period: Vector2) -> Vector2i:
 	if not is_finite(period.x) or not is_finite(period.y) \
 			or period.x <= 0.0 or period.y <= 0.0:

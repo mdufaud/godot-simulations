@@ -201,6 +201,16 @@ func _test_math_canvas_coordinate_mapping() -> void:
 	var segment: Vector4 = solver.get_segments()[0]
 	_check(segment.y < 0.0 and segment.w < 0.0,
 		"top-half canvas strokes map to shader top-half coordinates")
+	# The canvas spans 2 units over its height in either orientation: on a
+	# portrait canvas a 10 px stroke is 0.1 units, as the display draws it.
+	var portrait := Solver.new()
+	portrait.initialize(Vector2i(100, 200), Config.new(), Vector2i(100, 200))
+	var flick := Stroke.new()
+	flick.points_px = PackedVector2Array([Vector2(50.0, 100.0), Vector2(60.0, 100.0)])
+	portrait.set_strokes([flick])
+	var span: Vector4 = portrait.get_segments().back()
+	_check(is_equal_approx(span.z, 0.1) and is_equal_approx(portrait.get_segments()[0].x, 0.0),
+		"portrait strokes are normalised by the canvas height (%s)" % str(span))
 
 
 func _test_oracle_line_fixtures() -> void:

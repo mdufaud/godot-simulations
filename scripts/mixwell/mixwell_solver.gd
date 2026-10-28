@@ -325,8 +325,7 @@ func _stroke_segments(stroke) -> int:
 func _bake_stroke_range(stroke, first: int, last: int) -> void:
 	if not stroke is MixwellStroke or stroke.validate() != "":
 		return
-	var reference_min := float(maxi(mini(_reference_size.x, _reference_size.y), 1))
-	var epsilon: float = stroke.radius_px * 2.0 / reference_min
+	var epsilon: float = stroke.radius_px * Periodicity.units_per_pixel(_reference_size)
 	var segments: Array[Vector4] = stroke.to_segments()
 	var end := segments.size() if last < 0 else mini(last, segments.size())
 	for segment_index in range(first, end):
@@ -787,11 +786,10 @@ func _compute_gpu_oracle() -> Dictionary:
 	var aspect := float(_size.x) / float(maxi(_size.y, 1))
 	var coordinate := (Vector2(pixel) + jitter) / Vector2(_size) * 2.0 \
 			* Vector2(aspect, 1.0) - Vector2(aspect, 1.0)
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-			_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	var operation: Dictionary = _render_snapshot.operations[0]
 	var radius := _operation_radius(operation, _render_snapshot)
-	var epsilon := radius * 2.0 / reference_min
+	var epsilon := radius * unit
 	var expected := Diagnostics.oracle_expected(operation, coordinate, epsilon,
 			_render_snapshot.midpoint_alpha)
 	var values := readback_diagnostics()
@@ -1229,8 +1227,7 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 	if not _segment_buffer.is_valid() or _render_snapshot == null:
 		return 0
 	var values := PackedFloat32Array()
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-		_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	for operation in operations:
 		if values.size() / 8 >= DESKTOP_SEGMENT_LIMIT:
 			break
@@ -1238,7 +1235,7 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 			continue
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var radius := _operation_radius(operation, _render_snapshot)
-		var epsilon: float = radius * 2.0 / reference_min
+		var epsilon: float = radius * unit
 		values.append(segment.x)
 		values.append(segment.y)
 		values.append(segment.z)
@@ -1432,14 +1429,13 @@ func _upload_diagnostic_operations(operations: Array[Dictionary]) -> void:
 	if not _diagnostic_ops_buffer.is_valid() or _render_snapshot == null:
 		return
 	var values := PackedFloat32Array()
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-		_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	for operation in operations:
 		if values.size() / 16 >= DESKTOP_SEGMENT_LIMIT:
 			break
 		var operation_type := int(operation.get("type", Gallery.LINE))
 		var radius := _operation_radius(operation, _render_snapshot)
-		var epsilon: float = radius * 2.0 / reference_min
+		var epsilon: float = radius * unit
 		var origin: Vector2 = operation.get("origin", Vector2.ZERO)
 		var direction: Vector2 = operation.get("direction", Vector2.RIGHT)
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
@@ -1521,8 +1517,7 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 	var brush_radius_px: float = active_snapshot.brush_radius_px if radius_px <= 0.0 else radius_px
 	if active_snapshot.affine_mode >= 0 and not _is_user_segment(operation):
 		brush_radius_px = active_snapshot.affine_radius_px
-	var reference_min := mini(active_snapshot.reference_size.x, active_snapshot.reference_size.y)
-	var epsilon: float = brush_radius_px * 2.0 / float(maxi(reference_min, 1))
+	var epsilon: float = brush_radius_px * Periodicity.units_per_pixel(active_snapshot.reference_size)
 	pc.encode_float(16, epsilon)
 	pc.encode_float(20, active_snapshot.midpoint_alpha)
 	pc.encode_float(24, active_snapshot.cutoff_gamma)
@@ -1789,18 +1784,16 @@ func _normalized_segments() -> Array[Vector4]:
 		copy.append_array(_preset_segments)
 		return copy
 	var result: Array[Vector4] = []
-	var half := Vector2(_reference_size) * 0.5
-	var scale := 2.0 / float(maxi(mini(_reference_size.x, _reference_size.y), 1))
 	for segment in _segments_px:
-		result.append(Vector4(
-			(segment.x - half.x) * scale, (segment.y - half.y) * scale,
-			(segment.z - half.x) * scale, (segment.w - half.y) * scale))
+		result.append(_normalize_segment(segment))
 	return result
 
 
+## Canvas pixels to canvas units, as the display maps them: 2 units per height.
+## (Scaling by the smaller side put portrait strokes off their own pixels.)
 func _normalize_segment(segment: Vector4) -> Vector4:
 	var half := Vector2(_reference_size) * 0.5
-	var scale := 2.0 / float(maxi(mini(_reference_size.x, _reference_size.y), 1))
+	var scale := Periodicity.units_per_pixel(_reference_size)
 	return Vector4(
 		(segment.x - half.x) * scale, (segment.y - half.y) * scale,
 		(segment.z - half.x) * scale, (segment.w - half.y) * scale)
