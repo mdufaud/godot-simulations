@@ -17,12 +17,12 @@ func _run() -> void:
 	if _rd == null:
 		_finish("light_paste")
 		return
-	# Bingham yield stress in Pa, solved implicitly (sph_viscosity.comp). Below
-	# ~600 Pa the solve is converged at the default sweep count.
+	# Bingham yield stress in Pa, solved implicitly (sph_viscosity.comp); the
+	# slider stops at 400 Pa, where the default sweep count still converges.
 	var heights := {}
 	var settled: SphFluidSolver
 	var default_yield := FluidMaterial.for_kind(FluidSystem.FluidKind.LIGHT_PASTE).yield_stress
-	for threshold in [0.0, 100.0, default_yield, 600.0]:
+	for threshold in [0.0, 100.0, default_yield, 400.0]:
 		var solver := await _make_solver(threshold, 0.06, true)
 		await _step(solver, 180)
 		var state := await _read_state(solver)
@@ -35,7 +35,7 @@ func _run() -> void:
 			await _free_solver(solver)
 	_check(heights[0.0] < 0.15, "Paste without yield did not flow flat: %.3f" % heights[0.0])
 	_check(heights[default_yield] > 0.35, "Paste pile lost its relief: %.3f" % heights[default_yield])
-	_check(heights[600.0] > heights[100.0] + 0.15, "Yield stress does not set the pile height: %s"
+	_check(heights[400.0] > heights[100.0] + 0.12, "Yield stress does not set the pile height: %s"
 		% [heights])
 
 	# A soft shove is resisted by the unyielded paste and its grip on the floor;

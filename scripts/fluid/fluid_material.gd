@@ -12,8 +12,10 @@ var collision_damping := 0.15
 ## Honey-only stretch term, applied in the pressure pass (0 = no kernel work).
 var extension_strength := 0.0
 ## Bingham yield stress (Pa); 0 = flows freely. Solved implicitly with
-## Papanastasiou regularisation (shaders/sph/sph_viscosity.comp); the solve is
-## converged up to ~600 Pa at the default sweep count (SphFluidSolver.YIELD_SWEEPS).
+## Papanastasiou regularisation (shaders/sph/sph_viscosity.comp). At the default
+## SphFluidSolver.YIELD_SWEEPS a settled pile stands within 2% of the fully
+## converged height up to 300 Pa and 5% lower at 400 Pa (the slider's top);
+## stiffer yields need more sweeps.
 var yield_stress := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
