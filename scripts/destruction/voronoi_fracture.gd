@@ -8,8 +8,13 @@ extends RefCounted
 
 # A cell only ever borders its close seeds, so the bisectors against distant ones
 # are redundant. Clipping against all of them would make the hull O(N^3) per cell
-# and turn a 200-cell wall into a multi-second freeze.
+# and turn a 200-cell wall into a multi-second freeze. The nearest NEIGHBOURS
+# bisectors are clipped first; that is exact for most cells, and the security
+# radius test in fracture_box adds further ones only for the cells that need them
+# (a random 3D Voronoi cell averages ~15.5 faces, so a hard cap of 16 left the
+# rest too large, overlapping their neighbours and missing support contacts).
 const NEIGHBOURS := 16
+const SECURITY_CHUNK := 8
 const ON_PLANE_EPS := 1e-4
 
 
@@ -22,14 +27,32 @@ static func fracture_box(size: Vector3, seeds: PackedVector3Array) -> Array:
 	var cells := []
 	var box_planes := Geometry3D.build_box_planes(size * 0.5)
 	for i in seeds.size():
+		var order := _by_distance(seeds, i)
 		var planes := box_planes.duplicate()
 		var owners := PackedInt32Array()
-		for j in _nearest(seeds, i):
-			var n := (seeds[j] - seeds[i]).normalized()
-			var mid := (seeds[j] + seeds[i]) * 0.5
-			planes.append(Plane(n, n.dot(mid)))
-			owners.append(j)
-		var points := Geometry3D.compute_convex_mesh_points(planes)
+		var points := PackedVector3Array()
+		var used := 0
+		var batch := mini(NEIGHBOURS, order.size())
+		while true:
+			for q in range(used, used + batch):
+				var j := order[q]
+				var n := (seeds[j] - seeds[i]).normalized()
+				var mid := (seeds[j] + seeds[i]) * 0.5
+				planes.append(Plane(n, n.dot(mid)))
+				owners.append(j)
+			used += batch
+			points = Geometry3D.compute_convex_mesh_points(planes)
+			if used >= order.size() or points.size() < 4:
+				break
+			# Security radius: the cell lies within `reach` of its seed, and a seed
+			# farther than 2 * reach has its bisector beyond the cell, so no
+			# remaining seed (all at least that far) can cut it any more.
+			var reach_sq := 0.0
+			for p in points:
+				reach_sq = maxf(reach_sq, p.distance_squared_to(seeds[i]))
+			if seeds[i].distance_squared_to(seeds[order[used]]) > 4.0 * reach_sq:
+				break
+			batch = mini(SECURITY_CHUNK, order.size() - used)
 		if points.size() < 4:
 			continue
 		var center := Vector3.ZERO
@@ -60,15 +83,22 @@ static func fracture_box(size: Vector3, seeds: PackedVector3Array) -> Array:
 	return cells
 
 
-static func _nearest(seeds: PackedVector3Array, i: int) -> PackedInt32Array:
-	var order := []
+## Every other seed index, nearest first (ties by index). Sorted as Vector2 keys
+## with the native comparator: a Dictionary per pair and a GDScript lambda per
+## comparison made this the dominant cost of a rebuild (O(N^2 log N) lambda calls).
+static func _by_distance(seeds: PackedVector3Array, i: int) -> PackedInt32Array:
+	var keyed: Array[Vector2] = []
+	keyed.resize(seeds.size() - 1)
+	var k := 0
 	for j in seeds.size():
 		if j != i:
-			order.append({idx = j, d = seeds[i].distance_squared_to(seeds[j])})
-	order.sort_custom(func(a, b): return a.d < b.d)
+			keyed[k] = Vector2(seeds[i].distance_squared_to(seeds[j]), j)
+			k += 1
+	keyed.sort()
 	var out := PackedInt32Array()
-	for k in mini(NEIGHBOURS, order.size()):
-		out.append(order[k].idx)
+	out.resize(keyed.size())
+	for q in keyed.size():
+		out[q] = int(keyed[q].y)
 	return out
 
 

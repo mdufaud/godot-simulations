@@ -88,6 +88,11 @@ void fragment() {
 	for (int iteration = 0; iteration < 8; iteration++) {
 		displacement = surface_displacement(q, jacobian);
 		vec2 residual = q + displacement.xz - target;
+		// Converged (|r| < 2e-4, well under the 1e-3 acceptance below): most
+		// pixels get here in 2-3 of the 8 iterations, each 5 cascade lookups.
+		if (dot(residual, residual) < 4.0e-8) {
+			break;
+		}
 		float jacobian_determinant = determinant(jacobian);
 		float safe_determinant = (jacobian_determinant < 0.0 ? -1.0 : 1.0)
 			* max(abs(jacobian_determinant), 0.08);

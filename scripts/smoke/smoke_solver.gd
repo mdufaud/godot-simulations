@@ -363,8 +363,12 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 	var maccormack := _uniform_sets.has("maccormack")
 	_rd.capture_timestamp("smoke/start")
 	var cl := _rd.compute_list_begin()
-	for substep in substeps:
+	# The obstacle image depends only on the static occupancy and this call's
+	# obstacle list (same pc every substep), and no later stage writes it: one
+	# rasterisation serves every substep.
+	if substeps > 0:
 		_dispatch(cl, "obstacles", pc, groups)
+	for substep in substeps:
 		if maccormack:
 			_dispatch(cl, "advect", pc, face_groups, "advect_hat")
 			_dispatch(cl, "maccormack", pc, face_groups)

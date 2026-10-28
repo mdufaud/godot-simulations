@@ -280,6 +280,8 @@ static func auto_values(level: int) -> Dictionary:
 		5:
 			values = preset_values(Preset.PERFORMANCE)
 			values.render_scale = 0.65
+			# The whole-preset swap brings PERFORMANCE's atlas back in: drop it again.
+			values.erase("pool")
 	return values
 
 

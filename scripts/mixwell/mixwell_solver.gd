@@ -10,10 +10,10 @@ const Diagnostics := preload("res://scripts/mixwell/mixwell_diagnostics.gd")
 const SHADER_DIR := "res://shaders/mixwell/"
 const WG := 256
 const STAGES := ["init", "rd_line", "rd_segment", "affine", "shade", "diagnostics", "accumulate",
-	"diagnostics_reduce", "bake", "lookup", "replay"]
+	"diagnostics_reduce", "bake", "lookup", "replay", "rd_strokes"]
 const STAGE_INCLUDES := {
 	"rd_segment": ["segments"], "bake": ["segments", "baked"], "lookup": ["baked"],
-	"replay": ["segments"],
+	"replay": ["segments"], "rd_strokes": ["segments"],
 }
 const DESKTOP_SEGMENT_LIMIT := 256
 const MOBILE_SEGMENT_LIMIT := 128
@@ -30,6 +30,16 @@ const KEYFRAME_BUDGET_BYTES := 192 * 1024 * 1024
 const REPLAY_SEGMENT_LIMIT := 192
 ## Predicted bilinear error of the baked map above which a pixel is replayed.
 const REPLAY_ERROR_PX := 1.0
+## Strokes up to this many segments converge through the exact per-sample pass;
+## beyond it (and in the one-sample preview while drawing) the baked map serves.
+const EXACT_STROKE_LIMIT := 8192
+## Cells per axis of the stroke grid at most (cells grow past the mask reach).
+const STROKE_GRID_MAX_CELLS := 128
+## A period within this many pixels of a whole number tiles; others don't.
+const WHOLE_PIXEL_TOLERANCE := 1.0e-3
+## Tiled-against-direct difference (canvas units) the CPU periodic check
+## accepts without asking whether the map's own conditioning explains it.
+const TILING_TOLERANCE := 1.0e-5
 
 var config: MixwellConfig = MixwellConfig.new()
 var live_segment_limit := LIVE_SEGMENT_LIMIT
@@ -62,7 +72,6 @@ var _gpu_periodic_comparison := {}
 var _gpu_oracle_comparison := {}
 var _force_periodic_validation := false
 var _affine_mode := -1
-var _wall_calibration := 1.0
 var _last_sample_gpu_ms := 1.0
 var _timing_store := GpuTimingStore.new()
 var _metrics := {
@@ -112,6 +121,11 @@ var _keyframe_capacity := 2
 var _replay_sets := {}
 var _replay_list := RID()
 var _replay := {}
+## Converge user strokes through the exact pass (see EXACT_STROKE_LIMIT).
+var exact_strokes := true
+var _stroke_buffers := {}
+var _stroke_capacity := {}
+var _uploaded_stroke_snapshot = null
 
 
 func initialize(size: Vector2i, value: MixwellConfig = null,
@@ -168,6 +182,26 @@ func create_render_snapshot(size_override := Vector2i.ZERO,
 	result.pattern = pattern_descriptor
 	result.pattern_step = _pattern_step
 	result.operations = _physical_operations()
+	var user_segments := _user_segment_values()
+	var user_count := user_segments.size() / BAKED_SEGMENT_FLOATS
+	result.exact_strokes = exact_strokes and user_count > 0 and user_count <= EXACT_STROKE_LIMIT
+	if result.exact_strokes:
+		var passes: Array[Dictionary] = []
+		var holds_strokes := false
+		for operation in result.operations:
+			if int(operation.get("curve_group", -1)) == USER_CURVE_GROUP \
+					or int(operation.get("type", Gallery.LINE)) == Gallery.BAKED_MAP:
+				holds_strokes = true
+			else:
+				passes.append(operation)
+		if holds_strokes:
+			# The strokes were drawn last, so they reverse-drift first.
+			passes.push_front({"type": Gallery.USER_STROKES, "kind": "USER_STROKES",
+				"count": user_count, "segments": user_segments, "period": Vector2.ZERO,
+				"direction": Vector2.ZERO})
+		result.operations = passes
+		result.stroke_segments = user_segments
+		result.stroke_grid = _stroke_grid(user_segments, result)
 	result.baked_segments = _baked_segments
 	result.bake_generation = _bake_generation
 	result.bake_revision = _bake_revision
@@ -274,6 +308,78 @@ func set_strokes(strokes: Array, base_preset := Gallery.FREEHAND_LAB) -> void:
 	_refresh_periodicity()
 
 
+func set_exact_strokes(enabled: bool) -> void:
+	if enabled != exact_strokes:
+		exact_strokes = enabled
+		_snapshot_version += 1
+
+
+## Every user segment in drawing order -- baked strokes, then the live window --
+## as [start, end, epsilon, 0, 0, 0] in canvas units.
+func _user_segment_values() -> PackedFloat32Array:
+	var values := _baked_segments.duplicate()
+	var unit := Periodicity.units_per_pixel(_reference_size)
+	for operation in _pattern.operations:
+		if operation.curve_group == USER_CURVE_GROUP and operation.render_type == Gallery.SEGMENT:
+			var segment: Vector4 = operation.segment
+			values.append_array([segment.x, segment.y, segment.z, segment.w,
+				operation.radius_px * unit, 0.0, 0.0, 0.0])
+	return values
+
+
+## Uniform grid over the user segments for the exact pass. A cell is at least
+## the widest mask reach plus half the longest segment, so the 3x3 cells around
+## a point hold every segment that can move it; each segment is listed where
+## its midpoint falls, and where a slip image or periodic copy of the midpoint
+## falls within one cell of the canvas.
+func _stroke_grid(segments: PackedFloat32Array, snapshot) -> Dictionary:
+	var count := segments.size() / BAKED_SEGMENT_FLOATS
+	var half := Vector2(float(snapshot.size.x) / float(maxi(snapshot.size.y, 1)), 1.0)
+	var cell := 1.0e-3
+	for index in count:
+		var base := index * BAKED_SEGMENT_FLOATS
+		var length := Vector2(segments[base + 2] - segments[base],
+				segments[base + 3] - segments[base + 1]).length()
+		var epsilon: float = segments[base + 4]
+		cell = maxf(cell, maxf(epsilon * snapshot.cutoff_gamma, epsilon) + 0.5 * length)
+	cell *= 1.001
+	var span := 2.0 * half + Vector2(2.0 * cell, 2.0 * cell)
+	cell = maxf(cell, maxf(span.x, span.y) / float(STROKE_GRID_MAX_CELLS))
+	var origin := -half - Vector2(cell, cell)
+	var dims := Vector2i(ceili(span.x / cell), ceili(span.y / cell))
+	var buckets: Array[PackedInt32Array] = []
+	buckets.resize(dims.x * dims.y)
+	var copies: Array[Vector2i] = [Vector2i.ZERO]
+	if snapshot.active_boundary_mode != MixwellConfig.BoundaryMode.FULLSCREEN:
+		copies.append_array(Boundaries.EDGE_IMAGES + Boundaries.CORNER_IMAGES)
+	var period := 2.0 * half
+	for index in count:
+		var base := index * BAKED_SEGMENT_FLOATS
+		var midpoint := Vector2(segments[base] + segments[base + 2],
+				segments[base + 1] + segments[base + 3]) * 0.5
+		for copy in copies:
+			var position := midpoint
+			if copy != Vector2i.ZERO:
+				position = Boundaries.mirror_point(midpoint, copy, half) \
+						if snapshot.active_boundary_mode == MixwellConfig.BoundaryMode.SLIP_WALLS \
+						else midpoint + Vector2(copy) * period
+			var cell_index := Vector2i(floori((position.x - origin.x) / cell),
+					floori((position.y - origin.y) / cell))
+			if cell_index.x < 0 or cell_index.y < 0 or cell_index.x >= dims.x \
+					or cell_index.y >= dims.y:
+				continue
+			var flat := cell_index.y * dims.x + cell_index.x
+			if buckets[flat].is_empty() or buckets[flat][-1] != index:
+				buckets[flat].append(index)
+	var starts := PackedInt32Array()
+	var items := PackedInt32Array()
+	for bucket in buckets:
+		starts.append(items.size())
+		items.append_array(bucket)
+	starts.append(items.size())
+	return {"origin": origin, "cell": cell, "dims": dims, "starts": starts, "items": items}
+
+
 func get_baked_segment_count() -> int:
 	return _baked_segments.size() / BAKED_SEGMENT_FLOATS
 
@@ -325,8 +431,7 @@ func _stroke_segments(stroke) -> int:
 func _bake_stroke_range(stroke, first: int, last: int) -> void:
 	if not stroke is MixwellStroke or stroke.validate() != "":
 		return
-	var reference_min := float(maxi(mini(_reference_size.x, _reference_size.y), 1))
-	var epsilon: float = stroke.radius_px * 2.0 / reference_min
+	var epsilon: float = stroke.radius_px * Periodicity.units_per_pixel(_reference_size)
 	var segments: Array[Vector4] = stroke.to_segments()
 	var end := segments.size() if last < 0 else mini(last, segments.size())
 	for segment_index in range(first, end):
@@ -465,10 +570,6 @@ func get_gpu_oracle_comparison() -> Dictionary:
 	return result
 
 
-func get_wall_calibration() -> float:
-	return _wall_calibration
-
-
 func get_drift_compensation() -> int:
 	return config.drift_compensation
 
@@ -497,6 +598,30 @@ func get_segment_count() -> int:
 
 func get_preset_segment_count() -> int:
 	return _preset_segments.size()
+
+
+## User stroke segments the render still holds: baked into the map plus live.
+func get_user_segment_count() -> int:
+	return get_baked_segment_count() + _segments_px.size()
+
+
+## Passes of the selected construction itself, without user strokes or the map
+## that bakes them.
+func get_preset_pass_count() -> int:
+	var count := 0
+	for operation in _pattern.operations:
+		if operation.curve_group != USER_CURVE_GROUP and operation.render_type != Gallery.BAKED_MAP:
+			count += 1
+	return count
+
+
+## Baked maps in the render (at most one: every baked stroke shares it).
+func get_baked_map_count() -> int:
+	var count := 0
+	for operation in _pattern.operations:
+		if operation.render_type == Gallery.BAKED_MAP:
+			count += 1
+	return count
 
 
 func get_operation_count() -> int:
@@ -639,7 +764,9 @@ func render_sample(index: int, snapshot = null) -> void:
 	# Always bracketed, bake included: the per-frame sample budget needs the cost.
 	_rd.capture_timestamp("mixwell/start")
 	_sync_bake_render(active_snapshot)
-	_replay = _choose_replay(active_snapshot, _upload_segment_buffer(operations))
+	_upload_strokes(active_snapshot)
+	var used_segments := _upload_segment_buffer(operations)
+	_replay = {} if active_snapshot.exact_strokes else _choose_replay(active_snapshot, used_segments)
 	if active_snapshot.diagnostics_enabled:
 		_upload_diagnostic_operations(operations)
 	if not _replay.is_empty():
@@ -668,6 +795,8 @@ func render_sample(index: int, snapshot = null) -> void:
 				else ("rd_line" if int(operation.type) != Gallery.SEGMENT else "rd_segment")
 		if int(operation.type) == Gallery.BAKED_MAP:
 			stage = "lookup"
+		elif int(operation.type) == Gallery.USER_STROKES:
+			stage = "rd_strokes"
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var radius: float = _operation_radius(operation, active_snapshot)
 		var current_domain: Vector2i = period_pass["current"]
@@ -681,19 +810,16 @@ func render_sample(index: int, snapshot = null) -> void:
 			operation_pc.encode_float(88, float(_replay.get("count", 0)))
 			operation_pc.encode_float(92, float(_replay.get("base", 0)))
 		if stage == "rd_segment":
-			var dispatch_count := operation_count
-			# Only gallery curves carrying a periodic head shrink to it; stroke
-			# groups have no periodic_segment_count and must dispatch full size,
-			# else their field silently vanishes in optimized mode.
-			var periodic_count := maxi(int(operation.get("periodic_segment_count", 0)), 0)
-			if optimized and operation.get("curve_group", -1) >= 0 and periodic_count > 0:
-				dispatch_count = mini(dispatch_count, periodic_count)
-			if dispatch_count <= 0:
-				operation_index += operation_count
-				segment_buffer_offset += operation_count
-				continue
-			operation_pc.encode_float(88, float(dispatch_count))
+			operation_pc.encode_float(88, float(operation_count))
 			operation_pc.encode_float(92, float(segment_buffer_offset))
+		elif stage == "rd_strokes":
+			var grid: Dictionary = active_snapshot.stroke_grid
+			operation_pc.encode_float(32, grid.origin.x)
+			operation_pc.encode_float(36, grid.origin.y)
+			operation_pc.encode_float(40, grid.cell)
+			operation_pc.encode_float(48, float(grid.dims.x))
+			operation_pc.encode_float(52, float(grid.dims.y))
+			operation_pc.encode_float(88, float(operation.count))
 		var operation_groups := ceili(float(current_domain.x * current_domain.y) / WG)
 		_dispatch(cl, stage, operation_pc, operation_groups)
 		if stage == "lookup" and int(_replay.get("count", 0)) > 0:
@@ -798,11 +924,10 @@ func _compute_gpu_oracle() -> Dictionary:
 	var aspect := float(_size.x) / float(maxi(_size.y, 1))
 	var coordinate := (Vector2(pixel) + jitter) / Vector2(_size) * 2.0 \
 			* Vector2(aspect, 1.0) - Vector2(aspect, 1.0)
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-			_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	var operation: Dictionary = _render_snapshot.operations[0]
 	var radius := _operation_radius(operation, _render_snapshot)
-	var epsilon := radius * 2.0 / reference_min
+	var epsilon := radius * unit
 	var expected := Diagnostics.oracle_expected(operation, coordinate, epsilon,
 			_render_snapshot.midpoint_alpha)
 	var values := readback_diagnostics()
@@ -926,10 +1051,19 @@ func update_metrics(force := false) -> void:
 		return
 	var result := Diagnostics.analyse_reduced_metrics(reduced_values, _diagnostic_group_count,
 		DIAGNOSTIC_REDUCTION_STRIDE, _size, snapshot, sample_index)
-	var diagnostic_values := _readback_rgba16f(_textures.diagnostic)
-	var zone_values := _rd.texture_get_data(_textures.diagnostic_zone, 0)
-	result.merge(Diagnostics.analyse_zone_metrics(diagnostic_values, zone_values, _size))
+	# The per-zone p99/mean keys need the whole frame read back and a per-pixel
+	# GDScript pass (~1M iterations at 720p, blocking the render thread), and
+	# nothing reads them live: the panel shows only the GPU-reduced keys above.
+	# Run that pass once the accumulation reaches its target (or when forced) and
+	# carry the last zone values in between.
+	if force or get_sample_count() >= config.target_spp:
+		var diagnostic_values := _readback_rgba16f(_textures.diagnostic)
+		var zone_values := _rd.texture_get_data(_textures.diagnostic_zone, 0)
+		result.merge(Diagnostics.analyse_zone_metrics(diagnostic_values, zone_values, _size))
 	_metrics_mutex.lock()
+	for key in _metrics:
+		if not result.has(key):
+			result[key] = _metrics[key]
 	_metrics = result
 	_metrics_mutex.unlock()
 
@@ -993,6 +1127,10 @@ func init_render(snapshot = null) -> void:
 	_diagnostic_reduction_buffer = _rd.storage_buffer_create(
 			DIAGNOSTIC_REDUCTION_STRIDE * _diagnostic_group_count * 4)
 	_replay_list = _rd.storage_buffer_create((_size.x * _size.y + 1) * 4)
+	for key in ["segments", "starts", "items"]:
+		_stroke_capacity[key] = 256
+		_stroke_buffers[key] = _rd.storage_buffer_create(256 * 4)
+	_uploaded_stroke_snapshot = null
 	for stage in STAGES:
 		var sets: Array[RID] = []
 		for parity in 2:
@@ -1069,6 +1207,12 @@ func free_render() -> void:
 		_rd.free_rid(_diagnostic_reduction_buffer)
 	if _replay_list.is_valid():
 		_rd.free_rid(_replay_list)
+	for key in _stroke_buffers:
+		if _stroke_buffers[key].is_valid():
+			_rd.free_rid(_stroke_buffers[key])
+	_stroke_buffers.clear()
+	_stroke_capacity.clear()
+	_uploaded_stroke_snapshot = null
 	for stage in _pipelines:
 		if _pipelines[stage].is_valid():
 			_rd.free_rid(_pipelines[stage])
@@ -1152,6 +1296,13 @@ func _create_uniform_set(shader: RID, parity: int, stage := "", keyframe := RID(
 		segment_uniform.binding = 8
 		segment_uniform.add_id(_segment_buffer)
 		uniforms.append(segment_uniform)
+	if stage == "rd_strokes":
+		for entry in [[8, "segments"], [12, "starts"], [13, "items"]]:
+			var buffer_uniform := RDUniform.new()
+			buffer_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+			buffer_uniform.binding = entry[0]
+			buffer_uniform.add_id(_stroke_buffers[entry[1]])
+			uniforms.append(buffer_uniform)
 	if stage == "lookup" or stage == "replay":
 		var list_uniform := RDUniform.new()
 		list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1231,8 +1382,7 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 	if not _segment_buffer.is_valid() or _render_snapshot == null:
 		return 0
 	var values := PackedFloat32Array()
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-		_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	for operation in operations:
 		if values.size() / 8 >= DESKTOP_SEGMENT_LIMIT:
 			break
@@ -1240,7 +1390,7 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 			continue
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var radius := _operation_radius(operation, _render_snapshot)
-		var epsilon: float = radius * 2.0 / reference_min
+		var epsilon: float = radius * unit
 		values.append(segment.x)
 		values.append(segment.y)
 		values.append(segment.z)
@@ -1253,6 +1403,42 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 		var bytes := values.to_byte_array()
 		_rd.buffer_update(_segment_buffer, 0, bytes.size(), bytes)
 	return values.size() / 8
+
+
+## Puts the snapshot's strokes and grid on the GPU, growing the buffers (and
+## rebuilding the pass's uniform sets) when they no longer fit.
+func _upload_strokes(snapshot) -> void:
+	if snapshot == _uploaded_stroke_snapshot or not snapshot.exact_strokes:
+		return
+	_uploaded_stroke_snapshot = snapshot
+	var grid: Dictionary = snapshot.stroke_grid
+	var data := {
+		"segments": snapshot.stroke_segments.to_byte_array(),
+		"starts": PackedInt32Array(grid.starts).to_byte_array(),
+		"items": PackedInt32Array(grid.items).to_byte_array(),
+	}
+	var grow := false
+	for key in data:
+		grow = grow or data[key].size() > _stroke_capacity[key]
+	if grow:
+		# The sets reference the buffers: free them first, then regrow.
+		for uniform_set in _uniform_sets.rd_strokes:
+			if _rd.uniform_set_is_valid(uniform_set):
+				_rd.free_rid(uniform_set)
+		for key in data:
+			var capacity: int = _stroke_capacity[key]
+			while capacity < data[key].size():
+				capacity *= 2
+			if capacity != _stroke_capacity[key]:
+				_rd.free_rid(_stroke_buffers[key])
+				_stroke_buffers[key] = _rd.storage_buffer_create(capacity)
+				_stroke_capacity[key] = capacity
+		_uniform_sets.rd_strokes = [_create_uniform_set(_shaders.rd_strokes, 0, "rd_strokes"),
+			_create_uniform_set(_shaders.rd_strokes, 1, "rd_strokes")]
+	for key in data:
+		var bytes: PackedByteArray = data[key]
+		if not bytes.is_empty():
+			_rd.buffer_update(_stroke_buffers[key], 0, bytes.size(), bytes)
 
 
 ## Oldest base the replay budget reaches (identity or a keyframe); its segments
@@ -1434,18 +1620,20 @@ func _upload_diagnostic_operations(operations: Array[Dictionary]) -> void:
 	if not _diagnostic_ops_buffer.is_valid() or _render_snapshot == null:
 		return
 	var values := PackedFloat32Array()
-	var reference_min := float(maxi(mini(_render_snapshot.reference_size.x,
-		_render_snapshot.reference_size.y), 1))
+	var unit := Periodicity.units_per_pixel(_render_snapshot.reference_size)
 	for operation in operations:
 		if values.size() / 16 >= DESKTOP_SEGMENT_LIMIT:
 			break
 		var operation_type := int(operation.get("type", Gallery.LINE))
 		var radius := _operation_radius(operation, _render_snapshot)
-		var epsilon: float = radius * 2.0 / reference_min
+		var epsilon: float = radius * unit
 		var origin: Vector2 = operation.get("origin", Vector2.ZERO)
 		var direction: Vector2 = operation.get("direction", Vector2.RIGHT)
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var extent: Vector2 = operation.get("extent", Vector2.ZERO)
+		if operation_type == Gallery.TRI_WAVE:
+			extent = Vector2(float(operation.get("wavelength", 0.0)),
+					float(operation.get("amplitude", 0.0)))
 		var period: Vector2 = operation.get("period", Vector2.ZERO)
 		values.append(float(operation_type))
 		values.append(epsilon)
@@ -1518,10 +1706,9 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 	pc.encode_s32(8, index)
 	pc.encode_s32(12, active_snapshot.source_mode)
 	var brush_radius_px: float = active_snapshot.brush_radius_px if radius_px <= 0.0 else radius_px
-	if active_snapshot.affine_mode >= 0:
+	if active_snapshot.affine_mode >= 0 and not _is_user_segment(operation):
 		brush_radius_px = active_snapshot.affine_radius_px
-	var reference_min := mini(active_snapshot.reference_size.x, active_snapshot.reference_size.y)
-	var epsilon: float = brush_radius_px * 2.0 / float(maxi(reference_min, 1))
+	var epsilon: float = brush_radius_px * Periodicity.units_per_pixel(active_snapshot.reference_size)
 	pc.encode_float(16, epsilon)
 	pc.encode_float(20, active_snapshot.midpoint_alpha)
 	pc.encode_float(24, active_snapshot.cutoff_gamma)
@@ -1541,6 +1728,9 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 		pc.encode_float(60, segment.w)
 	else:
 		var extent: Vector2 = operation.get("extent", Vector2.ZERO)
+		if operation_type == Gallery.TRI_WAVE:
+			extent = Vector2(float(operation.get("wavelength", 0.0)),
+					float(operation.get("amplitude", 0.0)))
 		pc.encode_float(48, float(operation.get("phase", 0.0)))
 		pc.encode_float(52, epsilon)
 		pc.encode_float(56, extent.x)
@@ -1555,7 +1745,8 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 	pc.encode_float(76, 1.0 if optimized else 0.0)
 	pc.encode_float(80, float(operation.get("type", Gallery.LINE)))
 	pc.encode_float(84, float(operation.get("pitch", 0.0)))
-	pc.encode_float(88, float(operation.get("count", 1)))
+	pc.encode_float(88, (1.0 if operation.get("broken", false) else 0.0) \
+			if operation_type == Gallery.TRI_WAVE else float(operation.get("count", 1)))
 	pc.encode_float(92, float(operation.get("noise", 0.0)))
 	pc.encode_s32(96, current_domain.x)
 	pc.encode_s32(100, current_domain.y)
@@ -1576,13 +1767,21 @@ func _active_pattern_count() -> int:
 	return _pattern.operation_count() if _pattern_step < 0 else _pattern_step
 
 
+## The affine radius sizes the affine brush only. A user stroke (SEGMENT) keeps its
+## own brush radius: it is baked with that radius, so overriding it while live made
+## a stroke jump in width the moment it was baked.
 func _operation_radius(operation: Dictionary,
 		snapshot = null) -> float:
 	var active_snapshot = snapshot if snapshot != null else _render_snapshot
-	if active_snapshot != null and active_snapshot.affine_mode >= 0:
+	if active_snapshot != null and active_snapshot.affine_mode >= 0 \
+			and not _is_user_segment(operation):
 		return active_snapshot.affine_radius_px
 	var value := float(operation.get("radius_px", -1.0))
 	return config.brush_radius_px if value <= 0.0 else value
+
+
+static func _is_user_segment(operation: Dictionary) -> bool:
+	return int(operation.get("type", Gallery.LINE)) == Gallery.SEGMENT
 
 
 func get_periodic_domain_size() -> Vector2i:
@@ -1591,41 +1790,32 @@ func get_periodic_domain_size() -> Vector2i:
 	return _plan_domain(plan, _size)
 
 
+## Periodic passes run on a domain one period wide and are tiled with
+## pixel % domain, which is exact only when the period is a whole number of
+## pixels. Each pass's domain is the least common multiple of every period so
+## far (its input is the previous pass, tiled); a pass whose period falls
+## between pixels gets the full size and is evaluated directly, never seamed.
 func _periodic_operation_plan(operations: Array[Dictionary], optimized: bool,
 		render_size := Vector2i.ZERO) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var target_size := _size if render_size == Vector2i.ZERO else render_size
 	var previous := target_size
-	var previous_period_fixed := Vector2i.ZERO
-	var full_period_fixed := Periodicity.quantize_period(
-			Periodicity.canonical_period(_reference_size))
 	for operation in operations:
-		var operation_domain := _operation_period_pixels(operation, target_size) if optimized else target_size
-		var operation_period_fixed := full_period_fixed
-		var composite_period_fixed := full_period_fixed
-		if optimized:
-			operation_period_fixed = _operation_period_fixed(operation, target_size)
-			if operation_period_fixed == Vector2i.ZERO:
-				composite_period_fixed = full_period_fixed
-			else:
-				composite_period_fixed = Periodicity.composite_period_components_fixed([
-						previous_period_fixed, operation_period_fixed])
-				operation_domain = _domain_from_period_fixed(operation_period_fixed, target_size)
+		var operation_domain := _operation_period_pixels(operation, target_size) if optimized \
+				else target_size
 		var first := result.is_empty()
-		var current := operation_domain
-		if optimized:
-			current = _domain_from_period_fixed(composite_period_fixed, target_size)
-		if not optimized:
-			current = target_size
+		var current := operation_domain if first else _pixel_lcm(previous, operation_domain,
+				target_size)
 		result.append({
 			"current": current,
 			"previous": current if first else previous,
 			"operation_period": operation_domain,
-			"operation_period_fixed": operation_period_fixed,
-			"composite_period_fixed": composite_period_fixed,
+			"operation_period_fixed": Periodicity.quantize_period_components(
+					_coordinate_period(operation_domain, _reference_size, target_size)),
+			"composite_period_fixed": Periodicity.quantize_period_components(
+					_coordinate_period(current, _reference_size, target_size)),
 		})
 		previous = current
-		previous_period_fixed = composite_period_fixed
 	return result
 
 
@@ -1641,6 +1831,10 @@ func _plan_movement_dispatch_pixels(plan: Array[Dictionary], render_size: Vector
 	return pixels
 
 
+## An operation's period in pixels at this render size, per axis: 1 where its
+## field is constant along the axis, the period where that is a whole number
+## of pixels (within WHOLE_PIXEL_TOLERANCE), and the full size where it is not
+## periodic or its period falls between pixels.
 func _operation_period_pixels(operation: Dictionary, render_size := Vector2i.ZERO) -> Vector2i:
 	var target_size := _size if render_size == Vector2i.ZERO else render_size
 	var explicit: Vector2i = operation.get("period_pixels", Vector2i.ZERO)
@@ -1651,32 +1845,13 @@ func _operation_period_pixels(operation: Dictionary, render_size := Vector2i.ZER
 		return target_size
 	var canonical := Periodicity.canonical_period(_reference_size)
 	var result := Vector2i.ONE
-	if period.x > 0.0:
-		result.x = clampi(ceili(period.x / canonical.x * float(target_size.x)), 1, target_size.x)
-	if period.y > 0.0:
-		result.y = clampi(ceili(period.y / canonical.y * float(target_size.y)), 1, target_size.y)
-	return result
-
-
-func _operation_period_fixed(operation: Dictionary, render_size := Vector2i.ZERO) -> Vector2i:
-	var explicit: Vector2i = operation.get("period_pixels", Vector2i.ZERO)
-	if explicit.x > 0 and explicit.y > 0:
-		return Periodicity.quantize_period_components(_coordinate_period(explicit,
-				_reference_size, render_size))
-	return Periodicity.quantize_period_components(operation.get("period", Vector2.ZERO))
-
-
-func _domain_from_period_fixed(period_fixed: Vector2i, render_size: Vector2i) -> Vector2i:
-	if period_fixed == Vector2i.ZERO:
-		return Vector2i.ONE
-	var canonical := Periodicity.canonical_period(_reference_size)
-	var result := Vector2i.ONE
-	if period_fixed.x > 0:
-		result.x = clampi(ceili(float(period_fixed.x) / float(Periodicity.FIXED_SCALE)
-				/ canonical.x * float(render_size.x)), 1, render_size.x)
-	if period_fixed.y > 0:
-		result.y = clampi(ceili(float(period_fixed.y) / float(Periodicity.FIXED_SCALE)
-				/ canonical.y * float(render_size.y)), 1, render_size.y)
+	for axis in 2:
+		if period[axis] <= 0.0:
+			continue
+		var pixels: float = period[axis] / canonical[axis] * float(target_size[axis])
+		var whole := roundi(pixels)
+		result[axis] = whole if whole >= 1 and whole < target_size[axis] \
+				and absf(pixels - float(whole)) <= WHOLE_PIXEL_TOLERANCE else target_size[axis]
 	return result
 
 
@@ -1720,40 +1895,49 @@ func _lcm(a: int, b: int) -> int:
 
 
 func _refresh_periodicity() -> void:
-	_refresh_wall_calibration()
 	_period_fixed = Periodicity.quantize_period(_periodic_coordinate_period(get_periodic_domain_size()))
 	if config.boundary_mode != MixwellConfig.BoundaryMode.PERIODIC:
 		_comparison_mutex.lock()
 		_periodic_comparison = {"passes": true, "active": false, "samples": 0}
 		_comparison_mutex.unlock()
 		return
-	var period := get_period()
-	var canonical := Periodicity.canonical_period(_reference_size)
+	# The tiled passes, emulated on the CPU pixel by pixel, against the same
+	# passes evaluated directly, on a 4x4 grid of the render.
+	var period := Periodicity.canonical_period(_reference_size)
 	var periodic_values := PackedFloat32Array()
 	var fullscreen_values := PackedFloat32Array()
 	var periodic_colours := PackedFloat32Array()
 	var fullscreen_colours := PackedFloat32Array()
 	var operations := _physical_operations()
+	var plan := _periodic_operation_plan(operations, true, _size)
+	var jitter := Periodicity.r2_sample(0)
+	var conditioned := 0
 	for y in 4:
 		for x in 4:
-			var uv := Vector2((float(x) + 0.5) / 4.0, (float(y) + 0.5) / 4.0)
-			var point := Vector2(
-				(uv.x * 2.0 - 1.0) * canonical.x * 0.5,
-				(uv.y * 2.0 - 1.0) * canonical.y * 0.5)
+			var pixel := Vector2i((2 * x + 1) * _size.x / 8, (2 * y + 1) * _size.y / 8)
+			var point := Diagnostics.display_coordinate(pixel, _size, jitter)
 			var fullscreen := Diagnostics.cpu_advect(point, operations, false, period,
 					config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
 					config.affine_strength, config.cutoff_gamma, config.drift_compensation,
 					config.midpoint_alpha)
-			var periodic := Diagnostics.cpu_advect(point, operations, true, period,
-					config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
-					config.affine_strength, config.cutoff_gamma, config.drift_compensation,
-					config.midpoint_alpha)
+			var periodic := fullscreen if _affine_mode >= 0 else Diagnostics.cpu_tiled_advect(
+					pixel, plan, operations, _size, jitter, config.brush_radius_px, _reference_size,
+					config.cutoff_gamma, config.drift_compensation, config.midpoint_alpha)
+			# On a crease the map amplifies 32-bit rounding: a difference the
+			# direct map shows itself under a 1e-6 nudge is not a tiling seam.
+			var difference := Periodicity.shortest_delta(periodic, fullscreen, period).length()
+			if difference > TILING_TOLERANCE and difference <= TILING_TOLERANCE \
+					+ 2.0 * _cpu_sensitivity(point, fullscreen, operations, period):
+				periodic = fullscreen
+				conditioned += 1
 			var fullscreen_wrapped := Periodicity.wrap_coordinate(fullscreen, period)
+			var periodic_wrapped := Periodicity.wrap_coordinate(periodic, period)
 			fullscreen_values.append(fullscreen_wrapped.x)
 			fullscreen_values.append(fullscreen_wrapped.y)
-			periodic_values.append(periodic.x)
-			periodic_values.append(periodic.y)
-			var periodic_colour := Diagnostics.cpu_pigment(periodic, _source_mode, _reference_size)
+			periodic_values.append(periodic_wrapped.x)
+			periodic_values.append(periodic_wrapped.y)
+			var periodic_colour := Diagnostics.cpu_pigment(periodic_wrapped, _source_mode,
+					_reference_size)
 			var fullscreen_colour := Diagnostics.cpu_pigment(fullscreen_wrapped, _source_mode,
 					_reference_size)
 			for component in 3:
@@ -1762,6 +1946,7 @@ func _refresh_periodicity() -> void:
 	var comparison := Periodicity.compare_paths(periodic_values, fullscreen_values, period,
 			periodic_colours, fullscreen_colours)
 	comparison["active"] = comparison.get("passes", false)
+	comparison["conditioned"] = conditioned
 	comparison["domain_pixels"] = get_periodic_domain_size()
 	var dispatch_stats := get_periodic_dispatch_stats()
 	comparison.merge(dispatch_stats)
@@ -1770,28 +1955,38 @@ func _refresh_periodicity() -> void:
 	_comparison_mutex.unlock()
 
 
+## How far the direct CPU map moves when its input moves by 1e-6 (about the
+## 32-bit rounding of a coordinate), in canvas units.
+func _cpu_sensitivity(point: Vector2, mapped: Vector2, operations: Array[Dictionary],
+		period: Vector2) -> float:
+	var result := 0.0
+	for nudge in [Vector2(1.0e-6, 0.0), Vector2(-1.0e-6, 0.0), Vector2(0.0, 1.0e-6),
+			Vector2(0.0, -1.0e-6)]:
+		var moved: Vector2 = Diagnostics.cpu_advect(point + nudge, operations, false, period,
+				config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
+				config.affine_strength, config.cutoff_gamma, config.drift_compensation,
+				config.midpoint_alpha) - nudge
+		result = maxf(result, Periodicity.shortest_delta(moved, mapped, period).length())
+	return result
+
+
 func _normalized_segments() -> Array[Vector4]:
 	if not _preset_segments.is_empty():
 		var copy: Array[Vector4] = []
 		copy.append_array(_preset_segments)
 		return copy
 	var result: Array[Vector4] = []
-	var half := Vector2(_reference_size) * 0.5
-	var scale := 2.0 / float(maxi(mini(_reference_size.x, _reference_size.y), 1))
 	for segment in _segments_px:
-		result.append(Vector4(
-			(segment.x - half.x) * scale, (segment.y - half.y) * scale,
-			(segment.z - half.x) * scale, (segment.w - half.y) * scale))
+		result.append(_normalize_segment(segment))
 	return result
 
 
+## Canvas pixels to canvas units, as the display maps them: 2 units per height.
+## (Scaling by the smaller side put portrait strokes off their own pixels.)
 func _normalize_segment(segment: Vector4) -> Vector4:
 	var half := Vector2(_reference_size) * 0.5
-	var scale := 2.0 / float(maxi(mini(_reference_size.x, _reference_size.y), 1))
+	var scale := Periodicity.units_per_pixel(_reference_size)
 	return Vector4(
 		(segment.x - half.x) * scale, (segment.y - half.y) * scale,
 		(segment.z - half.x) * scale, (segment.w - half.y) * scale)
 
-
-func _refresh_wall_calibration() -> void:
-	_wall_calibration = 1.0

@@ -49,6 +49,9 @@ var flamethrower_firing := false
 var _frame_ms := 0.0
 var _gpu_samples := PackedFloat32Array()
 var _grid_config: CellPropagationConfig
+## Burning wood cell -> the WildfireSystem fire drawn on it, so the fire can be put
+## out when the cell's fuel is spent.
+var _fire_by_cell := {}
 
 
 func _ready() -> void:
@@ -104,11 +107,16 @@ func _on_cell_ignited(cell: Vector2i) -> void:
 	var pos := grid.cell_center(cell)
 	scenery.place_soot(pos)
 	scenery.ignite_pile_near(pos)
-	system.add_fire(pos + Vector3(0, 0.15, 0), PRESET_BONFIRE, false)
+	_fire_by_cell[cell] = system.add_fire(pos + Vector3(0, 0.15, 0), PRESET_BONFIRE)
 
 
 func _on_cell_burned_out(cell: Vector2i) -> void:
 	scenery.place_soot(grid.cell_center(cell))
+	# The cell's fuel is spent: let its bonfire die down and be removed once cold,
+	# instead of burning at full strength until Reset.
+	if _fire_by_cell.has(cell):
+		system.set_target(_fire_by_cell[cell], 0.0)
+		_fire_by_cell.erase(cell)
 
 
 ## The campfire and the torch poles burn from the start; reset re-lights them.
@@ -234,6 +242,7 @@ func reset_simulation() -> void:
 	grid.cell_ignited.disconnect(_on_cell_ignited)
 	grid.cell_burned_out.disconnect(_on_cell_burned_out)
 	system.clear_all()
+	_fire_by_cell.clear()
 	scenery.clear_soot()
 	scenery.extinguish_piles()
 	_reset_grid()

@@ -149,6 +149,11 @@ func set_mode(m: int) -> void:
 
 
 func set_particle_count(n: int) -> void:
+	# Every rebuild (material switch, Reset) calls this; the instance buffer only
+	# holds identity transforms, so refilling it at the same count bought nothing
+	# but a multi-megabyte copy at the top tiers.
+	if n == particle_count:
+		return
 	particle_count = n
 	_fill_mm(mm)
 

@@ -34,6 +34,11 @@ var bake_generation := 0
 var bake_revision := 0
 var bake_starts := PackedInt32Array()
 var bake_rewinds: Array[Vector2i] = []
+## Strokes evaluated exactly (one USER_STROKES pass over stroke_segments, found
+## through stroke_grid) rather than through the baked map.
+var exact_strokes := false
+var stroke_segments := PackedFloat32Array()
+var stroke_grid := {}
 
 
 func boundary_copy(next_boundary: int, optimized: bool):
@@ -71,4 +76,7 @@ func boundary_copy(next_boundary: int, optimized: bool):
 	result.bake_revision = bake_revision
 	result.bake_starts = bake_starts
 	result.bake_rewinds = bake_rewinds.duplicate()
+	result.exact_strokes = exact_strokes
+	result.stroke_segments = stroke_segments
+	result.stroke_grid = stroke_grid
 	return result

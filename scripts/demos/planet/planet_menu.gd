@@ -12,7 +12,7 @@ var atmosphere: PlanetAtmosphere
 var fluid: PlanetFluid
 var orbit_cam: OrbitCamera
 var atmosphere_quad: MeshInstance3D
-## The controller. Must answer: apply_preset(int), queue_regen(), start_generation(),
+## The controller. Must answer: apply_preset(int), queue_regen(), queue_bake(), start_generation(),
 ## set_render_scale(float), set_fluid_enabled(bool), rebuild_fluid(), aim_point(),
 ## carry sun_yaw / sun_auto_rotate, and expose the SimQualityState named quality.
 var host: Node
@@ -238,12 +238,12 @@ func build(menu: SimMenu, presets: Array) -> void:
 	menu.add_slider("Falloff", 0.5, 12.0, atmosphere.density_falloff, func(v: float) -> void:
 		atmosphere.density_falloff = v
 		atmosphere.refresh()
-		RenderingServer.call_on_render_thread(atmosphere.bake_render)
+		host.queue_bake()
 	, true, 0.01)
 	menu.add_slider("Thickness", 0.05, 1.0, atmosphere.shell_fraction, func(v: float) -> void:
 		atmosphere.shell_fraction = v
 		atmosphere.refresh()
-		RenderingServer.call_on_render_thread(atmosphere.bake_render)
+		host.queue_bake()
 	, true, 0.001)
 	_sliders["red_nm"] = menu.add_slider("Red nm", 500.0, 780.0, atmosphere.wavelengths_nm.x, func(v: float) -> void:
 		if _updating:

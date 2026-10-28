@@ -283,9 +283,18 @@ func spawn_debris_random() -> void:
 
 
 func scatter_props(fraction := 0.6) -> void:
-	var count := int(_bodies.size() * fraction)
+	var target := int(_bodies.size() * fraction)
 	var c := field.centerline_at(0.0) if field != null else Vector3.ZERO
-	for i in count:
+	var placed := 0
+	for i in _bodies.size():
+		if placed >= target:
+			break
+		# Leave airborne debris flying: _find_idle fills the low slots first, so
+		# the old index walk teleported most of the debris in the vortex to the
+		# ground at rest.
+		if _active_flags[i]:
+			continue
+		placed += 1
 		var ang := _rng.randf_range(0.0, TAU)
 		var r := _rng.randf_range(30.0, 250.0)
 		var pos := c + Vector3(cos(ang) * r, _sizes[i] * 0.6 + 0.2, sin(ang) * r)
@@ -360,10 +369,11 @@ func _physics_process(delta: float) -> void:
 			r_dir_x = rel_x / r
 			r_dir_z = rel_z / r
 		var t := TornadoWindField.tangent_from_radial(r_dir_x, r_dir_z, field.swirl_sign)
+		var lean := field.centerline_slope_at(bpos.y)
 		var v_wind := Vector3(
-			r_dir_x * v_cyl.x + t.x * v_cyl.y,
+			r_dir_x * v_cyl.x + t.x * v_cyl.y + lean.x * v_cyl.z,
 			v_cyl.z,
-			r_dir_z * v_cyl.x + t.y * v_cyl.y
+			r_dir_z * v_cyl.x + t.y * v_cyl.y + lean.y * v_cyl.z
 		)
 
 		var bvel := body.linear_velocity

@@ -344,10 +344,17 @@ func mark_spectrum_dirty() -> void:
 	_render_refresh_pending = true
 
 
-func request_render_refresh() -> void:
-	_spectral_mutex.lock()
-	_spectral_references.clear()
-	_spectral_mutex.unlock()
+## Repaint on the next render step (even while frozen). Pass
+## [param spectral_inputs_changed] only when SpectrumMetrics reads the changed
+## value (choppiness feeds its strain covariance): dropping the references
+## re-runs the whole spectral integral, ~0.2 s of GDScript, and current, crest and
+## breaking edits never affected it. The cache is replaced rather than cleared in
+## place, since spectral_references() hands that same array out.
+func request_render_refresh(spectral_inputs_changed := false) -> void:
+	if spectral_inputs_changed:
+		_spectral_mutex.lock()
+		_spectral_references = []
+		_spectral_mutex.unlock()
 	_render_refresh_pending = true
 
 

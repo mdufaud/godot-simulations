@@ -112,9 +112,10 @@ func contact() -> Dictionary:
 	return _contact
 
 
-# Least-squares plane through the four rim heights.
+# Least-squares plane through the four rim heights: central differences across
+# the ±0.6·radius probe pairs, i.e. over a baseline of 2·d = 1.2·radius.
 func _surface_normal(results: PackedVector4Array, base: int) -> Vector3:
-	var d := radius * 1.2
+	var d := radius * PROBE_OFFSETS[1].x
 	var slope_x := (results[base + 1].x - results[base + 2].x) / (2.0 * d)
 	var slope_z := (results[base + 3].x - results[base + 4].x) / (2.0 * d)
 	return Vector3(-slope_x, 1.0, -slope_z).normalized()

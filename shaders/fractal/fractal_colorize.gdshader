@@ -57,6 +57,14 @@ vec3 hsv2rgb(vec3 c) {
 }
 
 vec4 fetch(vec2 uv) {
+	// refine_blend is a uniform, so these are coherent branches: outside a fade it
+	// is exactly 0 or 1 and only one of the two views needs sampling.
+	if (refine_blend <= 0.0) {
+		return texture(tex_low, xform_low.xy * uv + xform_low.zw);
+	}
+	if (refine_blend >= 1.0) {
+		return texture(tex_high, xform_high.xy * uv + xform_high.zw);
+	}
 	return mix(texture(tex_low, xform_low.xy * uv + xform_low.zw),
 		texture(tex_high, xform_high.xy * uv + xform_high.zw), refine_blend);
 }

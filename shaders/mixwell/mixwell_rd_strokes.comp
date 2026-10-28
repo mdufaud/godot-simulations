@@ -1,0 +1,80 @@
+// Every user stroke segment, evaluated exactly per sample. Segments are indexed
+// in drawing order. A uniform grid lists, per cell and in ascending order, the
+// segments whose midpoint -- or a slip image or periodic copy of it -- falls in
+// the cell; cells are at least the mask reach plus half a segment wide, so any
+// segment that can move a point is listed in the 3x3 cells around it. Reverse
+// drift composes the newest segment first: from bound = N, take the newest
+// segment below bound in those cells, apply it, and continue below it. Every
+// segment skipped had no influence where the point then was, so this is the
+// whole composition, with nothing resampled.
+// Push constant: line.xy grid origin, line.z cell size, segment.xy grid dims,
+// operation.z segment count.
+layout(std430, set = 0, binding = 12) readonly buffer CellStart {
+	uint cell_start[];
+};
+
+layout(std430, set = 0, binding = 13) readonly buffer CellItems {
+	uint cell_items[];
+};
+
+
+// The newest segment of this cell below bound, or -1.
+int newest_below(int cell, int bound) {
+	uint first = cell_start[cell];
+	uint low = first;
+	uint high = cell_start[cell + 1];
+	while (low < high) {
+		uint middle = (low + high) / 2u;
+		if (int(cell_items[middle]) < bound) {
+			low = middle + 1u;
+		} else {
+			high = middle;
+		}
+	}
+	return low > first ? int(cell_items[low - 1u]) : -1;
+}
+
+
+void main() {
+	uint index = gl_GlobalInvocationID.x;
+	ivec2 work_size = work_dims();
+	uint count = uint(work_size.x * work_size.y);
+	if (index >= count) {
+		return;
+	}
+	ivec2 pixel = work_pixel(index);
+	vec2 initial_coordinate = load_coordinate(pixel);
+	vec2 coordinate = initial_coordinate;
+	ivec2 dims = ivec2(round(params.segment.xy));
+	int bound = int(round(params.operation.z));
+	vec2 relative_period = periodic_enabled() ? params.periodic.xy : vec2(0.0);
+	for (int guard = 0; guard < 65536 && bound > 0; guard++) {
+		vec2 cell_position = floor((coordinate - params.line.xy) / params.line.z);
+		if (any(lessThan(cell_position, vec2(-1.0))) || any(greaterThan(cell_position, vec2(dims)))) {
+			break;
+		}
+		ivec2 cell = ivec2(cell_position);
+		int newest = -1;
+		for (int dy = -1; dy <= 1; dy++) {
+			for (int dx = -1; dx <= 1; dx++) {
+				ivec2 neighbour = cell + ivec2(dx, dy);
+				if (all(greaterThanEqual(neighbour, ivec2(0))) && all(lessThan(neighbour, dims))) {
+					newest = max(newest, newest_below(neighbour.y * dims.x + neighbour.x, bound));
+				}
+			}
+		}
+		if (newest < 0) {
+			break;
+		}
+		vec4 encoded = segment_data[newest * 2];
+		coordinate = apply_segment(coordinate, encoded.xy, encoded.zw,
+				segment_data[newest * 2 + 1].x, vec2(0.0), relative_period);
+		bound = newest;
+	}
+	imageStore(coords_dst, pixel, vec4(coordinate, 0.0, 0.0));
+	vec2 drift = coordinate - initial_coordinate;
+	vec2 displacement = periodic_optimized()
+			? coordinate - display_coordinate(pixel)
+			: imageLoad(displacement_src, source_pixel(pixel)).xy + drift;
+	imageStore(displacement_dst, pixel, vec4(periodic_wrap(displacement), 0.0, 0.0));
+}

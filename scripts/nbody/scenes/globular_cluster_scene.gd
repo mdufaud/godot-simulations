@@ -18,6 +18,11 @@ func default_self_gravity() -> bool:
 	return true
 
 
+# No attractor and no disk: the cluster is held together by its own stars only.
+func requires_self_gravity() -> bool:
+	return true
+
+
 func params() -> Array:
 	return [
 		{key = "cluster_mass", label = "Cluster mass", min = 8.0, max = 60.0},

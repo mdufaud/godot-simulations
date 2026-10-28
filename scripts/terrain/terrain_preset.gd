@@ -374,6 +374,12 @@ func _seed_castle(sand: PackedFloat32Array, water: PackedFloat32Array,
 	var wall_top := 0.17
 	var soak_radius := 0.75
 	var soak := 0.035
+	# Built once, not as array literals inside the per-cell loop (3 allocations a
+	# cell, ~0.8M at 512^2). Same centres in the same order as before.
+	var bastion_centres: Array[Vector2] = [
+		Vector2(-bastion_ring, -bastion_ring), Vector2(-bastion_ring, bastion_ring),
+		Vector2(bastion_ring, -bastion_ring), Vector2(bastion_ring, bastion_ring),
+	]
 	for j in grid_n:
 		var z := (float(j) + 0.5) * cell - world_size * 0.5
 		var row := j * grid_n
@@ -384,11 +390,10 @@ func _seed_castle(sand: PackedFloat32Array, water: PackedFloat32Array,
 			for tier in tiers:
 				if absf(x) <= tier.half and absf(z) <= tier.half:
 					add = tier.top
-			for tx in [-bastion_ring, bastion_ring]:
-				for tz in [-bastion_ring, bastion_ring]:
-					var r := d.distance_to(Vector2(tx, tz))
-					if r < bastion_r:
-						add = maxf(add, 0.105 + bastion_h * (1.0 - (r / bastion_r) * (r / bastion_r)))
+			for centre in bastion_centres:
+				var r := d.distance_to(centre)
+				if r < bastion_r:
+					add = maxf(add, 0.105 + bastion_h * (1.0 - (r / bastion_r) * (r / bastion_r)))
 			var inside_wall := absf(x) <= wall_half and absf(z) <= wall_half \
 				and (absf(absf(x) - wall_half) <= wall_thickness
 					or absf(absf(z) - wall_half) <= wall_thickness)

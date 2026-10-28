@@ -1,6 +1,6 @@
 class_name FluidSystem
 extends Node3D
-## Reusable GPU fluid: one dual-density SPH simulation with a screen-space surface
+## Reusable GPU fluid: one double-density SPH simulation with a screen-space surface
 ## and optional foam. Instance it in a scene, assign a camera, and call start().
 ## The host scene owns its camera, environment and ground; this node owns the fluid.
 
@@ -152,7 +152,13 @@ func set_flow(value: float) -> void:
 func _launch_speed() -> float:
 	var speed := 6.0 if scenario == Scenario.BASIN else 2.0
 	var per_second := float(sph_solver.particle_count) * flow_rate / sph_solver.emission_cycle_seconds
-	return minf(speed, per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width))
+	var extrusion := per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width)
+	# Honey is a rope: it leaves at exactly the speed that carries the flux at rest
+	# density. Capping it below that packed successive layers closer than the rest
+	# spacing, and the rope burst sideways under its own pressure at high flow.
+	if mode == FluidKind.HONEY:
+		return extrusion
+	return minf(speed, extrusion)
 
 
 func set_particle_count(n: int) -> void:
@@ -477,6 +483,7 @@ func _configure_solver() -> void:
 	sph_solver.collision_inflation = spec.collision_inflation
 	sph_solver.freeze_heat = spec.freeze_heat
 	sph_solver.yield_stress = spec.yield_stress
+	sph_solver.drift_relaxation_s = spec.drift_relaxation_s
 	sph_solver.foam_enabled = _foam_active()
 	var basin_pour := scenario == Scenario.BASIN
 	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()

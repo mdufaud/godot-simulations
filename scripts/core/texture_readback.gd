@@ -78,7 +78,9 @@ func read_layer(rid: RID, layer: int, expected_bytes: int = 0,
 		if not state.pending():
 			return
 		var rd := RenderingServer.get_rendering_device()
-		if rd == null:
+		# A texture freed between the request and this callable never answers the
+		# async read, which would surface as a 10 s "timeout" instead of a miss.
+		if rd == null or not rd.texture_is_valid(rid):
 			state.complete.call_deferred(PackedByteArray())
 			return
 		rd.texture_get_data_async(rid, layer, func(bytes: PackedByteArray):

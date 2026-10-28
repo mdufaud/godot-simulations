@@ -79,7 +79,9 @@ void main() {
             vec4 result = water[target];
             result.yz = momentum;
             vec2 world = world_position(line_cell(lane));
-            float distance_edge = params.domain.x * 0.5 - length(world);
+            // Square domain, open on all four sides: Chebyshev distance to the edge,
+            // as ocean_shore_cfl.comp uses. A circle damped interior diagonal cells.
+            float distance_edge = params.domain.x * 0.5 - max(abs(world.x), abs(world.y));
             float sponge = smoothstep(0.1, 0.5, max(1.0 - distance_edge / params.physical.y, 0.0));
             float weight = SHORE_VISUAL_BREAKERS != 0 || params.misc.z == 0 ? 1.0 : 0.5;
             float blend = params.boundary.x > 0.5 ? min(weight * 12.0 * sqrt(params.domain.z * params.tiles.w)

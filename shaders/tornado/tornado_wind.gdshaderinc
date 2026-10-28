@@ -18,21 +18,49 @@ const float TW_SULLIVAN_B = 3.0;
 // Sullivan tangential peak sits 2.4976 viscous core radii out; the baked curve is
 // rescaled by it, and the Sullivan v_r/v_z terms use it below (r_core = RMW).
 const float TW_SULLIVAN_RMW = 2.4976;
-const float TW_R_BAR_MAX = 4.0;
 const float TW_INFLOW_PEAK_R = 1.5;
-const float TW_INFLOW_GROUND_FLOOR = 0.45;
-const float TW_Z_BAR_CAP = 6.0;
+const float TW_INFLOW_ONSET = 5.3;
+const float TW_UPDRAFT_DEPTH = 3.0;
+const float TW_TOP_CLOSE_START = 0.6;
+const float TW_OUTER_TAPER_R = 6.0;
 const float TW_INFLUENCE = 8.0;
 
 float tw_core_radius(float y) {
 	return r_core0 * (1.0 + flare * pow(clamp(y / funnel_height, 0.0, 1.0), 1.5));
 }
 
-// World-space vortex axis position at height y (slice lerp).
-vec3 tw_centerline(float y) {
+float tw_core_radius_slope(float y) {
+	if (y <= 0.0 || y >= funnel_height) {
+		return 0.0;
+	}
+	return r_core0 * flare * 1.5 * sqrt(y / funnel_height) / funnel_height;
+}
+
+// Axis offset (xz) at height y, or its slope d/dy: Catmull-Rom through the slices
+// (TornadoWindField._axis_offset).
+vec2 tw_axis(float y, bool derivative) {
 	float t = clamp(y / funnel_height, 0.0, 1.0) * 7.0;
 	int i = int(min(t, 6.0));
-	return mix(centerline[i], centerline[i + 1], t - float(i));
+	float u = t - float(i);
+	vec2 p0 = centerline[max(i - 1, 0)].xz;
+	vec2 p1 = centerline[i].xz;
+	vec2 p2 = centerline[i + 1].xz;
+	vec2 p3 = centerline[min(i + 2, 7)].xz;
+	vec2 c2 = 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3;
+	vec2 c3 = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+	if (derivative) {
+		if (y <= 0.0 || y >= funnel_height) {
+			return vec2(0.0);
+		}
+		return 0.5 * ((p2 - p0) + 2.0 * c2 * u + 3.0 * c3 * u * u) * (7.0 / funnel_height);
+	}
+	return 0.5 * (2.0 * p1 + (p2 - p0) * u + c2 * u * u + c3 * u * u * u);
+}
+
+// World-space vortex axis position at height y.
+vec3 tw_centerline(float y) {
+	vec2 axis = tw_axis(y, false);
+	return vec3(axis.x, y, axis.y);
 }
 
 // Normalized tangential profile (peak 1 at r_bar = 1, the RMW).
@@ -44,7 +72,49 @@ float tw_v_theta(float r_bar) {
 	if (wind_model == 1) {
 		return TW_BR_NORM * (1.0 - exp(-TW_BR_ALPHA * r_bar * r_bar)) / r_safe;
 	}
-	return texture(sullivan_curve, vec2(r_bar / 8.0, 0.5)).r;
+	// Texel centres hold r_bar = 8 i / 255 (TornadoWindField.build_sullivan_image).
+	float u = clamp(r_bar / 8.0, 0.0, 1.0) * (255.0 / 256.0) + 0.5 / 256.0;
+	return texture(sullivan_curve, vec2(u, 0.5)).r;
+}
+
+// (Phi/rho, Phi'/rho) of the active model (TornadoWindField._radial_shape).
+vec2 tw_radial_shape(float r_bar) {
+	float peak = wind_model == 0 ? 1.0 : TW_INFLOW_PEAK_R;
+	float d = 1.0 + r_bar * r_bar / (peak * peak);
+	vec2 shape = vec2(r_bar / d, 2.0 / (d * d));
+	if (wind_model == 2) {
+		float e = exp(-TW_SULLIVAN_RMW * TW_SULLIVAN_RMW * r_bar * r_bar);
+		shape.x -= TW_SULLIVAN_B / (TW_SULLIVAN_RMW * TW_SULLIVAN_RMW) * (1.0 - e) / max(r_bar, 1e-6);
+		shape.y -= 2.0 * TW_SULLIVAN_B * e;
+	}
+	return shape;
+}
+
+// (v_r, v_theta, v_z) / u_max (TornadoWindField.cylindrical_wind): v_r and v_z from
+// the stream function, so the field is divergence-free.
+vec3 tw_cylindrical(float r_bar, float y) {
+	if (y < 0.0 || y > funnel_height || r_bar > TW_INFLUENCE) {
+		return vec3(0.0);
+	}
+	float s = tw_core_radius(y);
+	float ds = tw_core_radius_slope(y);
+	float taper_t = clamp((r_bar - TW_OUTER_TAPER_R) / (TW_INFLUENCE - TW_OUTER_TAPER_R), 0.0, 1.0);
+	float taper = 1.0 - taper_t * taper_t * (3.0 - 2.0 * taper_t);
+	float dtaper = -6.0 * taper_t * (1.0 - taper_t) / (TW_INFLUENCE - TW_OUTER_TAPER_R);
+	float rise = exp(-TW_INFLOW_ONSET * y / (TW_UPDRAFT_DEPTH * r_core0));
+	float close_t = clamp((y - TW_TOP_CLOSE_START * funnel_height)
+		/ ((1.0 - TW_TOP_CLOSE_START) * funnel_height), 0.0, 1.0);
+	float close_v = 1.0 - close_t * close_t * (3.0 - 2.0 * close_t);
+	float dclose = -6.0 * close_t * (1.0 - close_t) / ((1.0 - TW_TOP_CLOSE_START) * funnel_height);
+	float level = TW_UPDRAFT_DEPTH * (1.0 - rise) * close_v;
+	float dlevel = (TW_INFLOW_ONSET / r_core0) * rise * close_v
+		+ TW_UPDRAFT_DEPTH * (1.0 - rise) * dclose;
+	vec2 shape = tw_radial_shape(r_bar);
+	float v_z = a_bar * level * (shape.y * taper + shape.x * dtaper);
+	float v_r = -a_bar * (ds * level * (2.0 * taper * shape.x - r_bar * taper * shape.y
+		- r_bar * shape.x * dtaper) + s * dlevel * taper * shape.x);
+	float fade = (1.0 - smoothstep(0.85 * funnel_height, funnel_height, y)) * taper;
+	return vec3(v_r, tw_v_theta(r_bar) * fade, v_z);
 }
 
 // Full wind velocity (m/s) at world position p. Ground is y = 0.
@@ -60,39 +130,10 @@ vec3 tw_wind(vec3 p) {
 	if (r_bar > TW_INFLUENCE) {
 		return vec3(0.0);
 	}
-	float z_bar = min(p.y / r_core, TW_Z_BAR_CAP);
-	float z_eff = TW_Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar));
-	float inflow_z = TW_INFLOW_GROUND_FLOOR
-		+ (1.0 - TW_INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar);
-	float r_safe = max(r_bar, 1e-3);
-	float inflow_r = (r_bar / TW_INFLOW_PEAK_R) * exp(1.0 - r_bar / TW_INFLOW_PEAK_R);
-	float sv2 = TW_SULLIVAN_RMW * TW_SULLIVAN_RMW * r_bar * r_bar;
-
-	float v_t = tw_v_theta(r_bar);
-	float v_r = 0.0;
-	float v_z = 0.0;
-	if (wind_model == 1) {
-		v_r = -a_bar * TW_R_BAR_MAX * inflow_r * inflow_z;
-		v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar);
-	} else if (wind_model == 2) {
-		float e = exp(-sv2);
-		v_r = a_bar * (-TW_R_BAR_MAX * inflow_r * inflow_z
-			+ (TW_SULLIVAN_B / (TW_SULLIVAN_RMW * r_safe)) * (1.0 - e));
-		v_z = 2.0 * a_bar * z_eff * (1.0 - TW_SULLIVAN_B * e) * exp(-0.15 * sv2);
-	}
-	if (wind_model != 0) {
-		// Corner flow (Lewellen): annular near-ground updraft jet at the RMW.
-		float dr = (r_bar - 1.0) / 0.45;
-		v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar);
-	}
-
-	float fade = (1.0 - smoothstep(0.85 * funnel_height, funnel_height, p.y))
-		* (1.0 - smoothstep(6.0, 8.0, r_bar));
-	v_t *= fade;
-	v_r *= fade;
-	v_z *= fade;
-
+	vec3 w = tw_cylindrical(r_bar, p.y);
 	vec3 r_dir = r > 1e-4 ? vec3(rel.x, 0.0, rel.y) / r : vec3(0.0);
 	vec3 t_dir = swirl_sign * cross(vec3(0.0, 1.0, 0.0), r_dir);
-	return (r_dir * v_r + t_dir * v_t + vec3(0.0, 1.0, 0.0) * v_z) * u_max;
+	// Vertical wind follows the leaning axis (TornadoWindField.axis_direction_at).
+	vec2 lean = tw_axis(p.y, true);
+	return (r_dir * w.x + t_dir * w.y + vec3(lean.x, 1.0, lean.y) * w.z) * u_max;
 }

@@ -45,8 +45,12 @@ func _test_contact_configuration(body: AmbientFluidBody3D) -> void:
 	_check(body.continuous_cd, "phase 4 body CCD is disabled")
 	_check(body.can_sleep, "phase 4 body sleep is disabled")
 	_check(body.max_contacts_reported == 4, "phase 4 contact report budget is wrong")
-	_check(body.contact_warning().contains("body inertia"),
-		"phase 4 Jolt inertia warning is missing")
+	_check(body.contact_warning().contains("added mass"),
+		"phase 4 Jolt contact mass note is missing")
+	var tensor := body.combined_tensor()
+	_check(absf(body.contact_mass_kg() - (tensor[21] + tensor[28] + tensor[35]) / 3.0)
+		< 1.0e-3 * body.contact_mass_kg() and body.contact_mass_kg() >= body.mass,
+		"Jolt contact mass is not the body plus its added mass")
 
 
 func _test_impacts(bodies: Array[AmbientFluidBody3D]) -> void:

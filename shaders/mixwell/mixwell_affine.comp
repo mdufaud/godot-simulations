@@ -7,15 +7,22 @@ void main() {
 	}
 	ivec2 pixel = work_pixel(index);
 	vec2 coordinate = load_coordinate(pixel);
+	// The affine brush (an extension: Twist and Pinch are not in the reference)
+	// moves the fluid with u for unit time, so its reverse drift is the flow of
+	// -u: midpoint steps no longer than midpoint_alpha * max(radius, distance)
+	// of travel, as the Mixwell brush steps.
 	vec2 mapped = coordinate;
-	const int substeps = 8;
-	const float dt = 1.0 / float(substeps);
-	for (int step = 0; step < substeps; step++) {
-		vec2 first = affine_velocity(mapped, params.line.xy, params.line.z,
+	float remaining = 1.0;
+	for (int step = 0; step < 4096 && remaining > 0.0; step++) {
+		vec2 first = -affine_velocity(mapped, params.line.xy, params.line.z,
 			params.field.x, params.field.z, params.line.w);
+		float reach = params.field.y * max(params.field.x, length(mapped - params.line.xy));
+		float speed = length(first);
+		float dt = speed * remaining > reach ? reach / speed : remaining;
 		vec2 midpoint = mapped + first * (0.5 * dt);
-		mapped += affine_velocity(midpoint, params.line.xy, params.line.z,
+		mapped -= affine_velocity(midpoint, params.line.xy, params.line.z,
 			params.field.x, params.field.z, params.line.w) * dt;
+		remaining -= dt;
 	}
 	mapped = periodic_wrap(mapped);
 	vec2 displacement = periodic_optimized()

@@ -4,7 +4,7 @@ extends RefCounted
 const PROFILE := preload("res://scripts/ambient_fluid/ambient_fluid_profile_3d.gd")
 const MATH := preload("res://scripts/ambient_fluid/ambient_fluid_math.gd")
 const GREEN_FUNCTION_SCALE := 1.0 / (4.0 * PI)
-const CONDITION_EPSILON := 1.0e-10
+const CONDITION_EPSILON := 1.0e-12
 
 static var _last_error := ""
 static var _last_bem_residual := 0.0
@@ -35,11 +35,7 @@ static func build_profile(mesh: ArrayMesh,
 	var face_centers := PackedVector3Array()
 	var face_normals := PackedVector3Array()
 	var face_areas := PackedFloat64Array()
-	var vertex_normals := PackedVector3Array()
-	vertex_normals.resize(vertices.size())
-	for vertex_index in vertices.size():
-		vertex_normals[vertex_index] = Vector3.ZERO
-	var edge_lengths := {}
+	var face_vertices := PackedVector3Array()
 	for triangle in triangles:
 		var ids: PackedInt32Array = triangle
 		var a: Vector3 = vertices[ids[0]]
@@ -47,39 +43,14 @@ static func build_profile(mesh: ArrayMesh,
 		var c: Vector3 = vertices[ids[2]]
 		var cross := (b - a).cross(c - a)
 		var area := cross.length() * 0.5
-		var normal := cross / (area * 2.0)
+		if not is_finite(area) or area <= 1.0e-14:
+			return _fail("mesh contains a degenerate triangle")
 		face_centers.append((a + b + c) / 3.0)
-		face_normals.append(normal)
+		face_normals.append(cross / (area * 2.0))
 		face_areas.append(area)
-		vertex_normals[ids[0]] += cross
-		vertex_normals[ids[1]] += cross
-		vertex_normals[ids[2]] += cross
-		_register_edge_length(edge_lengths, ids[0], ids[1], a.distance_to(b))
-		_register_edge_length(edge_lengths, ids[1], ids[2], b.distance_to(c))
-		_register_edge_length(edge_lengths, ids[2], ids[0], c.distance_to(a))
-	for vertex_index in vertices.size():
-		if vertex_normals[vertex_index].length_squared() <= 1.0e-20:
-			return _fail("vertex normal is undefined")
-		vertex_normals[vertex_index] = vertex_normals[vertex_index].normalized()
-	var mean_edge := 0.0
-	for length in edge_lengths.values():
-		mean_edge += float(length)
-	if edge_lengths.is_empty() or not is_finite(mean_edge) or mean_edge <= 0.0:
-		return _fail("mean edge length is invalid")
-	mean_edge /= edge_lengths.size()
-	var source_data: Dictionary = _choose_sources(vertices, triangles, face_normals,
-		vertex_normals, mean_edge)
-	if source_data.is_empty():
-		return null
-	var source_points: PackedVector3Array = source_data.sources
-	var source_offset_m: float = source_data.offset
-	var factorization: Dictionary = source_data.factorization
-	var potential_matrix := _solve_potentials(vertices, vertex_normals, source_points,
-		factorization)
-	if potential_matrix.is_empty():
-		return null
-	var added_mass := _build_added_mass(vertices, triangles, face_normals, face_areas,
-		potential_matrix, reference_density_kg_m3)
+		face_vertices.append_array(PackedVector3Array([a, b, c]))
+	var added_mass := _panel_added_mass(face_vertices, face_centers, face_normals, face_areas,
+		reference_density_kg_m3)
 	if added_mass.is_empty():
 		return null
 	var translation_trace := added_mass[21] + added_mass[28] + added_mass[35]
@@ -97,10 +68,6 @@ static func build_profile(mesh: ArrayMesh,
 			bem_psd_clamped = true
 			break
 	added_mass = projected_added_mass
-	var slip_matrix := _build_slip_matrix(vertices, triangles, face_normals,
-		potential_matrix)
-	if slip_matrix.size() != face_centers.size() * 18:
-		return _fail("BEM slip matrix construction failed")
 	var total_area := 0.0
 	for area in face_areas:
 		total_area += area
@@ -115,9 +82,8 @@ static func build_profile(mesh: ArrayMesh,
 	profile.face_centers_m = face_centers
 	profile.face_normals = face_normals
 	profile.face_areas_m2 = face_areas
+	profile.face_vertices_m = face_vertices
 	profile.added_mass_tensor = added_mass
-	profile.slip_matrix = slip_matrix
-	profile.source_offset_m = source_offset_m
 	profile.bem_psd_clamped = bem_psd_clamped
 	profile.bem_max_residual = _last_bem_residual
 	var profile_error := profile.validate()
@@ -248,221 +214,156 @@ static func _orient_and_measure(vertices: PackedVector3Array, triangles: Array):
 	return {volume = signed_volume, center = first_moment / signed_volume}
 
 
-static func _choose_sources(vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array, vertex_normals: PackedVector3Array,
-		mean_edge: float):
-	var minimum := Vector3(INF, INF, INF)
-	var maximum := Vector3(-INF, -INF, -INF)
-	for vertex in vertices:
-		minimum = minimum.min(vertex)
-		maximum = maximum.max(vertex)
-	var shape_extent := (maximum - minimum).length()
-	# Sources ride vertex normals inward. On a thin shape a deep offset pushes
-	# them past the opposite face, which corrupts the potentials (the demo
-	# plate once got an inverted broadside/edgewise added mass), so cap the
-	# offset at half the smallest face-centroid-to-opposite-plane distance.
-	var min_face_gap := INF
-	for triangle_index in triangles.size():
-		var ids: PackedInt32Array = triangles[triangle_index]
-		var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
-		var normal: Vector3 = face_normals[triangle_index]
-		for other_index in triangles.size():
-			if other_index == triangle_index:
+## Fluid inertia K_f (Eq. 8-9) by a constant-strength source panel method
+## (Hess & Smith): each face carries a uniform source density sigma_j, the
+## exterior Neumann condition n . grad(phi) = n . (v + w x x) holds on average
+## over each face, and K_f = -rho sum_i phi_i (n . u)_i A_i. Faces closer than
+## two of their sizes are integrated on sub-triangles at both ends (Galerkin);
+## the self potential averages the closed-form in-plane integral of 1/r. The
+## paper solves the same Neumann problem with interior point sources
+## (Sec. 5.1); sources under a finely cut box or a thin plate either smear its
+## edges or turn ill-conditioned, and gave the demo plate a tenth of its
+## broadside added mass. Converges like the panel size: a 320-face sphere is
+## 2% above 1/2 rho V.
+static func _panel_added_mass(face_vertices: PackedVector3Array,
+		face_centers: PackedVector3Array, face_normals: PackedVector3Array,
+		face_areas: PackedFloat64Array, density: float) -> PackedFloat64Array:
+	var count := face_centers.size()
+	var sizes := PackedFloat64Array()
+	var receivers: Array[PackedVector3Array] = []
+	var sources: Array[PackedVector3Array] = []
+	for face in count:
+		var a := face_vertices[face * 3]
+		var b := face_vertices[face * 3 + 1]
+		var c := face_vertices[face * 3 + 2]
+		sizes.append(maxf(a.distance_to(b), maxf(b.distance_to(c), c.distance_to(a))))
+		receivers.append(_sub_centroids(a, b, c, 2))
+		sources.append(_sub_centroids(a, b, c, 3))
+	var influence := PackedFloat64Array()
+	influence.resize(count * count)
+	var potential := PackedFloat64Array()
+	potential.resize(count * count)
+	for row in count:
+		var normal := face_normals[row]
+		var own_receivers: PackedVector3Array = receivers[row]
+		for col in count:
+			var index := row * count + col
+			if row == col:
+				# A flat face's own source has no normal flux in its plane: the
+				# exterior limit is the jump -sigma/2.
+				influence[index] = -0.5
+				var self_sum := 0.0
+				for point in own_receivers:
+					self_sum += _plane_inverse_distance(face_vertices[col * 3],
+						face_vertices[col * 3 + 1], face_vertices[col * 3 + 2], point)
+				potential[index] = GREEN_FUNCTION_SCALE * self_sum / own_receivers.size()
 				continue
-			var other_ids: PackedInt32Array = triangles[other_index]
-			# Facing pairs measure the shape's thinness; a triangle centroid
-			# hugging an edge would understate the gap to a perpendicular face.
-			if face_normals[other_index].dot(normal) >= -0.5:
-				continue
-			var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
-			if gap > 1.0e-9:
-				min_face_gap = minf(min_face_gap, gap)
-	if not is_finite(min_face_gap):
-		# No facing pair (nonconvex mesh): keep the conservative all-pairs bound.
-		for triangle_index in triangles.size():
-			var ids: PackedInt32Array = triangles[triangle_index]
-			var center := (vertices[ids[0]] + vertices[ids[1]] + vertices[ids[2]]) / 3.0
-			for other_index in triangles.size():
-				if other_index == triangle_index:
-					continue
-				var other_ids: PackedInt32Array = triangles[other_index]
-				var gap := face_normals[other_index].dot(vertices[other_ids[0]] - center)
-				if gap > 1.0e-9:
-					min_face_gap = minf(min_face_gap, gap)
-	if not is_finite(min_face_gap):
-		return _fail_dict("mesh interior is too thin to place BEM sources")
-	var max_offset := 0.5 * min_face_gap
-	var factors := [0.2, 0.15, 0.1, 0.075, 0.05, 0.025]
-	var previous_offset := -1.0
-	for factor in factors:
-		var offset := minf(shape_extent * float(factor), max_offset)
-		if is_equal_approx(offset, previous_offset):
-			continue
-		previous_offset = offset
-		var sources := PackedVector3Array()
-		var all_inside := true
-		for vertex_index in vertices.size():
-			var source := vertices[vertex_index] - vertex_normals[vertex_index] * offset
-			sources.append(source)
-			if not _point_inside(source, vertices, triangles, face_normals, mean_edge * 1.0e-6):
-				all_inside = false
-				break
-		if not all_inside:
-			continue
-		var matrix := _assemble_source_matrix(vertices, vertex_normals, sources)
-		var factorization := _factorize(matrix, vertices.size())
-		if not factorization.is_empty() and factorization.condition >= CONDITION_EPSILON:
-			return {sources = sources, offset = offset, factorization = factorization}
-	return _fail_dict("no interior source offset produced a sufficiently conditioned BEM matrix")
-
-
-static func _assemble_source_matrix(collocation_points: PackedVector3Array,
-		collocation_normals: PackedVector3Array, sources: PackedVector3Array) -> PackedFloat64Array:
-	var matrix := PackedFloat64Array()
-	matrix.resize(collocation_points.size() * sources.size())
-	for row in collocation_points.size():
-		for col in sources.size():
-			var delta := collocation_points[row] - sources[col]
-			var distance_squared := delta.length_squared()
-			if distance_squared <= 1.0e-24:
-				return PackedFloat64Array()
-			var inverse_distance_cubed := 1.0 / (distance_squared * sqrt(distance_squared))
-			var gradient := -delta * (GREEN_FUNCTION_SCALE * inverse_distance_cubed)
-			matrix[row * sources.size() + col] = collocation_normals[row].dot(gradient)
-	return matrix
-
-
-static func _solve_potentials(vertices: PackedVector3Array,
-		vertex_normals: PackedVector3Array, sources: PackedVector3Array,
-		factorization: Dictionary) -> PackedFloat64Array:
-	var potential_matrix := PackedFloat64Array()
-	potential_matrix.resize(vertices.size() * 6)
-	var source_matrix := _assemble_source_matrix(vertices, vertex_normals, sources)
-	if source_matrix.is_empty():
-		return _fail_array("BEM source matrix reconstruction failed")
+			var distance := face_centers[row].distance_to(face_centers[col])
+			var points := PackedVector3Array([face_centers[row]])
+			var quadrature := PackedVector3Array([face_centers[col]])
+			if distance < 2.0 * sizes[col]:
+				points = own_receivers
+				quadrature = sources[col]
+			elif distance < 4.0 * sizes[col]:
+				quadrature = receivers[col]
+			var weight := face_areas[col] / quadrature.size() / points.size()
+			var flux := 0.0
+			var value := 0.0
+			for point in points:
+				for source in quadrature:
+					var delta := point - source
+					var distance_squared := delta.length_squared()
+					var inverse_distance := 1.0 / sqrt(distance_squared)
+					flux -= normal.dot(delta) * inverse_distance / distance_squared
+					value += inverse_distance
+			influence[index] = GREEN_FUNCTION_SCALE * weight * flux
+			potential[index] = GREEN_FUNCTION_SCALE * weight * value
+	var factorization := _factorize(influence, count)
+	if factorization.is_empty() or factorization.condition < CONDITION_EPSILON:
+		return _fail_array("BEM panel system is singular")
+	var potentials: Array[PackedFloat64Array] = []
+	var boundaries: Array[PackedFloat64Array] = []
 	for mode in 6:
+		var angular := Vector3.ZERO
+		var linear := Vector3.ZERO
+		if mode < 3:
+			angular[mode] = 1.0
+		else:
+			linear[mode - 3] = 1.0
 		var rhs := PackedFloat64Array()
-		rhs.resize(vertices.size())
-		for point_index in vertices.size():
-			var angular := Vector3.ZERO
-			var linear := Vector3.ZERO
-			if mode < 3:
-				angular[mode] = 1.0
-			else:
-				linear[mode - 3] = 1.0
-			rhs[point_index] = vertex_normals[point_index].dot(
-				angular.cross(vertices[point_index]) + linear)
-		var source_strengths := _solve_factorized(factorization, rhs, sources.size())
-		if source_strengths.is_empty():
+		rhs.resize(count)
+		for face in count:
+			rhs[face] = face_normals[face].dot(angular.cross(face_centers[face]) + linear)
+		var strengths := _solve_factorized(factorization, rhs, count)
+		if strengths.is_empty():
 			return _fail_array("BEM LU solve failed")
-		var rhs_scale := 1.0
+		var rhs_scale := 1.0e-12
 		var mode_residual := 0.0
-		for row in vertices.size():
+		var phi := PackedFloat64Array()
+		phi.resize(count)
+		for row in count:
 			var reconstructed := 0.0
-			for col in sources.size():
-				reconstructed += source_matrix[row * sources.size() + col] \
-					* source_strengths[col]
+			var face_potential := 0.0
+			for col in count:
+				reconstructed += influence[row * count + col] * strengths[col]
+				face_potential += potential[row * count + col] * strengths[col]
 			rhs_scale = maxf(rhs_scale, absf(rhs[row]))
 			mode_residual = maxf(mode_residual, absf(reconstructed - rhs[row]))
+			phi[row] = face_potential
 		mode_residual /= rhs_scale
 		_last_bem_residual = maxf(_last_bem_residual, mode_residual)
 		if not is_finite(mode_residual) or mode_residual > 1.0e-7:
 			return _fail_array("BEM solve residual exceeds tolerance")
-		for vertex_index in vertices.size():
-			var potential := 0.0
-			for source_index in sources.size():
-				var delta := vertices[vertex_index] - sources[source_index]
-				var distance := delta.length()
-				if distance <= 1.0e-12:
-					return _fail_array("BEM potential evaluation reached a source")
-				potential += GREEN_FUNCTION_SCALE * source_strengths[source_index] / distance
-			potential_matrix[vertex_index * 6 + mode] = potential
-	return potential_matrix
-
-
-static func _build_added_mass(vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array, face_areas: PackedFloat64Array,
-		potential_matrix: PackedFloat64Array, density: float) -> PackedFloat64Array:
+		potentials.append(phi)
+		boundaries.append(rhs)
 	var result := MATH.zero_matrix()
-	for triangle_index in triangles.size():
-		var ids: PackedInt32Array = triangles[triangle_index]
-		var normal: Vector3 = face_normals[triangle_index]
-		var area: float = face_areas[triangle_index]
-		var positions := [vertices[ids[0]], vertices[ids[1]], vertices[ids[2]]]
-		var boundary := PackedFloat64Array()
-		boundary.resize(18)
-		for local_index in 3:
-			var position: Vector3 = positions[local_index]
-			for mode in 6:
-				var angular := Vector3.ZERO
-				var linear := Vector3.ZERO
-				if mode < 3:
-					angular[mode] = 1.0
-				else:
-					linear[mode - 3] = 1.0
-				boundary[local_index * 6 + mode] = normal.dot(
-					angular.cross(position) + linear)
-		for potential_mode in 6:
-			for motion_mode in 6:
-				var integral := 0.0
-				for potential_vertex in 3:
-					for motion_vertex in 3:
-						var weight := area / 12.0
-						if potential_vertex == motion_vertex:
-							weight *= 2.0
-						integral += weight * potential_matrix[ids[potential_vertex] * 6 + potential_mode] \
-							* boundary[motion_vertex * 6 + motion_mode]
-				result[potential_mode * 6 + motion_mode] -= density * integral
+	for potential_mode in 6:
+		for motion_mode in 6:
+			var integral := 0.0
+			for face in count:
+				integral += potentials[potential_mode][face] * boundaries[motion_mode][face] \
+					* face_areas[face]
+			result[potential_mode * 6 + motion_mode] = -density * integral
 	return result
 
 
-static func _build_slip_matrix(vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array,
-		potential_matrix: PackedFloat64Array) -> PackedFloat64Array:
-	var result := PackedFloat64Array()
-	result.resize(triangles.size() * 18)
-	for triangle_index in triangles.size():
-		var ids: PackedInt32Array = triangles[triangle_index]
-		var normal: Vector3 = face_normals[triangle_index]
-		var a: Vector3 = vertices[ids[0]]
-		var edge_a: Vector3 = vertices[ids[1]] - a
-		var edge_b: Vector3 = vertices[ids[2]] - a
-		var edge_a_squared := edge_a.length_squared()
-		var edge_b_squared := edge_b.length_squared()
-		var edge_dot := edge_a.dot(edge_b)
-		var determinant := edge_a_squared * edge_b_squared - edge_dot * edge_dot
-		if determinant <= maxf(1.0e-24, edge_a_squared * edge_b_squared * 1.0e-12):
-			return _fail_array("BEM slip gradient encountered a degenerate face")
-		var center: Vector3 = (a + vertices[ids[1]] + vertices[ids[2]]) / 3.0
-		for col in 6:
-			var potential_a := potential_matrix[ids[0] * 6 + col]
-			var potential_delta_a := potential_matrix[ids[1] * 6 + col] - potential_a
-			var potential_delta_b := potential_matrix[ids[2] * 6 + col] - potential_a
-			var gradient := edge_a * ((potential_delta_a * edge_b_squared \
-				- potential_delta_b * edge_dot) / determinant) \
-				+ edge_b * ((potential_delta_b * edge_a_squared \
-				- potential_delta_a * edge_dot) / determinant)
-			var tangent_flow := gradient - normal * normal.dot(gradient)
-			var rigid_velocity := Vector3(
-				_rigid_motion_matrix_value(center, 0, col),
-				_rigid_motion_matrix_value(center, 1, col),
-				_rigid_motion_matrix_value(center, 2, col))
-			var tangent_body := rigid_velocity - normal * normal.dot(rigid_velocity)
-			var relative_tangent := tangent_flow - tangent_body
-			for row in 3:
-				result[triangle_index * 18 + row * 6 + col] = relative_tangent[row]
-	return result
+## Centroids of the 4^levels triangles a midpoint subdivision cuts a face into.
+static func _sub_centroids(a: Vector3, b: Vector3, c: Vector3, levels: int) -> PackedVector3Array:
+	var triangles := [[a, b, c]]
+	for _level in levels:
+		var refined := []
+		for triangle in triangles:
+			var ab: Vector3 = (triangle[0] + triangle[1]) * 0.5
+			var bc: Vector3 = (triangle[1] + triangle[2]) * 0.5
+			var ca: Vector3 = (triangle[2] + triangle[0]) * 0.5
+			refined.append([triangle[0], ab, ca])
+			refined.append([ab, triangle[1], bc])
+			refined.append([ca, bc, triangle[2]])
+			refined.append([ab, bc, ca])
+		triangles = refined
+	var centroids := PackedVector3Array()
+	for triangle in triangles:
+		centroids.append((triangle[0] + triangle[1] + triangle[2]) / 3.0)
+	return centroids
 
 
-static func _rigid_motion_matrix_value(center: Vector3, row: int, col: int) -> float:
-	if col >= 3:
-		return 1.0 if col - 3 == row else 0.0
-	var cross_matrix := [
-		[0.0, center.z, -center.y],
-		[-center.z, 0.0, center.x],
-		[center.y, -center.x, 0.0],
-	]
-	return cross_matrix[row][col]
+## Integral of 1/|p - y| over the triangle (a, b, c) for p inside it, in its
+## plane: the sum over edges of d ln((r2 + s2) / (r1 + s1)), with d the
+## distance from p to the edge line, s the edge-wise coordinates of its ends
+## from the foot of the perpendicular and r their distances to p.
+static func _plane_inverse_distance(a: Vector3, b: Vector3, c: Vector3, point: Vector3) -> float:
+	var total := 0.0
+	var corners := [a, b, c]
+	for edge in 3:
+		var start: Vector3 = corners[edge]
+		var finish: Vector3 = corners[(edge + 1) % 3]
+		var tangent := (finish - start).normalized()
+		var start_along := (start - point).dot(tangent)
+		var finish_along := (finish - point).dot(tangent)
+		var height := (start - tangent * start_along - point).length()
+		total += height * log((finish.distance_to(point) + finish_along)
+			/ (start.distance_to(point) + start_along))
+	return total
 
 
 static func _factorize(matrix: PackedFloat64Array, size: int) -> Dictionary:
@@ -534,48 +435,6 @@ static func _solve_factorized(factorization: Dictionary, rhs: PackedFloat64Array
 	return values
 
 
-static func _point_inside(point: Vector3, vertices: PackedVector3Array, triangles: Array,
-		face_normals: PackedVector3Array, tolerance: float) -> bool:
-	var convex := true
-	for triangle_index in triangles.size():
-		var ids: PackedInt32Array = triangles[triangle_index]
-		if face_normals[triangle_index].dot(point - vertices[ids[0]]) > tolerance:
-			convex = false
-			break
-	if convex:
-		return true
-	var ray_direction := Vector3(1.0, 0.3713907, 0.1938472).normalized()
-	var intersections := 0
-	for triangle in triangles:
-		var ids: PackedInt32Array = triangle
-		var distance := _ray_triangle_distance(point, ray_direction, vertices[ids[0]],
-			vertices[ids[1]], vertices[ids[2]])
-		if distance > tolerance:
-			intersections += 1
-	return intersections % 2 == 1
-
-
-static func _ray_triangle_distance(origin: Vector3, direction: Vector3,
-		a: Vector3, b: Vector3, c: Vector3) -> float:
-	var edge_a := b - a
-	var edge_b := c - a
-	var cross_direction := direction.cross(edge_b)
-	var determinant := edge_a.dot(cross_direction)
-	if absf(determinant) <= 1.0e-12:
-		return -1.0
-	var inverse_determinant := 1.0 / determinant
-	var origin_delta := origin - a
-	var barycentric_u := origin_delta.dot(cross_direction) * inverse_determinant
-	if barycentric_u < -1.0e-8 or barycentric_u > 1.0 + 1.0e-8:
-		return -1.0
-	var cross_origin := origin_delta.cross(edge_a)
-	var barycentric_v := direction.dot(cross_origin) * inverse_determinant
-	if barycentric_v < -1.0e-8 or barycentric_u + barycentric_v > 1.0 + 1.0e-8:
-		return -1.0
-	var distance := edge_b.dot(cross_origin) * inverse_determinant
-	return distance
-
-
 static func _symmetrize(matrix: PackedFloat64Array) -> PackedFloat64Array:
 	var result := matrix.duplicate()
 	for row in 6:
@@ -584,13 +443,6 @@ static func _symmetrize(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			result[row * 6 + col] = value
 			result[col * 6 + row] = value
 	return result
-
-
-static func _register_edge_length(edge_lengths: Dictionary, first: int, second: int,
-		length: float) -> void:
-	var key := _edge_key(first, second)
-	if not edge_lengths.has(key):
-		edge_lengths[key] = length
 
 
 static func _edge_key(first: int, second: int) -> String:

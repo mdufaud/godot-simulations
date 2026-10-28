@@ -229,7 +229,7 @@ func _process(delta: float) -> void:
 
 	var cam := get_viewport().get_camera_3d()
 	if not _capture.measurement_active:
-		storm.update(simulation_delta, cam)
+		storm.update(simulation_delta, cam, simulation_delta * step_scale)
 
 	# World-space UVs anchor the wave field to the world. Continuous recentering
 	# avoids a whole clipmap lattice changing triangles on the same frame.

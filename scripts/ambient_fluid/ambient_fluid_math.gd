@@ -3,6 +3,8 @@ extends RefCounted
 
 const MATRIX_SIZE := 6
 const MATRIX_SCALARS := MATRIX_SIZE * MATRIX_SIZE
+## Relative to the matrix's largest entry: an absolute floor rejected every
+## millimetre-scale body (inertia ~ s^5 falls under 1e-12) and froze it.
 const PIVOT_EPSILON := 1.0e-12
 
 static var _native := Native.kernel(&"AmbientFluidKernels")
@@ -30,6 +32,57 @@ static func diagonal_matrix(angular: Vector3, mass: float) -> PackedFloat64Array
 	matrix[28] = mass
 	matrix[35] = mass
 	return matrix
+
+
+## Inertia tensor (3x3, row-major) of a uniform solid polyhedron of `mass`
+## about its centre of volume, from its outward-wound triangles (Sec. 5.2:
+## the divergence theorem over the tetrahedra the faces span with the origin,
+## as in Kallay 2006). Accumulated in double precision.
+static func polyhedron_inertia(face_vertices: PackedVector3Array, mass: float) -> PackedFloat64Array:
+	var volume := 0.0
+	var first := PackedFloat64Array([0.0, 0.0, 0.0])
+	var second := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+	for base in range(0, face_vertices.size() - 2, 3):
+		var a := PackedFloat64Array([face_vertices[base].x, face_vertices[base].y,
+			face_vertices[base].z])
+		var b := PackedFloat64Array([face_vertices[base + 1].x, face_vertices[base + 1].y,
+			face_vertices[base + 1].z])
+		var c := PackedFloat64Array([face_vertices[base + 2].x, face_vertices[base + 2].y,
+			face_vertices[base + 2].z])
+		var tetra := (a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2])
+			+ a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0
+		volume += tetra
+		for row in 3:
+			var sum_row := a[row] + b[row] + c[row]
+			first[row] += tetra * sum_row / 4.0
+			for col in 3:
+				second[row * 3 + col] += tetra / 20.0 * (a[row] * a[col] + b[row] * b[col]
+					+ c[row] * c[col] + sum_row * (a[col] + b[col] + c[col]))
+	if not is_finite(volume) or absf(volume) <= 1.0e-12 or not is_finite(mass):
+		return PackedFloat64Array()
+	var inertia := PackedFloat64Array()
+	inertia.resize(9)
+	var covariance := PackedFloat64Array()
+	covariance.resize(9)
+	for row in 3:
+		for col in 3:
+			covariance[row * 3 + col] = second[row * 3 + col] \
+				- first[row] * first[col] / volume
+	var trace := covariance[0] + covariance[4] + covariance[8]
+	var density := mass / volume
+	for row in 3:
+		for col in 3:
+			inertia[row * 3 + col] = density * ((trace if row == col else 0.0)
+				- covariance[row * 3 + col])
+	return inertia
+
+
+static func polyhedron_inertia_diagonal(face_vertices: PackedVector3Array,
+		mass: float) -> Vector3:
+	var inertia := polyhedron_inertia(face_vertices, mass)
+	if inertia.size() != 9:
+		return Vector3.ZERO
+	return Vector3(inertia[0], inertia[4], inertia[8])
 
 
 static func matrix_add(a: PackedFloat64Array, b: PackedFloat64Array) -> PackedFloat64Array:
@@ -114,6 +167,7 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 		return PackedFloat64Array()
 	if Native.enabled and _native != null:
 		return _native.matrix_inverse(matrix, MATRIX_SIZE, PIVOT_EPSILON)
+	var threshold := PIVOT_EPSILON * _max_abs(matrix)
 	var augmented := PackedFloat64Array()
 	augmented.resize(MATRIX_SIZE * MATRIX_SIZE * 2)
 	for row in MATRIX_SIZE:
@@ -129,7 +183,7 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			if candidate > pivot_abs:
 				pivot_abs = candidate
 				pivot_row = row
-		if pivot_abs <= PIVOT_EPSILON:
+		if not (pivot_abs > threshold):
 			return PackedFloat64Array()
 		if pivot_row != pivot:
 			for col in MATRIX_SIZE * 2:
@@ -144,7 +198,9 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			if row == pivot:
 				continue
 			var factor := augmented[row * MATRIX_SIZE * 2 + pivot]
-			if is_zero_approx(factor):
+			# Only an exact zero may skip: is_zero_approx (1e-5) dropped the real
+			# coupling terms of small bodies and corrupted their inverse.
+			if factor == 0.0:
 				continue
 			for col in MATRIX_SIZE * 2:
 				augmented[row * MATRIX_SIZE * 2 + col] -= factor * augmented[pivot * MATRIX_SIZE * 2 + col]
@@ -153,6 +209,19 @@ static func matrix_inverse(matrix: PackedFloat64Array) -> PackedFloat64Array:
 	for row in MATRIX_SIZE:
 		for col in MATRIX_SIZE:
 			result[row * MATRIX_SIZE + col] = augmented[row * MATRIX_SIZE * 2 + MATRIX_SIZE + col]
+	return result
+
+
+## Largest |entry|, the scale the pivot threshold is relative to. A NaN entry
+## returns NaN, which fails every pivot test, so the inverse comes back empty
+## rather than poisoned. Mirrored bit for bit by the native kernel.
+static func _max_abs(matrix: PackedFloat64Array) -> float:
+	var result := 0.0
+	for value in matrix:
+		var magnitude := absf(value)
+		if is_nan(magnitude):
+			return magnitude
+		result = maxf(result, magnitude)
 	return result
 
 
@@ -166,7 +235,7 @@ static func cholesky(matrix: PackedFloat64Array) -> PackedFloat64Array:
 			for k in col:
 				value -= lower[row * MATRIX_SIZE + k] * lower[col * MATRIX_SIZE + k]
 			if row == col:
-				if value <= PIVOT_EPSILON:
+				if not (value > PIVOT_EPSILON * absf(matrix[row * MATRIX_SIZE + row])):
 					return PackedFloat64Array()
 				lower[row * MATRIX_SIZE + col] = sqrt(value)
 			else:
@@ -192,7 +261,10 @@ static func is_positive_semidefinite(matrix: PackedFloat64Array,
 		tolerance := 1.0e-8) -> bool:
 	if matrix.size() != MATRIX_SCALARS or not is_symmetric(matrix, tolerance * 10.0):
 		return false
-	var work := matrix
+	# Packed arrays are shared by reference: rotate a copy, or the caller's
+	# tensor (profile.validate() checks the stored added mass) comes back
+	# diagonalised.
+	var work := matrix.duplicate()
 	for _iteration in 64:
 		var pivot_row := 0
 		var pivot_col := 1
@@ -304,14 +376,38 @@ static func vector_dot(a: PackedFloat64Array, b: PackedFloat64Array) -> float:
 	return result
 
 
+## The p x v torque of Eq. 4, the part the body-frame rotation of the momentum
+## does not apply. In double precision: with an isotropic linear inertia p is
+## parallel to v and p x v vanishes, but float32 products leave |p||v| * 1e-7
+## behind, a spurious torque of the order of the spin for a fast-falling body.
 static func semidirect_coupling_wrench(momentum: PackedFloat64Array,
 		velocity: PackedFloat64Array) -> PackedFloat64Array:
 	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:
 		return PackedFloat64Array()
-	var linear_momentum := Vector3(momentum[3], momentum[4], momentum[5])
-	var linear_velocity := Vector3(velocity[3], velocity[4], velocity[5])
-	var torque := linear_momentum.cross(linear_velocity)
-	return PackedFloat64Array([torque.x, torque.y, torque.z, 0.0, 0.0, 0.0])
+	var torque := _cross(momentum, 3, velocity, 3)
+	return PackedFloat64Array([torque[0], torque[1], torque[2], 0.0, 0.0, 0.0])
+
+
+## The full gyroscopic wrench of Eq. 4, (l x w + p x v, p x w), in double precision.
+static func gyroscopic_wrench(momentum: PackedFloat64Array,
+		velocity: PackedFloat64Array) -> PackedFloat64Array:
+	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:
+		return PackedFloat64Array()
+	var spin_torque := _cross(momentum, 0, velocity, 0)
+	var linear_torque := _cross(momentum, 3, velocity, 3)
+	var force := _cross(momentum, 3, velocity, 0)
+	return PackedFloat64Array([spin_torque[0] + linear_torque[0],
+		spin_torque[1] + linear_torque[1], spin_torque[2] + linear_torque[2],
+		force[0], force[1], force[2]])
+
+
+static func _cross(a: PackedFloat64Array, a_offset: int, b: PackedFloat64Array,
+		b_offset: int) -> PackedFloat64Array:
+	return PackedFloat64Array([
+		a[a_offset + 1] * b[b_offset + 2] - a[a_offset + 2] * b[b_offset + 1],
+		a[a_offset + 2] * b[b_offset] - a[a_offset] * b[b_offset + 2],
+		a[a_offset] * b[b_offset + 1] - a[a_offset + 1] * b[b_offset],
+	])
 
 
 static func gravity_buoyancy_wrench(body_mass_kg: float, displaced_mass_kg: float,
@@ -521,40 +617,70 @@ static func _append_unique_point(points: PackedVector3Array, point: Vector3) -> 
 	points.append(point)
 
 
-static func potential_pressure_wrench(face_centers_m: PackedVector3Array,
+## Surface forces of Padilla, Segall & Sorkine-Hornung (arXiv 2601.13971), per face:
+## the face moves at zdot = v + w x c relative to the medium, and the fluid slips
+## past it at u_s = -(I - n n^T) zdot (Eq. 16). The flow stays attached where
+## <n, zdot/|zdot|> > cos(alpha), a face pushing into the fluid or turning off it
+## by less than alpha; behind that it is separated (Eq. 17). The printed Eq. 17
+## has the inequality the other way round, which contradicts its own
+## assumption (1) and "a larger alpha attaches more"; this way a sphere gets
+## C_D = 1/2, drag opposes motion and the Magnus force points along w x v.
+## Attached faces carry
+##   dynamic pressure  f = -1/2 rho |u_s|^2 A n                 (Eq. 20)
+##   skin friction     f = +1/2 C_f rho |u_s| A u_s              (Eq. 22)
+## with C_f = 0.0576 Re^-1/5, Re = rho |u_s| L / mu (Eq. 19). u_s is the fluid's
+## velocity relative to the face, so friction drags the body along it; the
+## printed minus sign would make friction accelerate the body.
+## Extension beyond the paper, whose forces are inertial and vanish at low
+## Reynolds numbers (honey): every wetted face also carries the Stokes traction
+## -k zdot A plus the torque -k c x (w x c) A, k = 3 mu / 2R with R = L / (2 sqrt(pi))
+## the radius of the sphere with the body's area. On a sphere they integrate
+## exactly to Stokes' drag 6 pi mu R v and torque 8 pi mu R^3 w; on any shape and
+## centre of mass they only dissipate (power -k A (|zdot|^2 + |w x c|^2)); and they
+## fade next to the inertial terms as Re grows (sphere C_D ~ 24/Re + 1/2).
+## Returns {pressure, friction, attached_faces}; friction holds both viscous terms.
+static func surface_wrench(face_centers_m: PackedVector3Array,
 			face_normals: PackedVector3Array, face_areas_m2: PackedFloat64Array,
-			slip_matrix: PackedFloat64Array, generalized_velocity: PackedFloat64Array,
-			fluid_density_kg_m3: float, separation_angle_rad: float,
-			wet_area_fractions := PackedFloat64Array(),
+			generalized_velocity: PackedFloat64Array, fluid_density_kg_m3: float,
+			dynamic_viscosity_pa_s: float, separation_angle_rad: float,
+			characteristic_length_m: float, wet_area_fractions := PackedFloat64Array(),
 			wet_area_centers_m := PackedVector3Array()) -> Dictionary:
 	var pressure := PackedFloat64Array()
 	pressure.resize(MATRIX_SIZE)
+	var friction := PackedFloat64Array()
+	friction.resize(MATRIX_SIZE)
 	if face_centers_m.size() == 0 or face_centers_m.size() != face_normals.size() \
 		or face_centers_m.size() != face_areas_m2.size() \
-		or slip_matrix.size() != face_centers_m.size() * 18 \
 		or (not wet_area_fractions.is_empty() \
 			and wet_area_fractions.size() != face_centers_m.size()) \
 		or (not wet_area_centers_m.is_empty() \
 			and wet_area_centers_m.size() != face_centers_m.size()) \
 		or generalized_velocity.size() != MATRIX_SIZE:
-		return {pressure = pressure, attached_faces = 0}
-	if not is_finite(fluid_density_kg_m3) or fluid_density_kg_m3 <= 0.0:
-		return {pressure = pressure, attached_faces = 0}
+		return {pressure = pressure, friction = friction, attached_faces = 0}
+	if not is_finite(fluid_density_kg_m3) or fluid_density_kg_m3 <= 0.0 \
+		or not is_finite(dynamic_viscosity_pa_s) or dynamic_viscosity_pa_s < 0.0 \
+		or not is_finite(characteristic_length_m):
+		return {pressure = pressure, friction = friction, attached_faces = 0}
 	if Native.enabled and _native != null:
-		return _native.potential_pressure_wrench(face_centers_m, face_normals, face_areas_m2,
-			slip_matrix, generalized_velocity, fluid_density_kg_m3, separation_angle_rad,
-			wet_area_fractions, wet_area_centers_m)
+		return _native.surface_wrench(face_centers_m, face_normals, face_areas_m2,
+			generalized_velocity, fluid_density_kg_m3, dynamic_viscosity_pa_s,
+			separation_angle_rad, characteristic_length_m, wet_area_fractions,
+			wet_area_centers_m)
 	var cos_separation := cos(clampf(separation_angle_rad, PI * 0.5, PI))
-	var body_relative_velocity := Vector3(generalized_velocity[3],
-		generalized_velocity[4], generalized_velocity[5])
-	var body_speed_squared := body_relative_velocity.length_squared()
-	if body_speed_squared <= 1.0e-16:
-		return {pressure = pressure, attached_faces = 0}
-	var incoming_flow_direction := -body_relative_velocity.normalized()
+	# 1/2 C_f rho |u_s| = blasius * |u_s|^(4/5), so the face force is that times A u_s.
+	var blasius := 0.0
+	var stokes := 0.0
+	if dynamic_viscosity_pa_s > 0.0 and characteristic_length_m > 0.0:
+		blasius = 0.0288 * fluid_density_kg_m3 \
+			* pow(fluid_density_kg_m3 * characteristic_length_m / dynamic_viscosity_pa_s, -0.2)
+		stokes = 3.0 * sqrt(PI) * dynamic_viscosity_pa_s / characteristic_length_m
+	var angular_velocity := Vector3(generalized_velocity[0], generalized_velocity[1],
+		generalized_velocity[2])
+	var linear_velocity := Vector3(generalized_velocity[3], generalized_velocity[4],
+		generalized_velocity[5])
 	var attached_faces := 0
 	for face_index in face_centers_m.size():
-		var face_center := face_centers_m[face_index]
-		var center := face_center if wet_area_centers_m.is_empty() \
+		var center := face_centers_m[face_index] if wet_area_centers_m.is_empty() \
 			else wet_area_centers_m[face_index]
 		var normal := face_normals[face_index]
 		var wet_fraction := 1.0 if wet_area_fractions.is_empty() else \
@@ -562,103 +688,24 @@ static func potential_pressure_wrench(face_centers_m: PackedVector3Array,
 		var area := face_areas_m2[face_index] * wet_fraction
 		if area <= 1.0e-12:
 			continue
-		var attached := normal.dot(incoming_flow_direction) >= cos_separation
-		if attached:
-			attached_faces += 1
-		var slip := Vector3.ZERO
-		var base := face_index * 18
-		for row in 3:
-			var value := 0.0
-			for col in MATRIX_SIZE:
-				value += slip_matrix[base + row * MATRIX_SIZE + col] * generalized_velocity[col]
-			slip[row] = value
-		var center_delta := center - face_center
-		if center_delta.length_squared() > 1.0e-16:
-			var angular_velocity := Vector3(generalized_velocity[0],
-				generalized_velocity[1], generalized_velocity[2])
-			var tangent_delta := angular_velocity.cross(center_delta)
-			slip -= tangent_delta - normal * normal.dot(tangent_delta)
-		var slip_speed := slip.length()
-		if attached:
-			var pressure_delta := 0.5 * fluid_density_kg_m3 \
-				* (body_speed_squared - slip_speed * slip_speed)
-			var pressure_force := -pressure_delta * area * normal
-			_accumulate_wrench(pressure, center.cross(pressure_force), pressure_force)
-	return {pressure = pressure, attached_faces = attached_faces}
-
-
-static func particle_drag_wrench(generalized_velocity: PackedFloat64Array,
-			dynamic_viscosity_pa_s: float, fluid_density_kg_m3: float, body_volume_m3: float,
-			wetted_area_fraction: float, body_surface_area_m2 := 0.0) -> PackedFloat64Array:
-	var wrench := PackedFloat64Array()
-	wrench.resize(MATRIX_SIZE)
-	if generalized_velocity.size() != MATRIX_SIZE or not is_finite(dynamic_viscosity_pa_s) \
-			or dynamic_viscosity_pa_s < 0.0 or not is_finite(fluid_density_kg_m3) \
-			or fluid_density_kg_m3 <= 0.0 \
-			or body_volume_m3 <= 0.0 or wetted_area_fraction <= 0.0:
-		return wrench
-	var radius := pow(3.0 * body_volume_m3 / (4.0 * PI), 1.0 / 3.0)
-	var wetted := clampf(wetted_area_fraction, 0.0, 1.0)
-	var equivalent_sphere_area := 4.0 * PI * radius * radius
-	var projected_sphere_area := PI * radius * radius
-	var measured_surface_area := body_surface_area_m2 if is_finite(body_surface_area_m2) \
-		and body_surface_area_m2 > 0.0 else equivalent_sphere_area
-	var sphericity := clampf(equivalent_sphere_area / measured_surface_area, 0.026, 1.0)
-	var speed := Vector3(generalized_velocity[3], generalized_velocity[4],
-		generalized_velocity[5]).length()
-	var reynolds := INF if dynamic_viscosity_pa_s == 0.0 else \
-		2.0 * radius * fluid_density_kg_m3 * speed / dynamic_viscosity_pa_s
-	var coefficient_a := exp(2.3288 - 6.4581 * sphericity + 2.4486 * sphericity * sphericity)
-	var coefficient_b := 0.0964 + 0.5565 * sphericity
-	var coefficient_c := exp(4.905 - 13.8944 * sphericity + 18.4222 * sphericity * sphericity \
-		- 10.2599 * sphericity * sphericity * sphericity)
-	var coefficient_d := exp(1.4681 + 12.2584 * sphericity - 20.7322 * sphericity * sphericity \
-		+ 15.8855 * sphericity * sphericity * sphericity)
-	var drag_magnitude := 0.0
-	if speed > 1.0e-12:
-		if dynamic_viscosity_pa_s == 0.0:
-			drag_magnitude = 0.5 * fluid_density_kg_m3 * speed * speed \
-				* projected_sphere_area * coefficient_c * wetted
-		else:
-			if reynolds < 1.0e-8:
-				drag_magnitude = 6.0 * PI * dynamic_viscosity_pa_s * radius \
-					* speed * wetted
-			else:
-				var drag_coefficient := 24.0 / reynolds \
-					* (1.0 + coefficient_a * pow(reynolds, coefficient_b)) \
-					+ coefficient_c / (1.0 + coefficient_d / reynolds)
-				drag_magnitude = 0.5 * fluid_density_kg_m3 * speed * speed \
-					* projected_sphere_area * drag_coefficient * wetted
-	var linear_velocity := Vector3(generalized_velocity[3], generalized_velocity[4],
-		generalized_velocity[5])
-	var drag_force := -linear_velocity.normalized() * drag_magnitude \
-		if speed > 1.0e-12 else Vector3.ZERO
-	var angular_velocity := Vector3(generalized_velocity[0], generalized_velocity[1],
-		generalized_velocity[2])
-	var angular_speed := angular_velocity.length()
-	var rotational_drag_torque := 0.0
-	if angular_speed > 1.0e-12 and dynamic_viscosity_pa_s > 0.0:
-		var rotational_reynolds := fluid_density_kg_m3 * radius * radius * angular_speed \
-			/ dynamic_viscosity_pa_s
-		if rotational_reynolds < 6.03:
-			rotational_drag_torque = 8.0 * PI * dynamic_viscosity_pa_s \
-				* pow(radius, 3.0) * angular_speed
-		else:
-			var torque_coefficient := 0.0
-			if rotational_reynolds < 20.37:
-				torque_coefficient = 5.32 / sqrt(rotational_reynolds) \
-					+ 37.2 / rotational_reynolds
-			else:
-				torque_coefficient = 6.45 / sqrt(rotational_reynolds) \
-					+ 32.1 / rotational_reynolds
-			rotational_drag_torque = 0.5 * fluid_density_kg_m3 * pow(radius, 5.0) \
-				* torque_coefficient * angular_speed * angular_speed
-		rotational_drag_torque *= wetted
-	for axis in 3:
-		wrench[axis] = -rotational_drag_torque * angular_velocity[axis] / angular_speed \
-			if angular_speed > 1.0e-12 else 0.0
-		wrench[axis + 3] = drag_force[axis]
-	return wrench
+		var turning := angular_velocity.cross(center)
+		if stokes > 0.0:
+			var stokes_drag := (-stokes * area) * (linear_velocity + turning)
+			var stokes_spin := (-stokes * area) * turning
+			_accumulate_wrench(friction, center.cross(stokes_drag + stokes_spin), stokes_drag)
+		var surface_velocity := linear_velocity + turning
+		var speed := surface_velocity.length()
+		if speed <= 1.0e-12 or normal.dot(surface_velocity) <= cos_separation * speed:
+			continue
+		attached_faces += 1
+		var slip := normal * normal.dot(surface_velocity) - surface_velocity
+		var slip_squared := slip.length_squared()
+		var pressure_force := (-0.5 * fluid_density_kg_m3 * slip_squared * area) * normal
+		_accumulate_wrench(pressure, center.cross(pressure_force), pressure_force)
+		if blasius > 0.0 and slip_squared > 0.0:
+			var friction_force := (blasius * pow(slip_squared, 0.4) * area) * slip
+			_accumulate_wrench(friction, center.cross(friction_force), friction_force)
+	return {pressure = pressure, friction = friction, attached_faces = attached_faces}
 
 
 static func _accumulate_wrench(wrench: PackedFloat64Array, torque: Vector3, force: Vector3) -> void:
@@ -668,6 +715,24 @@ static func _accumulate_wrench(wrench: PackedFloat64Array, torque: Vector3, forc
 	wrench[3] += force.x
 	wrench[4] += force.y
 	wrench[5] += force.z
+
+
+## Extension beyond the paper, whose K is constant: when the added mass
+## changes because the body enters or leaves the liquid, the fluid's share of
+## the momentum is either taken up (entry: K u is conserved, von Karman's
+## slamming deceleration) or left behind in the wake (exit: the velocity is
+## kept). The rule takes whichever ends with less kinetic energy, so a change
+## of K never creates energy.
+static func added_mass_transition(velocity: PackedFloat64Array,
+		old_tensor: PackedFloat64Array, new_tensor: PackedFloat64Array,
+		new_inverse: PackedFloat64Array) -> PackedFloat64Array:
+	var momentum := matrix_vector_multiply(old_tensor, velocity)
+	var conserved := matrix_vector_multiply(new_inverse, momentum)
+	var kept_momentum := matrix_vector_multiply(new_tensor, velocity)
+	if conserved.size() != MATRIX_SIZE or kept_momentum.size() != MATRIX_SIZE:
+		return velocity
+	return conserved if vector_dot(momentum, conserved) < vector_dot(velocity, kept_momentum) \
+		else velocity
 
 
 static func semi_implicit_momentum_step(momentum: PackedFloat64Array,

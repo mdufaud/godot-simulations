@@ -6,6 +6,7 @@ const VoronoiFractureScript := preload("res://scripts/destruction/voronoi_fractu
 func _initialize() -> void:
 	_test_seed_points_are_deterministic()
 	_test_fracture_cells_match_seeds()
+	_test_fracture_cells_are_exact()
 	_finish("voronoi_fracture")
 
 
@@ -58,3 +59,36 @@ func _test_fracture_cells_match_seeds() -> void:
 			_check(neighbour != seed_index and neighbour >= 0 and neighbour < seeds.size(),
 				"cell neighbour index is valid")
 	_check(seen.size() == seeds.size(), "all fracture seed indices are present")
+
+
+# Every cell must be the true Voronoi cell: each of its vertices is at least as
+# close to its own seed as to any other. Run at wall-like counts, where cells have
+# more neighbours than the nearest-16 shortcut alone can clip.
+func _test_fracture_cells_are_exact() -> void:
+	var cases := [[Vector3(5.6, 4.0, 0.7), 110], [Vector3(5.0, 3.6, 0.18), 180],
+		[Vector3(3.0, 3.0, 3.0), 120]]
+	for case in cases:
+		var size: Vector3 = case[0]
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 0x5EED_F00D
+		var seeds: PackedVector3Array = VoronoiFractureScript.seed_points(
+			size, case[1], Vector3.ZERO, 0.6, rng)
+		var start := Time.get_ticks_usec()
+		var cells: Array = VoronoiFractureScript.fracture_box(size, seeds)
+		var elapsed_ms := float(Time.get_ticks_usec() - start) / 1000.0
+		var bad_vertices := 0
+		for cell_variant in cells:
+			var cell: Dictionary = cell_variant
+			var own: Vector3 = seeds[cell.seed]
+			for point in cell.points:
+				var world: Vector3 = point + cell.center
+				var own_d := world.distance_to(own)
+				for other in seeds:
+					if world.distance_to(other) + 1e-3 < own_d:
+						bad_vertices += 1
+						break
+		_check(cells.size() == seeds.size(), "%s: every seed produced a cell" % size)
+		_check(bad_vertices == 0,
+			"%s with %d seeds: %d cell vertices lie inside another seed's cell" % [
+				size, seeds.size(), bad_vertices])
+		print("voronoi %s x%d: %.1f ms" % [size, seeds.size(), elapsed_ms])

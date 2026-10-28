@@ -3,6 +3,50 @@ layout(std430, set = 0, binding = 8) readonly buffer SegmentBuffer {
 };
 
 
+// One segment's reverse drift: the Mixwell brush stepped back from end to start
+// under the segment's mask, with the slip images and periodic copies of the
+// active boundary.
+vec2 apply_segment(vec2 coordinate, vec2 start, vec2 end, float epsilon,
+		vec2 operation_period, vec2 relative_period) {
+	float influence = operation_period.x > 1.0e-30
+			? operation_segment_influence(coordinate, start, end, epsilon,
+					params.field.z, operation_period)
+			: slip_segment_influence(coordinate, start, end, epsilon, params.field.z);
+	if (influence <= 0.0) {
+		return coordinate;
+	}
+	vec2 segment_delta = start - end;
+	float remaining = length(segment_delta);
+	if (remaining <= 1.0e-30) {
+		return coordinate;
+	}
+	vec2 direction = segment_delta / remaining;
+	vec2 position = end;
+	vec2 relative = operation_delta_with_period(coordinate, position, relative_period);
+	float initial_length = remaining;
+	for (int step_index = 0; step_index < 8192; step_index++) {
+		if (remaining <= max(1.0e-12, initial_length * 1.0e-14)) {
+			break;
+		}
+		float relative_length = length(relative);
+		float step_length = min(remaining, params.field.y * max(epsilon, relative_length));
+		vec2 midpoint_relative = relative + slip_segment_velocity(
+			relative, position, direction, epsilon)
+				* step_length * 0.5;
+		vec2 delta_relative = slip_segment_velocity(
+			midpoint_relative, position, direction, epsilon);
+		relative += delta_relative * step_length;
+		position += direction * step_length;
+		remaining -= step_length;
+	}
+	vec2 mapped = operation_period.x > 1.0e-30
+			? coordinate + operation_delta_with_period(position + relative,
+					coordinate, operation_period)
+			: periodic_wrap(position + relative);
+	return periodic_wrap(mix(coordinate, mapped, influence));
+}
+
+
 vec2 apply_segments(vec2 coordinate, int segment_base, int segment_count,
 		vec2 operation_period) {
 	vec2 relative_period = operation_period.x > 1.0e-30 ? operation_period
@@ -13,46 +57,8 @@ vec2 apply_segments(vec2 coordinate, int segment_base, int segment_count,
 		}
 		int buffer_index = (segment_base + segment_index) * 2;
 		vec4 encoded = segment_data[buffer_index];
-		float epsilon = segment_data[buffer_index + 1].x;
-		vec2 start = encoded.xy;
-		vec2 end = encoded.zw;
-		float influence = operation_period.x > 1.0e-30
-				? operation_segment_influence(coordinate, start, end, epsilon,
-						params.field.z, operation_period)
-				: slip_segment_influence(coordinate, start, end, epsilon, params.field.z);
-		if (influence <= 0.0) {
-			continue;
-		}
-		vec2 segment_delta = start - end;
-		float remaining = length(segment_delta);
-		if (remaining <= 1.0e-30) {
-			continue;
-		}
-		vec2 direction = segment_delta / remaining;
-		vec2 position = end;
-		vec2 relative = operation_delta_with_period(coordinate, position,
-				relative_period);
-		float initial_length = remaining;
-		for (int step_index = 0; step_index < 8192; step_index++) {
-			if (remaining <= max(1.0e-12, initial_length * 1.0e-14)) {
-				break;
-			}
-			float relative_length = length(relative);
-			float step_length = min(remaining, params.field.y * max(epsilon, relative_length));
-			vec2 midpoint_relative = relative + slip_segment_velocity(
-				relative, position, direction, epsilon)
-					* step_length * 0.5;
-			vec2 delta_relative = slip_segment_velocity(
-				midpoint_relative, position, direction, epsilon);
-			relative += delta_relative * step_length;
-			position += direction * step_length;
-			remaining -= step_length;
-		}
-		vec2 mapped = operation_period.x > 1.0e-30
-				? coordinate + operation_delta_with_period(position + relative,
-						coordinate, operation_period)
-				: periodic_wrap(position + relative);
-		coordinate = periodic_wrap(mix(coordinate, mapped, influence));
+		coordinate = apply_segment(coordinate, encoded.xy, encoded.zw,
+				segment_data[buffer_index + 1].x, operation_period, relative_period);
 	}
 	return coordinate;
 }

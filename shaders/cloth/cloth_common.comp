@@ -61,7 +61,10 @@ vec3 wind_at(vec3 p) {
 	}
 	float t = params.wind_a.w;
 	float gust = params.wind_b.x;
-	vec3 q = p * params.wind_b.y - w * (t * 0.12);
+	// Advect in metres, then scale to noise space: wind_b.y is a spatial frequency
+	// (1/m), so subtracting w*t after scaling made the pattern drift at
+	// 0.12*|w|/freq, i.e. faster as the Turbulence slider went down.
+	vec3 q = (p - w * (t * 0.12)) * params.wind_b.y;
 
 	float n = 0.5 * sin(q.x * 1.7 + t * 1.3)
 			+ 0.3 * sin(q.z * 2.3 - t * 1.9 + 1.3)

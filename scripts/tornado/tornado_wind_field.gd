@@ -3,17 +3,33 @@ extends RefCounted
 
 ## Analytical tornado wind field.
 ## Single source of truth for the vortex math — shaders/tornado/tornado_wind.gdshaderinc
-## mirrors wind_at() line-for-line and must stay in sync.
+## mirrors wind_at() line-for-line and must stay in sync (tests/tornado_wind_parity_test.gd).
 ##
-## Profiles: Burgers-Rott (Burgers 1948 / Rott 1958), Sullivan two-cell (Sullivan 1959)
-## and a Vatistas n=1 tangential core (Vatistas et al. 1991; same shape as Burnham-Hallock).
-## Radial inflow peaks just outside the core radius and is ground-weighted; the near-ground
-## annular updraft jet follows the corner-flow picture of Lewellen & Lewellen (2007).
-## For the model family review see Gillmeier, Sterling, Hemida & Baker, JWEIA 174 (2018).
+## Tangential profiles: Burgers-Rott (Burgers 1948 / Rott 1958), Sullivan two-cell
+## (Sullivan 1959) and Vatistas n=1 (Vatistas et al. 1991), each normalised to u_max at
+## the radius of maximum wind (r_bar = 1). Model review: Gillmeier, Sterling, Hemida &
+## Baker, JWEIA 174 (2018).
+##
+## The radial and vertical winds come from a Stokes stream function, so the flow
+## conserves mass exactly (div u = 0) for every model, flare and height:
+##   psi = u_max * s(y)^2 * a_bar * Phi(rho) * T(rho) * L(y),  rho = r / s(y)
+##   v_z =  (1/r) dpsi/dr,  v_r = -(1/r) dpsi/dy
+## with s(y) the flared core radius. Phi carries the published near-core structure:
+## Burgers-Rott rho^2 (v_r = -a rho, v_z = 2 a z near the axis and ground, with
+## a = a_bar * INFLOW_ONSET), Sullivan's two-cell rho^2 - (3/R^2)(1 - e^-R^2 rho^2)
+## (axial downdraft inside rho ~ 0.42) and Vatistas' rho^2/(1 + rho^2); away from
+## the core it decays like Baker & Sterling's (2017) model, so the inflow peaks at
+## INFLOW_PEAK_R and fades outward. L(y) replaces the published models' unbounded
+## linear z: it rises at INFLOW_ONSET per core radius at the ground (the near-ground
+## corner flow that lofts debris), saturates at UPDRAFT_DEPTH, and closes to zero at
+## the funnel top, where the updraft turns into outflow. T(rho) closes the
+## circulation between OUTER_TAPER_R and INFLUENCE_FACTOR instead of cutting the
+## field off. The vortex axis leans with height (centerline_at); the vertical wind
+## follows the lean (axis_direction_at), which keeps the field divergence-free.
 ##
 ## Optimisation: bake_wind_grid() precomputes (v_r, v_t, v_z) on a 2D (r_bar, y)
-## grid once per frame.  Debris then calls sample_wind_grid() — a cheap bilinear
-## lookup instead of evaluating exp/smoothstep per-body per-tick.
+## grid once per parameter change. Debris then call sample_wind_grid() — a cheap
+## bilinear lookup instead of evaluating the field per body per tick.
 
 enum Model { VATISTAS, BURGERS_ROTT, SULLIVAN }
 
@@ -27,53 +43,99 @@ const SULLIVAN_RMW := 2.4976
 ## the tangential speed at r_bar = 1 (the RMW convention of tornado literature).
 const BR_ALPHA := 1.2564312
 const BR_NORM := 1.3979525
-const R_BAR_MAX := 4.0
-## Inflow shape: (r/1.5)*exp(1 - r/1.5) peaks at INFLOW_PEAK_R (just outside the RMW,
-## as in tornado LES) with magnitude a_bar * R_BAR_MAX at the surface, then decays.
+const SULLIVAN_TABLE_SIZE := 256
+const SULLIVAN_TABLE_SPAN := 8.0
+## Radius (in core radii) where the radial flow peaks: just outside the RMW, as in
+## tornado LES. Phi = rho^2 / (1 + (rho / INFLOW_PEAK_R)^2) has Phi/rho maximal here.
 const INFLOW_PEAK_R := 1.5
-## Aloft the inflow relaxes to this fraction of its surface value (LES: near-ground max).
-const INFLOW_GROUND_FLOOR := 0.45
-const Z_BAR_CAP := 6.0
+## dL/dy at the ground, per core radius: the surface inflow is a_bar * INFLOW_ONSET *
+## Phi/rho, i.e. 0.75 * INFLOW_ONSET * a_bar * u_max at INFLOW_PEAK_R.
+const INFLOW_ONSET := 5.3
+## Height (in core radii) of L's plateau: bounds the updraft at 2 a_bar UPDRAFT_DEPTH
+## u_max on the axis for Burgers-Rott (twice that, downward, for Sullivan's eye).
+const UPDRAFT_DEPTH := 3.0
+## psi closes to zero from this fraction of the funnel height to the top.
+const TOP_CLOSE_START := 0.6
+## psi closes to zero between these radii (core radii); the field is 0 beyond.
+const OUTER_TAPER_R := 6.0
 const INFLUENCE_FACTOR := 8.0
 
 ## Wind-grid resolution: radial × vertical samples.
 const WIND_GRID_R := 32
 const WIND_GRID_Y := 64
 
-var model: int = Model.BURGERS_ROTT
-var u_max := 85.0
-var r_core0 := 45.0
-var height := 550.0
-var flare := 2.5
-var a_bar := 0.15
-var swirl_sign := 1.0
+## Bumped by every write to a wind input below, so the baked grid and the
+## renderer's constant uniforms refresh only when a parameter actually changes.
+var revision := 0
+var model: int = Model.BURGERS_ROTT:
+	set(value):
+		model = value
+		revision += 1
+var u_max := 85.0:
+	set(value):
+		u_max = value
+		revision += 1
+var r_core0 := 45.0:
+	set(value):
+		r_core0 = value
+		revision += 1
+var height := 550.0:
+	set(value):
+		height = value
+		revision += 1
+var flare := 2.5:
+	set(value):
+		flare = value
+		revision += 1
+var a_bar := 0.15:
+	set(value):
+		a_bar = value
+		revision += 1
+var swirl_sign := 1.0:
+	set(value):
+		swirl_sign = value
+		revision += 1
 var base_pos := Vector3.ZERO
 var slice_offsets := PackedVector2Array()
 
-var _sullivan_curve: Curve
-var _sullivan_tex: CurveTexture
+## Normalised Sullivan tangential profile, SULLIVAN_TABLE_SIZE samples over
+## r_bar in [0, SULLIVAN_TABLE_SPAN]. The CPU interpolates these exact values and
+## the GPU filters the same texels (half floats, filterable on every device).
+var _sullivan_table := PackedFloat32Array()
+var _sullivan_tex: ImageTexture
+## The integral behind the table is the same for every field: built once.
+static var _shared_sullivan_image: Image
 
 ## Precomputed wind grid: (v_r, v_t, v_z) in m/s at (r_bar, y) nodes.
 ## Layout: row-major, index = yi * WIND_GRID_R + ri.
 var _wind_grid := PackedVector3Array()
+var _baked_revision := -1
 
 
 func _init() -> void:
 	slice_offsets.resize(NUM_SLICES)
-	_sullivan_curve = build_sullivan_profile()
-	_sullivan_tex = CurveTexture.new()
-	_sullivan_tex.texture_mode = CurveTexture.TEXTURE_MODE_RED
-	_sullivan_tex.width = 256
-	_sullivan_tex.curve = _sullivan_curve
+	if _shared_sullivan_image == null:
+		_shared_sullivan_image = build_sullivan_image()
+	var image := _shared_sullivan_image
+	_sullivan_tex = ImageTexture.create_from_image(image)
+	_sullivan_table.resize(SULLIVAN_TABLE_SIZE)
+	for i in SULLIVAN_TABLE_SIZE:
+		_sullivan_table[i] = image.get_pixel(i, 0).r
 	_wind_grid.resize(WIND_GRID_R * WIND_GRID_Y)
 
 
-## Bakes the normalized Sullivan tangential profile v_theta(r_bar) for r_bar in [0, 8].
+## Bakes the normalised Sullivan tangential profile v_theta(r_bar), r_bar in
+## [0, SULLIVAN_TABLE_SPAN], into a 1-row half-float image.
 ## H(x) = int_0^x exp(-x' + 3*int_0^x' (1-e^-t)/t dt) dx'; the raw profile peaks at
 ## SULLIVAN_RMW viscous core radii, so the bake samples H(SULLIVAN_RMW^2 * r_bar^2)
-## and the baked curve peaks at r_bar = 1 like the other models.
-static func build_sullivan_profile() -> Curve:
-	var dx := 0.01
+## and normalises by the value at r_bar = 1, like the other models.
+##
+## Texel i holds r_bar = SPAN * i / (SIZE - 1): the GLSL mirror reads it at
+## u = (r_bar / SPAN) * (SIZE - 1) / SIZE + 0.5 / SIZE, i.e. exactly between texel
+## centres, which is the interpolation sullivan_profile() does on the CPU.
+static func build_sullivan_image() -> Image:
+	var dx := 0.005
+	# The integrand ~ x^3 e^-x is spent by x = 64: past it H is H(inf) to float precision.
 	var x_max := 64.0
 	var n := int(x_max / dx)
 	var g := 0.0
@@ -86,31 +148,35 @@ static func build_sullivan_profile() -> Curve:
 		g += 3.0 * (1.0 - exp(-x)) / x * dx
 		h += exp(-x + g) * dx
 		h_samples[i + 1] = h
-	var h_inf := h
-	var points := 128
-	var values := PackedFloat64Array()
-	values.resize(points + 1)
-	var v_peak := 0.0
-	var rmw2 := SULLIVAN_RMW * SULLIVAN_RMW
-	for i in points + 1:
-		var r_bar := 8.0 * i / points
-		var v := 0.0
-		if r_bar > 1e-4:
-			var idx := mini(int(rmw2 * r_bar * r_bar / dx), n)
-			v = h_samples[idx] / (SULLIVAN_RMW * r_bar * h_inf)
-		values[i] = v
-		v_peak = maxf(v_peak, v)
-	var curve := Curve.new()
-	curve.min_value = 0.0
-	curve.max_value = 1.0
-	curve.max_domain = 8.0
-	curve.bake_resolution = 256
-	for i in points + 1:
-		curve.add_point(Vector2(8.0 * i / points, values[i] / v_peak))
-	return curve
+	var v_peak := _sullivan_raw(1.0, h_samples, dx)
+	var image := Image.create_empty(SULLIVAN_TABLE_SIZE, 1, false, Image.FORMAT_RH)
+	for i in SULLIVAN_TABLE_SIZE:
+		var r_bar := SULLIVAN_TABLE_SPAN * i / float(SULLIVAN_TABLE_SIZE - 1)
+		image.set_pixel(i, 0, Color(_sullivan_raw(r_bar, h_samples, dx) / v_peak, 0.0, 0.0))
+	return image
 
 
-func get_sullivan_texture() -> CurveTexture:
+## H(R^2 r^2) / (R r) from the tabulated H, interpolated linearly in x.
+static func _sullivan_raw(r_bar: float, h_samples: PackedFloat64Array, dx: float) -> float:
+	if r_bar < 1e-4:
+		return 0.0
+	var x := SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar / dx
+	var h := h_samples[h_samples.size() - 1]
+	if x < h_samples.size() - 1:
+		var i := int(x)
+		h = lerpf(h_samples[i], h_samples[i + 1], x - i)
+	return h / (SULLIVAN_RMW * r_bar)
+
+
+## Normalised Sullivan tangential speed at r_bar (peak 1 at r_bar = 1), the same
+## linear interpolation the GPU's filtered lookup performs.
+func sullivan_profile(r_bar: float) -> float:
+	var x := clampf(r_bar / SULLIVAN_TABLE_SPAN, 0.0, 1.0) * (SULLIVAN_TABLE_SIZE - 1)
+	var i := mini(int(x), SULLIVAN_TABLE_SIZE - 2)
+	return lerpf(_sullivan_table[i], _sullivan_table[i + 1], x - i)
+
+
+func get_sullivan_texture() -> Texture2D:
 	return _sullivan_tex
 
 
@@ -118,11 +184,40 @@ func core_radius_at(y: float) -> float:
 	return r_core0 * (1.0 + flare * pow(clampf(y / height, 0.0, 1.0), 1.5))
 
 
+## d core_radius_at / dy (0 outside the funnel, where the radius is clamped).
+func core_radius_slope_at(y: float) -> float:
+	if y <= 0.0 or y >= height:
+		return 0.0
+	return r_core0 * flare * 1.5 * sqrt(y / height) / height
+
+
+## Vortex axis at height y: a Catmull-Rom spline through the slice offsets, so its
+## slope (centerline_slope_at, which the wind follows) is continuous.
 func centerline_at(y: float) -> Vector3:
+	var off := _axis_offset(y, false)
+	return base_pos + Vector3(off.x, y, off.y)
+
+
+## d(axis x, z)/dy: how far the axis leans per metre of height (0 outside the funnel).
+func centerline_slope_at(y: float) -> Vector2:
+	if y <= 0.0 or y >= height:
+		return Vector2.ZERO
+	return _axis_offset(y, true)
+
+
+func _axis_offset(y: float, derivative: bool) -> Vector2:
 	var t := clampf(y / height, 0.0, 1.0) * (NUM_SLICES - 1)
 	var i := clampi(int(t), 0, NUM_SLICES - 2)
-	var off := slice_offsets[i].lerp(slice_offsets[i + 1], t - i)
-	return base_pos + Vector3(off.x, y, off.y)
+	var u := t - i
+	var p0 := slice_offsets[maxi(i - 1, 0)]
+	var p1 := slice_offsets[i]
+	var p2 := slice_offsets[i + 1]
+	var p3 := slice_offsets[mini(i + 2, NUM_SLICES - 1)]
+	var c2 := 2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3
+	var c3 := -p0 + 3.0 * p1 - 3.0 * p2 + p3
+	if derivative:
+		return 0.5 * ((p2 - p0) + 2.0 * c2 * u + 3.0 * c3 * u * u) * ((NUM_SLICES - 1) / height)
+	return 0.5 * (2.0 * p1 + (p2 - p0) * u + c2 * u * u + c3 * u * u * u)
 
 
 func influence_radius(y: float) -> float:
@@ -152,55 +247,21 @@ func get_shader_centerline() -> PackedVector3Array:
 
 # ── Precomputed wind grid ────────────────────────────────────────────────────
 
-## Rebuilds the cylindrical wind grid.  Call once per frame after parameters
-## (u_max, a_bar, model, etc.) may have changed.  Cost: ~2K vortex evaluations.
+## Rebuilds the cylindrical wind grid when a wind input (u_max, a_bar, model,
+## etc.) changed since the last bake; otherwise returns at once, so calling it
+## every frame costs nothing. A rebuild is ~2K vortex evaluations in GDScript.
+## The grid does not depend on base_pos or the centerline.
 func bake_wind_grid() -> void:
+	if _baked_revision == revision:
+		return
+	_baked_revision = revision
 	var inv_gr: float = 1.0 / (WIND_GRID_R - 1)
 	var inv_gy: float = 1.0 / (WIND_GRID_Y - 1)
-
 	for yi in WIND_GRID_Y:
 		var y := height * yi * inv_gy
-		var r_core := core_radius_at(y)
-		var z_bar := minf(y / r_core, Z_BAR_CAP)
-		var z_eff := Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar))
-		var inflow_z := INFLOW_GROUND_FLOOR \
-			+ (1.0 - INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar)
-		var top_fade := 1.0 - smoothstep(0.85 * height, height, y)
-
 		for ri in WIND_GRID_R:
 			var r_bar := INFLUENCE_FACTOR * ri * inv_gr
-			var r_safe := maxf(r_bar, 1e-3)
-			var inflow_r := (r_bar / INFLOW_PEAK_R) * exp(1.0 - r_bar / INFLOW_PEAK_R)
-
-			var v_t := 0.0
-			var v_r := 0.0
-			var v_z := 0.0
-			match model:
-				Model.VATISTAS:
-					v_t = 2.0 * r_bar / (1.0 + r_bar * r_bar)
-				Model.BURGERS_ROTT:
-					v_t = BR_NORM * (1.0 - exp(-BR_ALPHA * r_bar * r_bar)) / r_safe
-					v_r = -a_bar * R_BAR_MAX * inflow_r * inflow_z
-					v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
-				Model.SULLIVAN:
-					var e := exp(-SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
-					v_t = _sullivan_curve.sample_baked(r_bar)
-					v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z
-						+ (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
-					v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) \
-						* exp(-0.15 * SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
-
-			# Corner flow (Lewellen): annular near-ground updraft jet at the RMW.
-			if model != Model.VATISTAS:
-				var dr := (r_bar - 1.0) / 0.45
-				v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar)
-
-			var fade := top_fade * (1.0 - smoothstep(6.0, 8.0, r_bar))
-			v_t *= fade
-			v_r *= fade
-			v_z *= fade
-
-			_wind_grid[yi * WIND_GRID_R + ri] = Vector3(v_r, v_t, v_z) * u_max
+			_wind_grid[yi * WIND_GRID_R + ri] = cylindrical_wind(r_bar, y) * u_max
 
 
 ## Bilinear lookup in the precomputed grid.
@@ -232,6 +293,56 @@ static func tangent_from_radial(r_dir_x: float, r_dir_z: float, vortex_sign: flo
 	return Vector2(vortex_sign * r_dir_z, -vortex_sign * r_dir_x)
 
 
+## Normalised tangential speed of the active model at r_bar (peak 1 at r_bar = 1).
+func tangential_profile(r_bar: float) -> float:
+	match model:
+		Model.VATISTAS:
+			return 2.0 * r_bar / (1.0 + r_bar * r_bar)
+		Model.SULLIVAN:
+			return sullivan_profile(r_bar)
+	return BR_NORM * (1.0 - exp(-BR_ALPHA * r_bar * r_bar)) / maxf(r_bar, 1e-3)
+
+
+## (Phi/rho, Phi'/rho) of the active model: both finite on the axis.
+func _radial_shape(r_bar: float) -> Vector2:
+	var peak := 1.0 if model == Model.VATISTAS else INFLOW_PEAK_R
+	var d := 1.0 + r_bar * r_bar / (peak * peak)
+	var phi_over := r_bar / d
+	var dphi_over := 2.0 / (d * d)
+	if model == Model.SULLIVAN:
+		var e := exp(-SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar)
+		phi_over -= SULLIVAN_B / (SULLIVAN_RMW * SULLIVAN_RMW) * (1.0 - e) / maxf(r_bar, 1e-6)
+		dphi_over -= 2.0 * SULLIVAN_B * e
+	return Vector2(phi_over, dphi_over)
+
+
+## (v_r, v_theta, v_z) / u_max at r_bar core radii from the axis, height y.
+## v_r and v_z derive from psi (see the class doc), so they are exactly
+## divergence-free; v_theta(r_bar, y) is axisymmetric and adds no divergence.
+func cylindrical_wind(r_bar: float, y: float) -> Vector3:
+	if y < 0.0 or y > height or r_bar > INFLUENCE_FACTOR:
+		return Vector3.ZERO
+	var s := core_radius_at(y)
+	var ds := core_radius_slope_at(y)
+	# Outer taper T(rho) and its derivative.
+	var taper_t := clampf((r_bar - OUTER_TAPER_R) / (INFLUENCE_FACTOR - OUTER_TAPER_R), 0.0, 1.0)
+	var taper := 1.0 - taper_t * taper_t * (3.0 - 2.0 * taper_t)
+	var dtaper := -6.0 * taper_t * (1.0 - taper_t) / (INFLUENCE_FACTOR - OUTER_TAPER_R)
+	# Height function L(y) and dL/dy.
+	var rise := exp(-INFLOW_ONSET * y / (UPDRAFT_DEPTH * r_core0))
+	var close_t := clampf((y - TOP_CLOSE_START * height) / ((1.0 - TOP_CLOSE_START) * height), 0.0, 1.0)
+	var close := 1.0 - close_t * close_t * (3.0 - 2.0 * close_t)
+	var dclose := -6.0 * close_t * (1.0 - close_t) / ((1.0 - TOP_CLOSE_START) * height)
+	var level := UPDRAFT_DEPTH * (1.0 - rise) * close
+	var dlevel := (INFLOW_ONSET / r_core0) * rise * close + UPDRAFT_DEPTH * (1.0 - rise) * dclose
+	var shape := _radial_shape(r_bar)
+	var v_z := a_bar * level * (shape.y * taper + shape.x * dtaper)
+	var v_r := -a_bar * (ds * level * (2.0 * taper * shape.x - r_bar * taper * shape.y
+		- r_bar * shape.x * dtaper) + s * dlevel * taper * shape.x)
+	var fade := (1.0 - smoothstep(0.85 * height, height, y)) * taper
+	return Vector3(v_r, tangential_profile(r_bar) * fade, v_z)
+
+
 func wind_at(p: Vector3) -> Vector3:
 	if p.y > height or p.y < 0.0:
 		return Vector3.ZERO
@@ -242,48 +353,19 @@ func wind_at(p: Vector3) -> Vector3:
 	var r_bar := r / r_core
 	if r_bar > INFLUENCE_FACTOR:
 		return Vector3.ZERO
-	var z_bar := minf(p.y / r_core, Z_BAR_CAP)
-	# Fast near-ground onset saturating at Z_BAR_CAP: the papers' v_z ~ z is too weak
-	# in the corner-flow region to ever loft debris (models are inviscid, no boundary layer).
-	var z_eff := Z_BAR_CAP * (1.0 - exp(-0.8 * z_bar))
-	# Ground-weighted inflow: full surface strength, relaxing aloft (LES corner region).
-	var inflow_z := INFLOW_GROUND_FLOOR + (1.0 - INFLOW_GROUND_FLOOR) * exp(-0.9 * z_bar)
-	var r_safe := maxf(r_bar, 1e-3)
-	var inflow_r := (r_bar / INFLOW_PEAK_R) * exp(1.0 - r_bar / INFLOW_PEAK_R)
-	var sv2 := SULLIVAN_RMW * SULLIVAN_RMW * r_bar * r_bar
-
-	var v_t := 0.0
-	var v_r := 0.0
-	var v_z := 0.0
-	match model:
-		# Vatistas n=1 tangential core, radial/vertical both zero: debris orbit but
-		# never loft under this profile.
-		Model.VATISTAS:
-			v_t = 2.0 * r_bar / (1.0 + r_bar * r_bar)
-		Model.BURGERS_ROTT:
-			v_t = BR_NORM * (1.0 - exp(-BR_ALPHA * r_bar * r_bar)) / r_safe
-			v_r = -a_bar * R_BAR_MAX * inflow_r * inflow_z
-			v_z = 2.0 * a_bar * z_eff * exp(-0.25 * r_bar * r_bar)
-		Model.SULLIVAN:
-			var e := exp(-sv2)
-			v_t = _sullivan_curve.sample_baked(r_bar)
-			v_r = a_bar * (-R_BAR_MAX * inflow_r * inflow_z + (SULLIVAN_B / (SULLIVAN_RMW * r_safe)) * (1.0 - e))
-			v_z = 2.0 * a_bar * z_eff * (1.0 - SULLIVAN_B * e) * exp(-0.15 * sv2)
-
-	# Corner flow (Lewellen): annular near-ground updraft jet at the core wall —
-	# this is what lofts debris; absent from the inviscid models.
-	if model != Model.VATISTAS:
-		var dr := (r_bar - 1.0) / 0.45
-		v_z += 2.5 * a_bar * exp(-dr * dr) * (1.0 - exp(-8.0 * z_bar)) * exp(-0.5 * z_bar)
-
-	var fade := (1.0 - smoothstep(0.85 * height, height, p.y)) * (1.0 - smoothstep(6.0, 8.0, r_bar))
-	v_t *= fade
-	v_r *= fade
-	v_z *= fade
-
+	var w := cylindrical_wind(r_bar, p.y)
 	var r_dir := Vector3.ZERO
 	if r > 1e-4:
 		r_dir = Vector3(rel.x, 0.0, rel.y) / r
 	var t := tangent_from_radial(r_dir.x, r_dir.z, swirl_sign)
 	var t_dir := Vector3(t.x, 0.0, t.y)
-	return (r_dir * v_r + t_dir * v_t + Vector3.UP * v_z) * u_max
+	return (r_dir * w.x + t_dir * w.y + axis_direction_at(p.y) * w.z) * u_max
+
+
+## Direction the vertical wind follows: up along the leaning axis. Carrying v_z
+## along (c'(y), 1) is the push-forward of the axisymmetric field through the
+## shear x -> x + c(y), whose Jacobian is 1, so the leaning field stays
+## divergence-free (debris and dust then rise along the visible funnel).
+func axis_direction_at(y: float) -> Vector3:
+	var slope := centerline_slope_at(y)
+	return Vector3(slope.x, 1.0, slope.y)

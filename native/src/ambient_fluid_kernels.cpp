@@ -151,10 +151,13 @@ void accumulate_wrench(std::span<double> wrench, const Vector3 &torque, const Ve
     wrench[5] += force.z;
 }
 
-Dictionary pressure_result(const PackedFloat64Array &pressure, int64_t attached_faces)
+Dictionary surface_result(const PackedFloat64Array &pressure,
+                          const PackedFloat64Array &friction,
+                          int64_t attached_faces)
 {
     Dictionary out;
     out[godot::StringName("pressure")] = pressure;
+    out[godot::StringName("friction")] = friction;
     out[godot::StringName("attached_faces")] = attached_faces;
     return out;
 }
@@ -173,17 +176,18 @@ void AmbientFluidKernels::_bind_methods()
                                                 "plane_normal",
                                                 "plane_offset"),
                                 &AmbientFluidKernels::clip_convex_mesh_below_plane);
-    godot::ClassDB::bind_method(godot::D_METHOD("potential_pressure_wrench",
+    godot::ClassDB::bind_method(godot::D_METHOD("surface_wrench",
                                                 "face_centers_m",
                                                 "face_normals",
                                                 "face_areas_m2",
-                                                "slip_matrix",
                                                 "generalized_velocity",
                                                 "fluid_density_kg_m3",
+                                                "dynamic_viscosity_pa_s",
                                                 "separation_angle_rad",
+                                                "characteristic_length_m",
                                                 "wet_area_fractions",
                                                 "wet_area_centers_m"),
-                                &AmbientFluidKernels::potential_pressure_wrench);
+                                &AmbientFluidKernels::surface_wrench);
 }
 
 PackedFloat64Array AmbientFluidKernels::matrix_vector_multiply(const PackedFloat64Array &matrix,
@@ -192,6 +196,10 @@ PackedFloat64Array AmbientFluidKernels::matrix_vector_multiply(const PackedFloat
     const std::span<const double> m = view(matrix);
     const std::span<const double> v = view(vector);
     const size_t size = v.size();
+    // Bound directly to ClassDB: a caller that skips the GDScript wrapper must not
+    // be able to read past the matrix.
+    if (m.size() != size * size)
+        return {};
     PackedFloat64Array result_out;
     result_out.resize(vector.size());
     double *result = result_out.ptrw();
@@ -210,8 +218,23 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
                                                        double pivot_epsilon) const
 {
     const std::span<const double> m = view(matrix);
+    if (size < 0 || m.size() != static_cast<size_t>(size) * static_cast<size_t>(size))
+        return {};
     const auto n = static_cast<size_t>(size);
     const size_t width = n * 2;
+    // Pivot threshold relative to the largest entry, as AmbientFluidMath does.
+    double scale = 0.0;
+    for (const double value : m)
+    {
+        const double magnitude = std::abs(value);
+        if (std::isnan(magnitude))
+        {
+            scale = magnitude;
+            break;
+        }
+        scale = std::max(scale, magnitude);
+    }
+    const double threshold = pivot_epsilon * scale;
     std::vector<double> augmented(n * width);
     for (size_t row = 0; row < n; ++row)
     {
@@ -235,7 +258,7 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
                 pivot_row = row;
             }
         }
-        if (pivot_abs <= pivot_epsilon)
+        if (!(pivot_abs > threshold))
             return {};
         if (pivot_row != pivot)
             std::swap_ranges(augmented.begin() + static_cast<std::ptrdiff_t>(pivot * width),
@@ -250,7 +273,7 @@ PackedFloat64Array AmbientFluidKernels::matrix_inverse(const PackedFloat64Array 
             if (row == pivot)
                 continue;
             const double factor = augmented[row * width + pivot];
-            if (Math::is_zero_approx(factor))
+            if (factor == 0.0)
                 continue;
             for (size_t col = 0; col < width; ++col)
                 augmented[row * width + col] -= factor * augmented[pivot * width + col];
@@ -384,78 +407,94 @@ Dictionary AmbientFluidKernels::clip_convex_mesh_below_plane(const PackedVector3
                        to_packed(waterline));
 }
 
-Dictionary AmbientFluidKernels::potential_pressure_wrench(const PackedVector3Array &face_centers_m,
-                                                          const PackedVector3Array &face_normals,
-                                                          const PackedFloat64Array &face_areas_m2,
-                                                          const PackedFloat64Array &slip_matrix,
-                                                          const PackedFloat64Array &generalized_velocity,
-                                                          double fluid_density_kg_m3,
-                                                          double separation_angle_rad,
-                                                          const PackedFloat64Array &wet_area_fractions,
-                                                          const PackedVector3Array &wet_area_centers_m) const
+Dictionary AmbientFluidKernels::surface_wrench(const PackedVector3Array &face_centers_m,
+                                               const PackedVector3Array &face_normals,
+                                               const PackedFloat64Array &face_areas_m2,
+                                               const PackedFloat64Array &generalized_velocity,
+                                               double fluid_density_kg_m3,
+                                               double dynamic_viscosity_pa_s,
+                                               double separation_angle_rad,
+                                               double characteristic_length_m,
+                                               const PackedFloat64Array &wet_area_fractions,
+                                               const PackedVector3Array &wet_area_centers_m) const
 {
-    const std::span<const double> velocity = view(generalized_velocity);
-    const size_t matrix_size = velocity.size();
+    constexpr int64_t wrench_size = 6;
     PackedFloat64Array pressure_out;
-    pressure_out.resize(generalized_velocity.size());
-    const std::span<double> pressure(pressure_out.ptrw(), matrix_size);
+    pressure_out.resize(wrench_size);
+    PackedFloat64Array friction_out;
+    friction_out.resize(wrench_size);
+    const int64_t face_count = face_centers_m.size();
+    // Bound straight to ClassDB, so mismatched sizes must not read past a buffer.
+    if (generalized_velocity.size() != wrench_size || face_normals.size() != face_count
+        || face_areas_m2.size() != face_count
+        || (!wet_area_fractions.is_empty() && wet_area_fractions.size() != face_count)
+        || (!wet_area_centers_m.is_empty() && wet_area_centers_m.size() != face_count))
+        return surface_result(pressure_out, friction_out, 0);
+    const std::span<const double> velocity = view(generalized_velocity);
+    const std::span<double> pressure(pressure_out.ptrw(), wrench_size);
+    const std::span<double> friction(friction_out.ptrw(), wrench_size);
 
     const double cos_separation
         = std::cos(Math::clamp(separation_angle_rad, std::numbers::pi * 0.5, std::numbers::pi));
-    const Vector3 body_relative_velocity(static_cast<real_t>(velocity[3]),
-                                         static_cast<real_t>(velocity[4]),
-                                         static_cast<real_t>(velocity[5]));
-    const double body_speed_squared = body_relative_velocity.length_squared();
-    if (body_speed_squared <= 1.0e-16)
-        return pressure_result(pressure_out, 0);
-    const Vector3 incoming_flow_direction = -body_relative_velocity.normalized();
+    // 1/2 C_f rho |u_s| = blasius * |u_s|^(4/5) (Eq. 19, 22); stokes = 3 mu / 2R, R = L / (2 sqrt(pi)).
+    double blasius = 0.0;
+    double stokes = 0.0;
+    if (dynamic_viscosity_pa_s > 0.0 && characteristic_length_m > 0.0)
+    {
+        blasius = 0.0288 * fluid_density_kg_m3
+                  * std::pow(fluid_density_kg_m3 * characteristic_length_m / dynamic_viscosity_pa_s, -0.2);
+        stokes = 3.0 * std::sqrt(std::numbers::pi) * dynamic_viscosity_pa_s / characteristic_length_m;
+    }
     const Vector3 angular_velocity(static_cast<real_t>(velocity[0]),
                                    static_cast<real_t>(velocity[1]),
                                    static_cast<real_t>(velocity[2]));
+    const Vector3 linear_velocity(static_cast<real_t>(velocity[3]),
+                                  static_cast<real_t>(velocity[4]),
+                                  static_cast<real_t>(velocity[5]));
 
     const std::span<const Vector3> face_centers = view(face_centers_m);
     const std::span<const Vector3> normals = view(face_normals);
     const std::span<const double> face_areas = view(face_areas_m2);
-    const std::span<const double> slip_rows = view(slip_matrix);
     const std::span<const double> wet_fractions = view(wet_area_fractions);
     const std::span<const Vector3> wet_centers = view(wet_area_centers_m);
     int64_t attached_faces = 0;
     for (size_t face_index = 0; face_index < face_centers.size(); ++face_index)
     {
-        const Vector3 &face_center = face_centers[face_index];
-        const Vector3 &center = wet_centers.empty() ? face_center : wet_centers[face_index];
+        const Vector3 &center = wet_centers.empty() ? face_centers[face_index] : wet_centers[face_index];
         const Vector3 &normal = normals[face_index];
         const double wet_fraction = wet_fractions.empty() ? 1.0 : Math::clamp(wet_fractions[face_index], 0.0, 1.0);
         const double area = face_areas[face_index] * wet_fraction;
         if (area <= 1.0e-12)
             continue;
-        const bool attached = normal.dot(incoming_flow_direction) >= cos_separation;
-        if (attached)
-            ++attached_faces;
-        Vector3 slip;
-        const size_t base = face_index * 3 * matrix_size;
-        for (int row = 0; row < 3; ++row)
+        const Vector3 turning = angular_velocity.cross(center);
+        if (stokes > 0.0)
         {
-            double value = 0.0;
-            for (size_t col = 0; col < matrix_size; ++col)
-                value += slip_rows[base + static_cast<size_t>(row) * matrix_size + col] * velocity[col];
-            slip[row] = static_cast<real_t>(value);
+            // Stokes traction extension: -k zdot A, plus the torque of -k (w x c) A.
+            const Vector3 stokes_drag = static_cast<real_t>(-stokes * area) * (linear_velocity + turning);
+            const Vector3 stokes_spin = static_cast<real_t>(-stokes * area) * turning;
+            accumulate_wrench(friction, center.cross(stokes_drag + stokes_spin), stokes_drag);
         }
-        const Vector3 center_delta = center - face_center;
-        if (center_delta.length_squared() > 1.0e-16)
+        // Eq. 16-17: the face moves at zdot; attached where <n, zdot/|zdot|> > cos(alpha).
+        const Vector3 surface_velocity = linear_velocity + turning;
+        const double speed = surface_velocity.length();
+        if (speed <= 1.0e-12 || normal.dot(surface_velocity) <= cos_separation * speed)
+            continue;
+        ++attached_faces;
+        const Vector3 slip = normal * normal.dot(surface_velocity) - surface_velocity;
+        const double slip_squared = slip.length_squared();
+        // Eq. 20: f = -1/2 rho |u_s|^2 A n.
+        const Vector3 pressure_force
+            = static_cast<real_t>(-0.5 * fluid_density_kg_m3 * slip_squared * area) * normal;
+        accumulate_wrench(pressure, center.cross(pressure_force), pressure_force);
+        if (blasius > 0.0 && slip_squared > 0.0)
         {
-            const Vector3 tangent_delta = angular_velocity.cross(center_delta);
-            slip -= tangent_delta - normal * normal.dot(tangent_delta);
-        }
-        const double slip_speed = slip.length();
-        if (attached)
-        {
-            const double pressure_delta = 0.5 * fluid_density_kg_m3 * (body_speed_squared - slip_speed * slip_speed);
-            const Vector3 pressure_force = static_cast<real_t>(-pressure_delta * area) * normal;
-            accumulate_wrench(pressure, center.cross(pressure_force), pressure_force);
+            // Eq. 22 with the dissipative sign: f = +1/2 C_f rho |u_s| A u_s.
+            const Vector3 friction_force
+                = static_cast<real_t>(blasius * std::pow(slip_squared, 0.4) * area) * slip;
+            accumulate_wrench(friction, center.cross(friction_force), friction_force);
         }
     }
-    return pressure_result(pressure_out, attached_faces);
+    return surface_result(pressure_out, friction_out, attached_faces);
 }
 
 } // namespace pp

@@ -44,11 +44,7 @@ func render_operations(operation_limit := -1) -> Array[Dictionary]:
 		if operation.points.size() < 2:
 			result.append(value)
 			continue
-		var first_point: int = operation.points.size() - 1
-		var last_point: int = 1
-		if operation.periodic_segment_count > 0:
-			last_point = maxi(first_point - operation.periodic_segment_count + 1, 1)
-		for point_index in range(first_point, last_point - 1, -1):
+		for point_index in range(operation.points.size() - 1, 0, -1):
 			var start: Vector2 = value.points[point_index - 1]
 			var end: Vector2 = value.points[point_index]
 			var segment := value.duplicate(true)

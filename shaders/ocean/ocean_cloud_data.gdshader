@@ -62,6 +62,11 @@ void fragment() {
 			break;
 		}
 		float t = t0 + (float(i) + jitter) * step_length;
+		// distance_fade below is exactly 0 from 6500 m on, so every later sample
+		// adds nothing: stop instead of paying density and light taps for them.
+		if (t >= 6500.0) {
+			break;
+		}
 		vec3 p = ro + rd * t;
 		float d = cloud_density_at(p);
 		if (d <= 0.002) {

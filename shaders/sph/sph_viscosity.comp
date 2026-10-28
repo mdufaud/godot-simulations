@@ -8,131 +8,62 @@ const float LAVA_STICK_SPEED = 0.15;
 // the particle's viscosity squared, so thick lava creeps while runny lava keeps
 // sliding.
 const float LAVA_BED_RATE = 20.0;
-// Bingham plug, for any material with a yield (scene.fluid_rheology.x, m/s^2).
-// A particle resting on a collider, or touching plugged fluid that already
-// stopped, is supported: its velocity loses up to the yield deceleration every
-// sub-step, so anything pushed softer than the yield stops dead and in turn
-// supports what lies on it. Piles keep their relief; shoves harder than the
-// yield flow. Unsupported fluid falls freely. positions.w carries PLUG_ANCHORED
-// on top of the material's own attribute while the particle is stuck.
-const float PLUG_ANCHORED = 2.0;
-// Light Paste glows where it flows; the glow fades in and out over this time.
+// Bingham yield stress (scene.fluid_rheology.x, Pa) with Papanastasiou's
+// regularisation: the effective kinematic viscosity gains
+//   (tau_y / rho) * (1 - exp(-m * strain_rate)) / strain_rate,
+// finite (tau_y m / rho) where the fluid is at rest, tau_y / (rho strain_rate)
+// once it flows. A kinematic viscosity nu relaxes toward the Poly6-weighted
+// neighbour mean at 22 nu / h^2 (mean - v ~ (3 h^2 / 22) laplacian(v)). With a
+// yield, that relaxation is solved implicitly: YIELD_ITERATION (this file compiled
+// as the sph_yield_iter stage) runs Jacobi sweeps of the backward-Euler step
+// v = (v* + k mean) / (1 + k), k = rate dt, re-reading the strain rate each sweep
+// (Picard), with no-slip walls inside the sweep. An explicit or one-sweep
+// relaxation cannot hold a pile: it leaves any linear velocity field (a uniform
+// spread) untouched, and only the walls, propagated through the solve, stop it.
+const float POLY6_LAPLACIAN = 22.0;
+const float YIELD_REGULARISATION_S = 1000.0;
+// Light Paste glows where it flows (strain rate in 1/s); the glow fades in and
+// out over PASTE_GLOW_RESPONSE.
+const float PASTE_GLOW_RATE_LOW = 0.5;
+const float PASTE_GLOW_RATE_HIGH = 2.0;
 const float PASTE_GLOW_RESPONSE = 0.25;
 
-vec3 plug_yield(vec3 v, float yield_decel) {
-	return v * max(0.0, 1.0 - yield_decel * params.sim.x / max(length(v), 1e-6));
+// (1 - exp(-m x)) / x, finite as x -> 0.
+float papanastasiou(float strain_rate) {
+	float mx = YIELD_REGULARISATION_S * strain_rate;
+	return mx < 1e-4 ? YIELD_REGULARISATION_S * (1.0 - 0.5 * mx) : (1.0 - exp(-mx)) / strain_rate;
 }
 
-void main() {
-	uint i = gl_GlobalInvocationID.x;
-	if (i >= uint(params.grid_dims.w)) {
-		return;
-	}
-	vec3 pos = predicted.data[i].xyz;
-	float yield_decel = scene.fluid_rheology.x;
-	float carried = positions.data[i].w;
-	bool supported = yield_decel > 0.0 && carried >= PLUG_ANCHORED;
-	carried -= supported ? PLUG_ANCHORED : 0.0;
-	vec3 v_live = velocities.data[i].xyz;
-	vec3 vi_snap = velocities_snap.data[i].xyz;
-	vec3 visc = vec3(0.0);
-	float weight_sum = 0.0;
-	float strain_sum = 0.0;
-	int neighbours = 0;
-	// XSPH velocity smoothing with the Poly6 kernel.
-	FOREACH_NEIGHBOR(pos,
-		if (j == i) {
-			continue;
-		}
-		vec3 off = predicted.data[j].xyz - pos;
-		float r2 = dot(off, off);
-		if (r2 >= params.kernel.y) {
-			continue;
-		}
-		neighbours++;
-		supported = supported || (yield_decel > 0.0 && positions.data[j].w >= PLUG_ANCHORED);
-		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
-		float weight = 1.0;
-		if (params.material == MATERIAL_HONEY) {
-			float shear = length(relative) / params.kernel.x;
-			weight = 0.25 + 0.75 / (1.0 + 0.15 * shear);
-		} else if (params.material == MATERIAL_OIL && abs(carried - positions.data[j].w) > 0.5) {
-			weight = 0.1;
-		}
-		float kernel_weight = sph_poly6(r2) * weight;
-		visc += relative * kernel_weight;
-		weight_sum += kernel_weight;
-		if (params.material == MATERIAL_ASTRAL || params.material == MATERIAL_PRISMATIC_SLIME) {
-			strain_sum += abs(dot(relative, off)) / max(r2, 1e-6) * kernel_weight;
-		}
-	)
-	float viscosity = params.sim2.x;
-	float stress = carried;
-	if (params.material == MATERIAL_ASTRAL) {
-		float target_stress = smoothstep(2.0, 12.0, strain_sum / max(weight_sum, 1e-6));
-		float response_time = target_stress > stress ? 0.06 : 0.9;
-		stress = mix(target_stress, stress, exp(-params.sim.x / response_time));
-		viscosity = mix(viscosity, 6.0, stress * stress);
-	}
-	if (params.material == MATERIAL_PRISMATIC_SLIME) {
-		float target = smoothstep(1.0, 8.0, strain_sum / max(weight_sum, 1e-6));
-		float response = target > stress ? 0.08 : 1.25;
-		stress = mix(target, stress, exp(-params.sim.x / response));
-		viscosity = mix(viscosity, viscosity * 0.015, smoothstep(0.1, 0.75, stress));
-	}
-	float freeze = 0.0;
-	// A lone cold droplet has no support: it keeps falling instead of freezing
-	// in mid-air.
-	float crust = 0.0;
-	if (params.material == MATERIAL_OIL && carried > 0.5) {
-		viscosity *= 2.0;
-	} else if (is_lava()) {
-		float heat = clamp(carried, 0.0, 1.0);
-		viscosity *= mix(8.0, 1.5, heat);
-		float freeze_heat = scene.fluid_material.w;
-		freeze = freeze_heat > 0.0 ? 1.0 - smoothstep(0.0, freeze_heat, heat) : 0.0;
-		crust = freeze * smoothstep(2.0, 8.0, float(neighbours));
-	}
-	vec3 v;
-	if (params.material == MATERIAL_HONEY || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_SPECTRAL_GEL || params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
-		float rate = params.material == MATERIAL_HONEY ? 150.0 : params.material == MATERIAL_ASTRAL ? 100.0 : is_lava() ? 200.0 : params.material == MATERIAL_PRISMATIC_SLIME ? 35.0 : params.material == MATERIAL_LIGHT_PASTE ? 40.0 : 20.0;
-		vec3 target = vi_snap + visc / max(weight_sum, 1e-6);
-		float blend = 1.0 - exp(-rate * viscosity * params.sim.x);
-		if (is_lava()) {
-			blend = mix(blend, max(blend, 1.0 - exp(-LAVA_CRUST_RATE * params.sim.x)), crust);
-			v = v_live + blend * (target - vi_snap);
-		} else if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
-			v = v_live + blend * (target - vi_snap);
-		} else {
-			v = mix(v_live, target, blend);
-		}
-	} else {
-		v = v_live + visc * viscosity * params.sim.x;
-	}
-	if (params.material == MATERIAL_HONEY || is_lava()) {
-		float floor_distance = pos.y - params.grid_origin.y;
-		float floor_contact = 1.0 - smoothstep(0.12, 1.6, floor_distance);
-		float drag = is_lava() ? 0.08 * viscosity * viscosity : viscosity;
-		v.xz *= exp(-10.0 * drag * floor_contact * params.sim.x);
-	}
-	if (params.material == MATERIAL_PRISMATIC_SLIME) {
-		float contact = 1.0 - smoothstep(0.04, 0.3, pos.y - params.grid_origin.y);
-		v.xz *= exp(-3.0 * viscosity * contact * params.sim.x);
-	}
-	v *= 1.0 - crust * (1.0 - smoothstep(0.5 * LAVA_STICK_SPEED, LAVA_STICK_SPEED, length(v)));
-	if (yield_decel > 0.0 && supported) {
-		v = plug_yield(v, yield_decel);
-	}
-	vec3 p = positions.data[i].xyz + v * params.sim.x;
+// Per-material rate (1/s per unit viscosity) of the relaxation materials, 0 for
+// the XSPH ones.
+float relaxation_rate_constant() {
+	if (params.material == MATERIAL_HONEY) { return 150.0; }
+	if (params.material == MATERIAL_ASTRAL) { return 100.0; }
+	if (is_lava()) { return 200.0; }
+	if (params.material == MATERIAL_PRISMATIC_SLIME) { return 35.0; }
+	if (params.material == MATERIAL_LIGHT_PASTE) { return 40.0; }
+	if (params.material == MATERIAL_SPECTRAL_GEL) { return 20.0; }
+	return 0.0;
+}
+
+float yield_relaxation_rate(float yield_stress, float strain_rate) {
+	return yield_stress > 0.0
+		? POLY6_LAPLACIAN * yield_stress / scene.fluid_material.x
+			* papanastasiou(strain_rate) / params.kernel.y
+		: 0.0;
+}
+
+// Walls, obstacles, planet terrain and the domain box: moves p back out and
+// reflects v. True when anything was hit.
+bool resolve_collisions(inout vec3 p, inout vec3 v, vec3 previous) {
 	vec3 p_free = p;
-	vec3 before_collision = v;
 	float damp = params.sim2.y;
 	if (planet_mode()) {
 		resolve_planet_collision(p, v, damp);
 		p = clamp_domain(p);
 	} else {
 		if (scene_mode()) {
-			resolve_scene_collisions(p, v, positions.data[i].xyz, 0.985);
+			resolve_scene_collisions(p, v, previous, 0.985);
 			// Below the second ramp the chute has no side obstacles, so soft
 			// walls keep the stream in the tank. Keyed on the scene id, not on
 			// the obstacle count: any geometry edit would silently change a
@@ -154,8 +85,170 @@ void main() {
 		if (p.z < lo.z) { p.z = lo.z; v.z = -v.z * damp; }
 		else if (p.z > hi.z) { p.z = hi.z; v.z = -v.z * damp; }
 	}
+	return p != p_free;
+}
+
+void main() {
+	uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(params.grid_dims.w)) {
+		return;
+	}
+	vec3 pos = predicted.data[i].xyz;
+	float yield_stress = scene.fluid_rheology.x;
+	float carried = positions.data[i].w;
+	vec3 v_live = velocities.data[i].xyz;
+	vec3 vi_snap = velocities_snap.data[i].xyz;
+	vec3 visc = vec3(0.0);
+	float weight_sum = 0.0;
+	float strain_sum = 0.0;
+	int neighbours = 0;
+	// Water + Oil is a two-phase mixture (Ren et al. 2014, "Multiple-Fluid SPH
+	// Simulation Using a Mixture Model"): w is the particle's oil volume fraction
+	// alpha, and its mass is the mixture's (sph_pressure), so resolved blobs rise
+	// by their own buoyancy. Below the particle scale the oil slips past the
+	// water: the model's drift for two phases, with the mixture-acceleration and
+	// pressure terms left out (the basin is near hydrostatic), gives the oil
+	// volume flux alpha (1 - alpha) tau g (rho_w - rho_o) / rho_m -- the classic
+	// drift-flux form -- moved here between neighbour pairs by the SPH divergence.
+	// Without it the lattice holds the 15% density contrast: a viscous SPH column
+	// with oil under water never overturns.
+	bool drift = params.material == MATERIAL_OIL && scene.fluid_rheology.z > 0.0;
+	vec3 gravity_here = !drift ? vec3(0.0) : planet_mode() ? planet_gravity(pos) : params.gravity.xyz;
+	float drift_out = 0.0;
+	// XSPH velocity smoothing with the Poly6 kernel.
+	FOREACH_NEIGHBOR(pos,
+		if (j == i) {
+			continue;
+		}
+		vec3 off = predicted.data[j].xyz - pos;
+		float r2 = dot(off, off);
+		if (r2 >= params.kernel.y) {
+			continue;
+		}
+		neighbours++;
+		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
+		float kernel_weight = sph_poly6(r2);
+		if (drift && r2 > 1e-12) {
+			float dst = sqrt(r2);
+			float alpha_j = predicted.data[j].w;
+			float rho_mix = mix(OIL_WATER_DENSITY, scene.fluid_material.x, 0.5 * (carried + alpha_j));
+			// Oil's slip toward j: tau * (rho_w - rho_o) / rho_m * (-g . e_ij).
+			float slip = scene.fluid_rheology.z * (OIL_WATER_DENSITY - scene.fluid_material.x) / rho_mix
+				* dot(off / dst, -gravity_here);
+			// Upwind exchange: oil moves i -> j only as far as i holds oil and j
+			// holds water (and back), so the pair flux is antisymmetric -- oil
+			// volume is conserved -- and every fraction stays within [0, 1] (the
+			// clamp below only catches rounding).
+			float flux = max(slip, 0.0) * carried * (1.0 - alpha_j) - max(-slip, 0.0) * alpha_j * (1.0 - carried);
+			drift_out += flux * -sph_density_deriv(dst) * 4.0 / (densities.data[i] + densities.data[j]);
+		}
+		visc += relative * kernel_weight;
+		weight_sum += kernel_weight;
+		// Strain-rate estimate: |relative velocity along the pair| / distance.
+		strain_sum += abs(dot(relative, off)) / max(r2, 1e-6) * kernel_weight;
+	)
+	float strain_rate = strain_sum / max(weight_sum, 1e-6);
+	float viscosity = params.sim2.x;
+	float stress = carried;
+	if (params.material == MATERIAL_ASTRAL) {
+		float target_stress = smoothstep(2.0, 12.0, strain_rate);
+		float response_time = target_stress > stress ? 0.06 : 0.9;
+		stress = mix(target_stress, stress, exp(-params.sim.x / response_time));
+		viscosity = mix(viscosity, 6.0, stress * stress);
+	}
+	if (params.material == MATERIAL_PRISMATIC_SLIME) {
+		float target = smoothstep(1.0, 8.0, strain_rate);
+		float response = target > stress ? 0.08 : 1.25;
+		stress = mix(target, stress, exp(-params.sim.x / response));
+		viscosity = mix(viscosity, viscosity * 0.015, smoothstep(0.1, 0.75, stress));
+	}
+	float freeze = 0.0;
+	// A lone cold droplet has no support: it keeps falling instead of freezing
+	// in mid-air.
+	float crust = 0.0;
+	if (params.material == MATERIAL_OIL) {
+		// Mixture viscosity: oil is the thicker phase.
+		viscosity *= 1.0 + carried;
+	} else if (is_lava()) {
+		float heat = clamp(carried, 0.0, 1.0);
+		viscosity *= mix(8.0, 1.5, heat);
+		float freeze_heat = scene.fluid_material.w;
+		freeze = freeze_heat > 0.0 ? 1.0 - smoothstep(0.0, freeze_heat, heat) : 0.0;
+		crust = freeze * smoothstep(2.0, 8.0, float(neighbours));
+	}
+	float relax_rate = relaxation_rate_constant() * viscosity
+		+ yield_relaxation_rate(yield_stress, strain_rate);
+#ifdef YIELD_ITERATION
+	// One Jacobi sweep of v = (v* + k mean) / (1 + k): velocities_snap holds the
+	// current iterate (neighbours read it race-free), velocities_star the
+	// post-pressure velocity v*, and the new iterate goes to velocities.
+	float k = relax_rate * params.sim.x;
+	vec3 iterate = (velocities_star.data[i].xyz + k * (vi_snap + visc / max(weight_sum, 1e-6)))
+		/ (1.0 + k);
+	// No-slip inside the solve: a particle this velocity would carry into a wall
+	// is held by it -- no tangential motion, no pressing on into the wall.
+	vec3 p_test = positions.data[i].xyz + iterate * params.sim.x;
+	vec3 v_test = iterate;
+	if (resolve_collisions(p_test, v_test, positions.data[i].xyz)) {
+		vec3 impulse = iterate - v_test;
+		float push = length(impulse);
+		if (push > 1e-6) {
+			vec3 normal = impulse / push;
+			iterate = max(dot(v_test, normal), 0.0) * normal;
+		}
+	}
+	velocities.data[i] = vec4(iterate, velocities.data[i].w);
+	return;
+#endif
+	vec3 v;
+	// Share of the relative velocity viscosity removes this sub-step; a wall the
+	// particle touches is coupled the same way (see the no-slip block below).
+	float wall_blend = 0.0;
+	if (params.material == MATERIAL_HONEY || is_lava() || params.material == MATERIAL_ASTRAL || params.material == MATERIAL_SPECTRAL_GEL || params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
+		vec3 target = vi_snap + visc / max(weight_sum, 1e-6);
+		float blend = 1.0 - exp(-relax_rate * params.sim.x);
+		if (is_lava()) {
+			blend = mix(blend, max(blend, 1.0 - exp(-LAVA_CRUST_RATE * params.sim.x)), crust);
+		}
+		// Relax by increment toward the neighbour mean. With a yield the implicit
+		// sweeps (sph_yield_iter) already solved this sub-step's viscosity, so the
+		// velocity stands as they left it.
+		v = yield_stress > 0.0 ? v_live : v_live + blend * (target - vi_snap);
+		// Lava keeps its own bed model (LAVA_BED_RATE, freezing crust) below.
+		wall_blend = is_lava() ? 0.0 : blend;
+	} else {
+		// XSPH smoothing (Monaghan 1989): relax toward the kernel-weighted
+		// neighbour mean at rate viscosity * sum(W), integrated exactly over the
+		// sub-step. Same as the explicit v += viscosity * dt * sum((v_j - v_i) W)
+		// while that step is small; the explicit form overshot (and blew up) once
+		// viscosity * sum(W) * dt passed 1, at the slider's top or on one sub-step.
+		float blend = 1.0 - exp(-viscosity * weight_sum * params.sim.x);
+		v = v_live + blend * visc / max(weight_sum, 1e-6);
+	}
+	if (is_lava()) {
+		float floor_distance = pos.y - params.grid_origin.y;
+		float floor_contact = 1.0 - smoothstep(0.12, 1.6, floor_distance);
+		v.xz *= exp(-10.0 * 0.08 * viscosity * viscosity * floor_contact * params.sim.x);
+	}
+	v *= 1.0 - crust * (1.0 - smoothstep(0.5 * LAVA_STICK_SPEED, LAVA_STICK_SPEED, length(v)));
+	vec3 p = positions.data[i].xyz + v * params.sim.x;
+	vec3 p_free = p;
+	vec3 before_collision = v;
+	resolve_collisions(p, v, positions.data[i].xyz);
 	if (is_lava() && p != p_free) {
 		v *= (1.0 - freeze) * exp(-LAVA_BED_RATE * viscosity * viscosity * params.sim.x);
+	}
+	// No-slip walls for the viscous materials: where a wall or obstacle pushed
+	// back, the tangential velocity relaxes toward the wall's (at rest) exactly as
+	// viscosity relaxes it toward a resting neighbour, so a viscous film grips the
+	// surface it flows over (boundary viscosity, after Akinci et al. 2012).
+	if (wall_blend > 0.0 && p != p_free) {
+		vec3 impulse = before_collision - v;
+		float push = length(impulse);
+		if (push > 1e-6) {
+			vec3 normal = impulse / push;
+			v -= wall_blend * (v - dot(v, normal) * normal);
+		}
 	}
 	bool nitrogen_contact = params.material == MATERIAL_LIQUID_NITROGEN && p != p_free;
 	bool nitrogen_boil = nitrogen_contact && length(before_collision - v) > NITROGEN_BOIL_IMPACT;
@@ -164,17 +257,14 @@ void main() {
 		v += vec3(rand01(rng) - 0.5, rand01(rng) * 0.5, rand01(rng) - 0.5)
 			* NITROGEN_SKITTER * carried * params.sim.x;
 	}
-	bool anchored = false;
-	if (yield_decel > 0.0) {
-		if (p != p_free) {
-			v = plug_yield(v, yield_decel);
-		}
-		anchored = (supported || p != p_free) && dot(v, v) == 0.0;
-	}
 	if (params.material == MATERIAL_LIGHT_PASTE) {
-		stress = mix(anchored ? 0.0 : 1.0, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
+		float flowing = smoothstep(PASTE_GLOW_RATE_LOW, PASTE_GLOW_RATE_HIGH, strain_rate);
+		stress = mix(flowing, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
 	}
 	float temp = carried;
+	if (drift) {
+		temp = clamp(carried - params.sim.x * drift_out, 0.0, 1.0);
+	}
 	if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
 		temp = stress;
 	}
@@ -189,7 +279,7 @@ void main() {
 	if (params.material == MATERIAL_LIQUID_NITROGEN) {
 		temp = nitrogen_boil ? 1.0 : max(temp - params.sim.x * NITROGEN_COOL_RATE, 0.0);
 	}
-	positions.data[i] = vec4(p, temp + (anchored ? PLUG_ANCHORED : 0.0));
+	positions.data[i] = vec4(p, temp);
 	velocities.data[i] = vec4(v, velocities.data[i].w);
 	if (params.misc.z == 1) {
 		uint w = uint(params.misc.x);
