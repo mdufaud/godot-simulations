@@ -8,10 +8,6 @@ extends Control
 
 const DRAG_DEADZONE := 3.0
 
-@onready var _view_low: SubViewport = $ViewLow
-@onready var _view_high: SubViewport = $ViewHigh
-@onready var _rect_low: ColorRect = $ViewLow/Rect
-@onready var _rect_high: ColorRect = $ViewHigh/Rect
 @onready var _display: ColorRect = $Display
 @onready var _menu: SimMenu = $UI/SimMenu
 
@@ -34,10 +30,6 @@ var _prev_pinch_distance := 0.0
 func _ready() -> void:
 	_view.config = config
 	_view.camera = _camera
-	_view.view_low = _view_low
-	_view.view_high = _view_high
-	_view.rect_low = _rect_low
-	_view.rect_high = _rect_high
 	_view.display = _display
 	_view.host = self
 	quality.setup(FractalQualityProfile, "fractal_quality_profile", _apply_quality)
@@ -54,15 +46,15 @@ func _ready() -> void:
 	reset()
 
 
-## The cap and band are config the view reads per pass, the AA level a plain
-## view field; all safe to set before _view.start().
-## Widget-bound keys (band, AA) reach this only while the menu is still
-## unbuilt — afterwards they arrive through the sliders — so every read
-## defaults to the live config.
+## The budget is config the view reads per frame, the AA sample count a plain
+## view field; both safe to set before _view.start().
+## Widget-bound keys reach this only while the menu is still unbuilt —
+## afterwards they arrive through the sliders — so every read defaults to the
+## live value.
 func _apply_quality(values: Dictionary) -> void:
-	config.refine_band_rows = int(values.get("refine_band_rows",
-		config.refine_band_rows))
-	_view.aa_quality = int(values.get("aa_quality", _view.aa_quality))
+	config.sample_budget_ms = float(values.get("sample_budget_ms",
+		config.sample_budget_ms))
+	_view.aa_samples = int(values.get("aa_samples", _view.aa_samples))
 
 
 func _process(delta: float) -> void:

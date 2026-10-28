@@ -2,15 +2,17 @@ shader_type canvas_item;
 render_mode blend_disabled;
 
 // ============================================================
-// Fractal iteration pass — outputs DATA, not colors.
-// Rendered inside an HDR SubViewport (RGBA16F), only when the
-// view changes. Coloring happens in fractal_colorize.gdshader.
+// Fractal sample pass — outputs DATA, not colors.
+// Rendered inside an HDR SubViewport (RGBA16F) of 1/stride the
+// window size: texel (i, j) evaluates ONE sample at full-res pixel
+// (i, j) * stride + offset(i, j) + jitter, so every texel is dense
+// work and fractal_accumulate.gdshader scatters it into the window.
 //
-// Output packing:
-//   R = floor(mu / 64)          (mu = smooth iteration count)
-//   G = mu - R * 64
+// Output packing (premultiplied by escape, linear in every channel):
+//   R = floor(mu / mu_split)    (mu = smooth iteration count, 0 inside)
+//   G = mu - R * mu_split
 //   B = log-encoded orbit trap distance
-//   A = coverage (fraction of AA subsamples that escaped)
+//   A = 1 if the orbit escaped, 0 inside
 //
 // Types: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn
 //
@@ -43,10 +45,14 @@ uniform int ref_len_crit = 0;
 uniform int trap_shape : hint_range(0, 3) = 0;
 uniform float trap_scale = 1.0;
 
-// --- Quality / progressive bands ---
-uniform int aa_quality : hint_range(1, 3) = 1;
-uniform int band_y_min = 0;
-uniform int band_y_max = 1000000;
+// --- Sample layout ---
+uniform int sample_stride = 1;
+uniform int sample_phase = 0;
+uniform vec2 sample_jitter = vec2(0.0);
+uniform vec2 full_size = vec2(1280.0, 720.0);
+uniform float mu_split = 16.0;
+
+#include "res://shaders/fractal/fractal_slots.gdshaderinc"
 
 const float BAILOUT = 256.0;
 const float BAILOUT2 = BAILOUT * BAILOUT;
@@ -177,44 +183,15 @@ vec3 eval_pert(vec2 dc) {
 }
 
 void fragment() {
-	if (FRAGCOORD.y < float(band_y_min) || FRAGCOORD.y >= float(band_y_max)) {
-		discard;
-	}
+	ivec2 cell = ivec2(floor(UV / SCREEN_PIXEL_SIZE));
+	ivec2 offset = fractal_slot_offset(cell, sample_stride, sample_phase);
+	vec2 pixel = vec2(cell * sample_stride + offset) + 0.5 + sample_jitter;
+	vec2 world_scale = vec2(2.0 * view_half * full_size.x / full_size.y, 2.0 * view_half);
+	vec2 off = (pixel / full_size - 0.5) * world_scale;
+	vec3 r = use_perturbation ? eval_pert(dc_origin + off) : eval_direct(view_center + off);
 
-	vec2 res = 1.0 / SCREEN_PIXEL_SIZE;
-	float aspect = res.x / res.y;
-	vec2 world_scale = vec2(2.0 * view_half * aspect, 2.0 * view_half);
-
-	int ns = clamp(aa_quality, 1, 3);
-	float inv_ns = 1.0 / float(ns);
-
-	float mu_acc = 0.0;
-	float esc_count = 0.0;
-	float trap_acc = 0.0;
-	float mu_interior = float(max_iterations);
-
-	for (int sy = 0; sy < 3; sy++) {
-		if (sy >= ns) break;
-		for (int sx = 0; sx < 3; sx++) {
-			if (sx >= ns) break;
-			vec2 sub = (vec2(float(sx), float(sy)) + 0.5) * inv_ns - 0.5;
-			vec2 uv = UV + sub * SCREEN_PIXEL_SIZE;
-			vec2 off = (uv - 0.5) * world_scale;
-			vec3 r = use_perturbation ? eval_pert(dc_origin + off)
-			                          : eval_direct(view_center + off);
-			trap_acc += r.y;
-			if (r.z > 0.5) {
-				mu_acc += r.x;
-				esc_count += 1.0;
-			}
-		}
-	}
-
-	float total = float(ns * ns);
-	float coverage = esc_count / total;
-	float mu = esc_count > 0.0 ? mu_acc / esc_count : mu_interior;
-	float trap = log(1.0 + (trap_acc / total) * 8.0) / log(9.0);
-
-	float mu_hi = floor(mu / 64.0);
-	COLOR = vec4(mu_hi, mu - mu_hi * 64.0, trap, coverage);
+	float mu = r.z > 0.5 ? r.x : 0.0;
+	float mu_hi = floor(mu / mu_split);
+	float trap = log(1.0 + r.y * 8.0) / log(9.0);
+	COLOR = vec4(mu_hi, mu - mu_hi * mu_split, trap, r.z);
 }

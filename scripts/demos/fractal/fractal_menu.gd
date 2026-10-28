@@ -76,15 +76,15 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 
 	menu.add_separator()
 	menu.add_section("Quality")
-	var aa_slider: HSlider = menu.add_slider("Anti-Alias", 1, 3, float(_view.aa_quality),
-		func(value: float) -> void: _view.aa_quality = int(value))
-	quality.bind("aa_quality", aa_slider,
-		func(value: float) -> void: _view.aa_quality = int(value))
-	var band_slider: HSlider = menu.add_slider("Refine band", 32.0, 4096.0,
-		float(_view.config.refine_band_rows),
-		func(value: float) -> void: _view.config.refine_band_rows = int(value))
-	quality.bind("refine_band_rows", band_slider,
-		func(value: float) -> void: _view.config.refine_band_rows = int(value))
+	var aa_slider: HSlider = menu.add_slider("AA Samples", 1, 64, float(_view.aa_samples),
+		func(value: float) -> void: _view.aa_samples = int(value))
+	quality.bind("aa_samples", aa_slider,
+		func(value: float) -> void: _view.aa_samples = int(value))
+	var budget_slider: HSlider = menu.add_slider("GPU ms / frame", 1.0, 30.0,
+		_view.config.sample_budget_ms,
+		func(value: float) -> void: _view.config.sample_budget_ms = value)
+	quality.bind("sample_budget_ms", budget_slider,
+		func(value: float) -> void: _view.config.sample_budget_ms = value)
 	quality.attach_menu_option(menu)
 	menu.add_toggle("Auto Iterations", _camera.auto_iterations,
 		func(on: bool) -> void: _camera.auto_iterations = on)
@@ -106,12 +106,13 @@ func update_labels(delta: float) -> void:
 	_label_timer = 0.0
 	_zoom_label.text = "Zoom: " + _format_zoom(_camera.zoom())
 	_iterations_label.text = "Iterations: %d" % _camera.iterations_full()
+	var stride := _view.sample_stride()
 	match _view.state:
 		FractalView.State.MOVING:
-			_state_label.text = "State: rendering"
+			_state_label.text = "State: moving, 1/%d px per frame" % (stride * stride)
 		FractalView.State.REFINING:
-			_state_label.text = "State: refining %d%%" % mini(
-				int(100.0 * _view.refine_progress()), 100)
+			_state_label.text = "State: refining %d%%, 1/%d px per frame" % [mini(
+				int(100.0 * _view.refine_progress()), 100), stride * stride]
 		FractalView.State.IDLE:
 			_state_label.text = "State: idle"
 

@@ -1,18 +1,18 @@
 class_name FractalQualityProfile
 extends SimQualityProfile
-## Quality tiers of the 2D fractal explorer. Motion quality is not a tier
-## knob — the live preview always runs at the full iteration count and lets
-## its resolution adapt to the frame budget — so tiers size the settled
-## image: the refine band sweep speed and the per-pixel anti-alias level.
+## Quality tiers of the 2D fractal explorer. Every sample is computed at full
+## resolution and full iteration count; tiers only size the GPU time spent per
+## frame (how fast the screen refreshes while moving) and how many jittered
+## samples each pixel accumulates once the view is still.
 
-const AA_QUALITY := {Tier.LOW: 1, Tier.MEDIUM: 2, Tier.HIGH: 3, Tier.ULTRA: 3}
-const REFINE_BAND_ROWS := {
-	Tier.LOW: 128, Tier.MEDIUM: 256, Tier.HIGH: 512, Tier.ULTRA: 1024,
+const AA_SAMPLES := {Tier.LOW: 4, Tier.MEDIUM: 9, Tier.HIGH: 16, Tier.ULTRA: 32}
+const SAMPLE_BUDGET_MS := {
+	Tier.LOW: 6.0, Tier.MEDIUM: 10.0, Tier.HIGH: 12.0, Tier.ULTRA: 14.0,
 }
 
 
 static func values(tier: int) -> Dictionary:
 	return {
-		aa_quality = AA_QUALITY[tier],
-		refine_band_rows = REFINE_BAND_ROWS[tier],
+		aa_samples = AA_SAMPLES[tier],
+		sample_budget_ms = SAMPLE_BUDGET_MS[tier],
 	}

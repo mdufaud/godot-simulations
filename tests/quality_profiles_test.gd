@@ -35,7 +35,7 @@ func _profile_table() -> void:
 		GrassQualityProfile: ["near_detail", "density", "shadows", "shadow_distance_m"],
 		MixwellQualityProfile: ["target_spp", "final_scale", "max_render_pixels",
 			"gpu_budget_ms"],
-		FractalQualityProfile: ["aa_quality", "refine_band_rows"],
+		FractalQualityProfile: ["aa_samples", "sample_budget_ms"],
 		NonEuclideanQualityProfile: ["portal_views", "portal_view_scale"],
 		SsrQualityProfile: ["msaa", "ssr_steps", "max_objects",
 			"ssao", "ssil", "glow"],
@@ -168,9 +168,10 @@ func _test_lever_caps() -> void:
 	var fractal := FractalQualityProfile
 	for tier in 4:
 		var values: Dictionary = fractal.values(tier)
-		_check(values.refine_band_rows <= 4096,
-			"fractal tier %d band above FractalConfig range" % tier)
-		_check(values.aa_quality in [1, 2, 3], "fractal AA level out of shader range")
+		_check(values.sample_budget_ms >= 1.0 and values.sample_budget_ms <= 30.0,
+			"fractal tier %d budget outside the menu slider range" % tier)
+		_check(values.aa_samples >= 1 and values.aa_samples <= 64,
+			"fractal tier %d AA samples outside the menu slider range" % tier)
 	var non_euclidean: Dictionary = NonEuclideanQualityProfile.values(3)
 	_check(non_euclidean.portal_views <= 4,
 		"portal views above the pool constant (PortalRenderManager)")

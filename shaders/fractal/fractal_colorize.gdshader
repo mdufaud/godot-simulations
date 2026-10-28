@@ -2,24 +2,17 @@ shader_type canvas_item;
 
 // ============================================================
 // Fractal colorize pass — runs every frame, trivially cheap.
-// Reads iteration data from the two SubViewports (low = live
-// preview, high = refined) and maps it to color. Palette
+// Reads the accumulated iteration data (see
+// fractal_accumulate.gdshader) and maps it to color. Palette
 // animation via TIME costs nothing: the fractal itself is not
 // recomputed here.
 //
-// Input packing (see fractal.gdshader):
-//   R = floor(mu / 64), G = mu - R*64, B = trap, A = coverage
+// Input packing (premultiplied by coverage):
+//   R = floor(muc / mu_split), G = muc - R*mu_split, B = trap, A = coverage
 // ============================================================
 
-uniform sampler2D tex_low : filter_linear, repeat_disable;
-uniform sampler2D tex_high : filter_linear, repeat_disable;
-uniform float refine_blend : hint_range(0.0, 1.0) = 0.0;
-
-// Each source viewport holds a render of an older view: xy rescales and zw
-// shifts its UVs into the current view, so while the camera moves the screen
-// keeps stretching the last completed render until a fresh one replaces it.
-uniform vec4 xform_low = vec4(1.0, 1.0, 0.0, 0.0);
-uniform vec4 xform_high = vec4(1.0, 1.0, 0.0, 0.0);
+uniform sampler2D tex_accum : filter_linear, repeat_disable;
+uniform float mu_split = 16.0;
 
 uniform int color_mode : hint_range(0, 3) = 0;
 uniform float color_speed : hint_range(0.0, 5.0) = 0.3;
@@ -57,20 +50,12 @@ vec3 hsv2rgb(vec3 c) {
 }
 
 vec4 fetch(vec2 uv) {
-	// refine_blend is a uniform, so these are coherent branches: outside a fade it
-	// is exactly 0 or 1 and only one of the two views needs sampling.
-	if (refine_blend <= 0.0) {
-		return texture(tex_low, xform_low.xy * uv + xform_low.zw);
-	}
-	if (refine_blend >= 1.0) {
-		return texture(tex_high, xform_high.xy * uv + xform_high.zw);
-	}
-	return mix(texture(tex_low, xform_low.xy * uv + xform_low.zw),
-		texture(tex_high, xform_high.xy * uv + xform_high.zw), refine_blend);
+	return texture(tex_accum, uv);
 }
 
-float decode_mu(vec4 d) {
-	return d.r * 64.0 + d.g;
+// Smooth iteration count, or `fallback` where no sample escaped.
+float decode_mu(vec4 d, float fallback) {
+	return d.a > 1e-4 ? (d.r * mu_split + d.g) / d.a : fallback;
 }
 
 vec3 exterior_color(float mu, float trap) {
@@ -115,7 +100,7 @@ vec3 interior_color(float trap) {
 
 void fragment() {
 	vec4 d = fetch(UV);
-	float mu = decode_mu(d);
+	float mu = decode_mu(d, 0.0);
 	float trap = d.b;
 	float coverage = d.a;
 
@@ -123,11 +108,11 @@ void fragment() {
 
 	// Slope shading: emboss from the mu gradient (neighbor texels are free)
 	if (edge_strength > 0.001 && coverage > 0.0) {
-		vec2 ts = 1.0 / vec2(textureSize(tex_high, 0));
-		float ml = decode_mu(fetch(UV - vec2(ts.x, 0.0)));
-		float mr = decode_mu(fetch(UV + vec2(ts.x, 0.0)));
-		float mt = decode_mu(fetch(UV - vec2(0.0, ts.y)));
-		float mb = decode_mu(fetch(UV + vec2(0.0, ts.y)));
+		vec2 ts = 1.0 / vec2(textureSize(tex_accum, 0));
+		float ml = decode_mu(fetch(UV - vec2(ts.x, 0.0)), mu);
+		float mr = decode_mu(fetch(UV + vec2(ts.x, 0.0)), mu);
+		float mt = decode_mu(fetch(UV - vec2(0.0, ts.y)), mu);
+		float mb = decode_mu(fetch(UV + vec2(0.0, ts.y)), mu);
 		vec2 g = vec2(mr - ml, mb - mt);
 		float e = dot(g, vec2(-0.707, -0.707));
 		e = e / (1.0 + abs(e));

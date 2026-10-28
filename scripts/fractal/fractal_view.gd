@@ -1,51 +1,77 @@
 class_name FractalView extends RefCounted
-## Two-pass fractal render pipeline.
+## Progressive full-resolution fractal renderer.
 ##
-## Pass 1 ([code]fractal.gdshader[/code], in the two SubViewports) computes
-## iteration data only when the view changes: the low viewport is the live
-## preview while moving — always at the full iteration count the view needs,
-## downscaled as far as the frame budget demands; the high viewport refines
-## at full res in bands. Pass 2 ([code]fractal_colorize.gdshader[/code], on
-## the display rect) maps that data to colour every frame, resampling each
-## source through a view transform so the frames where a fresh render is not
-## in yet still show the previous one at the right position.
+## The sample pass ([code]fractal.gdshader[/code]) evaluates one sample per
+## texel of a buffer 1/stride the window size: texel (i, j) is one full-res
+## pixel of its stride x stride cell, a different one each frame so stride²
+## frames cover every pixel (fractal_slots.gdshaderinc), and every texel is
+## dense GPU work. The accumulation pass
+## ([code]fractal_accumulate.gdshader[/code], full resolution, ping-pong)
+## resamples the previous result through the exact float64 view transform and
+## blends the fresh samples in: a zoom magnifies real pixels, which are then
+## replaced at full resolution, never a stretched low-res preview. Once the view
+## is still, every pass adds one jittered sample per pixel until
+## [member aa_samples], then nothing renders. The colorize pass
+## ([code]fractal_colorize.gdshader[/code], on the display rect) maps the data
+## to colour every frame.
 ##
-## The host must assign every field above [method start], which asserts them:
+## The stride follows the GPU time of the sample pass against
+## [member FractalConfig.sample_budget_ms]: a costly view is paid in refresh
+## latency, never in resolution or iterations.
+##
+## The host assigns the fields below; [method start] builds the buffers under
+## [member host]:
 ##
 ## [codeblock]
 ## var view := FractalView.new()
 ## view.camera = camera
-## view.view_low = $ViewLow
-## view.view_high = $ViewHigh
-## view.rect_low = $ViewLow/Rect
-## view.rect_high = $ViewHigh/Rect
 ## view.display = $Display
 ## view.host = self
 ## view.start()
+## view.resize(get_window().size)
 ## [/codeblock]
 
 enum State { MOVING, REFINING, IDLE }
-## Seconds of the display crossfade toward whichever pass just finished.
-const BLEND_FADE_S := 0.05
-## Preview resolution levels: the preview renders at 2^-level of the window.
-## The cost of motion is paid in resolution, never in iterations — a
-## low-iteration preview paints deep zooms black, a low-resolution one is
-## merely soft while moving.
-const PREVIEW_MIN_LEVEL := 0
-const PREVIEW_MAX_LEVEL := 3
-## Frame-time hysteresis of the level: 3 slow frames drop one level, 30 fast
-## frames climb back one.
-const PREVIEW_DROP_S := 0.030
-const PREVIEW_RAISE_S := 0.014
+
+const SAMPLE_SHADER := preload("res://shaders/fractal/fractal.gdshader")
+const ACCUMULATE_SHADER := preload("res://shaders/fractal/fractal_accumulate.gdshader")
+## Weight of a fresh sample while the view moves slowly: the history then
+## averages about three samples (temporal anti-aliasing in motion).
+const MOTION_ALPHA := 0.5
+## Zoom change over one refresh cycle (stride² frames), in log units, past which
+## the history is too magnified to average with and fresh samples replace it.
+const MOTION_MAGNIFY_LO := 0.08
+const MOTION_MAGNIFY_HI := 0.4
+## Stride hysteresis: coarser after 3 frames over budget, finer after 12 frames
+## in which the finer stride is expected to fit under 80 % of it.
+const STRIDE_OVER_FRAMES := 3
+const STRIDE_UNDER_FRAMES := 12
+const STRIDE_UNDER_MARGIN := 0.8
+## Cost of the finer stride relative to the current one when it was not measured
+## recently. A pass with few texels leaves the GPU underused (fewer waves to hide
+## latency, lower clocks), so 4x the texels costs far less than 4x the time:
+## moving tries the optimistic guess and falls back within 3 frames, refining
+## only takes the pessimistic one so the accumulation is not disturbed.
+const STRIDE_GUESS_MOVING := 2.0
+const STRIDE_GUESS_REFINING := 4.0
+## Frames a measured stride cost stays trusted.
+const STRIDE_COST_TTL := 240
+## Frames the GPU timer may still report the previous stride after a change.
+const STRIDE_SETTLE_FRAMES := 4
+## Step of the two-channel mu encoding (R = floor(mu / step), G = remainder) in
+## the RGBA16F buffers: half floats hold integers exactly up to 2048, so R stays
+## exact up to 2048 * 16 iterations, while G keeps ~0.008 resolution through the
+## per-frame re-encode of resampled pixels. A coarser step lets that rounding
+## drift with pixel age, which the colorize emboss shows as stride-periodic stripes.
+const MU_SPLIT := 16.0
+## R2 low-discrepancy sequence, the sub-pixel jitter of successive samples.
+const R2_A1 := 0.7548776662466927
+const R2_A2 := 0.5698402909980532
 
 var camera: FractalCamera
 var config: FractalConfig = FractalConfig.new()
-var view_low: SubViewport
-var view_high: SubViewport
-var rect_low: ColorRect
-var rect_high: ColorRect
 var display: ColorRect
-## Node the blend tween is created on.
+## Node the render buffers are built under.
 var host: Node
 
 var julia_re := -0.7269
@@ -53,32 +79,50 @@ var julia_im := 0.1889
 var julia_morph := false
 var trap_shape := 0
 var trap_scale := 1.0
-var aa_quality := 2
+## Jittered samples each pixel accumulates once the view is still.
+var aa_samples := 9
 
 var state := State.MOVING
 
 var _orbit := FractalOrbit.new()
-var _material_low: ShaderMaterial
-var _material_high: ShaderMaterial
+var _sample_material: ShaderMaterial
 var _material_display: ShaderMaterial
-## View each source viewport was last rendered for; the display transform
-## resamples stale sources into the current view (see _source_xform).
-var _low_cx := 0.0
-var _low_cy := 0.0
-var _low_half := 1.0
-var _low_aspect := 1.0
-var _high_cx := 0.0
-var _high_cy := 0.0
-var _high_half := 1.0
-var _high_aspect := 1.0
-var _settle := 0.0
-var _refine_row := 0
-var _last_hash := 0
+var _accum: Array[SubViewport] = []
+var _accum_rects: Array[ColorRect] = []
+var _accum_materials: Array[ShaderMaterial] = []
+var _samples: Array[SubViewport] = []
+var _sample_rects: Array[ColorRect] = []
+var _full_size := Vector2i(8, 8)
+var _stride := 2
+var _frame := 0
+## Accumulation buffer the last render went to; the next one reads it as history.
+var _current := 0
+var _history_valid := false
+# View the history buffer was rendered for.
+var _hist_cx := 0.0
+var _hist_cy := 0.0
+var _hist_half := 1.0
+var _hist_log_zoom := 0.0
+## Samples every history pixel holds, as a blend weight.
+var _history_weight := 0.0
+## Frames left in which fresh samples replace the history instead of averaging.
+var _replace_frames := 0
+var _pass_frame := 0
+var _passes_done := 0
+var _view_key := 0
+var _soft_key := 0
+var _hard_key := 0
 var _julia_theta := 0.0
-var _blend_tween: Tween
-var _preview_level := PREVIEW_MIN_LEVEL
-var _slow_frames := 0
-var _fast_frames := 0
+var _over_frames := 0
+var _under_frames := 0
+var _stride_settle := 0
+# Last measured sample-pass cost per stride, and the frame it was measured at.
+var _stride_cost := {}
+var _stride_cost_frame := {}
+var _rendered := false
+# Names of the GPU timestamps the renderer captures around each sample viewport.
+var _sample_begin_names: Array[String] = []
+var _sample_end_names: Array[String] = []
 
 
 func start() -> void:
@@ -87,32 +131,53 @@ func start() -> void:
 		push_error("Fractal config: %s" % config_error)
 		return
 	assert(camera != null, "FractalView: camera is required")
-	assert(view_low != null and view_high != null, "FractalView: both SubViewports are required")
-	assert(rect_low != null and rect_high != null, "FractalView: both pass-1 rects are required")
 	assert(display != null and host != null, "FractalView: display rect and host are required")
 
-	_material_low = rect_low.material as ShaderMaterial
-	_material_high = rect_high.material as ShaderMaterial
 	_material_display = display.material as ShaderMaterial
-
 	display.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	view_high.render_target_clear_mode = SubViewport.CLEAR_MODE_NEVER
-	view_low.render_target_update_mode = SubViewport.UPDATE_DISABLED
-	view_high.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	_sample_material = ShaderMaterial.new()
+	_sample_material.shader = SAMPLE_SHADER
 
-	_material_display.set_shader_parameter("tex_low", view_low.get_texture())
-	_material_display.set_shader_parameter("tex_high", view_high.get_texture())
-	_material_display.set_shader_parameter("refine_blend", 0.0)
-
-	_store_low_view()
-	_store_high_view()
-	_update_display_xforms()
+	# Each sample viewport is a child of the accumulation viewport reading it:
+	# child viewports render first, so a frame's samples land the same frame.
+	for i in 2:
+		var accum := _make_viewport()
+		host.add_child(accum)
+		var sample := _make_viewport()
+		accum.add_child(sample)
+		var sample_rect := ColorRect.new()
+		sample_rect.material = _sample_material
+		sample.add_child(sample_rect)
+		var accum_material := ShaderMaterial.new()
+		accum_material.shader = ACCUMULATE_SHADER
+		var accum_rect := ColorRect.new()
+		accum_rect.material = accum_material
+		accum.add_child(accum_rect)
+		var sample_rid := sample.get_viewport_rid()
+		RenderingServer.viewport_set_measure_render_time(sample_rid, true)
+		_sample_begin_names.append("vp_begin_%d" % sample_rid.get_id())
+		_sample_end_names.append("vp_end_%d" % sample_rid.get_id())
+		_accum.append(accum)
+		_accum_rects.append(accum_rect)
+		_accum_materials.append(accum_material)
+		_samples.append(sample)
+		_sample_rects.append(sample_rect)
+	for i in 2:
+		_accum_materials[i].set_shader_parameter("tex_history", _accum[1 - i].get_texture())
+		_accum_materials[i].set_shader_parameter("tex_sample", _samples[i].get_texture())
+		_accum_materials[i].set_shader_parameter("mu_split", MU_SPLIT)
+	_sample_material.set_shader_parameter("mu_split", MU_SPLIT)
+	_material_display.set_shader_parameter("mu_split", MU_SPLIT)
+	_material_display.set_shader_parameter("tex_accum", _accum[0].get_texture())
+	_set_stride(mini(_stride, config.max_sample_stride))
 
 
 func resize(window_size: Vector2i) -> void:
-	view_high.size = Vector2i(maxi(window_size.x, 8), maxi(window_size.y, 8))
-	_apply_preview_level()
-	rect_high.size = Vector2(view_high.size)
+	_full_size = Vector2i(maxi(window_size.x, 8), maxi(window_size.y, 8))
+	for i in 2:
+		_accum[i].size = _full_size
+		_accum_rects[i].size = Vector2(_full_size)
+	_resize_samples()
 
 
 func set_julia_morph(enabled: bool) -> void:
@@ -130,39 +195,161 @@ func invalidate_orbit() -> void:
 	_orbit.invalidate()
 
 
-## 0 while the refinement starts, 1 when the last band is done.
+## 0 when the still view starts accumulating, 1 once every pixel holds
+## [member aa_samples] samples.
 func refine_progress() -> float:
-	return float(_refine_row) / maxf(float(view_high.size.y), 1.0)
+	var cycle := _stride * _stride
+	return float(_passes_done * cycle + _pass_frame) / float(maxi(aa_samples * cycle, 1))
+
+
+## 1 pixel in stride² gets a fresh sample per frame.
+func sample_stride() -> int:
+	return _stride
 
 
 func update(delta: float) -> void:
 	_advance_morph(delta)
-	_update_display_xforms()
 
-	var view_hash := _params_hash()
-	var dirty := view_hash != _last_hash
-	_last_hash = view_hash
+	var hard := _hard_hash()
+	if hard != _hard_key:
+		_hard_key = hard
+		_history_valid = false
+	var soft := _soft_hash()
+	var soft_changed := soft != _soft_key
+	_soft_key = soft
+	if soft_changed or not _history_valid:
+		# The history shows other content: fresh samples replace it, so the
+		# screen dissolves into the new image within one refresh cycle.
+		_replace_frames = _stride * _stride
+	var view := _view_hash()
+	var moving := view != _view_key or _replace_frames > 0
+	_view_key = view
 
-	if dirty:
-		_settle = 0.0
+	_adapt_stride(moving)
+
+	if moving:
 		state = State.MOVING
-		_adapt_preview(delta)
-		_render_preview()
-		# The preview holds the current view exactly (full iterations), so
-		# the screen can follow it as soon as it lands; the view transform
-		# covers the single frame it takes to arrive.
-		_fade_blend(0.0, BLEND_FADE_S)
+		_pass_frame = 0
+		_passes_done = 0
+		var alpha := _motion_alpha()
+		_history_weight = (1.0 - alpha) / alpha
+		# No jitter in motion: the moving view already lands every frame's samples
+		# elsewhere on the fractal, and pixels refreshed at different frames with
+		# different jitters disagree on smooth gradients, which the colorize
+		# emboss turns into diagonal stripes.
+		_render(_frame % (_stride * _stride), alpha, Vector2.ZERO)
 		return
 
-	match state:
-		State.MOVING:
-			_settle += delta
-			if _settle >= config.settle_time_s:
-				_begin_refine()
-		State.REFINING:
-			_refine_step()
-		State.IDLE:
-			pass
+	if state == State.MOVING:
+		state = State.REFINING
+		_history_weight = minf(_history_weight, 1.0)
+	elif state == State.IDLE:
+		_rendered = false
+		if _passes_done >= aa_samples:
+			return
+		state = State.REFINING
+
+	_render(_pass_frame, 1.0 / (_history_weight + 1.0), _r2(_passes_done))
+	_pass_frame += 1
+	if _pass_frame == _stride * _stride:
+		_pass_frame = 0
+		_passes_done += 1
+		_history_weight += 1.0
+		if _passes_done >= aa_samples:
+			state = State.IDLE
+
+
+func _make_viewport() -> SubViewport:
+	var viewport := SubViewport.new()
+	viewport.disable_3d = true
+	viewport.transparent_bg = true
+	viewport.use_hdr_2d = true
+	viewport.size = _full_size
+	viewport.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	return viewport
+
+
+func _resize_samples() -> void:
+	var sample_size := Vector2i(
+		ceili(float(_full_size.x) / _stride), ceili(float(_full_size.y) / _stride))
+	for i in 2:
+		_samples[i].size = sample_size
+		_sample_rects[i].size = Vector2(sample_size)
+
+
+func _set_stride(stride: int) -> void:
+	_stride = stride
+	_pass_frame = 0
+	_over_frames = 0
+	_under_frames = 0
+	_stride_settle = STRIDE_SETTLE_FRAMES
+	_resize_samples()
+
+
+## Sub-pixel jitter of the n-th sample, centred on the pixel for n = 0.
+static func _r2(n: int) -> Vector2:
+	return Vector2(fposmod(0.5 + n * R2_A1, 1.0), fposmod(0.5 + n * R2_A2, 1.0)) \
+		- Vector2(0.5, 0.5)
+
+
+## Coarser stride when the sample pass runs over budget, finer when the finer
+## one is expected to fit with margin.
+func _adapt_stride(moving: bool) -> void:
+	if not _rendered:
+		return
+	if _stride_settle > 0:
+		_stride_settle -= 1
+		return
+	var gpu_ms := _sample_gpu_ms()
+	if gpu_ms <= 0.0:
+		return
+	_stride_cost[_stride] = gpu_ms
+	_stride_cost_frame[_stride] = _frame
+	var budget := config.sample_budget_ms
+	if gpu_ms > budget:
+		_over_frames += 1
+		_under_frames = 0
+	elif _stride > 1 and _finer_cost_ms(gpu_ms, moving) < budget * STRIDE_UNDER_MARGIN:
+		_under_frames += 1
+		_over_frames = 0
+	else:
+		_over_frames = 0
+		_under_frames = 0
+	if _over_frames >= STRIDE_OVER_FRAMES and _stride < config.max_sample_stride:
+		_set_stride(_stride << 1)
+	elif _under_frames >= STRIDE_UNDER_FRAMES:
+		_set_stride(_stride >> 1)
+
+
+func _finer_cost_ms(gpu_ms: float, moving: bool) -> float:
+	var finer := _stride >> 1
+	if _stride_cost.has(finer) and _frame - int(_stride_cost_frame[finer]) < STRIDE_COST_TTL:
+		return _stride_cost[finer]
+	return gpu_ms * (STRIDE_GUESS_MOVING if moving else STRIDE_GUESS_REFINING)
+
+
+## GPU time of the latest sample pass the renderer has timestamps for, 0 when
+## none is available (per-viewport measured times stay 0 for viewports that do
+## not render every frame, so the raw timestamps are read instead).
+func _sample_gpu_ms() -> float:
+	var rd := RenderingServer.get_rendering_device()
+	if rd == null:
+		return 0.0
+	var begin := -1
+	for i in rd.get_captured_timestamps_count():
+		var name := rd.get_captured_timestamp_name(i)
+		if name in _sample_begin_names:
+			begin = rd.get_captured_timestamp_gpu_time(i)
+		elif begin >= 0 and name in _sample_end_names:
+			return float(rd.get_captured_timestamp_gpu_time(i) - begin) / 1.0e6
+	return 0.0
+
+
+func _motion_alpha() -> float:
+	if _replace_frames > 0:
+		return 1.0
+	var cycle_zoom := absf(camera.log_zoom - _hist_log_zoom) * float(_stride * _stride)
+	return lerpf(MOTION_ALPHA, 1.0, smoothstep(MOTION_MAGNIFY_LO, MOTION_MAGNIFY_HI, cycle_zoom))
 
 
 func _advance_morph(delta: float) -> void:
@@ -173,131 +360,73 @@ func _advance_morph(delta: float) -> void:
 	julia_im = 0.7885 * sin(_julia_theta)
 
 
-func _params_hash() -> int:
-	return hash([
-		camera.center_x, camera.center_y, camera.log_zoom, camera.fractal_type,
-		julia_re, julia_im, camera.iterations_full(), aa_quality,
-		trap_shape, trap_scale, view_high.size.x, view_high.size.y,
-	])
+## Changes no history pixel can stand in for: start over from fresh samples.
+func _hard_hash() -> int:
+	return hash([camera.fractal_type, _full_size, camera.auto_iterations])
 
 
-func _render_preview() -> void:
-	_apply_view_uniforms(_material_low, camera.iterations_full(), 1)
-	_material_low.set_shader_parameter("band_y_min", 0)
-	_material_low.set_shader_parameter("band_y_max", 1000000)
-	_store_low_view()
-	view_low.render_target_update_mode = SubViewport.UPDATE_ONCE
+## Changes the history still roughly matches: dissolve it away.
+func _soft_hash() -> int:
+	return hash([julia_re, julia_im, trap_shape, trap_scale,
+		0 if camera.auto_iterations else camera.manual_iterations])
 
 
-## Keeps the preview inside the frame budget while moving by trading
-## resolution (the iteration count stays exact). Delta is the previous
-## frame's time — the frame that paid for the last preview.
-func _adapt_preview(delta: float) -> void:
-	if delta > PREVIEW_DROP_S:
-		_slow_frames += 1
-		_fast_frames = 0
-	elif delta < PREVIEW_RAISE_S:
-		_fast_frames += 1
-		_slow_frames = 0
-	else:
-		_slow_frames = 0
-		_fast_frames = 0
-	var level := _preview_level
-	if _slow_frames >= 3 and level < PREVIEW_MAX_LEVEL:
-		level += 1
-		_slow_frames = 0
-	elif _fast_frames >= 30 and level > PREVIEW_MIN_LEVEL:
-		level -= 1
-		_fast_frames = 0
-	if level != _preview_level:
-		_preview_level = level
-		_apply_preview_level()
+func _view_hash() -> int:
+	return hash([camera.center_x, camera.center_y, camera.log_zoom])
 
 
-func _apply_preview_level() -> void:
-	view_low.size = Vector2i(
-		maxi(view_high.size.x >> _preview_level, 4),
-		maxi(view_high.size.y >> _preview_level, 4))
-	rect_low.size = Vector2(view_low.size)
+func _render(phase: int, alpha: float, jitter: Vector2) -> void:
+	if _replace_frames > 0:
+		alpha = 1.0
+		_replace_frames -= 1
+	var target := 1 - _current
+	var iterations := camera.iterations_full()
+
+	_apply_view_uniforms(_sample_material, iterations)
+	_sample_material.set_shader_parameter("sample_stride", _stride)
+	_sample_material.set_shader_parameter("sample_phase", phase)
+	_sample_material.set_shader_parameter("sample_jitter", jitter)
+	_sample_material.set_shader_parameter("full_size", Vector2(_full_size))
+
+	var xform := _history_xform()
+	var material := _accum_materials[target]
+	material.set_shader_parameter("sample_stride", _stride)
+	material.set_shader_parameter("sample_phase", phase)
+	material.set_shader_parameter("sample_jitter", jitter)
+	material.set_shader_parameter("history_valid", _history_valid)
+	material.set_shader_parameter("history_identity", xform == Vector4(1.0, 1.0, 0.0, 0.0))
+	material.set_shader_parameter("history_xform", xform)
+	material.set_shader_parameter("blend_alpha", alpha)
+	material.set_shader_parameter("mu_max", float(iterations + 64))
+
+	_samples[target].render_target_update_mode = SubViewport.UPDATE_ONCE
+	_accum[target].render_target_update_mode = SubViewport.UPDATE_ONCE
+	_material_display.set_shader_parameter("tex_accum", _accum[target].get_texture())
+
+	_current = target
+	_hist_cx = camera.center_x
+	_hist_cy = camera.center_y
+	_hist_half = camera.view_half()
+	_hist_log_zoom = camera.log_zoom
+	_history_valid = true
+	_frame += 1
+	_rendered = true
 
 
-func _begin_refine() -> void:
-	state = State.REFINING
-	_refine_row = 0
-	_apply_view_uniforms(_material_high, camera.iterations_full(), aa_quality)
-	_store_high_view()
-	_refine_step()
-
-
-func _refine_step() -> void:
-	_material_high.set_shader_parameter("band_y_min", _refine_row)
-	_material_high.set_shader_parameter("band_y_max", _refine_row + config.refine_band_rows)
-	view_high.render_target_update_mode = SubViewport.UPDATE_ONCE
-	_refine_row += config.refine_band_rows
-	if _refine_row >= view_high.size.y:
-		state = State.IDLE
-		_fade_blend_to_high()
-
-
-func _store_low_view() -> void:
-	_low_cx = camera.center_x
-	_low_cy = camera.center_y
-	_low_half = camera.view_half()
-	_low_aspect = camera.aspect()
-
-
-func _store_high_view() -> void:
-	_high_cx = camera.center_x
-	_high_cy = camera.center_y
-	_high_half = camera.view_half()
-	_high_aspect = camera.aspect()
-
-
-## Screen-UV transform resampling a source rendered for an older view
-## (cx0/cy0/half0/aspect0) into the current one. Computed in float64 here —
-## the deltas are tiny at deep zoom, far under float32 resolution — and only
-## the small result goes to the shader as float32.
-func _source_xform(cx0: float, cy0: float, half0: float, aspect0: float) -> Vector4:
-	var half := camera.view_half()
+## Screen-UV transform from the current view into the history's. Computed in
+## float64 here — the deltas are tiny at deep zoom, far under float32
+## resolution — and only the small result goes to the shader as float32.
+func _history_xform() -> Vector4:
 	var aspect := camera.aspect()
-	var sx := (half * aspect) / (half0 * aspect0)
-	var sy := half / half0
+	var s := camera.view_half() / _hist_half
 	return Vector4(
-		sx, sy,
-		0.5 + (camera.center_x - cx0) / (2.0 * half0 * aspect0) - 0.5 * sx,
-		0.5 + (camera.center_y - cy0) / (2.0 * half0) - 0.5 * sy
+		s, s,
+		0.5 + (camera.center_x - _hist_cx) / (2.0 * _hist_half * aspect) - 0.5 * s,
+		0.5 + (camera.center_y - _hist_cy) / (2.0 * _hist_half) - 0.5 * s
 	)
 
 
-func _update_display_xforms() -> void:
-	_material_display.set_shader_parameter("xform_low",
-		_source_xform(_low_cx, _low_cy, _low_half, _low_aspect))
-	_material_display.set_shader_parameter("xform_high",
-		_source_xform(_high_cx, _high_cy, _high_half, _high_aspect))
-
-
-func _fade_blend(value: float, duration: float) -> void:
-	if _blend_tween:
-		_blend_tween.kill()
-		_blend_tween = null
-	var raw: Variant = _material_display.get_shader_parameter("refine_blend")
-	var from := float(raw) if raw != null else 0.0
-	if absf(from - value) < 0.005:
-		_material_display.set_shader_parameter("refine_blend", value)
-		return
-	_blend_tween = host.create_tween()
-	_blend_tween.tween_method(
-		func(blend: float) -> void:
-			_material_display.set_shader_parameter("refine_blend", blend),
-		from, value, duration
-	)
-
-
-func _fade_blend_to_high() -> void:
-	_fade_blend(1.0, BLEND_FADE_S)
-
-
-func _apply_view_uniforms(material: ShaderMaterial, iterations: int, aa: int) -> void:
+func _apply_view_uniforms(material: ShaderMaterial, iterations: int) -> void:
 	var zoom := camera.zoom()
 	var perturbed := camera.fractal_type <= 1 and zoom > config.perturbation_zoom_threshold
 	if perturbed:
@@ -318,4 +447,3 @@ func _apply_view_uniforms(material: ShaderMaterial, iterations: int, aa: int) ->
 			material.set_shader_parameter("ref_len_crit", _orbit.crit_length)
 	material.set_shader_parameter("trap_shape", trap_shape)
 	material.set_shader_parameter("trap_scale", trap_scale)
-	material.set_shader_parameter("aa_quality", aa)
