@@ -22,7 +22,6 @@ var _cache_valid := false
 var _derived_spherical_inertia := false
 var _invalid_state_reported := false
 var _invalid_medium_reported := false
-var _analytic_surface_reported := false
 var _last_pressure_wrench := PackedFloat64Array()
 var _last_friction_wrench := PackedFloat64Array()
 var _last_surface_faces := 0
@@ -161,6 +160,7 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 	var next_velocity := generalized_velocity
 	for _index in substeps:
 		_last_pressure_wrench.fill(0.0)
+		_last_friction_wrench.fill(0.0)
 		_last_surface_faces = 0
 		next_velocity = MATH.matrix_vector_multiply(_combined_inverse, next_momentum)
 		if not _finite_array(next_velocity):
@@ -180,52 +180,26 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 		var passive_wrench := MATH.semidirect_coupling_wrench(
 			next_momentum, next_velocity)
 		if fluid_density > 0.0:
-			var wetted_fraction := float(immersion.wetted_area_fraction) \
-				if pool_buoyancy_enabled else 1.0
-			_last_friction_wrench = MATH.particle_drag_wrench(next_velocity,
-				config.dynamic_viscosity_pa_s, fluid_density, profile.volume_m3,
-				wetted_fraction, profile.total_area_m2)
-			var relative_speed := Vector3(next_velocity[3], next_velocity[4],
-				next_velocity[5]).length()
-			var reynolds := fluid_density * relative_speed \
-				* profile.characteristic_length_m / config.dynamic_viscosity_pa_s \
-				if config.dynamic_viscosity_pa_s > 0.0 else INF
-			if profile.format_version == AmbientFluidProfile3D.FORMAT_BEM \
-					and reynolds >= 100.0 \
-					and not profile.slip_matrix.is_empty():
-				var surface_start_us := Time.get_ticks_usec()
-				var surface := MATH.potential_pressure_wrench(profile.face_centers_m,
-					profile.face_normals,
-					profile.face_areas_m2, profile.slip_matrix, next_velocity,
-					fluid_density, config.separation_angle_rad,
-					immersion.wet_area_fractions if pool_buoyancy_enabled else PackedFloat64Array(),
-					immersion.wet_area_centers_m if pool_buoyancy_enabled else PackedVector3Array())
-				_last_pressure_wrench = surface.pressure.duplicate()
-				var relative_velocity := Vector3(next_velocity[3], next_velocity[4],
-					next_velocity[5])
-				if relative_velocity.length_squared() > 1.0e-16:
-					var pressure_force := Vector3(_last_pressure_wrench[3],
-						_last_pressure_wrench[4], _last_pressure_wrench[5])
-					pressure_force -= relative_velocity * (pressure_force.dot(relative_velocity)
-						/ relative_velocity.length_squared())
-					_last_pressure_wrench[3] = pressure_force.x
-					_last_pressure_wrench[4] = pressure_force.y
-					_last_pressure_wrench[5] = pressure_force.z
-				if pool_buoyancy_enabled and step_spin.length_squared() > 1.0e-16:
-					var pressure_torque := Vector3(_last_pressure_wrench[0],
-						_last_pressure_wrench[1], _last_pressure_wrench[2])
-					var spin_power := pressure_torque.dot(step_spin)
-					if spin_power > 0.0:
-						pressure_torque -= step_spin * (spin_power / step_spin.length_squared())
-						_last_pressure_wrench[0] = pressure_torque.x
-						_last_pressure_wrench[1] = pressure_torque.y
-						_last_pressure_wrench[2] = pressure_torque.z
-				_last_surface_faces = int(surface.attached_faces)
-				_last_surface_cpu_us += Time.get_ticks_usec() - surface_start_us
-			elif profile.format_version != AmbientFluidProfile3D.FORMAT_BEM \
-					and not _analytic_surface_reported:
-				_analytic_surface_reported = true
-				push_warning("AmbientFluidBody3D: analytic profile disables surface pressure")
+			var surface_start_us := Time.get_ticks_usec()
+			var surface := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+				profile.face_areas_m2, next_velocity, fluid_density,
+				config.dynamic_viscosity_pa_s, config.separation_angle_rad,
+				profile.surface_length_m(),
+				immersion.wet_area_fractions if pool_buoyancy_enabled else PackedFloat64Array(),
+				immersion.wet_area_centers_m if pool_buoyancy_enabled else PackedVector3Array())
+			_last_pressure_wrench = surface.pressure
+			_last_friction_wrench = surface.friction
+			if pool_buoyancy_enabled and step_spin.length_squared() > 1.0e-16:
+				var pressure_torque := Vector3(_last_pressure_wrench[0],
+					_last_pressure_wrench[1], _last_pressure_wrench[2])
+				var spin_power := pressure_torque.dot(step_spin)
+				if spin_power > 0.0:
+					pressure_torque -= step_spin * (spin_power / step_spin.length_squared())
+					_last_pressure_wrench[0] = pressure_torque.x
+					_last_pressure_wrench[1] = pressure_torque.y
+					_last_pressure_wrench[2] = pressure_torque.z
+			_last_surface_faces = int(surface.attached_faces)
+			_last_surface_cpu_us += Time.get_ticks_usec() - surface_start_us
 			passive_wrench = MATH.vector_add(passive_wrench, _last_pressure_wrench)
 		if not pool_buoyancy_faces_local.is_empty():
 			next_momentum = _pool_momentum_step(next_momentum, gravity_wrench,

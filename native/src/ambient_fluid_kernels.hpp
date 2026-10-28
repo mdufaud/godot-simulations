@@ -28,15 +28,16 @@ public:
                                                                  const godot::Vector3 &interior_point,
                                                                  const godot::Vector3 &plane_normal,
                                                                  double plane_offset) const;
-    [[nodiscard]] godot::Dictionary potential_pressure_wrench(const godot::PackedVector3Array &face_centers_m,
-                                                              const godot::PackedVector3Array &face_normals,
-                                                              const godot::PackedFloat64Array &face_areas_m2,
-                                                              const godot::PackedFloat64Array &slip_matrix,
-                                                              const godot::PackedFloat64Array &generalized_velocity,
-                                                              double fluid_density_kg_m3,
-                                                              double separation_angle_rad,
-                                                              const godot::PackedFloat64Array &wet_area_fractions,
-                                                              const godot::PackedVector3Array &wet_area_centers_m) const;
+    [[nodiscard]] godot::Dictionary surface_wrench(const godot::PackedVector3Array &face_centers_m,
+                                                   const godot::PackedVector3Array &face_normals,
+                                                   const godot::PackedFloat64Array &face_areas_m2,
+                                                   const godot::PackedFloat64Array &generalized_velocity,
+                                                   double fluid_density_kg_m3,
+                                                   double dynamic_viscosity_pa_s,
+                                                   double separation_angle_rad,
+                                                   double characteristic_length_m,
+                                                   const godot::PackedFloat64Array &wet_area_fractions,
+                                                   const godot::PackedVector3Array &wet_area_centers_m) const;
 };
 
 } // namespace pp

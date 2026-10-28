@@ -16,6 +16,7 @@ func _initialize() -> void:
 	_test_pressure_symmetry()
 	_test_magnus_symmetry()
 	_test_drag_dissipation()
+	_test_sphere_drag_coefficient()
 	_test_convergence_and_terminal_speed()
 	_test_semidirect_coupling_contract()
 	call_deferred("_test_runtime_quality")
@@ -45,43 +46,46 @@ func _test_pressure_separation() -> void:
 	var half := _surface(velocity, PI * 0.5, 0.0)
 	var wide := _surface(velocity, PI * 0.75, 0.0)
 	var attached := _surface(velocity, PI, 0.0)
-	_check(int(half.attached_faces) == 8, "PI/2 did not select upstream hemisphere")
+	_check(int(half.attached_faces) == 8, "PI/2 did not select the leading hemisphere")
+	for face_index in PROFILE.face_centers_m.size():
+		if PROFILE.face_normals[face_index].x < -1.0e-6:
+			var lone := MATH.surface_wrench(
+				PackedVector3Array([PROFILE.face_centers_m[face_index]]),
+				PackedVector3Array([PROFILE.face_normals[face_index]]),
+				PackedFloat64Array([PROFILE.face_areas_m2[face_index]]),
+				velocity, 998.0, 0.0, PI * 0.5, PROFILE.surface_length_m())
+			_check(int(lone.attached_faces) == 0, "a trailing face kept attached flow at PI/2")
 	_check(int(half.attached_faces) <= int(wide.attached_faces),
 		"attached faces decreased with separation angle")
 	_check(int(wide.attached_faces) <= int(attached.attached_faces),
 		"attached faces did not grow monotonically")
 	_check(int(attached.attached_faces) == PROFILE.face_centers_m.size(),
 		"PI did not retain all faces")
-	var full_power := MATH.vector_dot(attached.pressure, velocity)
-	_check(_wrench_norm(half.pressure) > 0.0,
-		"separation angle did not change the partial pressure integral")
-	_check(absf(full_power) < 1.0e-6,
-		"full attached pressure did not cancel on closed sphere")
+	_check(half.pressure[3] < 0.0, "separated flow did not produce drag")
+	_check(absf(MATH.vector_dot(attached.pressure, velocity)) < 1.0e-6,
+		"fully attached pressure did not cancel on a closed symmetric body (d'Alembert)")
 
 
 func _test_pressure_incidence_side() -> void:
-	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-	var slip_matrix := PackedFloat64Array()
-	slip_matrix.resize(18)
-	var upstream := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
-		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
-		velocity, 1000.0, PI * 0.5)
-	var downstream := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
-		PackedVector3Array([Vector3.RIGHT]), PackedFloat64Array([1.0]), slip_matrix,
-		velocity, 1000.0, PI * 0.5)
-	var half_wet := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
-		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
-		velocity, 1000.0, PI * 0.5, PackedFloat64Array([0.5]))
-	var dry := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
-		PackedVector3Array([Vector3.LEFT]), PackedFloat64Array([1.0]), slip_matrix,
-		velocity, 1000.0, PI * 0.5, PackedFloat64Array([0.0]))
-	_check(int(upstream.attached_faces) == 1 and upstream.pressure[3] > 0.0,
-		"body-relative flow did not load the upstream face")
-	_check(int(downstream.attached_faces) == 0,
-		"separation model attached the downstream face as the upstream side")
-	_check(absf(half_wet.pressure[3] - upstream.pressure[3] * 0.5) < 1.0e-6
+	# One face moving obliquely: the leading side (normal along the motion) keeps
+	# attached flow and feels the slip suction -1/2 rho |u_s|^2 A n; the
+	# trailing side separates at PI/2.
+	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 1.0, 0.0])
+	var leading := _single_face(Vector3.RIGHT, velocity, PackedFloat64Array())
+	var trailing := _single_face(Vector3.LEFT, velocity, PackedFloat64Array())
+	var half_wet := _single_face(Vector3.RIGHT, velocity, PackedFloat64Array([0.5]))
+	var dry := _single_face(Vector3.RIGHT, velocity, PackedFloat64Array([0.0]))
+	_check(int(leading.attached_faces) == 1 and absf(leading.pressure[3] + 500.0) < 1.0e-6,
+		"leading face did not carry -1/2 rho |u_s|^2 A n: %s" % leading.pressure)
+	_check(int(trailing.attached_faces) == 0 and _wrench_norm(trailing.pressure) == 0.0,
+		"trailing face kept attached flow at PI/2")
+	_check(absf(half_wet.pressure[3] - leading.pressure[3] * 0.5) < 1.0e-6
 		and int(dry.attached_faces) == 0 and _wrench_norm(dry.pressure) == 0.0,
-		"BEM pressure did not follow each face's clipped wet area")
+		"surface pressure did not follow each face's clipped wet area")
+	var head_on := _single_face(Vector3.RIGHT,
+		PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), PackedFloat64Array())
+	_check(int(head_on.attached_faces) == 1 and _wrench_norm(head_on.pressure) == 0.0,
+		"a stagnation face (no slip) carried dynamic pressure")
 
 
 func _test_pressure_symmetry() -> void:
@@ -91,25 +95,80 @@ func _test_pressure_symmetry() -> void:
 	var negative_result := _surface(negative, PI * 0.5, 0.0)
 	_check(absf(positive_result.pressure[3] + negative_result.pressure[3]) < 1.0e-4,
 		"pressure inversion symmetry failed")
-	_check(absf(MATH.vector_dot(positive_result.pressure, positive)) > 0.0,
-		"positive direction pressure was empty")
+	_check(MATH.vector_dot(positive_result.pressure, positive) < 0.0,
+		"positive direction pressure did not oppose the motion")
 
 
 func _test_drag_dissipation() -> void:
-	for direction: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.UP,
-		Vector3.DOWN, Vector3.FORWARD, Vector3.BACK]:
-		for candidate: AmbientFluidProfile3D in [PROFILE, PLATE_PROFILE, BODY_PROFILE]:
-			var velocity := PackedFloat64Array([0.0, 0.0, 0.0,
-				direction.x, direction.y, direction.z])
-			var drag := MATH.particle_drag_wrench(velocity, 0.001002, 998.0,
-				candidate.volume_m3, 1.0, candidate.total_area_m2)
-			_check(MATH.vector_dot(drag, velocity) < 0.0,
-				"particle drag power is not dissipative for %s" % candidate.resource_path)
-	var inviscid_velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-	var inviscid_drag := MATH.particle_drag_wrench(inviscid_velocity, 0.0, 998.0,
-		PROFILE.volume_m3, 1.0, PROFILE.total_area_m2)
-	_check(is_finite(inviscid_drag[3]) and inviscid_drag[3] < 0.0,
-		"zero-viscosity particle drag did not reach the finite high-Re limit")
+	# At PI/2 every attached face moves into the fluid (n.zdot > 0), so its
+	# -1/2 rho |u_s|^2 A n does negative work; friction (Blasius and the Stokes
+	# extension) dissipates at every separation angle. Checked on every shipped
+	# shape for random spins and velocities, not only symmetric translations.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 2601
+	for candidate: AmbientFluidProfile3D in [PROFILE, PLATE_PROFILE, BODY_PROFILE]:
+		for case_index in 48:
+			var velocity := PackedFloat64Array()
+			for axis in 6:
+				velocity.append(rng.randf_range(-4.0, 4.0))
+			if case_index < 6:
+				velocity = PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+				velocity[3 + (case_index >> 1)] = 1.0 if case_index % 2 == 0 else -1.0
+			var viscosity: float = [0.001002, 1.81e-5, 185.13][case_index % 3]
+			var half := _surface_with_profile(candidate, velocity, PI * 0.5, viscosity, 998.0)
+			var wide := _surface_with_profile(candidate, velocity, PI * 0.8, viscosity, 998.0)
+			_check(MATH.vector_dot(half.pressure, velocity) <= 1.0e-9,
+				"PI/2 pressure power is not dissipative for %s" % candidate.resource_path)
+			_check(MATH.vector_dot(half.friction, velocity) < 0.0
+				and MATH.vector_dot(wide.friction, velocity) < 0.0,
+				"friction power is not dissipative for %s" % candidate.resource_path)
+			if case_index < 6:
+				var direction := Vector3(velocity[3], velocity[4], velocity[5])
+				var force := Vector3(half.pressure[3], half.pressure[4], half.pressure[5]) \
+					+ Vector3(half.friction[3], half.friction[4], half.friction[5])
+				_check(force.dot(direction) < 0.0,
+					"drag does not oppose %s motion for %s" % [direction, candidate.resource_path])
+	var inviscid := _surface(PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0]), PI * 0.5, 0.0)
+	_check(_wrench_norm(inviscid.friction) == 0.0 and inviscid.pressure[3] < 0.0,
+		"zero viscosity kept friction or lost the inviscid pressure drag")
+
+
+func _test_sphere_drag_coefficient() -> void:
+	# Eq. 20 at PI/2 on a sphere: -1/2 rho v^2 integral of sin^2 cos over the
+	# leading hemisphere = 1/2 rho v^2 (pi R^2 / 2), so C_D = 1/2. A finely
+	# tessellated sphere converges to it.
+	var sphere := _sphere_surface(1.0, 96, 48)
+	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 3.0, 0.0, 0.0])
+	var result := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		velocity, 998.0, 0.0, PI * 0.5, sqrt(sphere.total_area))
+	var drag_coefficient := -float(result.pressure[3]) / (0.5 * 998.0 * 9.0 * PI)
+	print("AMBIENT SPHERE C_D=%.4f" % drag_coefficient)
+	_check(absf(drag_coefficient - 0.5) < 0.01,
+		"sphere pressure drag coefficient %.4f, expected 1/2" % drag_coefficient)
+	# Stokes extension: exact Stokes drag and torque on the same sphere.
+	var slow := PackedFloat64Array([0.0, 0.0, 0.0, 1.0e-4, 0.0, 0.0])
+	var creeping := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		slow, 1420.0, 185.13, PI * 0.5, sqrt(sphere.total_area))
+	var radius := sqrt(sphere.total_area / (4.0 * PI))
+	var stokes_drag := 6.0 * PI * 185.13 * radius * 1.0e-4
+	_check(absf(-float(creeping.friction[3]) - stokes_drag) < stokes_drag * 1.0e-3,
+		"creeping sphere drag %.6f, Stokes %.6f" % [-float(creeping.friction[3]), stokes_drag])
+	var spin := PackedFloat64Array([0.0, 2.0e-4, 0.0, 0.0, 0.0, 0.0])
+	var turning := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		spin, 1420.0, 185.13, PI * 0.5, sqrt(sphere.total_area))
+	var stokes_torque := 8.0 * PI * 185.13 * pow(radius, 3.0) * 2.0e-4
+	_check(absf(-float(turning.friction[1]) - stokes_torque) < stokes_torque * 2.0e-3,
+		"creeping sphere torque %.6f, Stokes %.6f" % [-float(turning.friction[1]), stokes_torque])
+	# Blasius friction (Eq. 22) on a spinning sphere scales as w^1.8.
+	var fast := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		PackedFloat64Array([0.0, 100.0, 0.0, 0.0, 0.0, 0.0]), 998.0, 0.001002, PI,
+		sqrt(sphere.total_area))
+	var faster := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		PackedFloat64Array([0.0, 200.0, 0.0, 0.0, 0.0, 0.0]), 998.0, 0.001002, PI,
+		sqrt(sphere.total_area))
+	var ratio := float(faster.friction[1]) / float(fast.friction[1])
+	_check(float(fast.friction[1]) < 0.0 and absf(ratio - pow(2.0, 1.8)) < 0.02,
+		"Blasius spin friction ratio %.4f, expected 2^1.8" % ratio)
 
 
 func _test_magnus_symmetry() -> void:
@@ -119,19 +178,15 @@ func _test_magnus_symmetry() -> void:
 	var negative := _surface(negative_spin, PI * 0.5, 0.0, 1.204)
 	_check(absf(positive.pressure[5] + negative.pressure[5]) < 1.0e-5,
 		"opposite spin did not reverse Magnus force")
-	_check(absf(positive.pressure[5]) > 1.0e-5,
-		"Magnus force was empty")
-
-
-func _test_shape_dissipation() -> void:
-	for candidate: AmbientFluidProfile3D in [PROFILE, PLATE_PROFILE, BODY_PROFILE]:
-		for direction: Vector3 in [Vector3.RIGHT, Vector3.LEFT, Vector3.UP,
-			Vector3.DOWN, Vector3.FORWARD, Vector3.BACK]:
-			var velocity := PackedFloat64Array([0.0, 0.0, 0.0,
-				direction.x, direction.y, direction.z])
-			var result := _surface_with_profile(candidate, velocity, PI * 0.5, 0.0, 998.0)
-			_check(MATH.vector_dot(result.pressure, velocity) <= 1.0e-10,
-				"pressure power is not dissipative for %s" % candidate.resource_path)
+	# w x v = (0, 1, 0) x (5, 0, 0) = (0, 0, -5): the faster-slipping side pulls.
+	_check(positive.pressure[5] < -1.0e-5,
+		"Magnus force %.6f does not point along w x v" % positive.pressure[5])
+	var sphere := _sphere_surface(0.11, 96, 48)
+	var ball := MATH.surface_wrench(sphere.centers, sphere.normals, sphere.areas,
+		PackedFloat64Array([0.0, 60.0, 0.0, 25.0, 0.0, 0.0]), 1.204, 1.81e-5, PI * 0.5,
+		sqrt(sphere.total_area))
+	_check(ball.pressure[5] < 0.0 and absf(ball.pressure[4]) < absf(ball.pressure[5]) * 1.0e-3,
+		"spinning ball lift is not along w x v: %s" % ball.pressure)
 
 
 func _test_runtime_quality() -> void:
@@ -165,17 +220,13 @@ func _test_scene_body() -> void:
 	_check(body.friction_power_w() < 0.0, "phase 3 body friction power is not dissipative")
 	var pressure_force := body.global_transform.basis * Vector3(body.pressure_wrench()[3],
 		body.pressure_wrench()[4], body.pressure_wrench()[5])
-	_check(absf(pressure_force.dot(body.linear_velocity)) \
-		< pressure_force.length() * body.linear_velocity.length() * 1.0e-2 + 1.0e-6,
-		"BEM pressure duplicated the empirical longitudinal particle drag")
+	_check(pressure_force.dot(body.linear_velocity) < 0.0,
+		"surface pressure did not oppose the body's motion")
 	_check(body.surface_cpu_time_us() >= 0, "phase 3 surface CPU time was not recorded")
-	body.reset_state(body.global_transform, Vector3.RIGHT, Vector3.ZERO)
-	await physics_frame
-	_check(body.surface_faces() > 0, "high-Reynolds body did not evaluate pressure before threshold crossing")
 	body.reset_state(body.global_transform, Vector3.RIGHT * 1.0e-6, Vector3.ZERO)
 	await physics_frame
-	_check(body.surface_faces() == 0 and _wrench_norm(body.pressure_wrench()) <= 1.0e-12,
-		"sub-threshold substep retained a stale pressure wrench")
+	_check(_wrench_norm(body.pressure_wrench()) <= 1.0e-6,
+		"a creeping body retained the previous tick's pressure wrench")
 	body.set_fluid_enabled(false)
 	await physics_frame
 	_check(body.pressure_wrench().size() == MATH.MATRIX_SIZE,
@@ -461,9 +512,7 @@ func _simulate_underwater(delta: float, duration: float) -> float:
 		var surface := _surface_with_profile(PROFILE, velocity, PI * 0.5,
 			0.001002, density)
 		wrench = MATH.vector_add(wrench,
-			surface.pressure)
-		wrench = MATH.vector_add(wrench, MATH.particle_drag_wrench(velocity,
-			0.001002, density, PROFILE.volume_m3, 1.0, PROFILE.total_area_m2))
+			MATH.vector_add(surface.pressure, surface.friction))
 		velocity = MATH.matrix_vector_multiply(inverse,
 			MATH.semi_implicit_momentum_step(momentum, wrench, delta))
 	return velocity[4]
@@ -475,9 +524,45 @@ func _surface(velocity: PackedFloat64Array, angle: float, viscosity: float,
 
 
 func _surface_with_profile(profile: AmbientFluidProfile3D, velocity: PackedFloat64Array,
-		angle: float, _viscosity: float, density: float) -> Dictionary:
-	return MATH.potential_pressure_wrench(profile.face_centers_m, profile.face_normals,
-		profile.face_areas_m2, profile.slip_matrix, velocity, density, angle)
+		angle: float, viscosity: float, density: float) -> Dictionary:
+	return MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, velocity, density, viscosity, angle, profile.surface_length_m())
+
+
+func _single_face(normal: Vector3, velocity: PackedFloat64Array,
+		wet: PackedFloat64Array) -> Dictionary:
+	return MATH.surface_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([normal]), PackedFloat64Array([1.0]), velocity, 1000.0, 0.0,
+		PI * 0.5, 1.0, wet)
+
+
+## Face centers, normals and areas of a UV sphere, for checks against
+## closed-form sphere results.
+func _sphere_surface(radius: float, segments: int, rings: int) -> Dictionary:
+	var mesh := SphereMesh.new()
+	mesh.radius = radius
+	mesh.height = radius * 2.0
+	mesh.radial_segments = segments
+	mesh.rings = rings
+	var faces := mesh.get_faces()
+	var centers := PackedVector3Array()
+	var normals := PackedVector3Array()
+	var areas := PackedFloat64Array()
+	var total_area := 0.0
+	for base in range(0, faces.size(), 3):
+		var cross := (faces[base + 1] - faces[base]).cross(faces[base + 2] - faces[base])
+		var area := cross.length() * 0.5
+		if area <= 1.0e-12:
+			continue
+		var center := (faces[base] + faces[base + 1] + faces[base + 2]) / 3.0
+		var normal := cross.normalized()
+		if normal.dot(center) < 0.0:
+			normal = -normal
+		centers.append(center)
+		normals.append(normal)
+		areas.append(area)
+		total_area += area
+	return {centers = centers, normals = normals, areas = areas, total_area = total_area}
 
 
 func _relative_vector_error(first: PackedFloat64Array, second: PackedFloat64Array) -> float:

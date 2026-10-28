@@ -65,6 +65,17 @@ func ensure_analytic_geometry() -> void:
 		face_areas_m2.append(cross.length() * 0.5)
 
 
+## The paper's Reynolds length L = sqrt(total area) (Eq. 19); analytic profiles
+## measure it from their generated faces.
+func surface_length_m() -> float:
+	if characteristic_length_m > 0.0:
+		return characteristic_length_m
+	var area := 0.0
+	for face_area in face_areas_m2:
+		area += face_area
+	return sqrt(area)
+
+
 func validate() -> String:
 	if format_version != FORMAT_ANALYTIC and format_version != FORMAT_BEM:
 		return "unsupported ambient fluid profile format_version"

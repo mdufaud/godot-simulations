@@ -539,40 +539,70 @@ static func _append_unique_point(points: PackedVector3Array, point: Vector3) -> 
 	points.append(point)
 
 
-static func potential_pressure_wrench(face_centers_m: PackedVector3Array,
+## Surface forces of Padilla, Segall & Sorkine-Hornung (arXiv 2601.13971), per face:
+## the face moves at zdot = v + w x c relative to the medium, and the fluid slips
+## past it at u_s = -(I - n n^T) zdot (Eq. 16). The flow stays attached where
+## <n, zdot/|zdot|> > cos(alpha), a face pushing into the fluid or turning off it
+## by less than alpha; behind that it is separated (Eq. 17). The printed Eq. 17
+## has the inequality the other way round, which contradicts its own
+## assumption (1) and "a larger alpha attaches more"; this way a sphere gets
+## C_D = 1/2, drag opposes motion and the Magnus force points along w x v.
+## Attached faces carry
+##   dynamic pressure  f = -1/2 rho |u_s|^2 A n                 (Eq. 20)
+##   skin friction     f = +1/2 C_f rho |u_s| A u_s              (Eq. 22)
+## with C_f = 0.0576 Re^-1/5, Re = rho |u_s| L / mu (Eq. 19). u_s is the fluid's
+## velocity relative to the face, so friction drags the body along it; the
+## printed minus sign would make friction accelerate the body.
+## Extension beyond the paper, whose forces are inertial and vanish at low
+## Reynolds numbers (honey): every wetted face also carries the Stokes traction
+## -k zdot A plus the torque -k c x (w x c) A, k = 3 mu / 2R with R = L / (2 sqrt(pi))
+## the radius of the sphere with the body's area. On a sphere they integrate
+## exactly to Stokes' drag 6 pi mu R v and torque 8 pi mu R^3 w; on any shape and
+## centre of mass they only dissipate (power -k A (|zdot|^2 + |w x c|^2)); and they
+## fade next to the inertial terms as Re grows (sphere C_D ~ 24/Re + 1/2).
+## Returns {pressure, friction, attached_faces}; friction holds both viscous terms.
+static func surface_wrench(face_centers_m: PackedVector3Array,
 			face_normals: PackedVector3Array, face_areas_m2: PackedFloat64Array,
-			slip_matrix: PackedFloat64Array, generalized_velocity: PackedFloat64Array,
-			fluid_density_kg_m3: float, separation_angle_rad: float,
-			wet_area_fractions := PackedFloat64Array(),
+			generalized_velocity: PackedFloat64Array, fluid_density_kg_m3: float,
+			dynamic_viscosity_pa_s: float, separation_angle_rad: float,
+			characteristic_length_m: float, wet_area_fractions := PackedFloat64Array(),
 			wet_area_centers_m := PackedVector3Array()) -> Dictionary:
 	var pressure := PackedFloat64Array()
 	pressure.resize(MATRIX_SIZE)
+	var friction := PackedFloat64Array()
+	friction.resize(MATRIX_SIZE)
 	if face_centers_m.size() == 0 or face_centers_m.size() != face_normals.size() \
 		or face_centers_m.size() != face_areas_m2.size() \
-		or slip_matrix.size() != face_centers_m.size() * 18 \
 		or (not wet_area_fractions.is_empty() \
 			and wet_area_fractions.size() != face_centers_m.size()) \
 		or (not wet_area_centers_m.is_empty() \
 			and wet_area_centers_m.size() != face_centers_m.size()) \
 		or generalized_velocity.size() != MATRIX_SIZE:
-		return {pressure = pressure, attached_faces = 0}
-	if not is_finite(fluid_density_kg_m3) or fluid_density_kg_m3 <= 0.0:
-		return {pressure = pressure, attached_faces = 0}
+		return {pressure = pressure, friction = friction, attached_faces = 0}
+	if not is_finite(fluid_density_kg_m3) or fluid_density_kg_m3 <= 0.0 \
+		or not is_finite(dynamic_viscosity_pa_s) or dynamic_viscosity_pa_s < 0.0 \
+		or not is_finite(characteristic_length_m):
+		return {pressure = pressure, friction = friction, attached_faces = 0}
 	if Native.enabled and _native != null:
-		return _native.potential_pressure_wrench(face_centers_m, face_normals, face_areas_m2,
-			slip_matrix, generalized_velocity, fluid_density_kg_m3, separation_angle_rad,
-			wet_area_fractions, wet_area_centers_m)
+		return _native.surface_wrench(face_centers_m, face_normals, face_areas_m2,
+			generalized_velocity, fluid_density_kg_m3, dynamic_viscosity_pa_s,
+			separation_angle_rad, characteristic_length_m, wet_area_fractions,
+			wet_area_centers_m)
 	var cos_separation := cos(clampf(separation_angle_rad, PI * 0.5, PI))
-	var body_relative_velocity := Vector3(generalized_velocity[3],
-		generalized_velocity[4], generalized_velocity[5])
-	var body_speed_squared := body_relative_velocity.length_squared()
-	if body_speed_squared <= 1.0e-16:
-		return {pressure = pressure, attached_faces = 0}
-	var incoming_flow_direction := -body_relative_velocity.normalized()
+	# 1/2 C_f rho |u_s| = blasius * |u_s|^(4/5), so the face force is that times A u_s.
+	var blasius := 0.0
+	var stokes := 0.0
+	if dynamic_viscosity_pa_s > 0.0 and characteristic_length_m > 0.0:
+		blasius = 0.0288 * fluid_density_kg_m3 \
+			* pow(fluid_density_kg_m3 * characteristic_length_m / dynamic_viscosity_pa_s, -0.2)
+		stokes = 3.0 * sqrt(PI) * dynamic_viscosity_pa_s / characteristic_length_m
+	var angular_velocity := Vector3(generalized_velocity[0], generalized_velocity[1],
+		generalized_velocity[2])
+	var linear_velocity := Vector3(generalized_velocity[3], generalized_velocity[4],
+		generalized_velocity[5])
 	var attached_faces := 0
 	for face_index in face_centers_m.size():
-		var face_center := face_centers_m[face_index]
-		var center := face_center if wet_area_centers_m.is_empty() \
+		var center := face_centers_m[face_index] if wet_area_centers_m.is_empty() \
 			else wet_area_centers_m[face_index]
 		var normal := face_normals[face_index]
 		var wet_fraction := 1.0 if wet_area_fractions.is_empty() else \
@@ -580,103 +610,24 @@ static func potential_pressure_wrench(face_centers_m: PackedVector3Array,
 		var area := face_areas_m2[face_index] * wet_fraction
 		if area <= 1.0e-12:
 			continue
-		var attached := normal.dot(incoming_flow_direction) >= cos_separation
-		if attached:
-			attached_faces += 1
-		var slip := Vector3.ZERO
-		var base := face_index * 18
-		for row in 3:
-			var value := 0.0
-			for col in MATRIX_SIZE:
-				value += slip_matrix[base + row * MATRIX_SIZE + col] * generalized_velocity[col]
-			slip[row] = value
-		var center_delta := center - face_center
-		if center_delta.length_squared() > 1.0e-16:
-			var angular_velocity := Vector3(generalized_velocity[0],
-				generalized_velocity[1], generalized_velocity[2])
-			var tangent_delta := angular_velocity.cross(center_delta)
-			slip -= tangent_delta - normal * normal.dot(tangent_delta)
-		var slip_speed := slip.length()
-		if attached:
-			var pressure_delta := 0.5 * fluid_density_kg_m3 \
-				* (body_speed_squared - slip_speed * slip_speed)
-			var pressure_force := -pressure_delta * area * normal
-			_accumulate_wrench(pressure, center.cross(pressure_force), pressure_force)
-	return {pressure = pressure, attached_faces = attached_faces}
-
-
-static func particle_drag_wrench(generalized_velocity: PackedFloat64Array,
-			dynamic_viscosity_pa_s: float, fluid_density_kg_m3: float, body_volume_m3: float,
-			wetted_area_fraction: float, body_surface_area_m2 := 0.0) -> PackedFloat64Array:
-	var wrench := PackedFloat64Array()
-	wrench.resize(MATRIX_SIZE)
-	if generalized_velocity.size() != MATRIX_SIZE or not is_finite(dynamic_viscosity_pa_s) \
-			or dynamic_viscosity_pa_s < 0.0 or not is_finite(fluid_density_kg_m3) \
-			or fluid_density_kg_m3 <= 0.0 \
-			or body_volume_m3 <= 0.0 or wetted_area_fraction <= 0.0:
-		return wrench
-	var radius := pow(3.0 * body_volume_m3 / (4.0 * PI), 1.0 / 3.0)
-	var wetted := clampf(wetted_area_fraction, 0.0, 1.0)
-	var equivalent_sphere_area := 4.0 * PI * radius * radius
-	var projected_sphere_area := PI * radius * radius
-	var measured_surface_area := body_surface_area_m2 if is_finite(body_surface_area_m2) \
-		and body_surface_area_m2 > 0.0 else equivalent_sphere_area
-	var sphericity := clampf(equivalent_sphere_area / measured_surface_area, 0.026, 1.0)
-	var speed := Vector3(generalized_velocity[3], generalized_velocity[4],
-		generalized_velocity[5]).length()
-	var reynolds := INF if dynamic_viscosity_pa_s == 0.0 else \
-		2.0 * radius * fluid_density_kg_m3 * speed / dynamic_viscosity_pa_s
-	var coefficient_a := exp(2.3288 - 6.4581 * sphericity + 2.4486 * sphericity * sphericity)
-	var coefficient_b := 0.0964 + 0.5565 * sphericity
-	var coefficient_c := exp(4.905 - 13.8944 * sphericity + 18.4222 * sphericity * sphericity \
-		- 10.2599 * sphericity * sphericity * sphericity)
-	var coefficient_d := exp(1.4681 + 12.2584 * sphericity - 20.7322 * sphericity * sphericity \
-		+ 15.8855 * sphericity * sphericity * sphericity)
-	var drag_magnitude := 0.0
-	if speed > 1.0e-12:
-		if dynamic_viscosity_pa_s == 0.0:
-			drag_magnitude = 0.5 * fluid_density_kg_m3 * speed * speed \
-				* projected_sphere_area * coefficient_c * wetted
-		else:
-			if reynolds < 1.0e-8:
-				drag_magnitude = 6.0 * PI * dynamic_viscosity_pa_s * radius \
-					* speed * wetted
-			else:
-				var drag_coefficient := 24.0 / reynolds \
-					* (1.0 + coefficient_a * pow(reynolds, coefficient_b)) \
-					+ coefficient_c / (1.0 + coefficient_d / reynolds)
-				drag_magnitude = 0.5 * fluid_density_kg_m3 * speed * speed \
-					* projected_sphere_area * drag_coefficient * wetted
-	var linear_velocity := Vector3(generalized_velocity[3], generalized_velocity[4],
-		generalized_velocity[5])
-	var drag_force := -linear_velocity.normalized() * drag_magnitude \
-		if speed > 1.0e-12 else Vector3.ZERO
-	var angular_velocity := Vector3(generalized_velocity[0], generalized_velocity[1],
-		generalized_velocity[2])
-	var angular_speed := angular_velocity.length()
-	var rotational_drag_torque := 0.0
-	if angular_speed > 1.0e-12 and dynamic_viscosity_pa_s > 0.0:
-		var rotational_reynolds := fluid_density_kg_m3 * radius * radius * angular_speed \
-			/ dynamic_viscosity_pa_s
-		if rotational_reynolds < 6.03:
-			rotational_drag_torque = 8.0 * PI * dynamic_viscosity_pa_s \
-				* pow(radius, 3.0) * angular_speed
-		else:
-			var torque_coefficient := 0.0
-			if rotational_reynolds < 20.37:
-				torque_coefficient = 5.32 / sqrt(rotational_reynolds) \
-					+ 37.2 / rotational_reynolds
-			else:
-				torque_coefficient = 6.45 / sqrt(rotational_reynolds) \
-					+ 32.1 / rotational_reynolds
-			rotational_drag_torque = 0.5 * fluid_density_kg_m3 * pow(radius, 5.0) \
-				* torque_coefficient * angular_speed * angular_speed
-		rotational_drag_torque *= wetted
-	for axis in 3:
-		wrench[axis] = -rotational_drag_torque * angular_velocity[axis] / angular_speed \
-			if angular_speed > 1.0e-12 else 0.0
-		wrench[axis + 3] = drag_force[axis]
-	return wrench
+		var turning := angular_velocity.cross(center)
+		if stokes > 0.0:
+			var stokes_drag := (-stokes * area) * (linear_velocity + turning)
+			var stokes_spin := (-stokes * area) * turning
+			_accumulate_wrench(friction, center.cross(stokes_drag + stokes_spin), stokes_drag)
+		var surface_velocity := linear_velocity + turning
+		var speed := surface_velocity.length()
+		if speed <= 1.0e-12 or normal.dot(surface_velocity) <= cos_separation * speed:
+			continue
+		attached_faces += 1
+		var slip := normal * normal.dot(surface_velocity) - surface_velocity
+		var slip_squared := slip.length_squared()
+		var pressure_force := (-0.5 * fluid_density_kg_m3 * slip_squared * area) * normal
+		_accumulate_wrench(pressure, center.cross(pressure_force), pressure_force)
+		if blasius > 0.0 and slip_squared > 0.0:
+			var friction_force := (blasius * pow(slip_squared, 0.4) * area) * slip
+			_accumulate_wrench(friction, center.cross(friction_force), friction_force)
+	return {pressure = pressure, friction = friction, attached_faces = attached_faces}
 
 
 static func _accumulate_wrench(wrench: PackedFloat64Array, torque: Vector3, force: Vector3) -> void:
