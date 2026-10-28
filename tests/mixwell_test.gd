@@ -77,6 +77,7 @@ func _initialize() -> void:
 	_test_progressivity_spp_targets()
 	_test_progressivity_fixed_composite_period()
 	_test_progressivity_periodic_coordinates()
+	_test_periodic_tiling_needs_whole_pixels()
 	_test_progressivity_path_comparison()
 	_test_progressivity_budget_progression()
 	_test_progressivity_render_snapshot()
@@ -634,6 +635,61 @@ func _test_progressivity_periodic_coordinates() -> void:
 		Vector2(-0.9, 0.9)) <= 1.0e-6, "canonical wrapping stays in centred domain")
 	_check(Periodicity.shortest_delta(Vector2(0.95, 0.0), Vector2(-0.95, 0.0), period).x \
 			<= -0.09, "periodic shortest path crosses boundary")
+
+
+# A periodic pass runs on one period and is tiled with pixel % domain, which is
+# exact only when the period is a whole number of pixels. At 1280x720 the
+# Nonpareil pitch (0.1778) is 64 px and tiles; the Gel-Git period (0.2370) is
+# 85.33 px and is evaluated directly -- rounded up to 86 px, every tile would
+# shift a further third of a pixel.
+func _test_periodic_tiling_needs_whole_pixels() -> void:
+	var size := Vector2i(1280, 720)
+	var config := Config.new()
+	config.boundary_mode = Config.BoundaryMode.PERIODIC
+	var solver := Solver.new()
+	solver.initialize(size, config, size)
+	solver.set_preset(Gallery.NONPAREIL)
+	var plan: Array[Dictionary] = solver.create_render_snapshot().periodic_plan
+	_check(plan[0].current == Vector2i(1, 64), "Nonpareil tiles its 64 px pitch (%s)" % str(plan[0].current))
+	solver.set_preset(Gallery.GEL_GIT)
+	var snapshot = solver.create_render_snapshot()
+	plan = snapshot.periodic_plan
+	_check(plan[0].current == Vector2i(1, 720),
+			"Gel-Git's 85.33 px period is not tiled (%s)" % str(plan[0].current))
+	var operations: Array[Dictionary] = snapshot.operations
+	var rounded: Array[Dictionary] = [{"current": Vector2i(1, 86), "previous": Vector2i(1, 86)}]
+	var jitter := Periodicity.r2_sample(0)
+	var tiled_error := 0.0
+	var rounded_error := 0.0
+	for y in range(5, 720, 37):
+		var pixel := Vector2i(640, y)
+		var direct := Diagnostics.cpu_advect(Diagnostics.display_coordinate(pixel, size, jitter),
+				operations, false, Vector2.ZERO, config.brush_radius_px, size, -1, 0.0, 0.0,
+				config.cutoff_gamma, config.drift_compensation, config.midpoint_alpha)
+		tiled_error = maxf(tiled_error, direct.distance_to(Diagnostics.cpu_tiled_advect(pixel, plan,
+				operations, size, jitter, config.brush_radius_px, size, config.cutoff_gamma,
+				config.drift_compensation, config.midpoint_alpha)))
+		rounded_error = maxf(rounded_error, direct.distance_to(Diagnostics.cpu_tiled_advect(pixel,
+				rounded, operations, size, jitter, config.brush_radius_px, size, config.cutoff_gamma,
+				config.drift_compensation, config.midpoint_alpha)))
+	print("MIXWELL TILING gel_git planned=%s rounded_to_86px=%s" % [str(tiled_error), str(rounded_error)])
+	_check(tiled_error <= 1.0e-6 and rounded_error > 1.0e-3,
+			"Gel-Git tiled on 86 px seams (%s), evaluated directly it does not (%s)"
+			% [str(rounded_error), str(tiled_error)])
+	for preset in [Gallery.NONPAREIL, Gallery.GEL_GIT, Gallery.FEATHER, Gallery.BIRD_WING,
+			Gallery.PEACOCK, Gallery.SUPER_TORNADO]:
+		for render_size in [Vector2i(640, 360), Vector2i(1280, 720)]:
+			var periodic := Solver.new()
+			periodic.initialize(render_size, config, render_size)
+			periodic.set_preset(preset)
+			var comparison: Dictionary = periodic.get_periodic_comparison()
+			print("MIXWELL TILING %s %s max=%s conditioned=%d" % [Gallery.preset_name(preset),
+					str(render_size), str(comparison.get("max_displacement")),
+					int(comparison.get("conditioned", -1))])
+			_check(comparison.get("passes", false)
+					and float(comparison.get("max_displacement", 1.0)) <= 1.0e-5,
+					"%s tiles exactly at %s (%s)" % [Gallery.preset_name(preset), str(render_size),
+					str(comparison.get("max_displacement"))])
 
 
 func _test_progressivity_path_comparison() -> void:

@@ -30,6 +30,11 @@ const KEYFRAME_BUDGET_BYTES := 192 * 1024 * 1024
 const REPLAY_SEGMENT_LIMIT := 192
 ## Predicted bilinear error of the baked map above which a pixel is replayed.
 const REPLAY_ERROR_PX := 1.0
+## A period within this many pixels of a whole number tiles; others don't.
+const WHOLE_PIXEL_TOLERANCE := 1.0e-3
+## Tiled-against-direct difference (canvas units) the CPU periodic check
+## accepts without asking whether the map's own conditioning explains it.
+const TILING_TOLERANCE := 1.0e-5
 
 var config: MixwellConfig = MixwellConfig.new()
 var live_segment_limit := LIVE_SEGMENT_LIMIT
@@ -1599,41 +1604,32 @@ func get_periodic_domain_size() -> Vector2i:
 	return _plan_domain(plan, _size)
 
 
+## Periodic passes run on a domain one period wide and are tiled with
+## pixel % domain, which is exact only when the period is a whole number of
+## pixels. Each pass's domain is the least common multiple of every period so
+## far (its input is the previous pass, tiled); a pass whose period falls
+## between pixels gets the full size and is evaluated directly, never seamed.
 func _periodic_operation_plan(operations: Array[Dictionary], optimized: bool,
 		render_size := Vector2i.ZERO) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	var target_size := _size if render_size == Vector2i.ZERO else render_size
 	var previous := target_size
-	var previous_period_fixed := Vector2i.ZERO
-	var full_period_fixed := Periodicity.quantize_period(
-			Periodicity.canonical_period(_reference_size))
 	for operation in operations:
-		var operation_domain := _operation_period_pixels(operation, target_size) if optimized else target_size
-		var operation_period_fixed := full_period_fixed
-		var composite_period_fixed := full_period_fixed
-		if optimized:
-			operation_period_fixed = _operation_period_fixed(operation, target_size)
-			if operation_period_fixed == Vector2i.ZERO:
-				composite_period_fixed = full_period_fixed
-			else:
-				composite_period_fixed = Periodicity.composite_period_components_fixed([
-						previous_period_fixed, operation_period_fixed])
-				operation_domain = _domain_from_period_fixed(operation_period_fixed, target_size)
+		var operation_domain := _operation_period_pixels(operation, target_size) if optimized \
+				else target_size
 		var first := result.is_empty()
-		var current := operation_domain
-		if optimized:
-			current = _domain_from_period_fixed(composite_period_fixed, target_size)
-		if not optimized:
-			current = target_size
+		var current := operation_domain if first else _pixel_lcm(previous, operation_domain,
+				target_size)
 		result.append({
 			"current": current,
 			"previous": current if first else previous,
 			"operation_period": operation_domain,
-			"operation_period_fixed": operation_period_fixed,
-			"composite_period_fixed": composite_period_fixed,
+			"operation_period_fixed": Periodicity.quantize_period_components(
+					_coordinate_period(operation_domain, _reference_size, target_size)),
+			"composite_period_fixed": Periodicity.quantize_period_components(
+					_coordinate_period(current, _reference_size, target_size)),
 		})
 		previous = current
-		previous_period_fixed = composite_period_fixed
 	return result
 
 
@@ -1649,6 +1645,10 @@ func _plan_movement_dispatch_pixels(plan: Array[Dictionary], render_size: Vector
 	return pixels
 
 
+## An operation's period in pixels at this render size, per axis: 1 where its
+## field is constant along the axis, the period where that is a whole number
+## of pixels (within WHOLE_PIXEL_TOLERANCE), and the full size where it is not
+## periodic or its period falls between pixels.
 func _operation_period_pixels(operation: Dictionary, render_size := Vector2i.ZERO) -> Vector2i:
 	var target_size := _size if render_size == Vector2i.ZERO else render_size
 	var explicit: Vector2i = operation.get("period_pixels", Vector2i.ZERO)
@@ -1659,32 +1659,13 @@ func _operation_period_pixels(operation: Dictionary, render_size := Vector2i.ZER
 		return target_size
 	var canonical := Periodicity.canonical_period(_reference_size)
 	var result := Vector2i.ONE
-	if period.x > 0.0:
-		result.x = clampi(ceili(period.x / canonical.x * float(target_size.x)), 1, target_size.x)
-	if period.y > 0.0:
-		result.y = clampi(ceili(period.y / canonical.y * float(target_size.y)), 1, target_size.y)
-	return result
-
-
-func _operation_period_fixed(operation: Dictionary, render_size := Vector2i.ZERO) -> Vector2i:
-	var explicit: Vector2i = operation.get("period_pixels", Vector2i.ZERO)
-	if explicit.x > 0 and explicit.y > 0:
-		return Periodicity.quantize_period_components(_coordinate_period(explicit,
-				_reference_size, render_size))
-	return Periodicity.quantize_period_components(operation.get("period", Vector2.ZERO))
-
-
-func _domain_from_period_fixed(period_fixed: Vector2i, render_size: Vector2i) -> Vector2i:
-	if period_fixed == Vector2i.ZERO:
-		return Vector2i.ONE
-	var canonical := Periodicity.canonical_period(_reference_size)
-	var result := Vector2i.ONE
-	if period_fixed.x > 0:
-		result.x = clampi(ceili(float(period_fixed.x) / float(Periodicity.FIXED_SCALE)
-				/ canonical.x * float(render_size.x)), 1, render_size.x)
-	if period_fixed.y > 0:
-		result.y = clampi(ceili(float(period_fixed.y) / float(Periodicity.FIXED_SCALE)
-				/ canonical.y * float(render_size.y)), 1, render_size.y)
+	for axis in 2:
+		if period[axis] <= 0.0:
+			continue
+		var pixels: float = period[axis] / canonical[axis] * float(target_size[axis])
+		var whole := roundi(pixels)
+		result[axis] = whole if whole >= 1 and whole < target_size[axis] \
+				and absf(pixels - float(whole)) <= WHOLE_PIXEL_TOLERANCE else target_size[axis]
 	return result
 
 
@@ -1735,33 +1716,43 @@ func _refresh_periodicity() -> void:
 		_periodic_comparison = {"passes": true, "active": false, "samples": 0}
 		_comparison_mutex.unlock()
 		return
-	var period := get_period()
-	var canonical := Periodicity.canonical_period(_reference_size)
+	# The tiled passes, emulated on the CPU pixel by pixel, against the same
+	# passes evaluated directly, on a 4x4 grid of the render.
+	var period := Periodicity.canonical_period(_reference_size)
 	var periodic_values := PackedFloat32Array()
 	var fullscreen_values := PackedFloat32Array()
 	var periodic_colours := PackedFloat32Array()
 	var fullscreen_colours := PackedFloat32Array()
 	var operations := _physical_operations()
+	var plan := _periodic_operation_plan(operations, true, _size)
+	var jitter := Periodicity.r2_sample(0)
+	var conditioned := 0
 	for y in 4:
 		for x in 4:
-			var uv := Vector2((float(x) + 0.5) / 4.0, (float(y) + 0.5) / 4.0)
-			var point := Vector2(
-				(uv.x * 2.0 - 1.0) * canonical.x * 0.5,
-				(uv.y * 2.0 - 1.0) * canonical.y * 0.5)
+			var pixel := Vector2i((2 * x + 1) * _size.x / 8, (2 * y + 1) * _size.y / 8)
+			var point := Diagnostics.display_coordinate(pixel, _size, jitter)
 			var fullscreen := Diagnostics.cpu_advect(point, operations, false, period,
 					config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
 					config.affine_strength, config.cutoff_gamma, config.drift_compensation,
 					config.midpoint_alpha)
-			var periodic := Diagnostics.cpu_advect(point, operations, true, period,
-					config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
-					config.affine_strength, config.cutoff_gamma, config.drift_compensation,
-					config.midpoint_alpha)
+			var periodic := fullscreen if _affine_mode >= 0 else Diagnostics.cpu_tiled_advect(
+					pixel, plan, operations, _size, jitter, config.brush_radius_px, _reference_size,
+					config.cutoff_gamma, config.drift_compensation, config.midpoint_alpha)
+			# On a crease the map amplifies 32-bit rounding: a difference the
+			# direct map shows itself under a 1e-6 nudge is not a tiling seam.
+			var difference := Periodicity.shortest_delta(periodic, fullscreen, period).length()
+			if difference > TILING_TOLERANCE and difference <= TILING_TOLERANCE \
+					+ 2.0 * _cpu_sensitivity(point, fullscreen, operations, period):
+				periodic = fullscreen
+				conditioned += 1
 			var fullscreen_wrapped := Periodicity.wrap_coordinate(fullscreen, period)
+			var periodic_wrapped := Periodicity.wrap_coordinate(periodic, period)
 			fullscreen_values.append(fullscreen_wrapped.x)
 			fullscreen_values.append(fullscreen_wrapped.y)
-			periodic_values.append(periodic.x)
-			periodic_values.append(periodic.y)
-			var periodic_colour := Diagnostics.cpu_pigment(periodic, _source_mode, _reference_size)
+			periodic_values.append(periodic_wrapped.x)
+			periodic_values.append(periodic_wrapped.y)
+			var periodic_colour := Diagnostics.cpu_pigment(periodic_wrapped, _source_mode,
+					_reference_size)
 			var fullscreen_colour := Diagnostics.cpu_pigment(fullscreen_wrapped, _source_mode,
 					_reference_size)
 			for component in 3:
@@ -1770,12 +1761,28 @@ func _refresh_periodicity() -> void:
 	var comparison := Periodicity.compare_paths(periodic_values, fullscreen_values, period,
 			periodic_colours, fullscreen_colours)
 	comparison["active"] = comparison.get("passes", false)
+	comparison["conditioned"] = conditioned
 	comparison["domain_pixels"] = get_periodic_domain_size()
 	var dispatch_stats := get_periodic_dispatch_stats()
 	comparison.merge(dispatch_stats)
 	_comparison_mutex.lock()
 	_periodic_comparison = comparison
 	_comparison_mutex.unlock()
+
+
+## How far the direct CPU map moves when its input moves by 1e-6 (about the
+## 32-bit rounding of a coordinate), in canvas units.
+func _cpu_sensitivity(point: Vector2, mapped: Vector2, operations: Array[Dictionary],
+		period: Vector2) -> float:
+	var result := 0.0
+	for nudge in [Vector2(1.0e-6, 0.0), Vector2(-1.0e-6, 0.0), Vector2(0.0, 1.0e-6),
+			Vector2(0.0, -1.0e-6)]:
+		var moved: Vector2 = Diagnostics.cpu_advect(point + nudge, operations, false, period,
+				config.brush_radius_px, _reference_size, _affine_mode, config.affine_radius_px,
+				config.affine_strength, config.cutoff_gamma, config.drift_compensation,
+				config.midpoint_alpha) - nudge
+		result = maxf(result, Periodicity.shortest_delta(moved, mapped, period).length())
+	return result
 
 
 func _normalized_segments() -> Array[Vector4]:

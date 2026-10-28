@@ -2,7 +2,6 @@ class_name MixwellGallery
 extends RefCounted
 
 const Pattern := preload("res://scripts/mixwell/mixwell_pattern.gd")
-const Periodicity := preload("res://scripts/mixwell/mixwell_periodicity.gd")
 
 const SINGLE_LINE := 0
 const FINITE_SEGMENT := 1
@@ -297,11 +296,8 @@ static func _tri_wave(start: Vector2, end: Vector2, amplitude: float, half_wave:
 	var direction := (end - start).normalized()
 	var origin := (start + end) * 0.5 + direction * half_wave * 0.5
 	# Periodic along a horizontal wave, never across it (2 is the full canonical
-	# height); a period of 0 would declare the field constant across. Two half
-	# waves on the planner's fixed-point grid, so a comb of the same pitch tiles
-	# with it.
-	var period := Vector2(2.0 * snappedf(half_wave, 1.0 / Periodicity.FIXED_SCALE), 2.0) \
-			if absf(direction.y) <= 1.0e-6 else Vector2.ZERO
+	# height); a period of 0 would declare the field constant across.
+	var period := Vector2(2.0 * half_wave, 2.0) if absf(direction.y) <= 1.0e-6 else Vector2.ZERO
 	return {"type": TRI_WAVE, "kind": "TRI_WAVE", "origin": origin, "direction": direction,
 		"period": period, "pitch": 0.0, "phase": 0.0,
 		"count": 1, "noise": 0.0, "radius_px": -1.0, "extent": Vector2.ZERO,

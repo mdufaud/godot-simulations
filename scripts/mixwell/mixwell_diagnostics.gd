@@ -70,6 +70,38 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 	return Periodicity.wrap_coordinate(value, period) if periodic else value
 
 
+## The GPU's periodic optimisation, emulated for one screen pixel: pass k runs on
+## a domain of plan[k].current pixels and reads the previous pass at
+## pixel % its domain, and the shade reads the last pass at pixel % its domain.
+## Exact only for whole-pixel periods -- which is what the solver's planner
+## guarantees and what this checks. Returns the reverse-drifted coordinate.
+static func cpu_tiled_advect(pixel: Vector2i, plan: Array[Dictionary],
+		operations: Array[Dictionary], size: Vector2i, jitter: Vector2, brush_radius_px: float,
+		reference_size: Vector2i, cutoff_gamma: float, drift_compensation: int,
+		midpoint_alpha: float) -> Vector2:
+	var chain: Array[Vector2i] = []
+	var current := pixel
+	for index in range(plan.size() - 1, -1, -1):
+		var domain: Vector2i = plan[index].current
+		current = Vector2i(posmod(current.x, domain.x), posmod(current.y, domain.y))
+		chain.push_front(current)
+	var displacement := Vector2.ZERO
+	for index in plan.size():
+		var source := display_coordinate(chain[index], size, jitter)
+		var single: Array[Dictionary] = [operations[index]]
+		var moved := cpu_advect(source + displacement, single, false, Vector2.ZERO,
+				brush_radius_px, reference_size, -1, 0.0, 0.0, cutoff_gamma, drift_compensation,
+				midpoint_alpha)
+		displacement = moved - source
+	return display_coordinate(pixel, size, jitter) + displacement
+
+
+## Canvas coordinate of a jittered pixel, as display_coordinate in the shaders.
+static func display_coordinate(pixel: Vector2i, size: Vector2i, jitter: Vector2) -> Vector2:
+	var aspect := Vector2(float(size.x) / float(maxi(size.y, 1)), 1.0)
+	return (Vector2(pixel) + jitter) / Vector2(size) * 2.0 * aspect - aspect
+
+
 ## rdSegment's local mask (Mixwell.glsl), as segment_mask in mixwell_common.comp:
 ## full drift out to half the cutoff (5 epsilon at gamma 10), zero at the cutoff.
 static func segment_mask(point: Vector2, segment: Vector4, epsilon: float,
