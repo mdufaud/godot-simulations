@@ -242,20 +242,25 @@ func _check_mixwell_periodic() -> void:
 	if _demo_root.solver.get_pattern_step() < 0:
 		_fail("Mixwell previous-pass control did not change the rendered construction")
 	_demo_root._restart_official_example()
-	var birdwing_passes: int = _demo_root.solver.get_pattern_operation_count()
+	var solver: MixwellSolver = _demo_root.solver
+	var birdwing_passes: int = solver.get_preset_pass_count()
 	var canvas_size: Vector2 = _demo_root.size
 	await _mixwell_touch_drag(canvas_size * Vector2(0.35, 0.55),
 			canvas_size * Vector2(0.52, 0.42))
-	if _demo_root.solver.get_preset_id() != 6 or _demo_root.source_mode != 3:
+	if solver.get_preset_id() != 6 or _demo_root.source_mode != 3:
 		_fail("Mixwell canvas click reset BirdWing to the first example")
-	var first_stroke_passes: int = _demo_root.solver.get_pattern_operation_count()
-	if _demo_root.strokes.size() != 1 or first_stroke_passes <= birdwing_passes + 1:
+	# Strokes are counted in segments: older ones bake into one shared map, so
+	# the number of render operations may shrink while every segment is kept.
+	if _demo_root.strokes.size() != 1 or solver.get_preset_pass_count() != birdwing_passes \
+			or solver.get_user_segment_count() != _mixwell_drawn_segments():
 		_fail("Mixwell first stroke replaced the selected published construction")
 	await _mixwell_touch_drag(canvas_size * Vector2(0.48, 0.62),
 			canvas_size * Vector2(0.64, 0.48))
-	if _demo_root.strokes.size() != 2 \
-			or _demo_root.solver.get_pattern_operation_count() <= first_stroke_passes:
-		_fail("Mixwell second stroke did not retain the first stroke")
+	if _demo_root.strokes.size() != 2 or solver.get_preset_pass_count() != birdwing_passes \
+			or solver.get_user_segment_count() != _mixwell_drawn_segments() \
+			or solver.get_baked_map_count() > 1:
+		_fail("Mixwell second stroke did not retain the first stroke (%d of %d segments)"
+				% [solver.get_user_segment_count(), _mixwell_drawn_segments()])
 	_demo_root._select_official_example(0)
 	_demo_root._set_profiling(true)
 	_demo_root.solver.set_boundary_mode(MixwellConfig.BoundaryMode.PERIODIC)
@@ -284,6 +289,13 @@ func _check_mixwell_periodic() -> void:
 		await get_tree().process_frame
 	if _demo_root.solver.get_preset_id() != 10:
 		_fail("Mixwell Pinch extension did not activate")
+
+
+func _mixwell_drawn_segments() -> int:
+	var total := 0
+	for stroke in _demo_root.strokes:
+		total += stroke.segment_count()
+	return total
 
 
 func _mixwell_touch_drag(start: Vector2, finish: Vector2) -> void:

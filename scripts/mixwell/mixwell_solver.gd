@@ -503,6 +503,30 @@ func get_preset_segment_count() -> int:
 	return _preset_segments.size()
 
 
+## User stroke segments the render still holds: baked into the map plus live.
+func get_user_segment_count() -> int:
+	return get_baked_segment_count() + _segments_px.size()
+
+
+## Passes of the selected construction itself, without user strokes or the map
+## that bakes them.
+func get_preset_pass_count() -> int:
+	var count := 0
+	for operation in _pattern.operations:
+		if operation.curve_group != USER_CURVE_GROUP and operation.render_type != Gallery.BAKED_MAP:
+			count += 1
+	return count
+
+
+## Baked maps in the render (at most one: every baked stroke shares it).
+func get_baked_map_count() -> int:
+	var count := 0
+	for operation in _pattern.operations:
+		if operation.render_type == Gallery.BAKED_MAP:
+			count += 1
+	return count
+
+
 func get_operation_count() -> int:
 	return _pattern.operation_count()
 
