@@ -20,14 +20,13 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 		value = Periodicity.wrap_coordinate(value, period)
 	var unit := Periodicity.units_per_pixel(reference_size)
 	var epsilon := brush_radius_px * unit
-	if affine_mode >= 0:
-		var affine_radius := affine_radius_px * unit
-		value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
-			affine_strength, affine_radius, cutoff_gamma)
-		return Periodicity.wrap_coordinate(value, period) if periodic else value
 	for operation in operations:
 		var operation_type := int(operation.get("type", Gallery.LINE))
-		if operation_type in [Gallery.LINE, Gallery.LINE_COMB, Gallery.GEL_GIT_PASS,
+		if affine_mode >= 0 and operation_type == Gallery.LINE:
+			# The affine pass replaces the preset's line; user strokes still apply.
+			value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
+				affine_strength, affine_radius_px * unit, cutoff_gamma, midpoint_alpha)
+		elif operation_type in [Gallery.LINE, Gallery.LINE_COMB, Gallery.GEL_GIT_PASS,
 				Gallery.TRI_WAVE]:
 			var direction: Vector2 = operation.get("direction", Vector2.RIGHT).normalized()
 			var perpendicular := Vector2(-direction.y, direction.x)

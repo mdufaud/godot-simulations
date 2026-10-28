@@ -23,11 +23,12 @@ const SLIP_NUDGE := 1.5e-5
 const PRESETS := [
 	Gallery.SINGLE_LINE, Gallery.FINITE_SEGMENT, Gallery.NONPAREIL, Gallery.NONPAREIL_NOISY,
 	Gallery.GEL_GIT, Gallery.FEATHER, Gallery.BIRD_WING, Gallery.PEACOCK, Gallery.SUPER_TORNADO,
-	Gallery.CIRCLE_GRID, Gallery.SINE_CURVE,
+	Gallery.CIRCLE_GRID, Gallery.SINE_CURVE, Gallery.TWIST, Gallery.PINCH,
 ]
 
 var _readback: Array = []
 var _slip := false
+var _affine := -1
 
 
 func _initialize() -> void:
@@ -91,7 +92,9 @@ func _render_displacement(solver: MixwellSolver) -> PackedFloat32Array:
 func _check_preset(solver: MixwellSolver, config: MixwellConfig, preset: int,
 		slip := false) -> void:
 	solver.set_preset(preset)
+	_affine = preset if Gallery.is_affine(preset) else -1
 	await _check_snapshot(solver, config, Gallery.preset_name(preset), slip, not slip)
+	_affine = -1
 
 
 func _check_snapshot(solver: MixwellSolver, config: MixwellConfig, label: String, slip: bool,
@@ -144,7 +147,7 @@ func _check_snapshot(solver: MixwellSolver, config: MixwellConfig, label: String
 func _advect(coordinate: Vector2, operations: Array[Dictionary], config: MixwellConfig) -> Vector2:
 	var aspect := float(SIZE.x) / float(SIZE.y)
 	return Diagnostics.cpu_advect(coordinate, operations, false,
-			Vector2(2.0 * aspect, 2.0), config.brush_radius_px, SIZE, -1,
+			Vector2(2.0 * aspect, 2.0), config.brush_radius_px, SIZE, _affine,
 			config.affine_radius_px, config.affine_strength, config.cutoff_gamma,
 			config.drift_compensation, config.midpoint_alpha,
 			Vector2(aspect, 1.0) if _slip else Vector2.ZERO)

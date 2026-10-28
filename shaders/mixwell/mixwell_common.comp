@@ -390,15 +390,6 @@ vec2 affine_field(vec2 relative, float strength, float radius, float kind,
 }
 
 
-vec2 affine_base_velocity(vec2 point, vec2 centre, float strength, float radius,
-		float _cutoff_gamma, float kind) {
-	mat2 coefficient = kind < 0.5
-		? mat2(vec2(0.0, 1.0), vec2(-1.0, 0.0))
-		: mat2(vec2(-1.0, 0.0), vec2(0.0, 1.0));
-	return affine_field(point - centre, strength, radius, kind, coefficient);
-}
-
-
 vec2 affine_velocity(vec2 point, vec2 centre, float strength, float radius,
 		float _cutoff_gamma, float kind) {
 	mat2 coefficient = kind < 0.5

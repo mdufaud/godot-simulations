@@ -34,8 +34,8 @@ const CPU_GOLDENS := [
 	[0.343880176544, 0.007083654404],
 	[0.210636630654, -0.435729742050],
 	[0.313077807426, 0.011130049825],
-	[-0.397537738085, 0.154076203704],
-	[0.814242064953, -0.383117645979],
+	[-0.340353220701, 0.255645304918],
+	[0.266750782728, -0.607660651207],
 	[-0.068243294954, 0.054871618748],
 	[0.276869505644, -0.058102622628],
 	[0.575342893600, -0.029069144279],
@@ -752,6 +752,27 @@ func _test_affine_extensions() -> void:
 	_check(is_finite(twisted.x) and is_finite(twisted.y)
 			and absf(twisted.length() - twist_point.length()) < 0.01,
 		"Twist midpoint integration preserves its radial support")
+	# The reverse drift is the flow of -u: carrying the result forward along u
+	# for the same unit time returns the point, and a gentle Twist turns the
+	# point back against u (a strong one wraps past half a turn).
+	var returned := Gallery.affine_advect(Gallery.TWIST, twisted, Vector2.ZERO, 0.65, 0.5, 10.0,
+			0.1, 1.0)
+	var gentle := Gallery.affine_advect(Gallery.TWIST, twist_point, Vector2.ZERO, 0.05, 0.5, 10.0)
+	var forward := Gallery.affine_drift(Gallery.TWIST, twist_point, Vector2.ZERO, 0.05, 0.5, 10.0)
+	_check(returned.distance_to(twist_point) <= 1.0e-3
+			and twist_point.angle_to(gentle) * twist_point.cross(forward) < 0.0,
+		"Twist's reverse drift undoes its flow (%s, turn %s)" % [str(returned.distance_to(twist_point)),
+		str(twist_point.angle_to(gentle))])
+	# User strokes still apply on top of an affine preset.
+	var stroke_operations: Array[Dictionary] = [{"type": Gallery.LINE, "kind": "AFFINE"},
+		{"type": Gallery.SEGMENT, "segment": Vector4(0.1, -0.3, 0.1, 0.3), "radius_px": 9.0}]
+	var affine_only: Array[Dictionary] = [stroke_operations[0]]
+	var probe := Vector2(0.12, 0.05)
+	_check(Diagnostics.cpu_advect(probe, stroke_operations, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), Gallery.TWIST, 180.0, 0.65, 10.0, 0, 0.1).distance_to(
+			Diagnostics.cpu_advect(probe, affine_only, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), Gallery.TWIST, 180.0, 0.65, 10.0, 0, 0.1)) > 1.0e-3,
+		"the CPU twin applies user strokes in affine mode")
 	var solver := Solver.new()
 	solver.initialize(Vector2i(128, 128), Config.new(), Vector2i(128, 128))
 	solver.set_preset(Gallery.TWIST)

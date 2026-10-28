@@ -138,15 +138,25 @@ static func affine_drift(id: int, point: Vector2, centre: Vector2,
 			+ b * f_transpose_relative + b * trace * relative)
 
 
+## Reverse drift of the affine brush (an extension: Twist and Pinch are not in
+## the reference): the brush moves the fluid with u for unit time, so a point is
+## carried back by the flow of -u, in midpoint steps no longer than
+## alpha * max(radius, distance) of travel, as in mixwell_affine.comp.
 static func affine_advect(id: int, point: Vector2, centre: Vector2,
-		strength: float, radius: float, cutoff_gamma: float) -> Vector2:
-	const SUBSTEPS := 8
+		strength: float, radius: float, cutoff_gamma: float, alpha := 0.1,
+		sign := -1.0) -> Vector2:
 	var mapped := point
-	var dt := 1.0 / float(SUBSTEPS)
-	for _step in SUBSTEPS:
-		var first := affine_drift(id, mapped, centre, strength, radius, cutoff_gamma)
+	var remaining := 1.0
+	for _step in 4096:
+		if remaining <= 0.0:
+			break
+		var first := sign * affine_drift(id, mapped, centre, strength, radius, cutoff_gamma)
+		var reach := alpha * maxf(radius, mapped.distance_to(centre))
+		var speed := first.length()
+		var dt := reach / speed if speed * remaining > reach else remaining
 		var midpoint := mapped + first * (0.5 * dt)
-		mapped += affine_drift(id, midpoint, centre, strength, radius, cutoff_gamma) * dt
+		mapped += sign * affine_drift(id, midpoint, centre, strength, radius, cutoff_gamma) * dt
+		remaining -= dt
 	return mapped
 
 
