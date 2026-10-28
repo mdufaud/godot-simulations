@@ -483,6 +483,7 @@ func _configure_solver() -> void:
 	sph_solver.collision_inflation = spec.collision_inflation
 	sph_solver.freeze_heat = spec.freeze_heat
 	sph_solver.yield_stress = spec.yield_stress
+	sph_solver.drift_relaxation_s = spec.drift_relaxation_s
 	sph_solver.foam_enabled = _foam_active()
 	var basin_pour := scenario == Scenario.BASIN
 	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()

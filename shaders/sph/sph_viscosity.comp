@@ -102,6 +102,19 @@ void main() {
 	float weight_sum = 0.0;
 	float strain_sum = 0.0;
 	int neighbours = 0;
+	// Water + Oil is a two-phase mixture (Ren et al. 2014, "Multiple-Fluid SPH
+	// Simulation Using a Mixture Model"): w is the particle's oil volume fraction
+	// alpha, and its mass is the mixture's (sph_pressure), so resolved blobs rise
+	// by their own buoyancy. Below the particle scale the oil slips past the
+	// water: the model's drift for two phases, with the mixture-acceleration and
+	// pressure terms left out (the basin is near hydrostatic), gives the oil
+	// volume flux alpha (1 - alpha) tau g (rho_w - rho_o) / rho_m -- the classic
+	// drift-flux form -- moved here between neighbour pairs by the SPH divergence.
+	// Without it the lattice holds the 15% density contrast: a viscous SPH column
+	// with oil under water never overturns.
+	bool drift = params.material == MATERIAL_OIL && scene.fluid_rheology.z > 0.0;
+	vec3 gravity_here = !drift ? vec3(0.0) : planet_mode() ? planet_gravity(pos) : params.gravity.xyz;
+	float drift_out = 0.0;
 	// XSPH velocity smoothing with the Poly6 kernel.
 	FOREACH_NEIGHBOR(pos,
 		if (j == i) {
@@ -114,11 +127,21 @@ void main() {
 		}
 		neighbours++;
 		vec3 relative = velocities_snap.data[j].xyz - vi_snap;
-		float weight = 1.0;
-		if (params.material == MATERIAL_OIL && abs(carried - predicted.data[j].w) > 0.5) {
-			weight = 0.1;
+		float kernel_weight = sph_poly6(r2);
+		if (drift && r2 > 1e-12) {
+			float dst = sqrt(r2);
+			float alpha_j = predicted.data[j].w;
+			float rho_mix = mix(OIL_WATER_DENSITY, scene.fluid_material.x, 0.5 * (carried + alpha_j));
+			// Oil's slip toward j: tau * (rho_w - rho_o) / rho_m * (-g . e_ij).
+			float slip = scene.fluid_rheology.z * (OIL_WATER_DENSITY - scene.fluid_material.x) / rho_mix
+				* dot(off / dst, -gravity_here);
+			// Upwind exchange: oil moves i -> j only as far as i holds oil and j
+			// holds water (and back), so the pair flux is antisymmetric -- oil
+			// volume is conserved -- and every fraction stays within [0, 1] (the
+			// clamp below only catches rounding).
+			float flux = max(slip, 0.0) * carried * (1.0 - alpha_j) - max(-slip, 0.0) * alpha_j * (1.0 - carried);
+			drift_out += flux * -sph_density_deriv(dst) * 4.0 / (densities.data[i] + densities.data[j]);
 		}
-		float kernel_weight = sph_poly6(r2) * weight;
 		visc += relative * kernel_weight;
 		weight_sum += kernel_weight;
 		// Strain-rate estimate: |relative velocity along the pair| / distance.
@@ -143,8 +166,9 @@ void main() {
 	// A lone cold droplet has no support: it keeps falling instead of freezing
 	// in mid-air.
 	float crust = 0.0;
-	if (params.material == MATERIAL_OIL && carried > 0.5) {
-		viscosity *= 2.0;
+	if (params.material == MATERIAL_OIL) {
+		// Mixture viscosity: oil is the thicker phase.
+		viscosity *= 1.0 + carried;
 	} else if (is_lava()) {
 		float heat = clamp(carried, 0.0, 1.0);
 		viscosity *= mix(8.0, 1.5, heat);
@@ -238,6 +262,9 @@ void main() {
 		stress = mix(flowing, stress, exp(-params.sim.x / PASTE_GLOW_RESPONSE));
 	}
 	float temp = carried;
+	if (drift) {
+		temp = clamp(carried - params.sim.x * drift_out, 0.0, 1.0);
+	}
 	if (params.material == MATERIAL_PRISMATIC_SLIME || params.material == MATERIAL_LIGHT_PASTE) {
 		temp = stress;
 	}

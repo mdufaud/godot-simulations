@@ -3675,18 +3675,20 @@ func _run_fluid_materials() -> void:
 	demo.fluid.sph_solver.emitter_enabled = false
 	await _wait_sim(demo, 2.0)
 	var final := await _sample_fluid_phases(demo.fluid.sph_solver)
-	print("FLUMAT water=%d oil=%d pouring_oil=%d settled_delta=%.3f sim=%.2f" % [
-		int(final.get("water_count", 0)), int(final.get("oil_count", 0)),
-		int(pouring.get("oil_count", 0)),
+	print("FLUMAT water=%.1f oil=%.1f pouring_oil=%.1f settled_delta=%.3f sim=%.2f" % [
+		float(final.get("water_volume", 0.0)), float(final.get("oil_volume", 0.0)),
+		float(pouring.get("oil_volume", 0.0)),
 		float(final.get("oil_y", 0.0)) - float(final.get("water_y", 0.0)),
 		demo.fluid.sph_solver._sim_time])
-	_check(int(pouring.get("oil_count", 0)) > 0 and
-		int(filled.get("oil_count", 0)) > int(pouring.get("oil_count", 0)) + 1000,
+	_check(float(pouring.get("oil_volume", 0.0)) > 0.0 and
+		float(filled.get("oil_volume", 0.0)) > float(pouring.get("oil_volume", 0.0)) + 1000.0,
 		"fluid_materials: oil was not poured")
-	_check(int(final.get("water_count", 0)) > 0 and
-		int(final.get("water_count", 0)) == int(filled.get("water_count", -1)) and
-		int(final.get("oil_count", 0)) == int(filled.get("oil_count", -1)),
-		"fluid_materials: phases changed after the pour filled the basin")
+	# Particles carry oil volume fractions that drift between neighbours; each
+	# phase's total volume (in particles) must survive the separation.
+	_check(float(final.get("water_volume", 0.0)) > 0.0 and
+		absf(float(final.get("water_volume", 0.0)) - float(filled.get("water_volume", -1.0))) < 1.0 and
+		absf(float(final.get("oil_volume", 0.0)) - float(filled.get("oil_volume", -1.0))) < 1.0,
+		"fluid_materials: phase volumes changed after the pour filled the basin")
 	_check(float(final.get("oil_y", 0.0)) > float(final.get("water_y", 0.0)) + 0.3,
 		"fluid_materials: oil did not settle above water")
 	demo.queue_free()
@@ -3867,19 +3869,17 @@ func _sample_fluid_phases(solver: SphFluidSolver) -> Dictionary:
 func _read_fluid_phases(solver: SphFluidSolver, result: Dictionary) -> void:
 	var key := "positions_a" if solver.current_parity() == 0 else "positions_b"
 	var positions := solver._rd.buffer_get_data(solver._buffers[key]).to_float32_array()
+	# w is the particle's oil volume fraction: weight each phase by it.
 	var sums := Vector2.ZERO
-	var counts := Vector2i.ZERO
+	var volumes := Vector2.ZERO
 	for i in solver.live_count():
-		if positions[i * 4 + 3] > 0.5:
-			sums.y += positions[i * 4 + 1]
-			counts.y += 1
-		else:
-			sums.x += positions[i * 4 + 1]
-			counts.x += 1
-	result["water_count"] = counts.x
-	result["oil_count"] = counts.y
-	result["water_y"] = sums.x / maxf(float(counts.x), 1.0)
-	result["oil_y"] = sums.y / maxf(float(counts.y), 1.0)
+		var oil := positions[i * 4 + 3]
+		sums += Vector2(1.0 - oil, oil) * positions[i * 4 + 1]
+		volumes += Vector2(1.0 - oil, oil)
+	result["water_volume"] = volumes.x
+	result["oil_volume"] = volumes.y
+	result["water_y"] = sums.x / maxf(volumes.x, 1e-6)
+	result["oil_y"] = sums.y / maxf(volumes.y, 1e-6)
 	result["done"] = true
 
 

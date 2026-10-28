@@ -5,6 +5,7 @@ extends "res://tests/test_case.gd"
 
 const SIDE := 10
 const COUNT := SIDE * SIDE * SIDE
+const TWO_PHASE_COUNT := 2 * COUNT
 const SPACING := 0.12
 const DT := 1.0 / 60.0
 
@@ -24,6 +25,7 @@ func _run() -> void:
 	await _test_viscous_column_is_substep_independent()
 	await _test_viscosity_slider_is_stable()
 	await _test_viscous_blob_translates_freely()
+	await _test_oil_rises_through_water()
 	_finish("sph_consistency")
 
 
@@ -99,6 +101,107 @@ func _test_viscous_blob_translates_freely() -> void:
 		_check(absf(drift - 0.5) < 0.002,
 			"material %d slowed a freely translating blob: %s m/s" % [kind, str(drift)])
 		await _free_solver(solver)
+
+
+# Oil under water is unstable: the lighter phase must rise through the heavier and
+# settle on top, by the density contrast alone. With equal densities the same
+# stratified column must stay as it is -- no phase-specific push may separate it.
+# The phases are oil volume fractions carried by the particles, so the oil volume
+# is a conserved sum, and every fraction stays within [0, 1].
+func _test_oil_rises_through_water() -> void:
+	for density in [850.0, 1000.0]:
+		var solver := await _make_two_phase(density)
+		var start := _phase_stats(await _read_state(solver), TWO_PHASE_COUNT)
+		await _step(solver, 480)
+		var state := await _read_state(solver)
+		var stats := _phase_stats(state, TWO_PHASE_COUNT)
+		var delta: float = stats.oil_y - stats.water_y
+		print("SPH TWO PHASE density=%d oil_minus_water=%.3f oil_on_top=%.3f oil_volume=%.3f->%.3f fraction=[%.4f, %.4f]"
+			% [density, delta, stats.oil_on_top, start.oil, stats.oil, stats.lowest, stats.highest])
+		_check(_finite(state), "two-phase column went non-finite at %d kg/m3" % density)
+		_check(absf(stats.oil - start.oil) < 1e-3 * start.oil,
+			"oil volume not conserved at %d kg/m3: %s -> %s" % [density, str(start.oil), str(stats.oil)])
+		_check(stats.lowest >= 0.0 and stats.highest <= 1.0,
+			"oil fraction left [0, 1] at %d kg/m3" % density)
+		if density < 1000.0:
+			_check(delta > 0.5 and stats.oil_on_top > 0.9,
+				"oil did not rise through water (%s m, %s on top)" % [str(delta), str(stats.oil_on_top)])
+		else:
+			_check(delta < -0.6, "equal-density phases separated on their own (%s m)" % str(delta))
+		await _free_solver(solver)
+
+
+func _make_two_phase(density: float) -> SphFluidSolver:
+	var spec := FluidMaterial.for_kind(FluidSystem.FluidKind.WATER_OIL)
+	var solver := SphFluidSolver.new()
+	solver.particle_count = TWO_PHASE_COUNT
+	solver.active_count = TWO_PHASE_COUNT
+	solver.material = FluidSystem.FluidKind.WATER_OIL
+	solver.substeps = 3
+	solver.gravity = Vector3(0.0, -9.8, 0.0)
+	solver.foam_enabled = false
+	solver.viscosity_strength = spec.viscosity
+	solver.cohesion_strength = spec.cohesion
+	solver.collision_damping = spec.collision_damping
+	solver.material_density_kg_m3 = density
+	solver.drift_relaxation_s = spec.drift_relaxation_s
+	solver.config = FluidConfig.new()
+	solver.config.default_particle_count = TWO_PHASE_COUNT
+	solver.config.particle_counts = [TWO_PHASE_COUNT]
+	solver.config.texture_width = 64
+	solver.config.grid_dims = Vector3i(8, 16, 8)
+	solver.config.grid_origin = Vector3(-1.0, 0.0, -1.0)
+	var half := 0.5 * SIDE * SPACING + 0.02
+	solver.config.domain_origin = Vector3(-half, 0.0, -half)
+	solver.config.domain_size_m = Vector3(2.0 * half, 4.0, 2.0 * half)
+	solver.config.cell_size_m = 0.25
+	# A column twice the cube's height: oil in the lower half, water above.
+	var positions := PackedFloat32Array()
+	positions.resize(TWO_PHASE_COUNT * 4)
+	for i in TWO_PHASE_COUNT:
+		@warning_ignore("integer_division")
+		var layer := (i / SIDE) % (2 * SIDE)
+		positions[i * 4] = -0.54 + float(i % SIDE) * SPACING
+		positions[i * 4 + 1] = 0.06 + float(layer) * SPACING
+		@warning_ignore("integer_division")
+		positions[i * 4 + 2] = -0.54 + float(i / (2 * SIDE * SIDE)) * SPACING
+		positions[i * 4 + 3] = 1.0 if layer < SIDE else 0.0
+	solver.set_seed_positions(positions)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	await RenderingServer.frame_post_draw
+	return solver
+
+
+# Volume-weighted centroids of the two phases, the oil volume, the share of it
+# above the column's mean height, and the fraction range.
+func _phase_stats(state: Dictionary, count: int) -> Dictionary:
+	var positions: PackedFloat32Array = state.positions
+	var weighted := Vector2.ZERO
+	var volume := Vector2.ZERO
+	var lowest := 1.0
+	var highest := 0.0
+	var mean_y := 0.0
+	for i in count:
+		var oil := positions[i * 4 + 3]
+		var y := positions[i * 4 + 1]
+		weighted += Vector2(1.0 - oil, oil) * y
+		volume += Vector2(1.0 - oil, oil)
+		lowest = minf(lowest, oil)
+		highest = maxf(highest, oil)
+		mean_y += y
+	mean_y /= float(count)
+	var on_top := 0.0
+	for i in count:
+		if positions[i * 4 + 1] > mean_y:
+			on_top += positions[i * 4 + 3]
+	return {
+		"water_y": weighted.x / maxf(volume.x, 1e-6),
+		"oil_y": weighted.y / maxf(volume.y, 1e-6),
+		"oil": volume.y,
+		"oil_on_top": on_top / maxf(volume.y, 1e-6),
+		"lowest": lowest,
+		"highest": highest,
+	}
 
 
 func _make_column(kind: int, substeps: int, viscosity := -1.0, boxed := true) -> SphFluidSolver:

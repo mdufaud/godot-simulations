@@ -8,8 +8,9 @@ void main() {
 	vec3 v = velocities_src.data[i].xyz + g * params.sim.x;
 	velocities_src.data[i] = vec4(v, velocities_src.data[i].w);
 	vec3 pred = clamp_domain(pos + v * params.sim.x);
-	// w carries the particle's phase into the sorted predicted buffer, so
-	// sph_viscosity can read its neighbours' phases from a buffer it never writes.
+	// w carries the particle's attribute (oil fraction, lava heat) into the sorted
+	// predicted buffer, so sph_viscosity can read its neighbours' from a buffer it
+	// never writes.
 	predicted_src.data[i] = vec4(pred, positions_src.data[i].w);
 	atomicAdd(cell_count.data[cell_index(cell_of(pred))], 1u);
 }

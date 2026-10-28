@@ -48,6 +48,8 @@ var near_pressure_mult := DEFAULT_NEAR_PRESSURE_MULT
 var viscosity_strength := 0.14
 var extension_strength := 0.0
 var yield_stress := 0.0
+## Two-phase oil: mixture-model drift relaxation time (s), see FluidMaterial.
+var drift_relaxation_s := 0.0
 var material_density_kg_m3 := 1000.0
 # Derived kernel constants from FluidMaterial; packed into the SceneParams
 # block (density, stiffness, inflation) and the push constant (cohesion scale).
@@ -851,7 +853,7 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
 		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
 		stiffness_scale, collision_inflation, freeze_heat, yield_stress, _rest_neighbours,
-		scene_id, config.domain_origin,
+		drift_relaxation_s, scene_id, config.domain_origin,
 		config.domain_size_m])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
@@ -884,6 +886,7 @@ func _pack_scene_ubo_static() -> PackedByteArray:
 	b.encode_float(1196, freeze_heat)
 	b.encode_float(1248, yield_stress)
 	b.encode_float(1252, _rest_neighbours)
+	b.encode_float(1256, drift_relaxation_s)
 	b.encode_s32(1200, scene_id)
 	var upper := config.domain_origin + config.domain_size_m
 	for axis in 3:

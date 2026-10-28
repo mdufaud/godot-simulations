@@ -17,6 +17,12 @@ var extension_strength := 0.0
 ## converged height up to 300 Pa and 5% lower at 400 Pa (the slider's top);
 ## stiffer yields need more sweeps.
 var yield_stress := 0.0
+## Water + Oil only: drift relaxation time (s) of the two-phase mixture model
+## (Ren et al. 2014). Below the particle scale oil slips past water at
+## u = tau * g * (1000 - density_kg_m3) / rho_mixture; 0 = no slip. 0.3 s gives
+## an isolated oil parcel 0.48 m/s, about the terminal rise of an oil blob one
+## particle spacing (12 cm) across at drag coefficient ~1.
+var drift_relaxation_s := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
 var emission_cycle_seconds := 24.0
@@ -75,6 +81,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 250.0
 			spec.collision_damping = 0.15
 			spec.density_kg_m3 = 850.0
+			spec.drift_relaxation_s = 0.3
 		FluidSystem.FluidKind.ASTRAL:
 			spec.viscosity = 0.25
 			spec.cohesion = 1200.0

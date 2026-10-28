@@ -135,6 +135,9 @@ const int MATERIAL_LAVA = 1;
 const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
+// Water + Oil: rest density of the water phase (kg/m3); the oil's is
+// scene.fluid_material.x.
+const float OIL_WATER_DENSITY = 1000.0;
 const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
@@ -184,7 +187,7 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 	vec4 domain_min;
 	vec4 domain_max;
-	vec4 fluid_rheology; // x = Bingham yield stress in Pa (0 = flows freely), y = rest-lattice neighbour count, zw = pad
+	vec4 fluid_rheology; // x = Bingham yield stress in Pa (0 = flows freely), y = rest-lattice neighbour count, z = oil drift relaxation time in s, w = pad
 }
 scene;
 
