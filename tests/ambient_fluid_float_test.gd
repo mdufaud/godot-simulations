@@ -30,6 +30,7 @@ func _run() -> void:
 	await _test_runtime_air_to_water_transition()
 	await _test_runtime_honey_1100_body()
 	await _test_light_pool_throw_stability()
+	await _test_contact_mass()
 	await _test_repeated_drop_mix()
 	_finish("ambient_fluid_float")
 
@@ -391,6 +392,29 @@ func _test_light_pool_throw_stability() -> void:
 				break
 		_check(not body._invalid_state_reported and body.finite_state(),
 			"changing pool fluid produced a non-finite integration state")
+	demo.queue_free()
+	await process_frame
+
+
+func _test_contact_mass() -> void:
+	# A light ball under water collides with its added mass: Jolt's mass is
+	# the K diagonal, several times the body's own; in vacuum just the body.
+	var demo: Node = SCENE.instantiate()
+	root.add_child(demo)
+	await process_frame
+	demo._clear_objects()
+	var body: AmbientFluidBody3D = demo._spawn_body(0, 100.0,
+		Vector3(0.0, -2.0, 0.0), Vector3.ZERO, Vector3.ZERO)
+	await physics_frame
+	await physics_frame
+	print("AMBIENT CONTACT MASS body=%.1f contact=%.1f" % [body.mass, body.contact_mass_kg()])
+	_check(body.contact_mass_kg() > body.mass * 5.0,
+		"submerged light ball collides without its added mass")
+	demo._set_medium(4)
+	await physics_frame
+	await physics_frame
+	_check(absf(body.contact_mass_kg() - body.mass) < 1.0e-3 * body.mass,
+		"vacuum contact mass is not the body's own")
 	demo.queue_free()
 	await process_frame
 

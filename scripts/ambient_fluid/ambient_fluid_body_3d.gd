@@ -612,7 +612,8 @@ func contact_count() -> int:
 
 
 func contact_warning() -> String:
-	return "Jolt contact impulses use body inertia Kb; fluid K is rebuilt from post-contact velocity."
+	return "Jolt contacts use body inertia plus the added mass diagonal (scalar mass: the" \
+		+ " translation average); the fluid coupling of K does not reach the contact solver."
 
 
 func finite_state() -> bool:
@@ -648,6 +649,25 @@ func _rebuild_tensors(fluid_density_override := NAN) -> void:
 	_cached_inertia = body_inertia_diagonal_kg_m2
 	if not _cache_valid:
 		_report_invalid_state("combined inertia tensor is not positive definite")
+		return
+	_sync_contact_mass()
+
+
+## Jolt resolves contacts with its own scalar mass and diagonal inertia. Hand
+## it the diagonal of K = K_b + K_f (translation averaged over the axes) so a
+## light body in water collides like the heavy object it effectively is; the
+## node's mass and inertia stay the body's own (K_b). Jolt's contact response
+## comes back as a velocity change on the next tick.
+func _sync_contact_mass() -> void:
+	var tensor := _combined_tensor
+	PhysicsServer3D.body_set_param(get_rid(), PhysicsServer3D.BODY_PARAM_MASS,
+		(tensor[21] + tensor[28] + tensor[35]) / 3.0)
+	PhysicsServer3D.body_set_param(get_rid(), PhysicsServer3D.BODY_PARAM_INERTIA,
+		Vector3(tensor[0], tensor[7], tensor[14]))
+
+
+func contact_mass_kg() -> float:
+	return PhysicsServer3D.body_get_param(get_rid(), PhysicsServer3D.BODY_PARAM_MASS)
 
 
 func _ensure_tensor_cache(fluid_density_override := NAN) -> void:
