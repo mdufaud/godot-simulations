@@ -2,6 +2,7 @@ class_name MixwellGallery
 extends RefCounted
 
 const Pattern := preload("res://scripts/mixwell/mixwell_pattern.gd")
+const Periodicity := preload("res://scripts/mixwell/mixwell_periodicity.gd")
 
 const SINGLE_LINE := 0
 const FINITE_SEGMENT := 1
@@ -26,6 +27,11 @@ const LINE := 0
 const LINE_COMB := 1
 const SEGMENT := 2
 const BAKED_MAP := 3
+const GEL_GIT_PASS := 4
+const TRI_WAVE := 5
+
+## Tine pitch of each of Gel-Git's two combs.
+const GEL_GIT_PITCH := 0.23703704
 
 const PRESET_NAMES := [
 	"Single Line", "Finite Segment", "Freehand Lab", "Nonpareil", "Gel-Git",
@@ -145,62 +151,6 @@ static func affine_advect(id: int, point: Vector2, centre: Vector2,
 	return mapped
 
 
-static func preset_operations(id: int) -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	match id:
-		SINGLE_LINE:
-			result.append(_line(Vector2.ZERO, Vector2.RIGHT, Vector2.ZERO))
-		FINITE_SEGMENT:
-			result.append(_segment(Vector4(-0.82, 0.0, 0.82, 0.0), Vector2i.ZERO))
-		NONPAREIL:
-			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.17777778, 11, 0.0))
-		GEL_GIT:
-			result.append_array(_gel_git())
-		FEATHER:
-			result.append_array(_feather())
-		BIRD_WING:
-			result.append_array(_bird_wing())
-		PEACOCK:
-			result.append_array(_peacock(false))
-		FROG_FOOT:
-			result.append_array(_peacock(true))
-		THISTLE:
-			result.append_array(_gel_git())
-			result.append_array(_line_comb(Vector2.ZERO, Vector2.UP, 0.18, 11, 0.0))
-			result.append_array(_triangle_pass(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-				0.09, 9, false))
-			result.append_array(_triangle_pass(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-				-0.09, 9, true))
-		TORNADO:
-			result.append_array(_gel_git_vertical())
-			result.append_array(_gel_git())
-			result.append_array(_triangle_pass(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-				0.09, 9, false))
-			result.append_array(_triangle_pass(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-				-0.09, 9, true))
-		SUPER_TORNADO:
-			result.append_array(_gel_git_vertical())
-			result.append_array(_gel_git())
-			result.append_array(_line_comb(Vector2.ZERO, Vector2.UP, 0.14, 13, 0.018))
-			result.append_array(_triangle_pass(Vector2(-0.86, 0.0), Vector2(0.86, 0.0),
-				0.12, 12, false))
-			result.append_array(_triangle_pass(Vector2(-0.86, 0.0), Vector2(0.86, 0.0),
-				-0.12, 12, true))
-		NONPAREIL_NOISY:
-			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.18, 11, 0.035))
-		CIRCLE_GRID:
-			result.append_array(_circle_grid())
-		SINE_CURVE:
-			result.append_array(_sine_curve())
-		PAINT_SPREAD:
-			result.append_array(_peacock(false))
-			result.append_array(_triangle_pass(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-				0.10, 10, false))
-			result.append_array(_triangle_pass(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-				-0.10, 10, true))
-	return result
-
-
 static func _pattern_operations(id: int) -> Array[Dictionary]:
 	var result: Array[Dictionary] = []
 	match id:
@@ -209,84 +159,75 @@ static func _pattern_operations(id: int) -> Array[Dictionary]:
 		FINITE_SEGMENT:
 			result.append(_segment(Vector4(-0.82, 0.0, 0.82, 0.0), Vector2i.ZERO))
 		NONPAREIL:
-			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.17777778, 11, 0.0))
+			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.17777778, 0.0))
 		GEL_GIT:
-			result.append_array(_gel_git())
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
 		FEATHER:
-			result.append_array(_gel_git())
-			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.13333333, 15, 0.0))
-			result.append(_triangle_curve(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-					0.10, 10, false))
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
+			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.13333333, 0.0))
+			result.append(_tri_wave(Vector2(-0.82, 0.0), Vector2(0.82, 0.0), 0.10, 0.13333333,
+					false))
 		BIRD_WING:
 			result.append_array(_pattern_operations(FEATHER))
-			result.append(_triangle_curve(Vector2(0.82, 0.0), Vector2(-0.82, 0.0),
-					-0.10, 10, true))
+			result.append(_tri_wave(Vector2(0.82, 0.0), Vector2(-0.82, 0.0), -0.10, 0.13333333,
+					true))
 		PEACOCK, FROG_FOOT:
 			var frog := id == FROG_FOOT
-			result.append_array(_gel_git())
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
 			result.append(_comb(Vector2.ZERO, Vector2.DOWN if not frog else Vector2.UP,
-					0.16666667, 12, 0.0))
-			result.append(_triangle_curve(Vector2(-0.82, -0.35), Vector2(0.82, -0.35),
-					0.10, 9, false))
-			result.append(_triangle_curve(Vector2(0.82, 0.35), Vector2(-0.82, 0.35),
-					-0.10, 9, true))
+					0.16666667, 0.0))
+			result.append(_tri_wave(Vector2(-0.82, -0.35), Vector2(0.82, -0.35), 0.10,
+					0.16666667, false))
+			result.append(_tri_wave(Vector2(0.82, 0.35), Vector2(-0.82, 0.35), -0.10,
+					0.16666667, true))
 		THISTLE:
-			result.append_array(_gel_git())
-			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.17777778, 11, 0.0))
-			result.append(_triangle_curve(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-					0.09, 9, false))
-			result.append(_triangle_curve(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-					-0.09, 9, true))
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
+			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.17777778, 0.0))
+			result.append(_tri_wave(Vector2(-0.78, 0.0), Vector2(0.78, 0.0), 0.09, 0.16666667,
+					false))
+			result.append(_tri_wave(Vector2(-0.78, 0.0), Vector2(0.78, 0.0), -0.09, 0.16666667,
+					true))
 		TORNADO:
-			result.append_array(_gel_git_vertical())
-			result.append_array(_gel_git())
-			result.append(_triangle_curve(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-					0.09, 9, false))
-			result.append(_triangle_curve(Vector2(-0.78, 0.0), Vector2(0.78, 0.0),
-					-0.09, 9, true))
+			result.append(_gel_git(Vector2(-0.42, 0.0), Vector2.UP))
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
+			result.append(_tri_wave(Vector2(-0.78, 0.0), Vector2(0.78, 0.0), 0.09, 0.16666667,
+					false))
+			result.append(_tri_wave(Vector2(-0.78, 0.0), Vector2(0.78, 0.0), -0.09, 0.16666667,
+					true))
 		SUPER_TORNADO:
-			result.append_array(_gel_git_vertical())
-			result.append_array(_gel_git())
-			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.14814815, 13, 0.0))
-			result.append(_triangle_curve(Vector2(-0.86, 0.0), Vector2(0.86, 0.0),
-					0.12, 12, false))
-			result.append(_triangle_curve(Vector2(-0.86, 0.0), Vector2(0.86, 0.0),
-					-0.12, 12, true))
+			result.append(_gel_git(Vector2(-0.42, 0.0), Vector2.UP))
+			result.append(_gel_git(Vector2(0.0, -0.42), Vector2.RIGHT))
+			result.append(_comb(Vector2.ZERO, Vector2.UP, 0.14814815, 0.0))
+			result.append(_tri_wave(Vector2(-0.86, 0.0), Vector2(0.86, 0.0), 0.12, 0.14814815,
+					false))
+			result.append(_tri_wave(Vector2(-0.86, 0.0), Vector2(0.86, 0.0), -0.12, 0.14814815,
+					true))
 		NONPAREIL_NOISY:
-			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.18, 11, 0.035,
-					0.0175))
+			result.append(_comb(Vector2.ZERO, Vector2.RIGHT, 0.18, 0.035, 0.0175))
 		CIRCLE_GRID:
 			result.append_array(_pattern_circle_grid())
 		SINE_CURVE:
 			result.append(_pattern_sine_curve())
 		PAINT_SPREAD:
 			result.append_array(_pattern_operations(PEACOCK))
-			result.append(_triangle_curve(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-					0.10, 10, false))
-			result.append(_triangle_curve(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-					-0.10, 10, true))
+			result.append(_tri_wave(Vector2(-0.82, 0.0), Vector2(0.82, 0.0), 0.10, 0.13333333,
+					false))
+			result.append(_tri_wave(Vector2(-0.82, 0.0), Vector2(0.82, 0.0), -0.10, 0.13333333,
+					true))
 	return result
 
 
+## Segments the preset itself uploads (its strokes and curves), in render order.
 static func preset_segments(id: int) -> Array[Vector4]:
 	var result: Array[Vector4] = []
-	for operation in preset_operations(id):
+	if is_affine(id):
+		return result
+	for operation in preset_pattern(id).render_operations():
 		if int(operation.type) == SEGMENT:
 			result.append(operation.segment)
 	return result
 
 
-static func tri_wave(start: Vector2, end: Vector2, amplitude: float,
-		cycles: int) -> Array[Vector4]:
-	var result: Array[Vector4] = []
-	for operation in _triangle_pass(start, end, amplitude, cycles, false):
-		result.append(operation.segment)
-	return result
-
-
-## Drift added along a comb's direction to cancel its transport. The comb's
-## reverse drift points against its motion: -pi epsilon^2 / pitch on average
-## (Mean) and the Pade fit between tines (Minimum); compensation subtracts it.
 static func compensation_value(mode: int, epsilon: float, pitch: float) -> float:
 	if not is_finite(epsilon) or epsilon <= 0.0 or not is_finite(pitch) or pitch <= 0.0:
 		return NAN
@@ -314,22 +255,57 @@ static func _line(origin: Vector2, direction: Vector2, period: Vector2,
 		"radius_px": radius_px, "extent": extent}
 
 
-static func _comb(origin: Vector2, direction: Vector2, pitch: float, count: int,
-		noise: float, phase := 0.0, radius_px := -1.0,
-		extent := Vector2.ZERO) -> Dictionary:
-	var perpendicular := Vector2(-direction.y, direction.x).normalized()
-	var period := Vector2.ZERO
-	if noise <= 0.0:
-		period = Vector2(0.0, pitch) if absf(perpendicular.y) > absf(perpendicular.x) \
-			else Vector2(pitch, 0.0)
-	return {"type": LINE_COMB, "origin": origin, "direction": direction,
-		"period": period, "pitch": pitch, "phase": phase, "count": count,
-		"noise": noise, "radius_px": radius_px, "extent": extent}
+## A period along one axis for an axis-aligned direction, none otherwise (the
+## periodic planner tiles only axis-aligned periods). The other component is 0:
+## the field of a family of parallel lines is constant along them.
+static func _axis_period(direction: Vector2, length: float) -> Vector2:
+	var unit := direction.normalized()
+	if absf(unit.y) <= 1.0e-6:
+		return Vector2(length, 0.0)
+	if absf(unit.x) <= 1.0e-6:
+		return Vector2(0.0, length)
+	return Vector2.ZERO
 
 
-static func _line_comb(origin: Vector2, direction: Vector2, pitch: float, count: int,
-		noise: float) -> Array[Dictionary]:
-	return [_comb(origin, direction, pitch, count, noise)]
+## Nonpareil comb (rdNonpareilNoisy): tines gap apart, tine k shifted by up to
+## +-noise; phase shifts every tine across.
+static func _comb(origin: Vector2, direction: Vector2, gap: float, noise: float,
+		phase := 0.0, radius_px := -1.0) -> Dictionary:
+	var across := Vector2(-direction.y, direction.x)
+	return {"type": LINE_COMB, "kind": "COMB", "origin": origin, "direction": direction,
+		"period": _axis_period(across, gap) if noise <= 0.0 else Vector2.ZERO,
+		"pitch": gap, "phase": phase, "count": 1, "noise": noise, "radius_px": radius_px,
+		"extent": Vector2.ZERO}
+
+
+## Gel-Git (rdGelGit): a comb moving along direction with tines GEL_GIT_PITCH
+## apart, superposed on one moving against it offset by half that pitch.
+static func _gel_git(origin: Vector2, direction: Vector2) -> Dictionary:
+	var gap := GEL_GIT_PITCH * 0.5
+	var across := Vector2(-direction.y, direction.x)
+	return {"type": GEL_GIT_PASS, "kind": "GEL_GIT", "origin": origin, "direction": direction,
+		"period": _axis_period(across, 2.0 * gap), "pitch": gap, "phase": 0.0, "count": 1,
+		"noise": 0.0, "radius_px": -1.0, "extent": Vector2.ZERO}
+
+
+## Triangle wave (rdTriWave) from start toward end, its half wave (one segment
+## from trough to crest) half_wave long, its crests the signed amplitude from
+## the centre line. Infinite along its line: start and end set its direction,
+## and the centre falls on a trough, as the gallery drew it.
+static func _tri_wave(start: Vector2, end: Vector2, amplitude: float, half_wave: float,
+		broken: bool) -> Dictionary:
+	var direction := (end - start).normalized()
+	var origin := (start + end) * 0.5 + direction * half_wave * 0.5
+	# Periodic along a horizontal wave, never across it (2 is the full canonical
+	# height); a period of 0 would declare the field constant across. Two half
+	# waves on the planner's fixed-point grid, so a comb of the same pitch tiles
+	# with it.
+	var period := Vector2(2.0 * snappedf(half_wave, 1.0 / Periodicity.FIXED_SCALE), 2.0) \
+			if absf(direction.y) <= 1.0e-6 else Vector2.ZERO
+	return {"type": TRI_WAVE, "kind": "TRI_WAVE", "origin": origin, "direction": direction,
+		"period": period, "pitch": 0.0, "phase": 0.0,
+		"count": 1, "noise": 0.0, "radius_px": -1.0, "extent": Vector2.ZERO,
+		"wavelength": 2.0 * half_wave, "amplitude": amplitude, "broken": broken}
 
 
 static func _segment(segment: Vector4, period_pixels: Vector2i,
@@ -339,121 +315,14 @@ static func _segment(segment: Vector4, period_pixels: Vector2i,
 		"radius_px": radius_px}
 
 
-static func _gel_git() -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	result.append(_comb(Vector2(0.0, -0.42), Vector2.RIGHT, 0.23703704, 7, 0.0))
-	result.append(_comb(Vector2(0.0, 0.42), Vector2.LEFT, 0.23703704, 7, 0.0))
-	return result
-
-
-static func _gel_git_vertical() -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	result.append(_comb(Vector2(-0.42, 0.0), Vector2.UP, 0.23703704, 7, 0.0))
-	result.append(_comb(Vector2(0.42, 0.0), Vector2.DOWN, 0.23703704, 7, 0.0))
-	return result
-
-
-static func _feather() -> Array[Dictionary]:
-	var result := _gel_git()
-	result.append(_comb(Vector2.ZERO, Vector2.UP, 0.13, 15, 0.02))
-	result.append_array(_triangle_pass(Vector2(-0.82, 0.0), Vector2(0.82, 0.0),
-			0.10, 10, false))
-	return result
-
-
-static func _bird_wing() -> Array[Dictionary]:
-	var result := _feather()
-	result.append_array(_triangle_pass(Vector2(0.82, 0.0), Vector2(-0.82, 0.0),
-			-0.10, 10, true))
-	return result
-
-
-static func _peacock(frog: bool) -> Array[Dictionary]:
-	var result := _gel_git()
-	result.append(_comb(Vector2.ZERO, Vector2.DOWN if not frog else Vector2.UP,
-			0.16, 12, 0.018))
-	result.append_array(_triangle_pass(Vector2(-0.82, -0.35), Vector2(0.82, -0.35),
-			0.10, 9, false))
-	result.append_array(_triangle_pass(Vector2(0.82, 0.35), Vector2(-0.82, 0.35),
-			-0.10, 9, true))
-	return result
-
-
-static func _triangle_pass(start: Vector2, end: Vector2, amplitude: float,
-		cycles: int, broken: bool) -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	var count := maxi(cycles * 2, 2)
-	var edge := end - start
-	if edge.length() <= 1.0e-6:
-		return result
-	var perpendicular := Vector2(-edge.y, edge.x).normalized()
-	var points: Array[Vector2] = []
-	for index in count + 1:
-		var fraction := float(index) / float(count)
-		var triangle := 0.0
-		if index > 0 and index < count:
-			triangle = 1.0 - absf(fposmod(fraction * float(cycles), 2.0) - 1.0)
-			triangle = triangle * 2.0 - 1.0
-		points.append(start.lerp(end, fraction) + perpendicular * amplitude * triangle)
-	for index in range(points.size() - 1):
-		var a := points[index]
-		var b := points[index + 1]
-		if broken and index % 2 == 1:
-			var swap := a
-			a = b
-			b = swap
-		result.append(_segment(Vector4(a.x, a.y, b.x, b.y), Vector2i(300, 180)))
-	return result
-
-
-static func _triangle_curve(start: Vector2, end: Vector2, amplitude: float,
-		cycles: int, broken: bool) -> Dictionary:
-	var repeat_scale := 4
-	var expanded_cycles := maxi(cycles * repeat_scale, 1)
-	var edge := end - start
-	var points: Array[Vector2] = []
-	if edge.length() <= 1.0e-6:
-		return _curve(points, "TRIWAVE", not broken, broken)
-	var edge_direction := edge.normalized()
-	var centre := (start + end) * 0.5
-	var period_x: float
-	match cycles:
-		9:
-			period_x = 0.16666667
-		10:
-			period_x = 0.13333333
-		12:
-			period_x = 0.14814815
-		_:
-			period_x = round(absf(edge.x) / float(maxi(cycles, 1)) * 270.0) / 270.0
-	period_x = maxf(period_x, 1.0 / 270.0)
-	var expanded_length := period_x * float(maxi(cycles, 1)) * repeat_scale
-	var expanded_start := centre - edge_direction * expanded_length * 0.5
-	var expanded_end := centre + edge_direction * expanded_length * 0.5
-	var expanded_edge := expanded_end - expanded_start
-	var perpendicular := Vector2(-expanded_edge.y, expanded_edge.x).normalized()
-	for index in expanded_cycles * 2 + 1:
-		var fraction := float(index) / float(expanded_cycles * 2)
-		var triangle := 0.0
-		if index > 0 and index < expanded_cycles * 2:
-			triangle = 1.0 - absf(fposmod(fraction * float(expanded_cycles), 2.0) - 1.0)
-			triangle = triangle * 2.0 - 1.0
-		points.append(expanded_start.lerp(expanded_end, fraction)
-				+ perpendicular * amplitude * triangle)
-	var period := Vector2(period_x, 2.0)
-	return _curve(points, "TRIWAVE", not broken, broken, Transform2D.IDENTITY,
-			Vector2.ZERO, Vector2i.ZERO, 2, period)
-
-
 static func _curve(points: Array[Vector2], mode: String, smooth: bool,
 		broken: bool, transform := Transform2D.IDENTITY,
-		extent := Vector2.ZERO, period_pixels := Vector2i(300, 180),
-		periodic_segment_count := 0, period := Vector2.ZERO) -> Dictionary:
+		extent := Vector2.ZERO, period_pixels := Vector2i(300, 180)) -> Dictionary:
 	return {"type": SEGMENT, "kind": "CURVE", "curve_mode": mode,
 		"points": points, "smooth": smooth, "broken": broken,
-		"transform": transform, "extent": extent, "period": period,
+		"transform": transform, "extent": extent, "period": Vector2.ZERO,
 		"period_pixels": period_pixels, "pitch": 0.0, "phase": 0.0,
-		"count": 1, "noise": 0.0, "periodic_segment_count": periodic_segment_count}
+		"count": 1, "noise": 0.0}
 
 
 static func _pattern_circle_grid() -> Array[Dictionary]:
@@ -475,34 +344,5 @@ static func _pattern_sine_curve() -> Dictionary:
 	for index in 33:
 		var fraction := float(index) / 32.0
 		points.append(Vector2(lerpf(-0.9, 0.9, fraction), sin(fraction * TAU * 2.0) * 0.42))
-	return _curve(points, "SINE", true, false, Transform2D.IDENTITY,
-			Vector2(-0.9, 0.9), Vector2.ZERO, 16, Vector2(0.9, 2.0))
-
-
-static func _circle_grid() -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	for row in 4:
-		for column in 5:
-			var centre := Vector2(-0.68 + float(column) * 0.34, -0.54 + float(row) * 0.36)
-			var points: Array[Vector2] = []
-			for index in 13:
-				var angle := TAU * float(index) / 12.0
-				points.append(centre + Vector2(cos(angle), sin(angle)) * 0.11)
-			for index in range(points.size() - 1):
-				var a := points[index]
-				var b := points[index + 1]
-				result.append(_segment(Vector4(a.x, a.y, b.x, b.y), Vector2i(120, 120)))
-	return result
-
-
-static func _sine_curve() -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	var points: Array[Vector2] = []
-	for index in 33:
-		var fraction := float(index) / 32.0
-		points.append(Vector2(lerpf(-0.9, 0.9, fraction), sin(fraction * TAU * 2.0) * 0.42))
-	for index in range(points.size() - 1):
-		var a := points[index]
-		var b := points[index + 1]
-		result.append(_segment(Vector4(a.x, a.y, b.x, b.y), Vector2i(300, 180)))
-	return result
+	return _curve(points, "SINE", true, false, Transform2D.IDENTITY, Vector2.ZERO,
+			Vector2i.ZERO)

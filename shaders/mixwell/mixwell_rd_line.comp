@@ -1,3 +1,10 @@
+// Line-family operations, each a closed-form reverse-drift function of the
+// sample point (mixwell_common.comp): LINE (0), the Nonpareil comb LINE_COMB
+// (1), GEL_GIT (4) and TRI_WAVE (5). Push constant per operation:
+//   line.xy origin, line.zw direction; segment.x phase (tines and waves shift
+//   across by it), segment.y epsilon, segment.zw LINE extent or TRI_WAVE
+//   (wavelength, amplitude); operation.y comb gap (pitch), operation.z TRI_WAVE
+//   broken flag, operation.w comb noise.
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	ivec2 work_size = work_dims();
@@ -16,48 +23,24 @@ void main() {
 	}
 	direction /= direction_length;
 	vec2 perpendicular = vec2(-direction.y, direction.x);
-	vec2 drift = vec2(0.0);
-	float line_epsilon = params.segment.y > 1.0e-30 ? params.segment.y : params.field.x;
-	float phase = params.segment.x;
+	float epsilon = params.segment.y > 1.0e-30 ? params.segment.y : params.field.x;
 	int operation_type = int(round(params.operation.x));
-	int line_count = max(int(round(params.operation.z)), 1);
-	int max_lines = min(line_count, 256);
-	bool periodic_comb = operation_type == 1 && params.operation.w <= 1.0e-6
-			&& params.operation.y > 1.0e-30;
-	float periodic_offset = 0.0;
-	if (periodic_comb) {
-		periodic_offset = round((dot(coordinate - params.line.xy, perpendicular)
-				- phase) / params.operation.y) * params.operation.y;
-	}
-	for (int line_index = 0; line_index < 256; line_index++) {
-		if (line_index >= max_lines) {
-			break;
-		}
-		float offset = float(line_index) - 0.5 * float(max_lines - 1);
-		if (operation_type == 1) {
-			float noise = (hash11(float(line_index) + params.operation.w) * 2.0 - 1.0)
-					* params.operation.w;
-			offset = offset * params.operation.y + noise;
-		} else {
-			offset = 0.0;
-		}
-		offset += phase;
-		if (periodic_comb) {
-			offset += periodic_offset;
-		}
-		vec2 origin = params.line.xy + perpendicular * offset;
-		float extent_weight = line_extent_weight(coordinate, origin, direction,
-				line_epsilon, params.field.z, params.segment.zw);
-		if (slip_enabled()) {
-			drift += slip_line_velocity(coordinate, origin, direction, line_epsilon)
-					* extent_weight;
-		} else {
-			drift += line_velocity(coordinate, origin, direction, line_epsilon)
-					* extent_weight;
-		}
-	}
+	vec2 origin = params.line.xy + perpendicular * params.segment.x;
+	vec2 local = coordinate - origin;
+	vec2 drift;
 	if (operation_type == 1) {
-		drift += drift_compensation(direction, line_epsilon);
+		drift = rd_nonpareil(local, epsilon, direction, params.operation.y, params.operation.w,
+				params.field.z) + drift_compensation(direction, epsilon);
+	} else if (operation_type == 4) {
+		drift = rd_gel_git(local, epsilon, direction, params.operation.y);
+	} else if (operation_type == 5) {
+		drift = rd_tri_wave_comb(local, epsilon, direction, params.segment.z, params.segment.w,
+				params.operation.z > 0.5, params.operation.y, params.field.z, params.field.y);
+	} else {
+		float extent_weight = line_extent_weight(coordinate, origin, direction, epsilon,
+				params.field.z, params.segment.zw);
+		drift = (slip_enabled() ? slip_line_velocity(coordinate, origin, direction, epsilon)
+				: line_velocity(coordinate, origin, direction, epsilon)) * extent_weight;
 	}
 	vec2 mapped = periodic_wrap(coordinate + drift);
 	vec2 source_coordinate = display_coordinate(pixel);

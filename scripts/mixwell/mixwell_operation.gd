@@ -2,6 +2,9 @@ class_name MixwellOperation
 extends RefCounted
 
 const TYPE_LINE := "LINE"
+const TYPE_COMB := "COMB"
+const TYPE_GEL_GIT := "GEL_GIT"
+const TYPE_TRI_WAVE := "TRI_WAVE"
 const TYPE_SEGMENT_CHAIN := "SEGMENT_CHAIN"
 const TYPE_CURVE := "CURVE"
 const TYPE_AFFINE := "AFFINE"
@@ -23,7 +26,9 @@ var extent := Vector2.ZERO
 var points: Array[Vector2] = []
 var curve_mode := ""
 var curve_group := -1
-var periodic_segment_count := 0
+## TRI_WAVE: wavelength and signed amplitude.
+var wavelength := 0.0
+var amplitude := 0.0
 var smooth := true
 var broken := false
 var localized := true
@@ -53,7 +58,8 @@ func set_from_dictionary(value: Dictionary) -> void:
 			points.append(point)
 	curve_mode = str(value.get("curve_mode", curve_mode))
 	curve_group = int(value.get("curve_group", curve_group))
-	periodic_segment_count = int(value.get("periodic_segment_count", periodic_segment_count))
+	wavelength = float(value.get("wavelength", wavelength))
+	amplitude = float(value.get("amplitude", amplitude))
 	smooth = bool(value.get("smooth", smooth))
 	broken = bool(value.get("broken", broken))
 	localized = bool(value.get("localized", localized))
@@ -79,7 +85,8 @@ func to_dictionary() -> Dictionary:
 		"points": points.duplicate(true),
 		"curve_mode": curve_mode,
 		"curve_group": curve_group,
-		"periodic_segment_count": periodic_segment_count,
+		"wavelength": wavelength,
+		"amplitude": amplitude,
 		"smooth": smooth,
 		"broken": broken,
 		"localized": localized,

@@ -20,45 +20,38 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 		value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
 			affine_strength, affine_radius, cutoff_gamma)
 		return Periodicity.wrap_coordinate(value, period) if periodic else value
-	var periodic_curve_counts := {}
 	for operation in operations:
-		var curve_group := int(operation.get("curve_group", -1))
-		if periodic and curve_group >= 0:
-			var limit := maxi(int(operation.get("periodic_segment_count", 0)), 0)
-			var seen := int(periodic_curve_counts.get(curve_group, 0))
-			if limit <= 0 or seen >= limit:
-				continue
-			periodic_curve_counts[curve_group] = seen + 1
 		var operation_type := int(operation.get("type", Gallery.LINE))
-		if operation_type == Gallery.LINE or operation_type == Gallery.LINE_COMB:
+		if operation_type in [Gallery.LINE, Gallery.LINE_COMB, Gallery.GEL_GIT_PASS,
+				Gallery.TRI_WAVE]:
 			var direction: Vector2 = operation.get("direction", Vector2.RIGHT).normalized()
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var operation_radius := float(operation.get("radius_px", -1.0))
 			var operation_epsilon := (brush_radius_px if operation_radius <= 0.0 else operation_radius) \
 					* 2.0 / reference_min
-			var count := maxi(int(operation.get("count", 1)), 1) \
-					if operation_type == Gallery.LINE_COMB else 1
-			for line_index in count:
-				var offset := 0.0
-				if operation_type == Gallery.LINE_COMB:
-					offset = (float(line_index) - 0.5 * float(count - 1)) \
-							* float(operation.get("pitch", 0.0))
-					var noise_value := float(operation.get("noise", 0.0))
-					if noise_value != 0.0:
-						var noise := _hash11(float(line_index) + noise_value)
-						offset += (noise * 2.0 - 1.0) * noise_value
-				var phase := float(operation.get("phase", 0.0))
-				var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
-						+ perpendicular * (offset + phase)
-				var drift := Math.rd_line(Math.point(value.x - origin.x, value.y - origin.y),
-						operation_epsilon, Math.point(direction.x, direction.y))
-				if drift.size() == 2:
-					var weight := _line_extent_weight(value, origin, direction,
-							operation_epsilon, cutoff_gamma, operation.get("extent", Vector2.ZERO))
-					value += Vector2(drift[0], drift[1]) * weight
-			if operation_type == Gallery.LINE_COMB:
-				value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
-						float(operation.get("pitch", 0.0)), direction)
+			var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
+					+ perpendicular * float(operation.get("phase", 0.0))
+			var gap := float(operation.get("pitch", 0.0))
+			match operation_type:
+				Gallery.LINE_COMB:
+					value += Math.rd_nonpareil(value - origin, operation_epsilon, direction, gap,
+							float(operation.get("noise", 0.0)), cutoff_gamma)
+					value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
+							gap, direction)
+				Gallery.GEL_GIT_PASS:
+					value += Math.rd_gel_git(value - origin, operation_epsilon, direction, gap)
+				Gallery.TRI_WAVE:
+					value += Math.rd_tri_wave_comb(value - origin, operation_epsilon, direction,
+							float(operation.get("wavelength", 0.0)),
+							float(operation.get("amplitude", 0.0)),
+							bool(operation.get("broken", false)), gap, cutoff_gamma, midpoint_alpha)
+				_:
+					var drift := Math.rd_line(Math.point(value.x - origin.x, value.y - origin.y),
+							operation_epsilon, Math.point(direction.x, direction.y))
+					if drift.size() == 2:
+						value += Vector2(drift[0], drift[1]) * _line_extent_weight(value, origin,
+								direction, operation_epsilon, cutoff_gamma,
+								operation.get("extent", Vector2.ZERO))
 		elif operation_type == Gallery.SEGMENT:
 			var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 			if periodic or operation.get("period", Vector2.ZERO) != Vector2.ZERO:
@@ -102,10 +95,6 @@ static func _periodic_segment_at(segment: Vector4, point: Vector2, period: Vecto
 		shift.y = round((point.y - start.y) / period.y) * period.y
 	return Vector4(start.x + shift.x, start.y + shift.y,
 			segment.z + shift.x, segment.w + shift.y)
-
-
-static func _hash11(value: float) -> float:
-	return fposmod(sin(value * 127.1 + 311.7) * 43758.5453123, 1.0)
 
 
 static func _line_extent_weight(point: Vector2, origin: Vector2, direction: Vector2,
@@ -355,11 +344,8 @@ static func _area_category(pixel: Vector2i, size: Vector2i, snapshot) -> String:
 					/ maxf(edge.length_squared(), 1.0e-30), 0.0, 1.0)
 			nearest = minf(nearest, coordinate.distance_to(
 				Vector2(segment.x, segment.y) + edge * parameter))
-		else:
-			var direction: Vector2 = operation.get("direction", Vector2.RIGHT).normalized()
-			var perpendicular := Vector2(-direction.y, direction.x)
-			var origin: Vector2 = operation.get("origin", Vector2.ZERO)
-			nearest = minf(nearest, absf((coordinate - origin).dot(perpendicular)))
+		elif operation_type != Gallery.BAKED_MAP:
+			nearest = minf(nearest, pattern_nearest_distance(operation, coordinate))
 	var epsilon: float = snapshot.brush_radius_px * 2.0 / float(maxi(
 			mini(snapshot.reference_size.x, snapshot.reference_size.y), 1))
 	if nearest < epsilon * 0.5:
@@ -367,6 +353,41 @@ static func _area_category(pixel: Vector2i, size: Vector2i, snapshot) -> String:
 	if nearest <= epsilon * snapshot.cutoff_gamma:
 		return "cutoff"
 	return "core"
+
+
+## Distance to the nearest tine or wave segment of a line-family operation, as
+## pattern_nearest_distance in mixwell_common.comp.
+static func pattern_nearest_distance(operation: Dictionary, coordinate: Vector2) -> float:
+	var direction: Vector2 = operation.get("direction", Vector2.RIGHT)
+	if direction.length() <= 1.0e-30:
+		return INF
+	direction = direction.normalized()
+	var perpendicular := Vector2(-direction.y, direction.x)
+	var origin: Vector2 = operation.get("origin", Vector2.ZERO)
+	var local := coordinate - origin - perpendicular * float(operation.get("phase", 0.0))
+	var y := local.dot(perpendicular)
+	var operation_type := int(operation.get("type", Gallery.LINE))
+	var gap := 0.0 if operation_type == Gallery.LINE else float(operation.get("pitch", 0.0))
+	if operation_type == Gallery.GEL_GIT_PASS:
+		return Math.min_comb_dist(y, gap) if gap > 1.0e-30 else absf(y)
+	if operation_type == Gallery.TRI_WAVE:
+		var half_wave := 0.5 * float(operation.get("wavelength", 0.0))
+		if half_wave <= 1.0e-30:
+			return absf(y)
+		var amplitude := float(operation.get("amplitude", 0.0))
+		var nearest_index := roundi(local.dot(direction) / half_wave)
+		var distance := INF
+		for i in range(nearest_index - 1, nearest_index + 2):
+			var side := -1.0 if absi(i) % 2 == 0 else 1.0
+			var centre := direction * half_wave * float(i)
+			var a := centre - direction * half_wave * 0.5 + perpendicular * amplitude * side
+			var b := centre + direction * half_wave * 0.5 - perpendicular * amplitude * side
+			var edge := b - a
+			var along := clampf((local - a).dot(edge) / maxf(edge.length_squared(), 1.0e-30),
+					0.0, 1.0)
+			distance = minf(distance, local.distance_to(a + edge * along))
+		return distance
+	return absf(y - gap * round(y / gap)) if gap > 1.0e-30 else absf(y)
 
 
 static func _smoothstep(edge0: float, edge1: float, value: float) -> float:

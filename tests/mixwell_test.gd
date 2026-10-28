@@ -28,21 +28,21 @@ const CPU_GOLDENS := [
 	[0.359848827124, -0.209999993443],
 	[0.372573584318, -0.206582069397],
 	[0.370000004768, -0.209999993443],
-	[0.202904567122, -0.209999993443],
-	[0.281788051128, -0.209999993443],
-	[0.244730785489, 0.037602756172],
-	[0.331145524979, 0.015012499876],
-	[0.418813377619, -0.329502105713],
-	[0.454367011786, -0.026141650975],
+	[0.202365919948, -0.209999993443],
+	[0.282789975405, -0.209999993443],
+	[0.364158302546, -0.002806842327],
+	[0.343880176544, 0.007083654404],
+	[0.210636630654, -0.435729742050],
+	[0.313077807426, 0.011130049825],
 	[-0.397537738085, 0.154076203704],
 	[0.814242064953, -0.383117645979],
-	[0.696609914303, -0.057071477175],
-	[0.341940313578, -0.209272474051],
-	[0.480739802122, -0.156950622797],
-	[0.159733921289, -0.209999993443],
+	[-0.068243294954, 0.054871618748],
+	[0.276869505644, -0.058102622628],
+	[0.575342893600, -0.029069144279],
+	[0.265820562840, -0.209999993443],
 	[0.323050290346, -0.224748045206],
-	[0.381707012653, -0.190221786499],
-	[0.335513353348, -0.370333760977],
+	[0.374386221170, -0.188835710287],
+	[0.418397188187, -0.508496403694],
 ]
 
 
@@ -60,7 +60,7 @@ func _initialize() -> void:
 	_test_segment_mask_matches_reference()
 	_test_oracle_jacobian_grid_is_finite()
 	_test_gallery_names_and_counts()
-	_test_gallery_chained_tri_wave()
+	_test_reference_patterns()
 	_test_gallery_physical_reverse_order()
 	_test_gallery_mean_compensation()
 	_test_gallery_published_passes()
@@ -275,27 +275,75 @@ func _test_gallery_names_and_counts() -> void:
 			"finite segment has one segment")
 	_check(Gallery.preset_segments(Gallery.FREEHAND_LAB).is_empty(),
 			"freehand lab starts without preset segments")
-	_check(Gallery.preset_operations(Gallery.NONPAREIL).size() == 1
-			and Gallery.preset_operations(Gallery.NONPAREIL)[0].type == Gallery.LINE_COMB,
-		"Nonpareil is one rdLine comb pass")
-	_check(Gallery.preset_operations(Gallery.GEL_GIT).size() == 2,
-		"Gel-Git is two opposed comb passes")
+	var nonpareil: Array[Dictionary] = Gallery.preset_pattern(Gallery.NONPAREIL).render_operations()
+	_check(nonpareil.size() == 1 and nonpareil[0].type == Gallery.LINE_COMB,
+		"Nonpareil is one rdNonpareil comb pass")
+	var gel_git: Array[Dictionary] = Gallery.preset_pattern(Gallery.GEL_GIT).render_operations()
+	_check(gel_git.size() == 1 and gel_git[0].type == Gallery.GEL_GIT_PASS,
+		"Gel-Git is one pass of two superposed opposed combs")
 
 
-func _test_gallery_chained_tri_wave() -> void:
-	var segments := Gallery.tri_wave(Vector2(-0.8, 0.0), Vector2(0.8, 0.0), 0.1, 6)
-	_check(segments.size() == 12, "TriWave uses two chained segments per cycle")
-	for index in range(segments.size() - 1):
-		_check(Vector2(segments[index].z, segments[index].w).distance_to(
-				Vector2(segments[index + 1].x, segments[index + 1].y)) <= 1.0e-6,
-			"TriWave segment chain is continuous")
+# The reference pattern functions (Mixwell.glsl), checked on what defines them
+# rather than on a second copy of their code.
+func _test_reference_patterns() -> void:
+	var epsilon := 0.05
+	# Nonpareil: the windowed comb matches the infinite sum of its line drifts.
+	for y in [0.0, 0.037, 0.09]:
+		var windowed := Math.rd_nonpareil(Vector2(0.3, y), epsilon, Vector2.RIGHT, 0.18, 0.0, 10.0)
+		var full := 0.0
+		for k in range(-400, 401):
+			full += Math.rd_line_height(absf(y - 0.18 * float(k)), epsilon)
+		_check(absf(windowed.x - full) <= 1.0e-4 and windowed.y == 0.0,
+				"Nonpareil window matches the full comb at y=%s (%s vs %s)" % [str(y), str(windowed.x), str(full)])
+	# Gel-Git: tines every gap, alternately moving along and against direction,
+	# so the drift at a Gel tine is the opposite of the drift at a Git tine, and
+	# the field repeats every two gaps.
+	var gap := 0.11851852
+	var gel := Math.rd_gel_git(Vector2(0.1, 0.0), epsilon, Vector2.RIGHT, gap)
+	var git := Math.rd_gel_git(Vector2(0.1, gap), epsilon, Vector2.RIGHT, gap)
+	_check(gel.x < 0.0 and absf(gel.x + git.x) <= 1.0e-9,
+			"Gel and Git tines drift oppositely (%s, %s)" % [str(gel.x), str(git.x)])
+	# (Vector2 holds 32-bit floats, so the shifted point is off by ~1e-8.)
+	_check(Math.rd_gel_git(Vector2(0.1, 0.03 + 2.0 * gap), epsilon, Vector2.RIGHT, gap).distance_to(
+			Math.rd_gel_git(Vector2(0.1, 0.03), epsilon, Vector2.RIGHT, gap)) <= 1.0e-6,
+			"Gel-Git repeats every two gaps")
+	# TriWave: periodic along its line, zero beyond the mask reach, and a wave
+	# moving forward drags the fluid along its path forward (reverse drift points
+	# back). A few epsilon out the windowed sum leaves the dipole far field's
+	# reflux uncancelled -- the reference's own truncation -- so the transport is
+	# measured on the path.
+	var wavelength := 0.26666667
+	var amplitude := 0.1
+	var here := Vector2(0.071, 0.043)
+	var wave := Math.rd_tri_wave(here, epsilon, Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1)
+	var shifted := Math.rd_tri_wave(here + Vector2(wavelength, 0.0), epsilon, Vector2.RIGHT,
+			wavelength, amplitude, false, 10.0, 0.1)
+	_check(wave.distance_to(shifted) <= 1.0e-6, "TriWave repeats every wavelength")
+	_check(Math.rd_tri_wave(Vector2(0.0, amplitude + 10.0 * epsilon + 0.01), epsilon,
+			Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1) == Vector2.ZERO,
+			"TriWave moves nothing beyond its mask reach")
+	var mean := Vector2.ZERO
+	for index in 32:
+		mean += Math.rd_tri_wave(Vector2(float(index) / 32.0 * wavelength, 0.05), epsilon,
+				Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1) / 32.0
+	_check(mean.x < 0.0, "a forward TriWave transports the fluid forward (%s)" % str(mean))
+	# Broken: the same segments in the opposite order, so the field differs but
+	# the transport across the wave does not reverse.
+	var broken_mean := Vector2.ZERO
+	for index in 32:
+		broken_mean += Math.rd_tri_wave(Vector2(float(index) / 32.0 * wavelength, 0.05), epsilon,
+				Vector2.RIGHT, wavelength, amplitude, true, 10.0, 0.1) / 32.0
+	var broken := Math.rd_tri_wave(here, epsilon, Vector2.RIGHT, wavelength, amplitude, true,
+			10.0, 0.1)
+	_check(broken.distance_to(wave) > 1.0e-4 and broken_mean.x < 0.0,
+			"a broken TriWave reorders its strokes (%s vs %s)" % [str(broken), str(wave)])
 
 
 func _test_gallery_physical_reverse_order() -> void:
 	var solver := Solver.new()
 	var config := Config.new()
 	solver.initialize(Vector2i(128, 128), config, Vector2i(128, 128))
-	solver.set_preset(Gallery.FROG_FOOT)
+	solver.set_preset(Gallery.CIRCLE_GRID)
 	var logical := solver.get_segments()
 	var physical := solver.get_segments_physical_order()
 	_check(logical.size() == physical.size() and logical.size() > 1,
@@ -315,7 +363,7 @@ func _test_gallery_mean_compensation() -> void:
 			"mean drift compensation is +pi epsilon^2/pitch")
 	_check(Gallery.compensation_vector(2, epsilon, 2.0, Vector2.RIGHT).distance_to(
 			Vector2(expected, 0.0)) <= 1.0e-6, "mean compensation follows tine direction")
-	var comb: Array[Dictionary] = [Gallery._comb(Vector2.ZERO, Vector2.RIGHT, 0.2, 41, 0.0)]
+	var comb: Array[Dictionary] = [Gallery._comb(Vector2.ZERO, Vector2.RIGHT, 0.2, 0.0)]
 	for mode in [Config.DriftCompensation.MEAN, Config.DriftCompensation.MINIMUM]:
 		var mean := 0.0
 		for index in 400:
@@ -330,13 +378,14 @@ func _test_gallery_mean_compensation() -> void:
 
 
 func _test_gallery_published_passes() -> void:
-	var feather := Gallery.preset_operations(Gallery.FEATHER)
-	var bird_wing := Gallery.preset_operations(Gallery.BIRD_WING)
-	var peacock := Gallery.preset_operations(Gallery.PEACOCK)
-	var frog_foot := Gallery.preset_operations(Gallery.FROG_FOOT)
-	_check(feather.size() > 3 and bird_wing.size() > feather.size(),
-		"Feather and BirdWing compose combs and TriWaves")
-	_check(peacock.size() == frog_foot.size() and peacock.size() > 3,
+	var feather: Array[Dictionary] = Gallery.preset_pattern(Gallery.FEATHER).render_operations()
+	var bird_wing: Array[Dictionary] = Gallery.preset_pattern(Gallery.BIRD_WING).render_operations()
+	var peacock: Array[Dictionary] = Gallery.preset_pattern(Gallery.PEACOCK).render_operations()
+	var frog_foot: Array[Dictionary] = Gallery.preset_pattern(Gallery.FROG_FOOT).render_operations()
+	_check(feather.size() == 3 and bird_wing.size() == 4
+			and int(feather[0].type) == Gallery.TRI_WAVE and int(feather[2].type) == Gallery.GEL_GIT_PASS,
+		"Feather is Gel-Git, a comb and a TriWave, rendered last pass first")
+	_check(peacock.size() == frog_foot.size() and peacock.size() == 4,
 		"Peacock and FrogFoot share published pass count")
 	_check(Gallery.all_preset_names().size() == 18,
 		"gallery exposes affine, pattern and paint-spread entries")
@@ -435,7 +484,7 @@ func _test_baked_stroke_prefix() -> void:
 func _test_pattern_round_trip() -> void:
 	var pattern = Gallery.preset_pattern(Gallery.GEL_GIT)
 	var descriptor: Dictionary = pattern.serialize()
-	_check(descriptor.name == "Gel-Git" and descriptor.operations.size() == 2,
+	_check(descriptor.name == "Gel-Git" and descriptor.operations.size() == 1,
 		"gallery exposes a named ordered pattern")
 	_check(descriptor.source.preset_id == Gallery.GEL_GIT,
 		"pattern metadata identifies its gallery source")
@@ -482,15 +531,16 @@ func _test_pattern_snapshot_carries_pattern() -> void:
 	solver.initialize(Vector2i(320, 180), null, Vector2i(640, 360))
 	solver.set_preset(Gallery.BIRD_WING)
 	var snapshot = solver.create_render_snapshot()
+	# Every BirdWing pass is a closed-form pattern function, rendered as itself.
 	_check(snapshot.pattern.name == "BirdWing"
-			and snapshot.pattern.operations.size() < snapshot.operations.size(),
-		"render snapshot carries high-level pattern and expanded render operations")
-	_check(snapshot.pattern.operations[0].kind == "LINE" or
-			snapshot.pattern.operations[0].kind == "SEGMENT_CHAIN",
+			and snapshot.pattern.operations.size() == snapshot.operations.size(),
+		"render snapshot carries the pattern and its render operations")
+	_check(snapshot.pattern.operations[0].kind in ["LINE", "COMB", "GEL_GIT", "TRI_WAVE",
+			"SEGMENT_CHAIN", "CURVE"],
 		"snapshot operation exposes a scientific operation kind")
-	# BirdWing opens with a comb pass: a line family, not a segment chain.
-	_check(snapshot.pattern.operations[0].kind == "LINE",
-		"a LINE_COMB operation is labelled LINE, not SEGMENT_CHAIN")
+	# BirdWing opens with a Gel-Git pass: a line family, not a segment chain.
+	_check(snapshot.pattern.operations[0].kind == "GEL_GIT",
+		"a Gel-Git operation is labelled GEL_GIT, not SEGMENT_CHAIN")
 
 
 func _test_affine_preset_keeps_stroke_radius() -> void:

@@ -98,6 +98,7 @@ declare -a SUITES=(
 	"smoke_gpu|gpu|-|-s res://tests/smoke_gpu_test.gd"
 	"tornado_boot_look|gpu|-|-s res://tests/probe.gd -- tornado_boot_look"
 	"tornado_wind_parity|gpu|-|-s res://tests/tornado_wind_parity_test.gd"
+	"mixwell_parity|gpu|-|-s res://tests/mixwell_parity_test.gd"
 	"sph_consistency|gpu|-|-s res://tests/sph_consistency_test.gd"
 	"light_paste|gpu|-|-s res://tests/light_paste_test.gd"
 	"spectral_gel|gpu|-|-s res://tests/spectral_gel_test.gd"

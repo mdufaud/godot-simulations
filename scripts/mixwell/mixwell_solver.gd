@@ -681,18 +681,7 @@ func render_sample(index: int, snapshot = null) -> void:
 			operation_pc.encode_float(88, float(_replay.get("count", 0)))
 			operation_pc.encode_float(92, float(_replay.get("base", 0)))
 		if stage == "rd_segment":
-			var dispatch_count := operation_count
-			# Only gallery curves carrying a periodic head shrink to it; stroke
-			# groups have no periodic_segment_count and must dispatch full size,
-			# else their field silently vanishes in optimized mode.
-			var periodic_count := maxi(int(operation.get("periodic_segment_count", 0)), 0)
-			if optimized and operation.get("curve_group", -1) >= 0 and periodic_count > 0:
-				dispatch_count = mini(dispatch_count, periodic_count)
-			if dispatch_count <= 0:
-				operation_index += operation_count
-				segment_buffer_offset += operation_count
-				continue
-			operation_pc.encode_float(88, float(dispatch_count))
+			operation_pc.encode_float(88, float(operation_count))
 			operation_pc.encode_float(92, float(segment_buffer_offset))
 		var operation_groups := ceili(float(current_domain.x * current_domain.y) / WG)
 		_dispatch(cl, stage, operation_pc, operation_groups)
@@ -1455,6 +1444,9 @@ func _upload_diagnostic_operations(operations: Array[Dictionary]) -> void:
 		var direction: Vector2 = operation.get("direction", Vector2.RIGHT)
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var extent: Vector2 = operation.get("extent", Vector2.ZERO)
+		if operation_type == Gallery.TRI_WAVE:
+			extent = Vector2(float(operation.get("wavelength", 0.0)),
+					float(operation.get("amplitude", 0.0)))
 		var period: Vector2 = operation.get("period", Vector2.ZERO)
 		values.append(float(operation_type))
 		values.append(epsilon)
@@ -1550,6 +1542,9 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 		pc.encode_float(60, segment.w)
 	else:
 		var extent: Vector2 = operation.get("extent", Vector2.ZERO)
+		if operation_type == Gallery.TRI_WAVE:
+			extent = Vector2(float(operation.get("wavelength", 0.0)),
+					float(operation.get("amplitude", 0.0)))
 		pc.encode_float(48, float(operation.get("phase", 0.0)))
 		pc.encode_float(52, epsilon)
 		pc.encode_float(56, extent.x)
@@ -1564,7 +1559,8 @@ func _pack_push_constant(index: int, segment: Vector4, radius_px: float,
 	pc.encode_float(76, 1.0 if optimized else 0.0)
 	pc.encode_float(80, float(operation.get("type", Gallery.LINE)))
 	pc.encode_float(84, float(operation.get("pitch", 0.0)))
-	pc.encode_float(88, float(operation.get("count", 1)))
+	pc.encode_float(88, (1.0 if operation.get("broken", false) else 0.0) \
+			if operation_type == Gallery.TRI_WAVE else float(operation.get("count", 1)))
 	pc.encode_float(92, float(operation.get("noise", 0.0)))
 	pc.encode_s32(96, current_domain.x)
 	pc.encode_s32(100, current_domain.y)

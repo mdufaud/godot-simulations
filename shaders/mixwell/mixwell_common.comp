@@ -464,14 +464,207 @@ float segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
 }
 
 
-vec2 r2_sample(uint sample_index) {
-	const vec2 step = vec2(0.7548776662466927, 0.5698402909980532);
-	return fract(vec2(0.5) + float(sample_index) * step);
+// --- Reference pattern reverse-drift functions -------------------------------
+// Ported from the authors' Mixwell.glsl (MIT, (c) 2026 Doug L. James and Ethan
+// James): rdNonpareilNoisy, rdGelGit (two passes, as their app runs it),
+// rdSegment (Mixwell brush, adaptive midpoint, local mask) and
+// rdTriWave/rdTriWaveComb. The reference's mask factor of 10 is cutoff_gamma
+// here (10 by default); its brush step of 0.1 is midpoint_alpha.
+
+// Tine noise in [0, 1). The reference hashes with fract(sin(k) * 43758.5453),
+// whose value depends on each GPU's sin precision; an integer hash (PCG) keeps
+// the tines as random and identical on every GPU and on the CPU twin.
+float reference_hash(int k) {
+	uint state = uint(k) * 747796405u + 2891336453u;
+	uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+	return float((word >> 22u) ^ word) / 4294967296.0;
 }
 
 
-float hash11(float value) {
-	return fract(sin(value * 127.1 + 311.7) * 43758.5453123);
+// Reverse drift of a line at this height above it (rdLine1DS).
+float rd_line_height(float height, float epsilon) {
+	return epsilon * xi_series(height / epsilon);
+}
+
+
+// Distance from y to the nearest tine of a comb of this pitch rooted at 0.
+float min_comb_dist(float y, float pitch) {
+	return pitch * abs(fract(y / pitch - 0.5) - 0.5);
+}
+
+
+// Nonpareil comb: every tine within the mask reach around the nearest one,
+// tine k offset by +-noise.
+vec2 rd_nonpareil(vec2 p, float epsilon, vec2 direction, float gap, float noise,
+		float cutoff_gamma) {
+	if (gap <= 1.0e-30 || length(direction) <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	vec2 unit_direction = normalize(direction);
+	float y = dot(p, vec2(-unit_direction.y, unit_direction.x));
+	int reach = min(int(ceil((epsilon * cutoff_gamma + gap) / gap)), 128);
+	int nearest = int(round(y / gap));
+	float drift = 0.0;
+	for (int k = nearest - reach; k <= nearest + reach; k++) {
+		float tine = gap * float(k) + noise * (2.0 * reference_hash(k) - 1.0);
+		drift += rd_line_height(abs(y - tine), epsilon);
+	}
+	return drift * unit_direction;
+}
+
+
+// Gel-Git: a comb moving along direction (tines at 2 gap k) superposed on one
+// moving against it, offset by half its pitch (tines at 2 gap k + gap).
+vec2 rd_gel_git(vec2 p, float epsilon, vec2 direction, float gap) {
+	const int PASSES = 2;
+	if (gap <= 1.0e-30 || length(direction) <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	vec2 unit_direction = normalize(direction);
+	float y = dot(p, vec2(-unit_direction.y, unit_direction.x));
+	float pass_gap = float(PASSES) * gap * 2.0;
+	float drift = 0.0;
+	for (int k = 0; k < PASSES; k++) {
+		drift -= rd_line_height(min_comb_dist(y + (0.5 + float(k)) * gap * 2.0, pass_gap), epsilon);
+		drift += rd_line_height(min_comb_dist(y + float(k) * gap * 2.0, pass_gap), epsilon);
+	}
+	return drift * unit_direction;
+}
+
+
+// Reverse drift of a radius-epsilon Mixwell brush moving a -> b, stepped back
+// from b with adaptive midpoint integration (rdMixwellBrushAdaptiveMidpoint).
+vec2 rd_brush(vec2 p0, float epsilon, vec2 a, vec2 b, float alpha) {
+	vec2 reverse_step = a - b;
+	float remaining = length(reverse_step);
+	if (remaining <= 1.0e-20) {
+		return vec2(0.0);
+	}
+	vec2 direction = reverse_step / remaining;
+	vec2 p = p0;
+	for (int step_index = 0; step_index < 8192 && remaining > 0.0; step_index++) {
+		vec2 relative = p - b;
+		float step_length = min(remaining, alpha * max(epsilon, length(relative)));
+		remaining -= step_length;
+		vec2 brush_step = step_length * direction;
+		vec2 first = kernel_matrix(relative, epsilon) * brush_step;
+		vec2 midpoint = relative + 0.5 * (first - brush_step);
+		p += kernel_matrix(midpoint, epsilon) * brush_step;
+		b += brush_step;
+	}
+	return p - p0;
+}
+
+
+float plain_segment_sdf(vec2 p, vec2 a, vec2 b) {
+	vec2 edge = b - a;
+	float along = clamp(dot(p - a, edge) / max(dot(edge, edge), 1.0e-30), 0.0, 1.0);
+	return length(p - a - edge * along);
+}
+
+
+// rdSegment: the brush's reverse drift under the local mask.
+vec2 rd_segment_masked(vec2 p, float epsilon, vec2 a, vec2 b, float cutoff_gamma,
+		float alpha) {
+	float mask = segment_mask(plain_segment_sdf(p, a, b), epsilon, cutoff_gamma);
+	return mask > 0.0 ? mask * rd_brush(p, epsilon, a, b, alpha) : vec2(0.0);
+}
+
+
+// Triangle wave of this wavelength and signed amplitude along direction
+// through the origin: one segment per half wave, every segment within the
+// mask reach composed in reverse order. A broken wave draws each segment the
+// same way but steps between them backwards.
+vec2 rd_tri_wave(vec2 p, float epsilon, vec2 direction, float wavelength, float amplitude,
+		bool broken, float cutoff_gamma, float alpha) {
+	if (length(direction) <= 1.0e-30) {
+		return vec2(0.0);
+	}
+	vec2 p0 = p;
+	vec2 unit_direction = normalize(broken ? -direction : direction);
+	float x = dot(p, unit_direction);
+	float y = length(p - x * unit_direction);
+	float half_wave = 0.5 * wavelength;
+	float reach = epsilon * cutoff_gamma + sqrt(amplitude * amplitude + wavelength * wavelength / 16.0);
+	float disc = reach * reach - y * y;
+	if (disc <= 0.0 || half_wave <= 0.0) {
+		return vec2(0.0);
+	}
+	float reach_x = sqrt(disc);
+	int last = int(ceil((x + reach_x) / half_wave));
+	int first = max(int(floor((x - reach_x) / half_wave)), last - 256);
+	vec2 along = 0.5 * half_wave * unit_direction;
+	vec2 across = amplitude * vec2(-unit_direction.y, unit_direction.x);
+	for (int i = last; i >= first; i--) {
+		float side = abs(i) % 2 == 0 ? -1.0 : 1.0;
+		vec2 centre = unit_direction * half_wave * float(i);
+		vec2 a = centre - along + side * across;
+		vec2 b = centre + along - side * across;
+		p += broken ? rd_segment_masked(p, epsilon, b, a, cutoff_gamma, alpha)
+				: rd_segment_masked(p, epsilon, a, b, cutoff_gamma, alpha);
+	}
+	return p - p0;
+}
+
+
+// rdTriWaveComb: parallel waves gap apart (gap 0 = the single wave).
+vec2 rd_tri_wave_comb(vec2 p, float epsilon, vec2 direction, float wavelength,
+		float amplitude, bool broken, float gap, float cutoff_gamma, float alpha) {
+	if (gap <= 1.0e-30) {
+		return rd_tri_wave(p, epsilon, direction, wavelength, amplitude, broken,
+				cutoff_gamma, alpha);
+	}
+	vec2 unit_direction = normalize(direction);
+	vec2 normal = vec2(-unit_direction.y, unit_direction.x);
+	float y = dot(p, normal);
+	int reach = min(int(ceil((abs(amplitude) + epsilon * cutoff_gamma) / gap)), 64);
+	int nearest = int(round(y / gap));
+	vec2 drift = vec2(0.0);
+	for (int k = nearest - reach; k <= nearest + reach; k++) {
+		drift += rd_tri_wave(p - float(k) * gap * normal, epsilon, direction, wavelength,
+				amplitude, broken, cutoff_gamma, alpha);
+	}
+	return drift;
+}
+
+
+// Distance to the nearest tine or stroke of a pattern operation, for the
+// diagnostic zones.
+float pattern_nearest_distance(int operation_type, vec2 p, vec2 direction, float gap,
+		float wavelength, float amplitude) {
+	if (length(direction) <= 1.0e-30) {
+		return 1.0e30;
+	}
+	vec2 unit_direction = normalize(direction);
+	float y = dot(p, vec2(-unit_direction.y, unit_direction.x));
+	if (operation_type == 4) {
+		return gap > 1.0e-30 ? min_comb_dist(y, gap) : abs(y);
+	}
+	if (operation_type == 5) {
+		float half_wave = 0.5 * wavelength;
+		if (half_wave <= 1.0e-30) {
+			return abs(y);
+		}
+		float x = dot(p, unit_direction);
+		int nearest = int(round(x / half_wave));
+		float distance = 1.0e30;
+		vec2 along = 0.5 * half_wave * unit_direction;
+		vec2 across = amplitude * vec2(-unit_direction.y, unit_direction.x);
+		for (int i = nearest - 1; i <= nearest + 1; i++) {
+			float side = abs(i) % 2 == 0 ? -1.0 : 1.0;
+			vec2 centre = unit_direction * half_wave * float(i);
+			distance = min(distance, plain_segment_sdf(p, centre - along + side * across,
+					centre + along - side * across));
+		}
+		return distance;
+	}
+	return gap > 1.0e-30 ? abs(y - gap * round(y / gap)) : abs(y);
+}
+
+
+vec2 r2_sample(uint sample_index) {
+	const vec2 step = vec2(0.7548776662466927, 0.5698402909980532);
+	return fract(vec2(0.5) + float(sample_index) * step);
 }
 
 
