@@ -305,18 +305,28 @@ func _test_gallery_physical_reverse_order() -> void:
 				"RDF composition dispatches segments in physical inverse order")
 
 
+# A comb's reverse drift averages -pi epsilon^2 / pitch along its direction;
+# compensation must cancel that transport, not double it. Measured on the comb
+# itself: Mean leaves no average drift over a pitch, Minimum none between tines.
 func _test_gallery_mean_compensation() -> void:
 	var epsilon := 0.25
-	var expected := -PI * epsilon * epsilon / 2.0
+	var expected := PI * epsilon * epsilon / 2.0
 	_check(absf(Gallery.compensation_value(2, epsilon, 2.0) - expected) <= 1.0e-12,
-			"mean drift compensation follows -pi epsilon^2/pitch")
-	var h := 2.0 / epsilon
-	var minimum := epsilon * (-37.7829 + 1.01689 * h) \
-			/ (1.09635 + h * (12.2129 + h * (1.59101 + h)))
-	_check(absf(Gallery.compensation_value(1, epsilon, 2.0) - minimum) <= 1.0e-12,
-			"minimum drift compensation follows Padé approximation")
+			"mean drift compensation is +pi epsilon^2/pitch")
 	_check(Gallery.compensation_vector(2, epsilon, 2.0, Vector2.RIGHT).distance_to(
 			Vector2(expected, 0.0)) <= 1.0e-6, "mean compensation follows tine direction")
+	var comb: Array[Dictionary] = [Gallery._comb(Vector2.ZERO, Vector2.RIGHT, 0.2, 41, 0.0)]
+	for mode in [Config.DriftCompensation.MEAN, Config.DriftCompensation.MINIMUM]:
+		var mean := 0.0
+		for index in 400:
+			var point := Vector2(0.0, (float(index) + 0.5) / 400.0 * 0.2)
+			mean += (Diagnostics.cpu_advect(point, comb, false, Vector2(2.0, 2.0), 9.0,
+					Vector2i(640, 360), -1, 180.0, 0.65, 10.0, mode, 0.1).x - point.x) / 400.0
+		var between := Diagnostics.cpu_advect(Vector2(0.0, 0.1), comb, false, Vector2(2.0, 2.0),
+				9.0, Vector2i(640, 360), -1, 180.0, 0.65, 10.0, mode, 0.1).x
+		var cancelled := absf(mean) if mode == Config.DriftCompensation.MEAN else absf(between)
+		print("MIXWELL COMPENSATION mode=%d mean=%.6f between_tines=%.6f" % [mode, mean, between])
+		_check(cancelled <= 2.0e-4, "compensation mode %d cancels the comb's transport" % mode)
 
 
 func _test_gallery_published_passes() -> void:

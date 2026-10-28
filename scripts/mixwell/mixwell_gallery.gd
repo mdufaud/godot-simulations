@@ -284,14 +284,17 @@ static func tri_wave(start: Vector2, end: Vector2, amplitude: float,
 	return result
 
 
+## Drift added along a comb's direction to cancel its transport. The comb's
+## reverse drift points against its motion: -pi epsilon^2 / pitch on average
+## (Mean) and the Pade fit between tines (Minimum); compensation subtracts it.
 static func compensation_value(mode: int, epsilon: float, pitch: float) -> float:
 	if not is_finite(epsilon) or epsilon <= 0.0 or not is_finite(pitch) or pitch <= 0.0:
 		return NAN
 	if mode == 2:
-		return -PI * epsilon * epsilon / pitch
+		return PI * epsilon * epsilon / pitch
 	if mode == 1:
 		var h := pitch / epsilon
-		return epsilon * (-37.7829 + 1.01689 * h) \
+		return -epsilon * (-37.7829 + 1.01689 * h) \
 				/ (1.09635 + h * (12.2129 + h * (1.59101 + h)))
 	return 0.0
 

@@ -193,13 +193,17 @@ vec2 drift_compensation(vec2 direction, float epsilon) {
 	if (pitch <= 1.0e-30) {
 		return vec2(0.0);
 	}
+	// A comb's reverse drift points against its motion: -pi eps^2 / pitch on
+	// average, and the Pade fit below between tines. Compensation subtracts it,
+	// so the comb leaves the fluid with no mean transport (Mean) or none between
+	// its tines (Minimum).
 	int mode = int(round(params.field.w));
 	float amount = 0.0;
 	if (mode == 2) {
-		amount = -3.141592653589793 * epsilon * epsilon / pitch;
+		amount = 3.141592653589793 * epsilon * epsilon / pitch;
 	} else if (mode == 1) {
 		float h = pitch / epsilon;
-		amount = epsilon * (-37.7829 + 1.01689 * h)
+		amount = -epsilon * (-37.7829 + 1.01689 * h)
 				/ (1.09635 + h * (12.2129 + h * (1.59101 + h)));
 	}
 	float direction_length = length(direction);
