@@ -45,7 +45,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | Water & Stone | Multi-material heightfield: sediment transport, rainfall, snow, erosion and uplift; dig/pour/smooth/water/pack brushes, throwable balls |
 | Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
-| Ambient Fluid Rigid Body | Kirchhoff equations with an offline BEM added-mass tensor (CPU) driving Jolt bodies |
+| Ambient Fluid Rigid Body | Padilla et al. 2026: Kirchhoff added mass from an offline source-panel BEM, per-face separated surface pressure and skin friction, Algorithm 2 integration (CPU + native kernels) driving Jolt bodies |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
 | Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |
 | Smoke Simulation | GPU stable fluids on a MAC grid: MacCormack advection, buoyancy, vorticity confinement, red-black Gauss-Seidel pressure, voxelized mesh obstacles + Jolt bodies, self-shadowed volume raymarch |

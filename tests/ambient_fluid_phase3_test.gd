@@ -201,6 +201,7 @@ func _test_runtime_quality() -> void:
 	await _test_rotational_convergence()
 	await _test_torque_free_angular_momentum()
 	await _test_slow_turn_reaches_jolt()
+	await _test_magnus_curve()
 	await _test_coupled_gyroscopic_stability()
 	_finish("ambient_fluid_phase3")
 
@@ -436,6 +437,37 @@ func _test_slow_turn_reaches_jolt() -> void:
 		print("AMBIENT SLOW TURN rate=%.2f turned=%.5f expected=%.5f" % [rate, turned, rate * 61.0 / 60.0])
 		_check(absf(turned - rate * 61.0 / 60.0) < absf(rate) * 0.03 + 1.0e-4,
 			"a %.2f rad/s spin turned the Jolt pose %.5f rad in 61 ticks" % [rate, turned])
+
+
+func _test_magnus_curve() -> void:
+	# Paper Sec. 6.2 on the real loop: a ball spun about +y while flying along
+	# +x curves toward w x v = -z; without spin it flies straight.
+	var drift := []
+	for spin in [0.0, 30.0, -30.0]:
+		var config := CONFIG.new()
+		config.fluid_density_kg_m3 = 1.204
+		config.dynamic_viscosity_pa_s = 1.81e-5
+		config.body_density_kg_m3 = 60.0
+		config.initial_velocity_m_s = Vector3(20.0, 0.0, 0.0)
+		config.initial_spin_rad_s = Vector3(0.0, spin, 0.0)
+		var body := BODY.new()
+		body.profile = PROFILE
+		body.config = config
+		body.contacts_enabled = false
+		body.position = Vector3(0.0, 500.0, 0.0)
+		root.add_child(body)
+		await process_frame
+		while body._pending_reset:
+			await physics_frame
+		for _frame in 90:
+			await physics_frame
+		drift.append(body.global_position.z)
+		body.queue_free()
+		await process_frame
+	print("AMBIENT MAGNUS z: no spin %.3f, +y spin %.3f, -y spin %.3f" % drift)
+	_check(absf(drift[0]) < 0.01, "a ball without spin drifted sideways")
+	_check(drift[1] < -0.5 and drift[2] > 0.5,
+		"spinning balls did not curve along w x v: %s" % [drift])
 
 
 func _rotational_energy(body: AmbientFluidBody3D) -> float:
