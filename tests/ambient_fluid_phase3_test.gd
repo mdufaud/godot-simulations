@@ -342,10 +342,10 @@ func _test_rotational_convergence() -> void:
 		for _frame in frequency:
 			await physics_frame
 		_check(body.finite_state(), "rotational convergence body became non-finite at %d Hz" % frequency)
-		results.append(PackedFloat64Array([
-			body.angular_velocity.x, body.angular_velocity.y, body.angular_velocity.z,
-			body.linear_velocity.x, body.linear_velocity.y, body.linear_velocity.z,
-		]))
+		var spin := body.current_angular_velocity()
+		var velocity := body.current_linear_velocity()
+		results.append(PackedFloat64Array([spin.x, spin.y, spin.z,
+			velocity.x, velocity.y, velocity.z]))
 		body.queue_free()
 		await process_frame
 	Engine.physics_ticks_per_second = original_ticks
@@ -356,43 +356,58 @@ func _test_rotational_convergence() -> void:
 
 
 func _test_torque_free_angular_momentum() -> void:
-	var config := CONFIG.new()
-	config.body_density_kg_m3 = 500.0
-	config.initial_velocity_m_s = Vector3(2.0, 0.0, 0.0)
-	config.initial_spin_rad_s = Vector3(3.0, 5.0, 2.0)
-	var body := BODY.new()
-	body.profile = PROFILE
-	body.config = config
-	body.fluid_enabled = false
-	body.contacts_enabled = false
-	body.body_inertia_diagonal_kg_m2 = Vector3(2.0, 3.0, 4.0)
-	root.add_child(body)
-	await process_frame
-	while body._pending_reset:
-		await physics_frame
-	var reference := _world_angular_momentum(body)
-	var reference_norm := reference.length()
-	var worst_norm_drift := 0.0
-	var worst_direction := 1.0
-	for _frame in 120:
-		await physics_frame
-		_check(body.finite_state(), "torque-free gyro body became non-finite")
-		var angular := _world_angular_momentum(body)
-		worst_norm_drift = maxf(worst_norm_drift,
-			absf(angular.length() - reference_norm) / reference_norm)
-		worst_direction = minf(worst_direction,
-			angular.normalized().dot(reference.normalized()))
-	body.queue_free()
-	await process_frame
-	# No external torque acts on the vacuum anisotropic top, so the real loop's
-	# R^T momentum propagation must conserve world-frame angular momentum up to
-	# first-order integration error (measured: 0.8% norm drift, 0.9996
-	# direction). Dropping or misapplying the rotation wobbles the direction by
-	# radians as the body tumbles.
-	_check(worst_norm_drift < 0.03,
-		"torque-free angular momentum norm drifted %.4f on the real loop" % worst_norm_drift)
-	_check(worst_direction > 0.99,
-		"torque-free angular momentum direction drifted on the real loop (%.5f)" % worst_direction)
+	# Ten seconds of a vacuum anisotropic top, slow (one symplectic Euler step
+	# per tick) and fast (RK4 substeps). No torque acts about the centre of
+	# mass, so world angular momentum and rotational energy must hold.
+	for spin: Vector3 in [Vector3(3.0, 5.0, 2.0) * 0.3, Vector3(3.0, 5.0, 2.0),
+			Vector3(20.0, 30.0, 10.0)]:
+		var config := CONFIG.new()
+		config.body_density_kg_m3 = 500.0
+		config.initial_velocity_m_s = Vector3(2.0, 0.0, 0.0)
+		config.initial_spin_rad_s = spin
+		var body := BODY.new()
+		body.profile = PROFILE
+		body.config = config
+		body.fluid_enabled = false
+		body.contacts_enabled = false
+		body.body_inertia_diagonal_kg_m2 = Vector3(2.0, 3.0, 4.0)
+		root.add_child(body)
+		await process_frame
+		while body._pending_reset:
+			await physics_frame
+		var reference := _world_angular_momentum(body)
+		var reference_energy := _rotational_energy(body)
+		var worst_norm_drift := 0.0
+		var worst_direction := 1.0
+		var worst_energy_drift := 0.0
+		for _frame in 600:
+			await physics_frame
+			_check(body.finite_state(), "torque-free gyro body became non-finite")
+			var angular := _world_angular_momentum(body)
+			worst_norm_drift = maxf(worst_norm_drift,
+				absf(angular.length() - reference.length()) / reference.length())
+			worst_direction = minf(worst_direction,
+				angular.normalized().dot(reference.normalized()))
+			worst_energy_drift = maxf(worst_energy_drift,
+				absf(_rotational_energy(body) - reference_energy) / reference_energy)
+		var substeps := body.integration_substeps()
+		body.queue_free()
+		await process_frame
+		print("AMBIENT TOP spin=%s substeps=%d norm=%.6f direction=%.8f energy=%.6f" % [
+			spin, substeps, worst_norm_drift, worst_direction, worst_energy_drift])
+		_check(worst_norm_drift < 0.005,
+			"torque-free angular momentum norm drifted %.5f (spin %s)" % [worst_norm_drift, spin])
+		_check(worst_direction > 0.99999,
+			"torque-free angular momentum direction drifted (%.7f, spin %s)" % [worst_direction, spin])
+		_check(worst_energy_drift < 0.005,
+			"torque-free rotational energy drifted %.5f (spin %s)" % [worst_energy_drift, spin])
+
+
+func _rotational_energy(body: AmbientFluidBody3D) -> float:
+	var velocity := body.current_generalized_velocity()
+	var momentum := body.current_generalized_momentum()
+	return 0.5 * (velocity[0] * momentum[0] + velocity[1] * momentum[1]
+		+ velocity[2] * momentum[2])
 
 
 func _test_coupled_gyroscopic_stability() -> void:
@@ -439,8 +454,7 @@ func _test_coupled_gyroscopic_stability() -> void:
 
 
 func _world_angular_momentum(body: AmbientFluidBody3D) -> Vector3:
-	var momentum := body.current_generalized_momentum()
-	return body.global_transform.basis * Vector3(momentum[0], momentum[1], momentum[2])
+	return body.world_angular_momentum()
 
 
 func _coupled_added_mass_tensor() -> PackedFloat64Array:
@@ -463,16 +477,34 @@ func _coupled_added_mass_tensor() -> PackedFloat64Array:
 func _test_semidirect_coupling_contract() -> void:
 	# The runtime gyroscopic term is semidirect_coupling_wrench: torque equals
 	# the linear momentum crossed with the linear velocity, force stays zero.
-	var momentum := PackedFloat64Array([0.0, 0.0, 0.0, 3.0, -1.0, 2.0])
+	# Both helpers work in double precision.
+	var momentum := PackedFloat64Array([0.5, 1.5, -2.0, 3.0, -1.0, 2.0])
 	var velocity := PackedFloat64Array([0.5, -0.25, 1.0, 0.3, 0.0, -0.6])
 	var wrench := MATH.semidirect_coupling_wrench(momentum, velocity)
-	var expected_torque := Vector3(3.0, -1.0, 2.0).cross(Vector3(0.3, 0.0, -0.6))
-	_check(absf(wrench[0] - expected_torque.x) < 1.0e-12
-		and absf(wrench[1] - expected_torque.y) < 1.0e-12
-		and absf(wrench[2] - expected_torque.z) < 1.0e-12,
+	var expected_torque := [-1.0 * -0.6 - 2.0 * 0.0, 2.0 * 0.3 - 3.0 * -0.6,
+		3.0 * 0.0 - -1.0 * 0.3]
+	_check(absf(wrench[0] - expected_torque[0]) < 1.0e-12
+		and absf(wrench[1] - expected_torque[1]) < 1.0e-12
+		and absf(wrench[2] - expected_torque[2]) < 1.0e-12,
 		"semidirect coupling torque is not p_linear x v_linear")
 	_check(absf(wrench[3]) + absf(wrench[4]) + absf(wrench[5]) < 1.0e-12,
 		"semidirect coupling produced a force")
+	# Eq. 4: (l x w + p x v, p x w).
+	var gyro := MATH.gyroscopic_wrench(momentum, velocity)
+	var spin_torque := [1.5 * 1.0 - -2.0 * -0.25, -2.0 * 0.5 - 0.5 * 1.0,
+		0.5 * -0.25 - 1.5 * 0.5]
+	var force := [-1.0 * 1.0 - 2.0 * -0.25, 2.0 * 0.5 - 3.0 * 1.0, 3.0 * -0.25 - -1.0 * 0.5]
+	for axis in 3:
+		_check(absf(gyro[axis] - spin_torque[axis] - expected_torque[axis]) < 1.0e-12
+			and absf(gyro[axis + 3] - force[axis]) < 1.0e-12,
+			"gyroscopic wrench does not match Eq. 4 on axis %d" % axis)
+	# Isotropic linear inertia: p parallel to v, so p x v vanishes exactly even
+	# for a fast body (float32 products would leave |p||v| * 1e-7).
+	var parallel := MATH.semidirect_coupling_wrench(
+		PackedFloat64Array([0.0, 0.0, 0.0, 1259.7 * 31.3, 1259.7 * -97.1, 1259.7 * 4.7]),
+		PackedFloat64Array([0.0, 0.0, 0.0, 31.3, -97.1, 4.7]))
+	_check(absf(parallel[0]) + absf(parallel[1]) + absf(parallel[2]) < 1.0e-6,
+		"parallel momentum and velocity left a spurious gyroscopic torque")
 
 
 func _test_convergence_and_terminal_speed() -> void:

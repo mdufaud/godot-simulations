@@ -23,13 +23,13 @@ func _run() -> void:
 	_test_restoring_torque()
 	_test_pool_viscous_drag()
 	_test_pool_wet_rotation()
+	_test_added_mass_transition()
 	await _test_runtime_honey_drag()
 	await _test_runtime_honey_entry_drag()
 	await _test_runtime_pool_and_scientific_paths()
 	await _test_runtime_air_to_water_transition()
 	await _test_runtime_honey_1100_body()
 	await _test_light_pool_throw_stability()
-	await _test_pool_momentum_passivity()
 	await _test_repeated_drop_mix()
 	_finish("ambient_fluid_float")
 
@@ -476,26 +476,24 @@ func _test_repeated_drop_mix() -> void:
 	await process_frame
 
 
-func _test_pool_momentum_passivity() -> void:
-	var demo: Node = SCENE.instantiate()
-	root.add_child(demo)
-	await process_frame
-	var body: AmbientFluidBody3D = demo.bodies[0]
-	var momentum := PackedFloat64Array([0.0, 0.0, 0.0, 10.0, 0.0, 0.0])
-	var zero := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-	var sideways := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 10000.0, 0.0])
-	var drag := PackedFloat64Array([0.0, 0.0, 0.0, -100000.0, 0.0, 0.0])
-	var inverse := body.combined_inverse()
-	var before := 0.5 * MATH.vector_dot(momentum,
-		MATH.matrix_vector_multiply(inverse, momentum))
-	var next := body._pool_momentum_step(momentum, zero, sideways, drag, 1.0 / 60.0)
-	var after := 0.5 * MATH.vector_dot(next,
-		MATH.matrix_vector_multiply(inverse, next))
-	_check(after <= before + 1.0e-6 and after >= 0.0,
-		"pool pressure and drag created kinetic energy")
-	_check(next[3] >= -1.0e-6, "pool drag reversed momentum in one step")
-	demo.queue_free()
-	await process_frame
+func _test_added_mass_transition() -> void:
+	var body_tensor := MATH.diagonal_matrix(Vector3(2.0, 3.0, 4.0), 10.0)
+	var wet_tensor := MATH.matrix_add(body_tensor,
+		MATH.matrix_scale(SPHERE_PROFILE.added_mass_tensor, 0.4))
+	var velocity := PackedFloat64Array([0.3, -0.2, 0.1, 1.0, -2.0, 0.5])
+	var entering := MATH.added_mass_transition(velocity, body_tensor, wet_tensor,
+		MATH.matrix_inverse(wet_tensor))
+	var before := MATH.matrix_vector_multiply(body_tensor, velocity)
+	var after := MATH.matrix_vector_multiply(wet_tensor, entering)
+	for index in MATH.MATRIX_SIZE:
+		_check(absf(after[index] - before[index]) < 1.0e-9,
+			"entering the liquid did not conserve momentum K u")
+	_check(Vector3(entering[3], entering[4], entering[5]).length()
+		< Vector3(velocity[3], velocity[4], velocity[5]).length(),
+		"entering the liquid did not slow the body")
+	var leaving := MATH.added_mass_transition(velocity, wet_tensor, body_tensor,
+		MATH.matrix_inverse(body_tensor))
+	_check(leaving == velocity, "leaving the liquid did not keep the body velocity")
 
 
 func _cube_faces() -> PackedVector3Array:

@@ -322,14 +322,38 @@ static func vector_dot(a: PackedFloat64Array, b: PackedFloat64Array) -> float:
 	return result
 
 
+## The p x v torque of Eq. 4, the part the body-frame rotation of the momentum
+## does not apply. In double precision: with an isotropic linear inertia p is
+## parallel to v and p x v vanishes, but float32 products leave |p||v| * 1e-7
+## behind, a spurious torque of the order of the spin for a fast-falling body.
 static func semidirect_coupling_wrench(momentum: PackedFloat64Array,
 		velocity: PackedFloat64Array) -> PackedFloat64Array:
 	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:
 		return PackedFloat64Array()
-	var linear_momentum := Vector3(momentum[3], momentum[4], momentum[5])
-	var linear_velocity := Vector3(velocity[3], velocity[4], velocity[5])
-	var torque := linear_momentum.cross(linear_velocity)
-	return PackedFloat64Array([torque.x, torque.y, torque.z, 0.0, 0.0, 0.0])
+	var torque := _cross(momentum, 3, velocity, 3)
+	return PackedFloat64Array([torque[0], torque[1], torque[2], 0.0, 0.0, 0.0])
+
+
+## The full gyroscopic wrench of Eq. 4, (l x w + p x v, p x w), in double precision.
+static func gyroscopic_wrench(momentum: PackedFloat64Array,
+		velocity: PackedFloat64Array) -> PackedFloat64Array:
+	if momentum.size() != MATRIX_SIZE or velocity.size() != MATRIX_SIZE:
+		return PackedFloat64Array()
+	var spin_torque := _cross(momentum, 0, velocity, 0)
+	var linear_torque := _cross(momentum, 3, velocity, 3)
+	var force := _cross(momentum, 3, velocity, 0)
+	return PackedFloat64Array([spin_torque[0] + linear_torque[0],
+		spin_torque[1] + linear_torque[1], spin_torque[2] + linear_torque[2],
+		force[0], force[1], force[2]])
+
+
+static func _cross(a: PackedFloat64Array, a_offset: int, b: PackedFloat64Array,
+		b_offset: int) -> PackedFloat64Array:
+	return PackedFloat64Array([
+		a[a_offset + 1] * b[b_offset + 2] - a[a_offset + 2] * b[b_offset + 1],
+		a[a_offset + 2] * b[b_offset] - a[a_offset] * b[b_offset + 2],
+		a[a_offset] * b[b_offset + 1] - a[a_offset + 1] * b[b_offset],
+	])
 
 
 static func gravity_buoyancy_wrench(body_mass_kg: float, displaced_mass_kg: float,
@@ -637,6 +661,24 @@ static func _accumulate_wrench(wrench: PackedFloat64Array, torque: Vector3, forc
 	wrench[3] += force.x
 	wrench[4] += force.y
 	wrench[5] += force.z
+
+
+## Extension beyond the paper, whose K is constant: when the added mass
+## changes because the body enters or leaves the liquid, the fluid's share of
+## the momentum is either taken up (entry: K u is conserved, von Karman's
+## slamming deceleration) or left behind in the wake (exit: the velocity is
+## kept). The rule takes whichever ends with less kinetic energy, so a change
+## of K never creates energy.
+static func added_mass_transition(velocity: PackedFloat64Array,
+		old_tensor: PackedFloat64Array, new_tensor: PackedFloat64Array,
+		new_inverse: PackedFloat64Array) -> PackedFloat64Array:
+	var momentum := matrix_vector_multiply(old_tensor, velocity)
+	var conserved := matrix_vector_multiply(new_inverse, momentum)
+	var kept_momentum := matrix_vector_multiply(new_tensor, velocity)
+	if conserved.size() != MATRIX_SIZE or kept_momentum.size() != MATRIX_SIZE:
+		return velocity
+	return conserved if vector_dot(momentum, conserved) < vector_dot(velocity, kept_momentum) \
+		else velocity
 
 
 static func semi_implicit_momentum_step(momentum: PackedFloat64Array,

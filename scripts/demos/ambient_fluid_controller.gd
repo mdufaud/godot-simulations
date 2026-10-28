@@ -117,10 +117,11 @@ func _physics_process(_delta: float) -> void:
 	for body in bodies:
 		if not is_instance_valid(body) or _trajectory_rows.size() >= TRAJECTORY_LIMIT:
 			break
+		var velocity := body.current_linear_velocity()
 		_trajectory_rows.append("%d,%s,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f" % [
 			Engine.get_physics_frames(), body.name, body.global_position.x,
-			body.global_position.y, body.global_position.z, body.linear_velocity.x,
-			body.linear_velocity.y, body.linear_velocity.z, body.kinetic_energy_j()])
+			body.global_position.y, body.global_position.z, velocity.x,
+			velocity.y, velocity.z, body.kinetic_energy_j()])
 
 
 func _process(_delta: float) -> void:

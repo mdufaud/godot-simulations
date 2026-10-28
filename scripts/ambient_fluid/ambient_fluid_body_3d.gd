@@ -2,7 +2,8 @@ class_name AmbientFluidBody3D
 extends RigidBody3D
 
 const MATH := preload("res://scripts/ambient_fluid/ambient_fluid_math.gd")
-const MAX_ROTATION_STEP_RAD := deg_to_rad(2.0)
+## Sec. 5.4: substeps keep ||w|| dt below 0.1 rad.
+const MAX_ROTATION_STEP_RAD := 0.1
 const MAX_SUBSTEPS := 64
 
 @export var profile: AmbientFluidProfile3D
@@ -31,6 +32,16 @@ var _last_substeps := 1
 var _last_generalized_velocity := PackedFloat64Array()
 var _last_wrench_generalized_velocity := PackedFloat64Array()
 var _contact_bodies: Dictionary = {}
+var _true_state_valid := false
+var _last_end_basis := Basis.IDENTITY
+var _last_end_origin := Vector3.ZERO
+var _last_physics_frame := -1
+var _true_linear_velocity_world := Vector3.ZERO
+var _true_angular_velocity_world := Vector3.ZERO
+var _given_linear_velocity_world := Vector3.ZERO
+var _given_angular_velocity_world := Vector3.ZERO
+var _last_fluid_density := NAN
+var _last_added_mass_density := NAN
 var _contacts_connected := false
 var _pending_reset := false
 var _pending_transform := Transform3D.IDENTITY
@@ -106,36 +117,79 @@ func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
 
 
 func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
+	# Algorithm 2 of Padilla et al.: momentum from K (Eq. 1), the wrench of
+	# Eq. 4 (gyroscopic terms, gravity and buoyancy, surface forces), a momentum
+	# step, velocities from K^-1, then the pose. The pose is integrated here,
+	# substep by substep, and Jolt is handed the constant velocities that carry
+	# it from the start pose to the same end pose in one tick; the body's true
+	# end velocity is kept between ticks, and anything Jolt changed meanwhile
+	# (contacts, a script setting the velocity) arrives as a velocity delta.
+	var physics_frame := Engine.get_physics_frames()
+	var carried := _true_state_valid and physics_frame == _last_physics_frame + 1
+	_last_physics_frame = physics_frame
+	_true_state_valid = false
 	if _pending_reset:
 		state.transform = _pending_transform
 		state.linear_velocity = _pending_linear_velocity_world
 		state.angular_velocity = _pending_angular_velocity_world
 		_pending_reset = false
-	var basis := state.transform.basis
-	if not _basis_is_valid(basis):
+		carried = false
+	var jolt_basis := state.transform.basis
+	var jolt_origin := state.transform.origin
+	if not _basis_is_valid(jolt_basis):
 		_report_invalid_state("body basis is not finite and orthonormal")
 		return
-	if not _finite_vector(state.linear_velocity) or not _finite_vector(state.angular_velocity):
+	var basis := jolt_basis
+	var origin := jolt_origin
+	var linear_world := state.linear_velocity
+	var angular_world := state.angular_velocity
+	if carried:
+		var linear_change := state.linear_velocity - _given_linear_velocity_world
+		var angular_change := state.angular_velocity - _given_angular_velocity_world
+		linear_world = _true_linear_velocity_world + linear_change
+		angular_world = _true_angular_velocity_world + angular_change
+		# Left alone, Jolt lands within rounding of the internal end pose (the
+		# float axis-angle hand-off of a small turn loses ~1e-5 rad). Continue
+		# from the internal pose then, so that rounding cannot accumulate; any
+		# contact, push or teleport hands the pose back to Jolt.
+		if linear_change == Vector3.ZERO and angular_change == Vector3.ZERO \
+				and jolt_origin.distance_squared_to(_last_end_origin) < 1.0e-6 \
+				and (jolt_basis.x - _last_end_basis.x).length_squared() \
+					+ (jolt_basis.y - _last_end_basis.y).length_squared() \
+					+ (jolt_basis.z - _last_end_basis.z).length_squared() < 1.0e-6:
+			basis = _last_end_basis
+			origin = _last_end_origin
+	if not _finite_vector(linear_world) or not _finite_vector(angular_world):
 		_report_invalid_state("body velocity is not finite")
 		return
-	var fluid_density := _sample_fluid_density(state.transform.origin)
+	var fluid_density := _sample_fluid_density(origin)
 	if not is_finite(fluid_density) or fluid_density < 0.0:
 		if not _invalid_medium_reported:
 			_invalid_medium_reported = true
 			push_error("AmbientFluidBody3D: medium density sampler returned an invalid value")
 		fluid_density = 0.0
-	var immersion := _sample_pool_immersion(basis, state.transform.origin)
+	var immersion := _sample_pool_immersion(basis, origin)
 	var effective_added_mass_density := fluid_density * float(immersion.fraction)
+	var previous_tensor := _combined_tensor
+	var previous_fluid_density := _last_fluid_density
+	var previous_added_mass_density := _last_added_mass_density
 	_ensure_tensor_cache(effective_added_mass_density)
 	if not _cache_valid:
 		return
-	var fluid_velocity_world := _sample_fluid_velocity(state.transform.origin)
-	var local_velocity := basis.transposed() * (state.linear_velocity - fluid_velocity_world)
-	var local_spin := basis.transposed() * state.angular_velocity
+	_last_fluid_density = fluid_density
+	_last_added_mass_density = effective_added_mass_density
+	var fluid_velocity_world := _sample_fluid_velocity(origin)
+	var local_velocity := basis.transposed() * (linear_world - fluid_velocity_world)
+	var local_spin := basis.transposed() * angular_world
 	var generalized_velocity := PackedFloat64Array([
 		local_spin.x, local_spin.y, local_spin.z,
 		local_velocity.x, local_velocity.y, local_velocity.z,
 	])
+	if carried and fluid_density == previous_fluid_density \
+			and effective_added_mass_density != previous_added_mass_density \
+			and previous_tensor.size() == MATH.MATRIX_SCALARS:
+		generalized_velocity = MATH.added_mass_transition(generalized_velocity,
+			previous_tensor, _combined_tensor, _combined_inverse)
 	var momentum := MATH.matrix_vector_multiply(_combined_tensor, generalized_velocity)
 	if _pending_torque_impulse_world != Vector3.ZERO \
 		or _pending_central_impulse_world != Vector3.ZERO:
@@ -147,108 +201,180 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 		]))
 		_pending_torque_impulse_world = Vector3.ZERO
 		_pending_central_impulse_world = Vector3.ZERO
-	_last_pressure_wrench.fill(0.0)
-	_last_friction_wrench.fill(0.0)
-	_last_surface_faces = 0
 	_last_surface_cpu_us = 0
 	var substeps := clampi(ceili(local_spin.length() * state.step / MAX_ROTATION_STEP_RAD), 1,
 		MAX_SUBSTEPS)
 	_last_substeps = substeps
+	var context := {
+		fluid_density = fluid_density,
+		gravity = state.total_gravity,
+		medium_velocity = fluid_velocity_world,
+	}
+	var step := {basis = basis, origin = origin, momentum = momentum}
 	var substep := state.step / float(substeps)
-	var next_momentum := momentum
-	var output_basis := basis
-	var next_velocity := generalized_velocity
 	for _index in substeps:
-		_last_pressure_wrench.fill(0.0)
-		_last_friction_wrench.fill(0.0)
-		_last_surface_faces = 0
-		next_velocity = MATH.matrix_vector_multiply(_combined_inverse, next_momentum)
-		if not _finite_array(next_velocity):
-			_report_invalid_state("substep velocity is not finite")
-			return
-		_last_wrench_generalized_velocity = next_velocity
-		var step_spin := Vector3(next_velocity[0], next_velocity[1], next_velocity[2])
-		if not is_finite(step_spin.length() * substep):
-			_report_invalid_state("substep rotation is not finite")
-			return
-		var gravity_local := output_basis.transposed() * state.total_gravity
-		immersion = _sample_pool_immersion(output_basis, state.transform.origin)
-		var displaced_mass := fluid_density * float(immersion.volume_m3) \
-			if pool_buoyancy_enabled else fluid_density * profile.volume_m3
-		var gravity_wrench := MATH.gravity_buoyancy_wrench(
-			mass, displaced_mass, gravity_local, immersion.centroid_m)
-		var passive_wrench := MATH.semidirect_coupling_wrench(
-			next_momentum, next_velocity)
-		if fluid_density > 0.0:
-			var surface_start_us := Time.get_ticks_usec()
-			var surface := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
-				profile.face_areas_m2, next_velocity, fluid_density,
-				config.dynamic_viscosity_pa_s, config.separation_angle_rad,
-				profile.surface_length_m(),
-				immersion.wet_area_fractions if pool_buoyancy_enabled else PackedFloat64Array(),
-				immersion.wet_area_centers_m if pool_buoyancy_enabled else PackedVector3Array())
-			_last_pressure_wrench = surface.pressure
-			_last_friction_wrench = surface.friction
-			if pool_buoyancy_enabled and step_spin.length_squared() > 1.0e-16:
-				var pressure_torque := Vector3(_last_pressure_wrench[0],
-					_last_pressure_wrench[1], _last_pressure_wrench[2])
-				var spin_power := pressure_torque.dot(step_spin)
-				if spin_power > 0.0:
-					pressure_torque -= step_spin * (spin_power / step_spin.length_squared())
-					_last_pressure_wrench[0] = pressure_torque.x
-					_last_pressure_wrench[1] = pressure_torque.y
-					_last_pressure_wrench[2] = pressure_torque.z
-			_last_surface_faces = int(surface.attached_faces)
-			_last_surface_cpu_us += Time.get_ticks_usec() - surface_start_us
-			passive_wrench = MATH.vector_add(passive_wrench, _last_pressure_wrench)
-		if not pool_buoyancy_faces_local.is_empty():
-			next_momentum = _pool_momentum_step(next_momentum, gravity_wrench,
-				passive_wrench, _last_friction_wrench, substep)
+		if substeps == 1:
+			step = _symplectic_euler_step(step, substep, context)
 		else:
-			var wrench := MATH.vector_add(gravity_wrench,
-				MATH.vector_add(passive_wrench, _last_friction_wrench))
-			next_momentum = MATH.semi_implicit_momentum_step(next_momentum, wrench, substep)
-		if not _finite_array(next_momentum):
-			_report_invalid_state("substep momentum is not finite")
+			step = _runge_kutta_step(step, substep, context)
+		if step.is_empty():
 			return
-		var rotation_increment := _rotation_increment(step_spin, substep)
-		next_momentum = _rotate_generalized_momentum(next_momentum,
-			rotation_increment.transposed())
-		output_basis *= rotation_increment
-	next_velocity = MATH.matrix_vector_multiply(_combined_inverse, next_momentum)
-	if next_velocity.size() != MATH.MATRIX_SIZE or not _finite_array(next_velocity):
-		_report_invalid_state("integrated velocity is not finite")
+	var end_basis: Basis = step.basis
+	var end_origin: Vector3 = step.origin
+	var next_velocity := MATH.matrix_vector_multiply(_combined_inverse, step.momentum)
+	if not _finite_array(next_velocity) or not _basis_is_valid(end_basis) \
+		or not _finite_vector(end_origin):
+		_report_invalid_state("integrated state is not finite")
 		return
-	var next_local_spin := Vector3(next_velocity[0], next_velocity[1], next_velocity[2])
-	state.angular_velocity = output_basis * next_local_spin
-	state.linear_velocity = output_basis * Vector3(next_velocity[3], next_velocity[4], next_velocity[5]) \
-		+ fluid_velocity_world
 	_last_generalized_velocity = next_velocity
+	_last_end_basis = end_basis
+	_true_angular_velocity_world = end_basis * Vector3(next_velocity[0], next_velocity[1],
+		next_velocity[2])
+	_true_linear_velocity_world = end_basis * Vector3(next_velocity[3], next_velocity[4],
+		next_velocity[5]) + fluid_velocity_world
+	_last_end_origin = end_origin
+	var turn := (end_basis * jolt_basis.transposed()).get_rotation_quaternion()
+	var angle := turn.get_angle()
+	var axis := turn.get_axis() if angle > 1.0e-9 else Vector3.ZERO
+	if angle > PI:
+		angle = TAU - angle
+		axis = -axis
+	_given_angular_velocity_world = axis * (angle / state.step)
+	_given_linear_velocity_world = (end_origin - jolt_origin) / state.step
+	state.angular_velocity = _given_angular_velocity_world
+	state.linear_velocity = _given_linear_velocity_world
+	# Read back: Jolt stores (and may clamp) what it was given.
+	_given_angular_velocity_world = state.angular_velocity
+	_given_linear_velocity_world = state.linear_velocity
+	_true_state_valid = true
 
 
-func _pool_momentum_step(momentum: PackedFloat64Array,
-		gravity_wrench: PackedFloat64Array, passive_wrench: PackedFloat64Array,
-		drag_wrench: PackedFloat64Array, delta: float) -> PackedFloat64Array:
-	var forced := MATH.semi_implicit_momentum_step(momentum, gravity_wrench, delta)
+## One symplectic Euler step with the Lie-group rotation update (Alg. 2):
+## the momentum takes the wrench kick, the body turns at the kicked angular
+## velocity, then moves at its end velocity (so the velocity Jolt is handed is
+## the body's true end velocity). Turning the momentum into the new body frame
+## applies the l x w and p x w terms of Eq. 4 exactly and keeps |l| a Casimir;
+## the turn uses the velocity of a half-turned trial state (Lie-group midpoint),
+## so a free top's energy holds to second order instead of drifting.
+func _symplectic_euler_step(step: Dictionary, delta: float, context: Dictionary) -> Dictionary:
+	var basis: Basis = step.basis
+	var momentum: PackedFloat64Array = step.momentum
+	var velocity := MATH.matrix_vector_multiply(_combined_inverse, momentum)
+	if not _finite_array(velocity):
+		_report_invalid_state("substep velocity is not finite")
+		return {}
+	var wrench := MATH.vector_add(_external_wrench(basis, step.origin, velocity, context),
+		MATH.semidirect_coupling_wrench(momentum, velocity))
+	var forced := MATH.semi_implicit_momentum_step(momentum, wrench, delta)
 	var forced_velocity := MATH.matrix_vector_multiply(_combined_inverse, forced)
-	var energy_before := 0.5 * MATH.vector_dot(forced, forced_velocity)
-	var passive := MATH.semi_implicit_momentum_step(forced, passive_wrench, delta)
-	var passive_velocity := MATH.matrix_vector_multiply(_combined_inverse, passive)
-	var energy_after := 0.5 * MATH.vector_dot(passive, passive_velocity)
-	if energy_after > energy_before and energy_after > 0.0:
-		passive = MATH.vector_scale(passive,
-			sqrt(maxf(energy_before, 0.0) / energy_after))
-		passive_velocity = MATH.matrix_vector_multiply(_combined_inverse, passive)
-	var drag_impulse := MATH.vector_scale(drag_wrench, delta)
-	var drag_power := MATH.vector_dot(drag_impulse, passive_velocity)
-	if drag_power >= 0.0:
-		return passive
-	var drag_velocity := MATH.matrix_vector_multiply(_combined_inverse, drag_impulse)
-	var drag_curvature := MATH.vector_dot(drag_impulse, drag_velocity)
-	if drag_curvature <= 0.0:
-		return passive
-	var drag_scale := minf(1.0, -drag_power / drag_curvature)
-	return MATH.vector_add(passive, MATH.vector_scale(drag_impulse, drag_scale))
+	if not _finite_array(forced_velocity):
+		_report_invalid_state("substep momentum is not finite")
+		return {}
+	var trial_turn := _rotation_increment(Vector3(forced_velocity[0], forced_velocity[1],
+		forced_velocity[2]), delta * 0.5)
+	var midpoint := MATH.matrix_vector_multiply(_combined_inverse,
+		_rotate_generalized_momentum(forced, trial_turn.transposed()))
+	if not _finite_array(midpoint):
+		_report_invalid_state("substep momentum is not finite")
+		return {}
+	var rotation_increment := _rotation_increment(Vector3(midpoint[0], midpoint[1],
+		midpoint[2]), delta)
+	var end_basis := (basis * rotation_increment).orthonormalized()
+	var end_momentum := _rotate_generalized_momentum(forced, rotation_increment.transposed())
+	var end_velocity := MATH.matrix_vector_multiply(_combined_inverse, end_momentum)
+	var linear_world: Vector3 = end_basis * Vector3(end_velocity[3], end_velocity[4],
+		end_velocity[5]) + context.medium_velocity
+	return {
+		basis = end_basis,
+		origin = step.origin + linear_world * delta,
+		momentum = end_momentum,
+	}
+
+
+## Classical RK4 on (q, y, l, p) with the full gyroscopic terms of Eq. 4, used
+## when the spin needs substeps (Sec. 5.4).
+func _runge_kutta_step(step: Dictionary, delta: float, context: Dictionary) -> Dictionary:
+	var orientation: Quaternion = (step.basis as Basis).get_rotation_quaternion()
+	var origin: Vector3 = step.origin
+	var momentum: PackedFloat64Array = step.momentum
+	var k1 := _state_derivative(orientation, origin, momentum, context)
+	if k1.is_empty():
+		return {}
+	var k2 := _state_derivative((orientation + k1.orientation * (delta * 0.5)).normalized(),
+		origin + k1.origin * (delta * 0.5),
+		MATH.vector_add(momentum, MATH.vector_scale(k1.momentum, delta * 0.5)), context)
+	if k2.is_empty():
+		return {}
+	var k3 := _state_derivative((orientation + k2.orientation * (delta * 0.5)).normalized(),
+		origin + k2.origin * (delta * 0.5),
+		MATH.vector_add(momentum, MATH.vector_scale(k2.momentum, delta * 0.5)), context)
+	if k3.is_empty():
+		return {}
+	var k4 := _state_derivative((orientation + k3.orientation * delta).normalized(),
+		origin + k3.origin * delta,
+		MATH.vector_add(momentum, MATH.vector_scale(k3.momentum, delta)), context)
+	if k4.is_empty():
+		return {}
+	var sixth := delta / 6.0
+	var orientation_rate: Quaternion = k1.orientation + (k2.orientation + k3.orientation) * 2.0 \
+		+ k4.orientation
+	var origin_rate: Vector3 = k1.origin + (k2.origin + k3.origin) * 2.0 + k4.origin
+	var momentum_rate := MATH.vector_add(MATH.vector_add(k1.momentum, k4.momentum),
+		MATH.vector_scale(MATH.vector_add(k2.momentum, k3.momentum), 2.0))
+	return {
+		basis = Basis((orientation + orientation_rate * sixth).normalized()),
+		origin = origin + origin_rate * sixth,
+		momentum = MATH.vector_add(momentum, MATH.vector_scale(momentum_rate, sixth)),
+	}
+
+
+## d/dt of (q, y, l, p): q' = q w / 2, y' = R v + medium (Eq. 3), and Eq. 4.
+func _state_derivative(orientation: Quaternion, origin: Vector3,
+		momentum: PackedFloat64Array, context: Dictionary) -> Dictionary:
+	var velocity := MATH.matrix_vector_multiply(_combined_inverse, momentum)
+	if not _finite_array(velocity):
+		_report_invalid_state("substep velocity is not finite")
+		return {}
+	var basis := Basis(orientation)
+	var spin := Vector3(velocity[0], velocity[1], velocity[2])
+	var linear := Vector3(velocity[3], velocity[4], velocity[5])
+	var wrench := MATH.vector_add(_external_wrench(basis, origin, velocity, context),
+		MATH.gyroscopic_wrench(momentum, velocity))
+	return {
+		orientation = orientation * Quaternion(spin.x, spin.y, spin.z, 0.0) * 0.5,
+		origin = basis * linear + context.medium_velocity,
+		momentum = wrench,
+	}
+
+
+## Gravity and buoyancy (Eq. 21) plus the surface forces (Eq. 20, 22) on the
+## body at (basis, origin) moving at the medium-relative velocity, in the body
+## frame. Records the surface diagnostics of the latest evaluation.
+func _external_wrench(basis: Basis, origin: Vector3, velocity: PackedFloat64Array,
+		context: Dictionary) -> PackedFloat64Array:
+	var fluid_density: float = context.fluid_density
+	var immersion := _sample_pool_immersion(basis, origin)
+	var displaced_mass := fluid_density * float(immersion.volume_m3) \
+		if pool_buoyancy_enabled else fluid_density * profile.volume_m3
+	var wrench := MATH.gravity_buoyancy_wrench(mass, displaced_mass,
+		basis.transposed() * (context.gravity as Vector3), immersion.centroid_m)
+	_last_wrench_generalized_velocity = velocity
+	_last_surface_faces = 0
+	if fluid_density <= 0.0:
+		_last_pressure_wrench = PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+		_last_friction_wrench = PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+		return wrench
+	var surface_start_us := Time.get_ticks_usec()
+	var surface := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, velocity, fluid_density, config.dynamic_viscosity_pa_s,
+		config.separation_angle_rad, profile.surface_length_m(),
+		immersion.wet_area_fractions if pool_buoyancy_enabled else PackedFloat64Array(),
+		immersion.wet_area_centers_m if pool_buoyancy_enabled else PackedVector3Array())
+	_last_pressure_wrench = surface.pressure
+	_last_friction_wrench = surface.friction
+	_last_surface_faces = int(surface.attached_faces)
+	_last_surface_cpu_us += Time.get_ticks_usec() - surface_start_us
+	return MATH.vector_add(wrench, MATH.vector_add(surface.pressure, surface.friction))
 
 
 func set_fluid_enabled(enabled: bool) -> void:
@@ -394,6 +520,7 @@ func reset_state(reset_transform: Transform3D, velocity_m_s: Vector3, spin_rad_s
 	_pending_central_impulse_world = Vector3.ZERO
 	_pending_torque_impulse_world = Vector3.ZERO
 	_pending_reset = true
+	_true_state_valid = false
 	sleeping = false
 
 
@@ -419,18 +546,38 @@ func current_generalized_momentum() -> PackedFloat64Array:
 	return MATH.matrix_vector_multiply(_combined_tensor, current_generalized_velocity())
 
 
+## World-frame angular momentum about the centre of mass, paired with the pose
+## it was integrated to. Godot runs _integrate_forces before physics_frame and
+## Jolt moves the body after it, so global_transform still holds the start of
+## the tick when scripts read the end-of-tick momentum.
+func world_angular_momentum() -> Vector3:
+	var momentum := current_generalized_momentum()
+	return _last_end_basis * Vector3(momentum[0], momentum[1], momentum[2])
+
+
 func kinetic_energy_j() -> float:
 	var velocity := current_generalized_velocity()
 	var momentum := MATH.matrix_vector_multiply(_combined_tensor, velocity)
 	return 0.5 * MATH.vector_dot(velocity, momentum)
 
 
+## The body's world velocity at the end of the last tick. linear_velocity and
+## angular_velocity hold what Jolt moves the body with over the tick: equal
+## for a single step, the substep average when the spin needed substeps.
+func current_linear_velocity() -> Vector3:
+	return _true_linear_velocity_world if _true_state_valid else linear_velocity
+
+
+func current_angular_velocity() -> Vector3:
+	return _true_angular_velocity_world if _true_state_valid else angular_velocity
+
+
 func speed_m_s() -> float:
-	return linear_velocity.length()
+	return current_linear_velocity().length()
 
 
 func angular_speed_rad_s() -> float:
-	return angular_velocity.length()
+	return current_angular_velocity().length()
 
 
 func pressure_wrench() -> PackedFloat64Array:
