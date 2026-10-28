@@ -210,7 +210,10 @@ static func is_positive_semidefinite(matrix: PackedFloat64Array,
 		tolerance := 1.0e-8) -> bool:
 	if matrix.size() != MATRIX_SCALARS or not is_symmetric(matrix, tolerance * 10.0):
 		return false
-	var work := matrix
+	# Packed arrays are shared by reference: rotate a copy, or the caller's
+	# tensor (profile.validate() checks the stored added mass) comes back
+	# diagonalised.
+	var work := matrix.duplicate()
 	for _iteration in 64:
 		var pivot_row := 0
 		var pivot_col := 1

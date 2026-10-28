@@ -49,6 +49,15 @@ func _test_matrix_operations() -> void:
 	_check(_array_near(MATH.matrix_multiply(tiny, tiny_inverse), MATH.identity_matrix(), 1.0e-9),
 		"millimetre-scale inverse product is not identity")
 	_check(MATH.is_positive_definite(tiny), "millimetre-scale SPD matrix failed Cholesky")
+	# The PSD check runs Jacobi rotations; they must not reach the caller's
+	# matrix (profile.validate() hands it the stored added-mass tensor).
+	var coupled := MATH.diagonal_matrix(Vector3(80.0, 60.0, 70.0), 500.0)
+	coupled[5 * MATH.MATRIX_SIZE + 5] = 30.0
+	coupled[1 * MATH.MATRIX_SIZE + 3] = 4.0
+	coupled[3 * MATH.MATRIX_SIZE + 1] = 4.0
+	var before := coupled.duplicate()
+	_check(MATH.is_positive_semidefinite(coupled), "coupled SPD tensor failed the PSD check")
+	_check(coupled == before, "the PSD check diagonalised the caller's tensor")
 
 
 func _test_profile_and_tensor() -> void:
