@@ -4524,10 +4524,11 @@ func _fail_tier(demo: Node, stage: String) -> void:
 ##   1. the preview pass always runs at the FULL iteration count the view
 ##      needs — a capped preview paints deep zooms black (blob) or false
 ##      structure; resolution, not iterations, is the cost knob;
-##   2. the display follows the preview while moving (live current view, no
-##      unbounded stretch of an older render);
-##   3. after stillness the full-res refine lands and stays;
-##   4. the autopilot (perpetual motion) keeps the same guarantees.
+##   2. the renderer stays live while moving (it renders every frame and
+##      never sits idle on an older image);
+##   3. after stillness the accumulation completes and the renderer idles;
+##   4. the autopilot (perpetual motion) keeps the same guarantees, and each
+##      2 s hold refreshes every pixel at full resolution at least once.
 ## Frame times are logged during gestures as a jank metric. PNGs land in
 ## res://tmp/policy/ for visual inspection.
 
@@ -4547,7 +4548,7 @@ func _run_fractal_policy() -> void:
 
 	# ── Phase A: boot settles to the refined image ────────────────────────
 	if not await _wait_settled(view, 10000):
-		_fail("boot never settled (state=%d blend=%.3f)" % [view.state, _blend(view)])
+		_fail("boot never settled (state=%d)" % view.state)
 		quit(1)
 		return
 	_shot_policy("a_settled")
@@ -4577,16 +4578,16 @@ func _run_fractal_policy() -> void:
 			max_delta = maxf(max_delta, float(Time.get_ticks_usec() - before) / 1.0e6)
 			if f % 4 == 0:
 				samples += 1
-				var blend := _blend(view)
+				var moving := view.state == FractalView.State.MOVING
 				var need := cam.iterations_full()
 				var iters := _preview_iters(view)
 				if iters < need:
 					capped += 1
-				if blend < 0.5:
+				if moving:
 					live += 1
-				if notch >= POLICY_NOTCHES - 3 and blend >= 0.5:
-					_fail("wheel scroll end holds a stale image (blend=%.3f, need=%d)" % [
-						blend, need])
+				if notch >= POLICY_NOTCHES - 3 and view.state == FractalView.State.IDLE:
+					_fail("wheel scroll end holds a stale image (state=%d, need=%d)" % [
+						view.state, need])
 				if iters != 0 and iters < need:
 					_fail("preview runs capped: %d of %d iterations" % [iters, need])
 	print("POLICY scroll live=%d/%d capped=%d/%d max_frame=%.3fs" % [
@@ -4602,14 +4603,14 @@ func _run_fractal_policy() -> void:
 	var became_live := false
 	for f in 15:
 		await process_frame
-		if _blend(view) < 0.5:
+		if view.state == FractalView.State.MOVING:
 			became_live = true
 		if _preview_iters(view) < cam.iterations_full():
 			_fail("dive preview capped at %d of %d iterations" % [
 				_preview_iters(view), cam.iterations_full()])
 	if not became_live:
-		_fail("deep dive never switched to the live preview (blend=%.3f)" % _blend(view))
-	print("POLICY dive live=%s blend=%.3f" % [became_live, _blend(view)])
+		_fail("deep dive never switched to the live preview (state=%d)" % view.state)
+	print("POLICY dive live=%s state=%d" % [became_live, view.state])
 	var mid_luma := _shot_policy("c_dive_mid")
 	if mid_luma < 0.25 * pre_luma:
 		_fail("dive frame went dark (luma %.4f vs %.4f before)" % [mid_luma, pre_luma])
@@ -4627,11 +4628,12 @@ func _run_fractal_policy() -> void:
 	for f in 900:
 		await process_frame
 		if f % 90 == 0:
-			print("POLICY auto f%03d blend=%.3f state=%d zoom=%.1f" % [
-				f, _blend(view), view.state, cam.log_zoom / POLICY_LN10])
+			print("POLICY auto f%03d state=%d stride=%d zoom=%.1f" % [
+				f, view.state, view.sample_stride(), cam.log_zoom / POLICY_LN10])
 		if f == 150:
 			_shot_policy("e_auto_moving")
-		if view.state == FractalView.State.IDLE and _blend(view) >= 0.999:
+		if view.state == FractalView.State.IDLE or (view.state == FractalView.State.REFINING
+				and view.refine_progress() * view.aa_samples >= 1.0):
 			if not saw_refined:
 				_shot_policy("e_auto_hold")
 			saw_refined = true
@@ -4641,9 +4643,9 @@ func _run_fractal_policy() -> void:
 	if auto_capped:
 		_fail("autopilot previews ran below the needed iteration count")
 	if not saw_refined:
-		_fail("autopilot never landed a refined image during its holds")
+		_fail("autopilot never fully refreshed the image during its holds")
 	else:
-		print("POLICY autopilot reached a refined image during holds")
+		print("POLICY autopilot fully refreshed the image during holds")
 
 	if _fails == 0:
 		print("POLICY PROBE PASS")
@@ -4671,20 +4673,15 @@ func _shot_policy(name: String) -> float:
 	return luma
 
 
-func _blend(view: FractalView) -> float:
-	var raw: Variant = view.display.material.get_shader_parameter("refine_blend")
-	return float(raw) if raw != null else 0.0
-
-
 func _preview_iters(view: FractalView) -> int:
-	return int(view._material_low.get_shader_parameter("max_iterations"))
+	return int(view._sample_material.get_shader_parameter("max_iterations"))
 
 
 func _wait_settled(view: FractalView, ms: int) -> bool:
 	var deadline := Time.get_ticks_msec() + ms
 	while Time.get_ticks_msec() < deadline:
 		await process_frame
-		if view.state == FractalView.State.IDLE and _blend(view) >= 0.999:
+		if view.state == FractalView.State.IDLE:
 			return true
 	return false
 
@@ -4693,8 +4690,8 @@ func _wait_settled(view: FractalView, ms: int) -> bool:
 ## F-FR2-1 probe: Julia perturbation vs Mandelbrot rebasing at deep zoom.
 ##
 ## Boots the real fractal_demo scene, drives the real FractalCamera to fixed
-## deep-zoom targets, saves the displayed frame, then reads back the high
-## viewport iteration data and compares it against a float64 CPU reference
+## deep-zoom targets, saves the displayed frame, then reads back the accumulated
+## iteration data and compares it against a float64 CPU reference
 ## evaluated at the same pixel centers. Deviations beyond float32 boundary
 ## fuzz mean the perturbation path misrenders (glitch blobs).
 ##
@@ -4737,7 +4734,7 @@ func _run_fractal_zoom() -> void:
 	var view: FractalView = demo._view
 	view.resize(root.size)
 	demo._autopilot.enabled = false
-	view.aa_quality = 1
+	view.aa_samples = 1
 
 	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path("res://tmp/fr2"))
 
@@ -4778,19 +4775,10 @@ func _run_fractal_target(cam: FractalCamera, view: FractalView, target: Array) -
 			break
 	if view.state != FractalView.State.IDLE:
 		print("FR2 %s TIMEOUT state=%d" % [tname, view.state])
-	# The display fades from the low-res preview to the refined high viewport;
-	# grab only once the fade completed so the PNG matches the readback.
-	var display_mat: ShaderMaterial = view.display.material
-	deadline = Time.get_ticks_msec() + 5000
-	while Time.get_ticks_msec() < deadline:
-		await process_frame
-		var blend: float = display_mat.get_shader_parameter("refine_blend")
-		if blend >= 0.999:
-			break
 
 	var shot := root.get_texture().get_image()
 	shot.save_png(ProjectSettings.globalize_path("res://tmp/fr2/%s.png" % tname))
-	var data: Image = view.view_high.get_texture().get_image()
+	var data: Image = view._accum[view._current].get_texture().get_image()
 
 	var iters: int = cam.iterations_full()
 	var half := VIEW_BASE / cam.zoom()
@@ -4833,7 +4821,7 @@ func _compare_fractal(img: Image, seed_x: float, seed_y: float, ftype: int, iter
 			var g := img.get_pixel(px, py)
 			var gpu_escaped := g.a > 0.5
 			total += 1
-			var gpu_mu := floorf(g.r) * 64.0 + g.g
+			var gpu_mu := (g.r * FractalView.MU_SPLIT + g.g) / maxf(g.a, 1e-4)
 			gpu_img.set_pixel(ix, iy, _dbg_color(gpu_escaped, gpu_mu, iters))
 			cpu_img.set_pixel(ix, iy, _dbg_color(ref.escaped, ref.mu, iters))
 			var bad: bool = gpu_escaped != ref.escaped
