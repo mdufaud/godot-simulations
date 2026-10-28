@@ -1,30 +1,25 @@
+// AVBD warm start: share of the multipliers and penalties kept between substeps.
+const float MULTIPLIER_RETAINED = 0.98;
+const float PENALTY_RETAINED = 0.99;
+
 void main() {
 	uint i = gl_GlobalInvocationID.x;
 	if (i >= uint(params.grid.z)) {
 		return;
 	}
+	if (params.misc.w == 1) {
+		tension.data[i] *= vec4(vec2(MULTIPLIER_RETAINED), vec2(PENALTY_RETAINED));
+	}
 	vec4 pw = positions.data[i];
-	vec4 pi = predicted.data[i];
-	if (pi.w > 0.5) {
-		if (params.grid.w == 1) {
-			int w_pin = params.misc.x;
-			imageStore(position_tex, ivec2(int(i) % w_pin, int(i) / w_pin), vec4(pw.xyz, 1.0));
-		}
+	int w = params.misc.x;
+	ivec2 texel = ivec2(int(i) % w, int(i) / w);
+	if (predicted.data[i].w > 0.5) {
+		imageStore(position_tex, texel, vec4(pw.xyz, 1.0));
 		return;
 	}
-	vec4 delta = deltas.data[i];
-	vec3 p = pi.xyz;
-	if (delta.w > 0.0) {
-		p += params.sim.w * delta.xyz / delta.w;
-	}
-	p = collide(p);
+	vec3 p = collide(deltas.data[i].xyz);
 	predicted.data[i] = vec4(p, 0.0);
-
-	// grid.w == 1 on the last solver iteration: finalize folded in
-	if (params.grid.w == 1) {
-		velocities.data[i] = vec4((p - pw.xyz) * params.sim.y, 0.0);
-		positions.data[i] = vec4(p, 0.0);
-		int w = params.misc.x;
-		imageStore(position_tex, ivec2(int(i) % w, int(i) / w), vec4(p, 0.0));
-	}
+	velocities.data[i] = vec4((p - pw.xyz) * params.sim.y, 0.0);
+	positions.data[i] = vec4(p, 0.0);
+	imageStore(position_tex, texel, vec4(p, 0.0));
 }

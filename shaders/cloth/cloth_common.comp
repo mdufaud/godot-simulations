@@ -18,7 +18,7 @@ layout(std430, set = 0, binding = 2) restrict buffer Predicted {
 }
 predicted;
 
-// xyz = summed positional correction, w = constraint count (Jacobi averaging).
+// Vertex block descent iterate, w = pin flag.
 layout(std430, set = 0, binding = 3) restrict buffer Deltas {
 	vec4 data[];
 }
@@ -26,15 +26,23 @@ deltas;
 
 layout(rgba32f, set = 0, binding = 4) uniform restrict image2D position_tex;
 
+// Inextensible VBD: the AVBD state of the structural edges each vertex owns,
+// xy = multiplier, zw = penalty stiffness, of the edges to (x + 1, y) and
+// (x, y + 1). Warm-started across substeps.
+layout(std430, set = 0, binding = 5) restrict buffer Tension {
+	vec4 data[];
+}
+tension;
+
 layout(push_constant, std430) uniform Params {
-	vec4 sim; // x = dt, y = 1/dt, z = damping, w = SOR relaxation
-	ivec4 grid; // x = width, y = height, z = vertex count, w = last_iteration
+	vec4 sim; // x = dt, y = 1/dt, z = damping
+	ivec4 grid; // x = width, y = height, z = vertex count
 	vec4 cloth; // x = rest spacing, y/z/w = stretch / shear / bend compliance
 	vec4 gravity; // xyz = gravity, w = aerodynamic drag
 	vec4 wind_a; // xyz = base wind vector (m/s), w = time
 	vec4 wind_b; // x = gustiness (0..1), y = turbulence spatial frequency
 	vec4 sphere; // xyz = obstacle centre, w = radius (0 = none)
-	ivec4 misc; // x = tex_width, y = wind enabled, z = unused, w = unused
+	ivec4 misc; // x = tex_width, y = wind enabled, z = VBD colour, w = inextensible
 }
 params;
 

@@ -43,7 +43,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | 3D Fractal Explorer | 7 distance-estimated fractals, sphere tracing |
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
 | Water & Stone | Multi-material heightfield: sediment transport, rainfall, snow, erosion and uplift; dig/pour/smooth/water/pack brushes, throwable balls |
-| Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
+| Cloth in the Wind | GPU vertex block descent cloth with AVBD inextensible edges and its own CPU gust wind (the tornado coupling is conceptual) |
 | Soft Bodies | GPU vertex block descent on tetrahedral lattices (stable Neo-Hookean), vertex-triangle contact between bodies, two-way Jolt coupling; grab, drop, press, throw |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
 | Ambient Fluid Rigid Body | Padilla et al. 2026: Kirchhoff added mass from an offline source-panel BEM, per-face separated surface pressure and skin friction, Algorithm 2 integration (CPU + native kernels) driving Jolt bodies |

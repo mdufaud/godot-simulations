@@ -529,6 +529,69 @@ func _run_smoke_metrics() -> void:
 	_finish("smoke_metrics")
 
 
+## Cloth demo at Medium (or tier=N), all sheets, 4 s (seconds=): structural strain
+## (max and 99th percentile of |edge| / rest - 1), NaN, GPU ms summed over the sheets. iterations=, substeps= and inextensible=0|1 override the tier.
+func _run_cloth_metrics() -> void:
+	var demo = (load("res://scenes/cloth_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var tier := ClothQualityProfile.Tier.MEDIUM
+	var seconds := 4.0
+	var overrides := {}
+	for arg in _extra:
+		var pair: PackedStringArray = str(arg).split("=", true, 1)
+		if pair.size() != 2:
+			continue
+		match pair[0]:
+			"tier":
+				tier = pair[1].to_int()
+			"seconds":
+				seconds = pair[1].to_float()
+			_:
+				overrides[pair[0]] = pair[1].to_int()
+	await _boot_frames(10)
+	demo.quality.set_tier(tier)
+	for solver: ClothSolver in demo.solvers:
+		solver.iterations = overrides.get("iterations", solver.iterations)
+		solver.substeps = overrides.get("substeps", solver.substeps)
+		solver.inextensible = overrides.get("inextensible", int(solver.inextensible)) == 1
+	await _sim_seconds(seconds)
+	var strains := PackedFloat32Array()
+	var finite := true
+	for solver: ClothSolver in demo.solvers:
+		var out: Array[PackedFloat32Array] = [PackedFloat32Array()]
+		var done := Semaphore.new()
+		RenderingServer.call_on_render_thread(func() -> void:
+			out[0] = solver._rd.buffer_get_data(solver._buffers["positions"]).to_float32_array()
+			done.post())
+		done.wait()
+		var p := out[0]
+		for y in solver.grid_h:
+			for x in solver.grid_w:
+				var i := (y * solver.grid_w + x) * 4
+				var a := Vector3(p[i], p[i + 1], p[i + 2])
+				finite = finite and a.is_finite()
+				if x + 1 < solver.grid_w:
+					strains.append(a.distance_to(Vector3(p[i + 4], p[i + 5], p[i + 6]))
+						/ solver.rest_spacing - 1.0)
+				if y + 1 < solver.grid_h:
+					var j := i + solver.grid_w * 4
+					strains.append(a.distance_to(Vector3(p[j], p[j + 1], p[j + 2]))
+						/ solver.rest_spacing - 1.0)
+	strains.sort()
+	var stages := {}
+	for solver: ClothSolver in demo.solvers:
+		var t: Dictionary = solver.get_timings()
+		for key in t:
+			stages[key] = stages.get(key, 0.0) + float(t[key])
+	print("CLOTH METRICS inextensible=%s tier=%d %dx%d strain max=%.4f p99=%.4f ms=%s" % [
+		demo.solvers[0].inextensible,
+		demo.quality.effective, demo.solvers[0].substeps, demo.solvers[0].iterations,
+		strains[-1], strains[int(strains.size() * 0.99)], stages])
+	_check(finite, "cloth_metrics: positions not finite")
+	demo.queue_free()
+	await process_frame
+	_finish("cloth_metrics")
+
 func _softbody_ready(demo) -> bool:
 	return await _smoke_ready(demo)
 

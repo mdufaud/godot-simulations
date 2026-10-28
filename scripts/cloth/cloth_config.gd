@@ -9,6 +9,9 @@ class_name ClothConfig extends Resource
 ## Velocity retained per 1/60 s; the solver spreads it across its substeps.
 @export_range(0.0, 1.0, 0.001) var damping: float = 0.98
 @export_range(0.0, 10.0, 0.01) var drag: float = 0.9
+## Structural edges carry an accumulated tension (AVBD dual) on top of
+## their spring, so the sheet barely stretches whatever the iteration budget.
+@export var inextensible := true
 
 
 func validate() -> String:

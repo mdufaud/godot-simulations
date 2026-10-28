@@ -32,14 +32,13 @@ func build(menu: SimMenu, solvers: Array[ClothSolver], state: Dictionary,
 	menu.add_separator()
 
 	menu.add_section("Solver")
-	var iterations_slider := menu.add_slider("Iterations", 2.0, 24.0,
+	menu.add_toggle("Inextensible", solvers[0].inextensible, callbacks.set_inextensible)
+	var iterations_slider := menu.add_slider("Iterations", 1.0, 24.0,
 		float(solvers[0].iterations), callbacks.set_iterations)
 	quality.bind("iterations", iterations_slider, callbacks.set_iterations)
-	var substeps_slider := menu.add_slider("Substeps", 1.0, 6.0, float(solvers[0].substeps),
+	var substeps_slider := menu.add_slider("Substeps", 1.0, 16.0, float(solvers[0].substeps),
 		callbacks.set_substeps)
 	quality.bind("substeps", substeps_slider, callbacks.set_substeps)
-	menu.add_slider("Relaxation", 1.0, 1.9, solvers[0].relaxation,
-		callbacks.set_relaxation)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
 	menu.add_separator()
 

@@ -1,22 +1,22 @@
 class_name ClothQualityProfile
 extends SimQualityProfile
-## Quality tiers for the XPBD cloth demo. Six sheets simulate in parallel, so
-## the XPBD budget is substeps × iterations over every vertex; the tiers spend
-## it from a light solve up to Ultra's stiff, wrinkle-dense cloth. Ultra sits
-## at the solver sliders' ceiling — the cost is purely linear.
+## Quality tiers for the VBD cloth demo. Six sheets simulate in parallel; VBD
+## converges faster with substeps than with iterations, so the tiers spend the
+## budget on substeps. Each tier stretches less than the XPBD tier it replaced
+## at about the same GPU time (Low +6 %, the others below).
 
 const ITERATIONS := {
-	Tier.LOW: 8,
-	Tier.MEDIUM: 14,
-	Tier.HIGH: 18,
-	Tier.ULTRA: 24,
+	Tier.LOW: 1,
+	Tier.MEDIUM: 2,
+	Tier.HIGH: 2,
+	Tier.ULTRA: 3,
 }
 
 const SUBSTEPS := {
-	Tier.LOW: 2,
-	Tier.MEDIUM: 4,
-	Tier.HIGH: 5,
-	Tier.ULTRA: 6,
+	Tier.LOW: 3,
+	Tier.MEDIUM: 5,
+	Tier.HIGH: 7,
+	Tier.ULTRA: 7,
 }
 
 static func values(tier: int) -> Dictionary:

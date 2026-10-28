@@ -95,6 +95,7 @@ declare -a SUITES=(
 	"ocean_shore|gpu|-|-s res://tests/ocean_shore_test.gd"
 	"ocean_island|gpu|-|-s res://tests/ocean_island_test.gd"
 	"scene_cycle|gpu|-|-s res://tests/scene_cycle_test.gd"
+	"cloth_gpu|gpu|-|-s res://tests/cloth_gpu_test.gd"
 	"smoke_gpu|gpu|-|-s res://tests/smoke_gpu_test.gd"
 	"softbody_gpu|gpu|-|-s res://tests/softbody_gpu_test.gd"
 	"tornado_boot_look|gpu|-|-s res://tests/probe.gd -- tornado_boot_look"

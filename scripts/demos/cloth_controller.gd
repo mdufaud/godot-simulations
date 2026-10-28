@@ -71,7 +71,7 @@ func _ready() -> void:
 		set_damping = _set_damping,
 		set_iterations = _set_iterations,
 		set_substeps = _set_substeps,
-		set_relaxation = _set_relaxation,
+		set_inextensible = _set_inextensible,
 		stretch = _on_stretch,
 		bending = _on_bending,
 		render_scale = _set_render_scale,
@@ -181,10 +181,9 @@ func _set_substeps(value: float) -> void:
 	cloth_menu.update_status(solvers)
 
 
-func _set_relaxation(value: float) -> void:
+func _set_inextensible(on: bool) -> void:
 	for solver in solvers:
-		solver.relaxation = value
-	cloth_menu.update_status(solvers)
+		solver.inextensible = on
 
 
 func _on_stretch(value: float) -> void:

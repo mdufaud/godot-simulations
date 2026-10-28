@@ -8,6 +8,7 @@ void main() {
 		// Pinned vertex: kinematic, the constraint solve must not move it either.
 		predicted.data[i] = vec4(pw.xyz, 1.0);
 		velocities.data[i] = vec4(0.0);
+		deltas.data[i] = vec4(pw.xyz, 1.0);
 		return;
 	}
 	int x = int(i) % params.grid.x;
@@ -29,4 +30,6 @@ void main() {
 	v *= params.sim.z;
 	predicted.data[i] = vec4(pw.xyz + v * params.sim.x, 0.0);
 	velocities.data[i] = vec4(v, 0.0);
+	// Vertex block descent starts its iterate at the inertial target.
+	deltas.data[i] = predicted.data[i];
 }

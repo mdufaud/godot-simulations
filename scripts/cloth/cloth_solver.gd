@@ -1,15 +1,17 @@
 class_name ClothSolver
 extends RefCounted
-## GPU XPBD cloth. The mesh is a regular grid, so neighbours are found by index
-## arithmetic — no spatial hash, no ping-pong, one thread per vertex for the whole
-## step: predict (gravity + gusty wind + aerodynamic drag), then
-## iterations x (distance solve, apply). Positions land in an rgba32f image that
-## the surface shader samples in its vertex stage, so vertices never touch the CPU.
+## GPU vertex block descent cloth. The mesh is a regular grid, so neighbours are
+## found by index arithmetic — no spatial hash, no ping-pong: per substep predict
+## (gravity + gusty wind + aerodynamic drag), iterations x 4 colour passes of
+## vertex block descent, then apply. Positions land in an rgba32f image that the
+## surface shader samples in its vertex stage, so vertices never touch the CPU.
 ## Several instances can run per frame (one per sheet); the SPIR-V is compiled
 ## once and shared across them.
 
 const SHADER_DIR := "res://shaders/cloth/"
-const STAGES: Array[String] = ["predict", "solve", "apply"]
+const STAGES: Array[String] = ["predict", "apply", "vbd"]
+## Vertex block descent colours (x mod 2, y mod 2); see cloth_vbd.comp.
+const VBD_COLORS := 4
 const WG := 256
 
 static var _spirv_cache := {}
@@ -26,11 +28,11 @@ var bend_compliance := 5e-6
 ## one second LOW kept ~3x the velocity ULTRA did; 0.98 keeps the MEDIUM look on
 ## every tier.
 var damping := 0.98
-var relaxation := 1.7
 var drag := 0.9
 var gravity := Vector3(0.0, -9.8, 0.0)
 var iterations := 14
 var substeps := 4
+var inextensible := true
 
 # The CPU animates the slow wind (direction wander, gust envelope) into `wind`;
 # the shader layers fast spatial turbulence on top, scaled by `wind_gust` with
@@ -95,6 +97,7 @@ func init_render() -> void:
 	config.gravity_mps2 = gravity
 	config.damping = damping
 	config.drag = drag
+	config.inextensible = inextensible
 	var config_error := config.validate()
 	if config_error != "":
 		push_error("Cloth config: %s" % config_error)
@@ -129,6 +132,7 @@ func init_render() -> void:
 	_buffers["velocities"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["predicted"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
 	_buffers["deltas"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["tension"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 
 	# One texel per vertex, laid out exactly like the grid: the surface shader
 	# indexes it straight from the mesh UV.
@@ -144,13 +148,13 @@ func init_render() -> void:
 	_tex_rid = _rd.texture_create(fmt, RDTextureView.new(), [])
 	_rd.texture_clear(_tex_rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
 
-	var order := ["positions", "velocities", "predicted", "deltas"]
+	var order := ["positions", "velocities", "predicted", "deltas", "tension"]
 	for stage in STAGES:
 		var uniforms: Array[RDUniform] = []
 		for bi in order.size():
 			var u := RDUniform.new()
 			u.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-			u.binding = bi
+			u.binding = bi if bi < 4 else bi + 1
 			u.add_id(_buffers[order[bi]])
 			uniforms.append(u)
 		var tu := RDUniform.new()
@@ -168,21 +172,26 @@ func step_render(dt: float) -> void:
 		return
 	_read_timings()
 	var sub_dt := dt / float(substeps)
-	var pc := _pack_push_constant(sub_dt, false)
-	var pc_last := _pack_push_constant(sub_dt, true)
+	var pc := _pack_push_constant(sub_dt)
 	var groups := ceili(float(vertex_count()) / WG)
 
 	_rd.capture_timestamp(profile_key + "/start")
 	var cl := _rd.compute_list_begin()
+	var colour_pcs: Array[PackedByteArray] = []
+	for colour in VBD_COLORS:
+		var colour_pc := pc.duplicate()
+		colour_pc.encode_s32(120, colour)
+		colour_pcs.append(colour_pc)
+	var colour_groups := ceili(float(ceili(grid_w / 2.0) * ceili(grid_h / 2.0)) / WG)
 	for _s in substeps:
 		_dispatch(cl, "predict", pc, groups)
 		cl = _mark(cl, profile_key + "/predict")
 		for _iter in iterations:
-			_dispatch(cl, "solve", pc, groups)
-			cl = _mark(cl, profile_key + "/solve")
-			var last := _iter == iterations - 1
-			_dispatch(cl, "apply", pc_last if last else pc, groups)
-			cl = _mark(cl, profile_key + "/apply")
+			for colour in VBD_COLORS:
+				_dispatch(cl, "vbd", colour_pcs[colour], colour_groups)
+		cl = _mark(cl, profile_key + "/vbd")
+		_dispatch(cl, "apply", pc, groups)
+		cl = _mark(cl, profile_key + "/apply")
 	_rd.compute_list_end()
 	_rd.capture_timestamp(profile_key + "/end")
 
@@ -245,18 +254,18 @@ func _dispatch(cl: int, stage: String, pc: PackedByteArray, groups: int) -> void
 	_rd.compute_list_add_barrier(cl)
 
 
-func _pack_push_constant(dt: float, last_iter: bool) -> PackedByteArray:
+func _pack_push_constant(dt: float) -> PackedByteArray:
 	var pc := PackedByteArray()
 	pc.resize(128)
 	pc.encode_float(0, dt)
 	pc.encode_float(4, 1.0 / dt)
 	# Per-substep share of the per-1/60 s damping: substeps no longer stack it.
 	pc.encode_float(8, pow(damping, dt * 60.0))
-	pc.encode_float(12, relaxation)
+	pc.encode_float(12, 0.0)
 	pc.encode_s32(16, grid_w)
 	pc.encode_s32(20, grid_h)
 	pc.encode_s32(24, vertex_count())
-	pc.encode_s32(28, 1 if last_iter else 0)
+	pc.encode_s32(28, 0)
 	pc.encode_float(32, rest_spacing)
 	pc.encode_float(36, stretch_compliance)
 	pc.encode_float(40, shear_compliance)
@@ -280,5 +289,5 @@ func _pack_push_constant(dt: float, last_iter: bool) -> PackedByteArray:
 	pc.encode_s32(112, grid_w)
 	pc.encode_s32(116, 1 if wind_enabled else 0)
 	pc.encode_s32(120, 0)
-	pc.encode_s32(124, 0)
+	pc.encode_s32(124, 1 if inextensible else 0)
 	return pc

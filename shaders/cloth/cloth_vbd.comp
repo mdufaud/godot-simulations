@@ -1,0 +1,159 @@
+// Vertex block descent (Chen et al. 2024) for one colour of the grid: colour
+// (x mod 2, y mod 2), so no structural or shear neighbour shares it and the
+// vertices of a colour move at once. Bending neighbours (offset 2) share the
+// colour and are read while they move: Jacobi for bending only, which costs
+// less than the 9 colours an exact colouring needs. Each vertex takes one Newton
+// step on its local energy: inertia, 12 mass-spring constraints (stiffness
+// 1 / compliance, unit vertex mass), and penalty
+// contacts with the ground and the boulder. deltas holds the iterate; predicted
+// holds the inertial target. Inextensible mode turns the structural springs into
+// AVBD hard constraints (Giles et al. 2025): each edge keeps a multiplier and a
+// penalty that starts at the inertia scale and ramps with the violation up to the
+// stretch stiffness, so the tension survives across iterations and substeps
+// instead of being re-found.
+
+// Penalty growth per metre of edge violation, in units of the inertia stiffness.
+const float PENALTY_RAMP_PER_M = 1000.0;
+// Share of the violation left at the start of the substep that a hard edge
+// corrects within it; the rest carries over instead of exploding (AVBD alpha).
+const float STABILIZATION = 0.95;
+
+// Violation a hard edge from vertex i to j started the substep with.
+float start_violation(int i, int j, float rest) {
+	return STABILIZATION * (length(positions.data[i].xyz - positions.data[j].xyz) - rest);
+}
+
+void add_spring(int x, int y, int dx, int dy, float rest, float stiffness, float pull,
+		bool hard, vec3 xi, inout vec3 f, inout mat3 H) {
+	int nx = x + dx;
+	int ny = y + dy;
+	if (!in_grid(nx, ny)) {
+		return;
+	}
+	int j = vindex(nx, ny);
+	vec3 d = xi - deltas.data[j].xyz;
+	float len = length(d);
+	if (len < 1e-8) {
+		return;
+	}
+	vec3 n = d / len;
+	float c = len - rest;
+	if (hard) {
+		c -= start_violation(vindex(x, y), j, rest);
+	}
+	float force = stiffness * c + pull;
+	f -= force * n;
+	mat3 nn = outerProduct(n, n);
+	// The transverse term is negative when the spring is compressed: dropped, so
+	// the block stays positive definite.
+	H += stiffness * nn + max(force / len, 0.0) * (mat3(1.0) - nn);
+}
+
+vec2 edge_penalty(vec4 state, float k_min, float k_max) {
+	return clamp(state.zw, vec2(k_min), vec2(k_max));
+}
+
+void update_tension(int x, int y, int i, vec3 xi, float rest, float k_min, float k_max) {
+	vec4 state = tension.data[i];
+	vec2 k = edge_penalty(state, k_min, k_max);
+	float ramp = PENALTY_RAMP_PER_M * k_min;
+	if (x + 1 < params.grid.x) {
+		float c = length(xi - deltas.data[i + 1].xyz) - rest - start_violation(i, i + 1, rest);
+		state.x += k.x * c;
+		k.x = min(k.x + ramp * abs(c), k_max);
+	}
+	if (y + 1 < params.grid.y) {
+		int j = i + params.grid.x;
+		float c = length(xi - deltas.data[j].xyz) - rest - start_violation(i, j, rest);
+		state.y += k.y * c;
+		k.y = min(k.y + ramp * abs(c), k_max);
+	}
+	tension.data[i] = vec4(state.xy, k);
+}
+
+void add_contact(float depth, vec3 n, float k, inout vec3 f, inout mat3 H) {
+	f += k * depth * n;
+	H += k * outerProduct(n, n);
+}
+
+void main() {
+	int cx = params.misc.z & 1;
+	int cy = params.misc.z >> 1;
+	int columns = (params.grid.x - cx + 1) / 2;
+	int rows = (params.grid.y - cy + 1) / 2;
+	int t = int(gl_GlobalInvocationID.x);
+	if (t >= columns * rows) {
+		return;
+	}
+	int x = cx + 2 * (t % columns);
+	int y = cy + 2 * (t / columns);
+	int i = vindex(x, y);
+	vec4 xi = deltas.data[i];
+	float d0 = params.cloth.x;
+	float k_stretch = 1.0 / params.cloth.y;
+	bool inextensible = params.misc.w == 1;
+	float inertia = params.sim.y * params.sim.y;
+	if (xi.w > 0.5) {
+		if (inextensible) {
+			update_tension(x, y, i, xi.xyz, d0, inertia, k_stretch);
+		}
+		return;
+	}
+	vec3 f = -inertia * (xi.xyz - predicted.data[i].xyz);
+	mat3 H = mat3(inertia);
+
+	float k_shear = 1.0 / params.cloth.z;
+	float k_bend = 1.0 / params.cloth.w;
+	if (inextensible) {
+		vec4 own = tension.data[i];
+		vec2 k_own = edge_penalty(own, inertia, k_stretch);
+		add_spring(x, y, 1, 0, d0, k_own.x, own.x, true, xi.xyz, f, H);
+		add_spring(x, y, 0, 1, d0, k_own.y, own.y, true, xi.xyz, f, H);
+		if (x > 0) {
+			vec4 left = tension.data[i - 1];
+			add_spring(x, y, -1, 0, d0, edge_penalty(left, inertia, k_stretch).x, left.x,
+					true, xi.xyz, f, H);
+		}
+		if (y > 0) {
+			vec4 up = tension.data[i - params.grid.x];
+			add_spring(x, y, 0, -1, d0, edge_penalty(up, inertia, k_stretch).y, up.y,
+					true, xi.xyz, f, H);
+		}
+	} else {
+		add_spring(x, y, 1, 0, d0, k_stretch, 0.0, false, xi.xyz, f, H);
+		add_spring(x, y, -1, 0, d0, k_stretch, 0.0, false, xi.xyz, f, H);
+		add_spring(x, y, 0, 1, d0, k_stretch, 0.0, false, xi.xyz, f, H);
+		add_spring(x, y, 0, -1, d0, k_stretch, 0.0, false, xi.xyz, f, H);
+	}
+	float ds = d0 * 1.41421356;
+	add_spring(x, y, 1, 1, ds, k_shear, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, 1, -1, ds, k_shear, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, -1, 1, ds, k_shear, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, -1, -1, ds, k_shear, 0.0, false, xi.xyz, f, H);
+	float db = d0 * 2.0;
+	add_spring(x, y, 2, 0, db, k_bend, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, -2, 0, db, k_bend, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, 0, 2, db, k_bend, 0.0, false, xi.xyz, f, H);
+	add_spring(x, y, 0, -2, db, k_bend, 0.0, false, xi.xyz, f, H);
+
+	float k_contact = 100.0 * inertia;
+	if (xi.y < 0.01) {
+		add_contact(0.01 - xi.y, vec3(0.0, 1.0, 0.0), k_contact, f, H);
+	}
+	if (params.sphere.w > 0.0) {
+		vec3 r = xi.xyz - params.sphere.xyz;
+		float dist = length(r);
+		if (dist < params.sphere.w && dist > 1e-6) {
+			add_contact(params.sphere.w - dist, r / dist, k_contact, f, H);
+		}
+	}
+
+	vec3 moved = xi.xyz;
+	if (abs(determinant(H)) > 1e-20) {
+		moved += inverse(H) * f;
+		deltas.data[i] = vec4(moved, 0.0);
+	}
+	if (inextensible) {
+		update_tension(x, y, i, moved, d0, inertia, k_stretch);
+	}
+}
