@@ -13,7 +13,7 @@ void main() {
         uint read_half = stage % 2u;
         uint write_half = (stage + 1u) % 2u;
         vec4 butterfly_value = butterfly[stage * LOCAL_N + col];
-        uvec2 indices = floatBitsToUint(butterfly_value.xy);
+        uvec2 indices = uvec2(round(butterfly_value.xy)); // exact floats: ocean_local_butterfly.comp
         vec2 upper = row_shared[read_half * LOCAL_N + indices.x];
         vec2 lower = row_shared[read_half * LOCAL_N + indices.y];
         vec2 twiddle = butterfly_value.zw;

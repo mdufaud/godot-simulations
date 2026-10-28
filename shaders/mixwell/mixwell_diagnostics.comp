@@ -24,16 +24,10 @@ float diagnostic_nearest_distance(vec2 coordinate) {
 			continue;
 		}
 		vec2 direction = normalize(origin_direction.zw);
-		vec2 perpendicular = vec2(-direction.y, direction.x);
-		int line_count = max(int(round(extra.y)), 1);
-		for (int line_index = 0; line_index < line_count; line_index++) {
-			float offset = (float(line_index) - 0.5 * float(line_count - 1)) * extra.x;
-			if (extra.z != 0.0) {
-				offset += (hash11(float(line_index) + extra.z) * 2.0 - 1.0) * extra.z;
-			}
-			vec2 line_origin = origin_direction.xy + perpendicular * (offset + extra.w);
-			nearest = min(nearest, abs(dot(coordinate - line_origin, perpendicular)));
-		}
+		vec2 origin = origin_direction.xy + vec2(-direction.y, direction.x) * extra.w;
+		float gap = operation_type == 0 ? 0.0 : extra.x;
+		nearest = min(nearest, pattern_nearest_distance(operation_type, coordinate - origin,
+				direction, gap, header.z, header.w));
 	}
 	return nearest;
 }

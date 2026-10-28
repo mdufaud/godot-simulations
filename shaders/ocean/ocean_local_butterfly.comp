@@ -16,8 +16,10 @@ void main() {
     uint read1 = stride * (i + mid) + j;
     uint write0 = stride * (2u * i) + j;
     uint write1 = stride * (2u * i + 1u) + j;
+    // Indices as exact float values, not raw uint bits (denormals; see
+    // ocean_fft_butterfly.comp). ocean_local_fft.comp rounds them back.
     butterfly[stage * LOCAL_N + write0] =
-        vec4(uintBitsToFloat(read0), uintBitsToFloat(read1), twiddle);
+        vec4(float(read0), float(read1), twiddle);
     butterfly[stage * LOCAL_N + write1] =
-        vec4(uintBitsToFloat(read0), uintBitsToFloat(read1), -twiddle);
+        vec4(float(read0), float(read1), -twiddle);
 }

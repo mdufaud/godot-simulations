@@ -409,6 +409,7 @@ var _stats_mutex := Mutex.new()
 var _stats_pending := false
 var _pool_stats_cache := {}
 var _pool_stats_mutex := Mutex.new()
+var _pool_counts_pending := false
 var _bootstrap_bounds := AABB()
 var _display_bounds_ready := false
 var _display_hyst := DisplayBoxHysteresis.new()
@@ -964,9 +965,12 @@ func set_pool_budget(budget: int) -> void:
 	_sets.clear()
 	if _pool != null:
 		_pool.free_render()
+	_pool_counts_pending = false
 	pool_budget = clampi(budget if budget > 0 else pool_budget, 1, atlas_slots)
 	_pool = FireTilePool.new()
-	if not _pool.init_render(_rd, _tex["activity"], pool_budget):
+	# Same slot layout as init_render: without it a 4096-slot atlas got a pool
+	# laid out for the default 2048 slots.
+	if not _pool.init_render(_rd, _tex["activity"], pool_budget, atlas_slots):
 		push_error("Fire solver could not rebuild the tile pool.")
 		_pool = null
 		return
@@ -1263,7 +1267,7 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/end")
-	# The pool counters ride their own tiny synchronous readback every 8 frames
+	# The pool counters ride their own tiny async readback every 8 frames
 	# regardless of profiling: the debug overlay and the capture harness both
 	# report occupancy, and a stale zero reads as "empty pool" to both.
 	if _frame % 8 == 0:
@@ -1664,7 +1668,10 @@ func _read_timings() -> void:
 func read_pool_stats() -> Dictionary:
 	if _pool == null or not _pool.initialized:
 		return {}
-	var c := _pool.read_counts()
+	return _pool_stats_from_counts(_pool.read_counts())
+
+
+func _pool_stats_from_counts(c: PackedInt32Array) -> Dictionary:
 	return {
 		"resident": c[FireTilePool.C_ACTIVE],
 		"cores": c[FireTilePool.C_KEEP],
@@ -1682,8 +1689,26 @@ func get_debug_pool_stats() -> Dictionary:
 	return copy
 
 
+## Refreshes the overlay's pool snapshot without stalling: the synchronous
+## read_counts() waited for the whole queued fire step every 8th frame. The
+## snapshot lags a frame or two, like get_stats().
 func _update_pool_stats_cache() -> void:
-	var snapshot := read_pool_stats()
+	if _pool_counts_pending or _pool == null or not _pool.initialized:
+		return
+	_pool_counts_pending = true
+	_rd.buffer_get_data_async(_pool.counts_rid(), _on_pool_counts_ready, 0,
+		FireTilePool.COUNTS_WORDS * 4)
+
+
+func _on_pool_counts_ready(bytes: PackedByteArray) -> void:
+	_pool_counts_pending = false
+	if _pool == null or not _pool.initialized or bytes.size() < FireTilePool.COUNTS_WORDS * 4:
+		return
+	var c := PackedInt32Array()
+	c.resize(FireTilePool.COUNTS_WORDS)
+	for i in FireTilePool.COUNTS_WORDS:
+		c[i] = bytes.decode_u32(i * 4)
+	var snapshot := _pool_stats_from_counts(c)
 	_pool_stats_mutex.lock()
 	_pool_stats_cache = snapshot
 	_pool_stats_mutex.unlock()
@@ -1693,6 +1718,8 @@ func free_render() -> void:
 	if _rd == null:
 		return
 	initialized = false
+	# A readback of a buffer about to be freed may never answer.
+	_pool_counts_pending = false
 	# The stage sets have to go first. They bind the pool's indirection volume and
 	# tile lists, and freeing a resource in Godot also drops every uniform set that
 	# references it — so tearing the pool down first would invalidate these behind

@@ -28,21 +28,21 @@ const CPU_GOLDENS := [
 	[0.359848827124, -0.209999993443],
 	[0.372573584318, -0.206582069397],
 	[0.370000004768, -0.209999993443],
-	[0.202904567122, -0.209999993443],
-	[0.281788051128, -0.209999993443],
-	[0.244730785489, 0.037602756172],
-	[0.331145524979, 0.015012499876],
-	[0.419651836157, -0.329145014286],
-	[0.454952865839, -0.026333246380],
-	[-0.397537738085, 0.154076203704],
-	[0.814242064953, -0.383117645979],
-	[0.696609914303, -0.057071477175],
-	[0.341940313578, -0.209272474051],
-	[0.480739802122, -0.156950622797],
-	[0.159733921289, -0.209999993443],
-	[0.321938484907, -0.224071413279],
-	[0.381899595261, -0.190166831017],
-	[0.337046623230, -0.369618535042],
+	[0.202365919948, -0.209999993443],
+	[0.282789975405, -0.209999993443],
+	[0.364158302546, -0.002806842327],
+	[0.343880176544, 0.007083654404],
+	[0.210636630654, -0.435729742050],
+	[0.313077807426, 0.011130049825],
+	[-0.340353220701, 0.255645304918],
+	[0.266750782728, -0.607660651207],
+	[-0.068243294954, 0.054871618748],
+	[0.276869505644, -0.058102622628],
+	[0.575342893600, -0.029069144279],
+	[0.265820562840, -0.209999993443],
+	[0.323050290346, -0.224748045206],
+	[0.374386221170, -0.188835710287],
+	[0.418397188187, -0.508496403694],
 ]
 
 
@@ -57,29 +57,33 @@ func _initialize() -> void:
 	_test_math_canvas_coordinate_mapping()
 	_test_oracle_line_fixtures()
 	_test_oracle_segment_fixtures()
+	_test_segment_mask_matches_reference()
 	_test_oracle_jacobian_grid_is_finite()
 	_test_gallery_names_and_counts()
-	_test_gallery_chained_tri_wave()
+	_test_reference_patterns()
 	_test_gallery_physical_reverse_order()
 	_test_gallery_mean_compensation()
 	_test_gallery_published_passes()
 	_test_gallery_retained_stroke_passes()
 	_test_baked_stroke_prefix()
+	_test_stroke_grid()
 	_test_pattern_round_trip()
 	_test_pattern_physical_order()
 	_test_pattern_curve_and_transform_expansion()
 	_test_pattern_steps()
 	_test_pattern_snapshot_carries_pattern()
+	_test_affine_preset_keeps_stroke_radius()
 	_test_pattern_diagnostics_are_standalone()
 	_test_progressivity_r2_sequence()
 	_test_progressivity_spp_targets()
 	_test_progressivity_fixed_composite_period()
 	_test_progressivity_periodic_coordinates()
+	_test_periodic_tiling_needs_whole_pixels()
 	_test_progressivity_path_comparison()
 	_test_progressivity_budget_progression()
 	_test_progressivity_render_snapshot()
 	_test_affine_extensions()
-	_test_slip_images_and_calibration()
+	_test_slip_images()
 	_test_diagnostics_contract()
 	_test_controller_contract()
 	_test_cpu_preset_matrix()
@@ -199,6 +203,16 @@ func _test_math_canvas_coordinate_mapping() -> void:
 	var segment: Vector4 = solver.get_segments()[0]
 	_check(segment.y < 0.0 and segment.w < 0.0,
 		"top-half canvas strokes map to shader top-half coordinates")
+	# The canvas spans 2 units over its height in either orientation: on a
+	# portrait canvas a 10 px stroke is 0.1 units, as the display draws it.
+	var portrait := Solver.new()
+	portrait.initialize(Vector2i(100, 200), Config.new(), Vector2i(100, 200))
+	var flick := Stroke.new()
+	flick.points_px = PackedVector2Array([Vector2(50.0, 100.0), Vector2(60.0, 100.0)])
+	portrait.set_strokes([flick])
+	var span: Vector4 = portrait.get_segments().back()
+	_check(is_equal_approx(span.z, 0.1) and is_equal_approx(portrait.get_segments()[0].x, 0.0),
+		"portrait strokes are normalised by the canvas height (%s)" % str(span))
 
 
 func _test_oracle_line_fixtures() -> void:
@@ -220,6 +234,22 @@ func _test_oracle_segment_fixtures() -> void:
 		_check(error <= 5.0e-4,
 			"rdSegment matches independent float64 fixture at (%f,%f): %.9f" \
 			% [point_value.x, point_value.y, error])
+
+
+# Mixwell.glsl rdSegment: mask = 1 - smoothstep(0.5 dMax, dMax, d), dMax = 10 r.
+# The full drift reaches 5 epsilon from the stroke; nothing reaches 10 epsilon.
+func _test_segment_mask_matches_reference() -> void:
+	var epsilon := 0.05
+	var segment := Vector4(-0.3, 0.0, 0.3, 0.0)
+	for case in [[0.0, 1.0], [4.99, 1.0], [7.5, 0.5], [10.0, 0.0], [12.0, 0.0]]:
+		var point := Vector2(0.1, case[0] * epsilon)
+		_check(absf(Diagnostics.segment_mask(point, segment, epsilon, 10.0) - case[1]) <= 1.0e-6,
+				"segment mask at %s epsilon is %s" % [str(case[0]), str(case[1])])
+	var beyond: Array[Dictionary] = [{"type": Gallery.SEGMENT, "segment": segment}]
+	var far := Vector2(0.1, 10.5 * epsilon)
+	_check(Diagnostics.cpu_advect(far, beyond, false, Vector2(2.0, 2.0), 0.05 * 180.0,
+			Vector2i(640, 360), -1, 180.0, 0.65, 10.0, 0, 0.1) == far,
+			"a segment moves nothing beyond its cutoff")
 
 
 func _test_oracle_jacobian_grid_is_finite() -> void:
@@ -257,27 +287,75 @@ func _test_gallery_names_and_counts() -> void:
 			"finite segment has one segment")
 	_check(Gallery.preset_segments(Gallery.FREEHAND_LAB).is_empty(),
 			"freehand lab starts without preset segments")
-	_check(Gallery.preset_operations(Gallery.NONPAREIL).size() == 1
-			and Gallery.preset_operations(Gallery.NONPAREIL)[0].type == Gallery.LINE_COMB,
-		"Nonpareil is one rdLine comb pass")
-	_check(Gallery.preset_operations(Gallery.GEL_GIT).size() == 2,
-		"Gel-Git is two opposed comb passes")
+	var nonpareil: Array[Dictionary] = Gallery.preset_pattern(Gallery.NONPAREIL).render_operations()
+	_check(nonpareil.size() == 1 and nonpareil[0].type == Gallery.LINE_COMB,
+		"Nonpareil is one rdNonpareil comb pass")
+	var gel_git: Array[Dictionary] = Gallery.preset_pattern(Gallery.GEL_GIT).render_operations()
+	_check(gel_git.size() == 1 and gel_git[0].type == Gallery.GEL_GIT_PASS,
+		"Gel-Git is one pass of two superposed opposed combs")
 
 
-func _test_gallery_chained_tri_wave() -> void:
-	var segments := Gallery.tri_wave(Vector2(-0.8, 0.0), Vector2(0.8, 0.0), 0.1, 6)
-	_check(segments.size() == 12, "TriWave uses two chained segments per cycle")
-	for index in range(segments.size() - 1):
-		_check(Vector2(segments[index].z, segments[index].w).distance_to(
-				Vector2(segments[index + 1].x, segments[index + 1].y)) <= 1.0e-6,
-			"TriWave segment chain is continuous")
+# The reference pattern functions (Mixwell.glsl), checked on what defines them
+# rather than on a second copy of their code.
+func _test_reference_patterns() -> void:
+	var epsilon := 0.05
+	# Nonpareil: the windowed comb matches the infinite sum of its line drifts.
+	for y in [0.0, 0.037, 0.09]:
+		var windowed := Math.rd_nonpareil(Vector2(0.3, y), epsilon, Vector2.RIGHT, 0.18, 0.0, 10.0)
+		var full := 0.0
+		for k in range(-400, 401):
+			full += Math.rd_line_height(absf(y - 0.18 * float(k)), epsilon)
+		_check(absf(windowed.x - full) <= 1.0e-4 and windowed.y == 0.0,
+				"Nonpareil window matches the full comb at y=%s (%s vs %s)" % [str(y), str(windowed.x), str(full)])
+	# Gel-Git: tines every gap, alternately moving along and against direction,
+	# so the drift at a Gel tine is the opposite of the drift at a Git tine, and
+	# the field repeats every two gaps.
+	var gap := 0.11851852
+	var gel := Math.rd_gel_git(Vector2(0.1, 0.0), epsilon, Vector2.RIGHT, gap)
+	var git := Math.rd_gel_git(Vector2(0.1, gap), epsilon, Vector2.RIGHT, gap)
+	_check(gel.x < 0.0 and absf(gel.x + git.x) <= 1.0e-9,
+			"Gel and Git tines drift oppositely (%s, %s)" % [str(gel.x), str(git.x)])
+	# (Vector2 holds 32-bit floats, so the shifted point is off by ~1e-8.)
+	_check(Math.rd_gel_git(Vector2(0.1, 0.03 + 2.0 * gap), epsilon, Vector2.RIGHT, gap).distance_to(
+			Math.rd_gel_git(Vector2(0.1, 0.03), epsilon, Vector2.RIGHT, gap)) <= 1.0e-6,
+			"Gel-Git repeats every two gaps")
+	# TriWave: periodic along its line, zero beyond the mask reach, and a wave
+	# moving forward drags the fluid along its path forward (reverse drift points
+	# back). A few epsilon out the windowed sum leaves the dipole far field's
+	# reflux uncancelled -- the reference's own truncation -- so the transport is
+	# measured on the path.
+	var wavelength := 0.26666667
+	var amplitude := 0.1
+	var here := Vector2(0.071, 0.043)
+	var wave := Math.rd_tri_wave(here, epsilon, Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1)
+	var shifted := Math.rd_tri_wave(here + Vector2(wavelength, 0.0), epsilon, Vector2.RIGHT,
+			wavelength, amplitude, false, 10.0, 0.1)
+	_check(wave.distance_to(shifted) <= 1.0e-6, "TriWave repeats every wavelength")
+	_check(Math.rd_tri_wave(Vector2(0.0, amplitude + 10.0 * epsilon + 0.01), epsilon,
+			Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1) == Vector2.ZERO,
+			"TriWave moves nothing beyond its mask reach")
+	var mean := Vector2.ZERO
+	for index in 32:
+		mean += Math.rd_tri_wave(Vector2(float(index) / 32.0 * wavelength, 0.05), epsilon,
+				Vector2.RIGHT, wavelength, amplitude, false, 10.0, 0.1) / 32.0
+	_check(mean.x < 0.0, "a forward TriWave transports the fluid forward (%s)" % str(mean))
+	# Broken: the same segments in the opposite order, so the field differs but
+	# the transport across the wave does not reverse.
+	var broken_mean := Vector2.ZERO
+	for index in 32:
+		broken_mean += Math.rd_tri_wave(Vector2(float(index) / 32.0 * wavelength, 0.05), epsilon,
+				Vector2.RIGHT, wavelength, amplitude, true, 10.0, 0.1) / 32.0
+	var broken := Math.rd_tri_wave(here, epsilon, Vector2.RIGHT, wavelength, amplitude, true,
+			10.0, 0.1)
+	_check(broken.distance_to(wave) > 1.0e-4 and broken_mean.x < 0.0,
+			"a broken TriWave reorders its strokes (%s vs %s)" % [str(broken), str(wave)])
 
 
 func _test_gallery_physical_reverse_order() -> void:
 	var solver := Solver.new()
 	var config := Config.new()
 	solver.initialize(Vector2i(128, 128), config, Vector2i(128, 128))
-	solver.set_preset(Gallery.FROG_FOOT)
+	solver.set_preset(Gallery.CIRCLE_GRID)
 	var logical := solver.get_segments()
 	var physical := solver.get_segments_physical_order()
 	_check(logical.size() == physical.size() and logical.size() > 1,
@@ -287,28 +365,39 @@ func _test_gallery_physical_reverse_order() -> void:
 				"RDF composition dispatches segments in physical inverse order")
 
 
+# A comb's reverse drift averages -pi epsilon^2 / pitch along its direction;
+# compensation must cancel that transport, not double it. Measured on the comb
+# itself: Mean leaves no average drift over a pitch, Minimum none between tines.
 func _test_gallery_mean_compensation() -> void:
 	var epsilon := 0.25
-	var expected := -PI * epsilon * epsilon / 2.0
+	var expected := PI * epsilon * epsilon / 2.0
 	_check(absf(Gallery.compensation_value(2, epsilon, 2.0) - expected) <= 1.0e-12,
-			"mean drift compensation follows -pi epsilon^2/pitch")
-	var h := 2.0 / epsilon
-	var minimum := epsilon * (-37.7829 + 1.01689 * h) \
-			/ (1.09635 + h * (12.2129 + h * (1.59101 + h)))
-	_check(absf(Gallery.compensation_value(1, epsilon, 2.0) - minimum) <= 1.0e-12,
-			"minimum drift compensation follows Padé approximation")
+			"mean drift compensation is +pi epsilon^2/pitch")
 	_check(Gallery.compensation_vector(2, epsilon, 2.0, Vector2.RIGHT).distance_to(
 			Vector2(expected, 0.0)) <= 1.0e-6, "mean compensation follows tine direction")
+	var comb: Array[Dictionary] = [Gallery._comb(Vector2.ZERO, Vector2.RIGHT, 0.2, 0.0)]
+	for mode in [Config.DriftCompensation.MEAN, Config.DriftCompensation.MINIMUM]:
+		var mean := 0.0
+		for index in 400:
+			var point := Vector2(0.0, (float(index) + 0.5) / 400.0 * 0.2)
+			mean += (Diagnostics.cpu_advect(point, comb, false, Vector2(2.0, 2.0), 9.0,
+					Vector2i(640, 360), -1, 180.0, 0.65, 10.0, mode, 0.1).x - point.x) / 400.0
+		var between := Diagnostics.cpu_advect(Vector2(0.0, 0.1), comb, false, Vector2(2.0, 2.0),
+				9.0, Vector2i(640, 360), -1, 180.0, 0.65, 10.0, mode, 0.1).x
+		var cancelled := absf(mean) if mode == Config.DriftCompensation.MEAN else absf(between)
+		print("MIXWELL COMPENSATION mode=%d mean=%.6f between_tines=%.6f" % [mode, mean, between])
+		_check(cancelled <= 2.0e-4, "compensation mode %d cancels the comb's transport" % mode)
 
 
 func _test_gallery_published_passes() -> void:
-	var feather := Gallery.preset_operations(Gallery.FEATHER)
-	var bird_wing := Gallery.preset_operations(Gallery.BIRD_WING)
-	var peacock := Gallery.preset_operations(Gallery.PEACOCK)
-	var frog_foot := Gallery.preset_operations(Gallery.FROG_FOOT)
-	_check(feather.size() > 3 and bird_wing.size() > feather.size(),
-		"Feather and BirdWing compose combs and TriWaves")
-	_check(peacock.size() == frog_foot.size() and peacock.size() > 3,
+	var feather: Array[Dictionary] = Gallery.preset_pattern(Gallery.FEATHER).render_operations()
+	var bird_wing: Array[Dictionary] = Gallery.preset_pattern(Gallery.BIRD_WING).render_operations()
+	var peacock: Array[Dictionary] = Gallery.preset_pattern(Gallery.PEACOCK).render_operations()
+	var frog_foot: Array[Dictionary] = Gallery.preset_pattern(Gallery.FROG_FOOT).render_operations()
+	_check(feather.size() == 3 and bird_wing.size() == 4
+			and int(feather[0].type) == Gallery.TRI_WAVE and int(feather[2].type) == Gallery.GEL_GIT_PASS,
+		"Feather is Gel-Git, a comb and a TriWave, rendered last pass first")
+	_check(peacock.size() == frog_foot.size() and peacock.size() == 4,
 		"Peacock and FrogFoot share published pass count")
 	_check(Gallery.all_preset_names().size() == 18,
 		"gallery exposes affine, pattern and paint-spread entries")
@@ -340,6 +429,42 @@ func _line_stroke(y: float, segments: int) -> MixwellStroke:
 	return stroke
 
 
+# The exact stroke pass finds segments through a uniform grid: a cell must be
+# at least the mask reach plus half a segment, and every segment must be listed
+# in the cell of its midpoint, in ascending order.
+func _test_stroke_grid() -> void:
+	var solver := Solver.new()
+	solver.initialize(Vector2i(320, 180), Config.new(), Vector2i(320, 180))
+	var strokes: Array = []
+	for row in 3:
+		var stroke := Stroke.new()
+		stroke.radius_px = 6.0 + 3.0 * row
+		for index in 40:
+			stroke.points_px.append(Vector2(30.0 + 6.5 * index, 40.0 + 50.0 * row + 20.0 * sin(index * 0.4)))
+		strokes.append(stroke)
+	solver.set_strokes(strokes, Gallery.FREEHAND_LAB)
+	var snapshot = solver.create_render_snapshot()
+	var grid: Dictionary = snapshot.stroke_grid
+	var segments: PackedFloat32Array = snapshot.stroke_segments
+	var reach := 0.0
+	var listed := true
+	for index in segments.size() / 8:
+		var base := index * 8
+		var start := Vector2(segments[base], segments[base + 1])
+		var end := Vector2(segments[base + 2], segments[base + 3])
+		reach = maxf(reach, segments[base + 4] * snapshot.cutoff_gamma + 0.5 * start.distance_to(end))
+		var cell := Vector2i(((start + end) * 0.5 - grid.origin) / grid.cell)
+		var flat: int = cell.y * grid.dims.x + cell.x
+		var items: PackedInt32Array = grid.items.slice(grid.starts[flat], grid.starts[flat + 1])
+		listed = listed and items.has(index)
+	var ascending := true
+	for flat in grid.dims.x * grid.dims.y:
+		for at in range(grid.starts[flat] + 1, grid.starts[flat + 1]):
+			ascending = ascending and grid.items[at - 1] < grid.items[at]
+	_check(grid.cell >= reach and listed and ascending,
+		"stroke grid: cell %s >= reach %s, every midpoint listed, ascending" % [str(grid.cell), str(reach)])
+
+
 func _test_baked_stroke_prefix() -> void:
 	var solver := Solver.new()
 	solver.initialize(Vector2i(256, 256), Config.new(), Vector2i(256, 256))
@@ -352,6 +477,17 @@ func _test_baked_stroke_prefix() -> void:
 		"recent strokes stay live while they fit the window")
 	var third := _line_stroke(120.0, 10)
 	solver.set_strokes([first, second, third], Gallery.FREEHAND_LAB)
+	# Converging samples evaluate every stroke exactly: one pass, all 30
+	# segments in drawing order (the baked stroke first).
+	var exact = solver.create_render_snapshot()
+	_check(exact.exact_strokes and exact.operations.size() == 1
+			and int(exact.operations[0].type) == Gallery.USER_STROKES
+			and int(exact.operations[0].count) == 30
+			and is_equal_approx(exact.stroke_segments[1], exact.stroke_segments[3])
+			and exact.stroke_segments[1] < exact.stroke_segments[10 * 8 + 1],
+		"converging samples evaluate all strokes exactly, oldest first in the buffer")
+	# The one-sample drawing preview reads the oldest stroke from the map.
+	solver.set_exact_strokes(false)
 	var operations: Array = solver.create_render_snapshot().operations
 	_check(solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 30,
 		"the oldest stroke is baked whole once the live window overflows")
@@ -407,7 +543,7 @@ func _test_baked_stroke_prefix() -> void:
 func _test_pattern_round_trip() -> void:
 	var pattern = Gallery.preset_pattern(Gallery.GEL_GIT)
 	var descriptor: Dictionary = pattern.serialize()
-	_check(descriptor.name == "Gel-Git" and descriptor.operations.size() == 2,
+	_check(descriptor.name == "Gel-Git" and descriptor.operations.size() == 1,
 		"gallery exposes a named ordered pattern")
 	_check(descriptor.source.preset_id == Gallery.GEL_GIT,
 		"pattern metadata identifies its gallery source")
@@ -454,12 +590,30 @@ func _test_pattern_snapshot_carries_pattern() -> void:
 	solver.initialize(Vector2i(320, 180), null, Vector2i(640, 360))
 	solver.set_preset(Gallery.BIRD_WING)
 	var snapshot = solver.create_render_snapshot()
+	# Every BirdWing pass is a closed-form pattern function, rendered as itself.
 	_check(snapshot.pattern.name == "BirdWing"
-			and snapshot.pattern.operations.size() < snapshot.operations.size(),
-		"render snapshot carries high-level pattern and expanded render operations")
-	_check(snapshot.pattern.operations[0].kind == "LINE" or
-			snapshot.pattern.operations[0].kind == "SEGMENT_CHAIN",
+			and snapshot.pattern.operations.size() == snapshot.operations.size(),
+		"render snapshot carries the pattern and its render operations")
+	_check(snapshot.pattern.operations[0].kind in ["LINE", "COMB", "GEL_GIT", "TRI_WAVE",
+			"SEGMENT_CHAIN", "CURVE"],
 		"snapshot operation exposes a scientific operation kind")
+	# BirdWing opens with a Gel-Git pass: a line family, not a segment chain.
+	_check(snapshot.pattern.operations[0].kind == "GEL_GIT",
+		"a Gel-Git operation is labelled GEL_GIT, not SEGMENT_CHAIN")
+
+
+func _test_affine_preset_keeps_stroke_radius() -> void:
+	var solver := Solver.new()
+	solver.initialize(Vector2i(320, 180), null, Vector2i(640, 360))
+	solver.set_preset(Gallery.TWIST)
+	var snapshot = solver.create_render_snapshot()
+	_check(snapshot.affine_mode >= 0, "Twist renders in affine mode")
+	var stroke := {"type": Gallery.SEGMENT, "radius_px": 18.0}
+	_check(is_equal_approx(solver._operation_radius(stroke, snapshot), 18.0),
+		"a user stroke keeps its brush radius under an affine preset (the bake uses it)")
+	_check(is_equal_approx(solver._operation_radius({"type": Gallery.LINE}, snapshot),
+			snapshot.affine_radius_px),
+		"the affine brush itself still uses the affine radius")
 
 
 func _test_pattern_steps() -> void:
@@ -531,6 +685,61 @@ func _test_progressivity_periodic_coordinates() -> void:
 			<= -0.09, "periodic shortest path crosses boundary")
 
 
+# A periodic pass runs on one period and is tiled with pixel % domain, which is
+# exact only when the period is a whole number of pixels. At 1280x720 the
+# Nonpareil pitch (0.1778) is 64 px and tiles; the Gel-Git period (0.2370) is
+# 85.33 px and is evaluated directly -- rounded up to 86 px, every tile would
+# shift a further third of a pixel.
+func _test_periodic_tiling_needs_whole_pixels() -> void:
+	var size := Vector2i(1280, 720)
+	var config := Config.new()
+	config.boundary_mode = Config.BoundaryMode.PERIODIC
+	var solver := Solver.new()
+	solver.initialize(size, config, size)
+	solver.set_preset(Gallery.NONPAREIL)
+	var plan: Array[Dictionary] = solver.create_render_snapshot().periodic_plan
+	_check(plan[0].current == Vector2i(1, 64), "Nonpareil tiles its 64 px pitch (%s)" % str(plan[0].current))
+	solver.set_preset(Gallery.GEL_GIT)
+	var snapshot = solver.create_render_snapshot()
+	plan = snapshot.periodic_plan
+	_check(plan[0].current == Vector2i(1, 720),
+			"Gel-Git's 85.33 px period is not tiled (%s)" % str(plan[0].current))
+	var operations: Array[Dictionary] = snapshot.operations
+	var rounded: Array[Dictionary] = [{"current": Vector2i(1, 86), "previous": Vector2i(1, 86)}]
+	var jitter := Periodicity.r2_sample(0)
+	var tiled_error := 0.0
+	var rounded_error := 0.0
+	for y in range(5, 720, 37):
+		var pixel := Vector2i(640, y)
+		var direct := Diagnostics.cpu_advect(Diagnostics.display_coordinate(pixel, size, jitter),
+				operations, false, Vector2.ZERO, config.brush_radius_px, size, -1, 0.0, 0.0,
+				config.cutoff_gamma, config.drift_compensation, config.midpoint_alpha)
+		tiled_error = maxf(tiled_error, direct.distance_to(Diagnostics.cpu_tiled_advect(pixel, plan,
+				operations, size, jitter, config.brush_radius_px, size, config.cutoff_gamma,
+				config.drift_compensation, config.midpoint_alpha)))
+		rounded_error = maxf(rounded_error, direct.distance_to(Diagnostics.cpu_tiled_advect(pixel,
+				rounded, operations, size, jitter, config.brush_radius_px, size, config.cutoff_gamma,
+				config.drift_compensation, config.midpoint_alpha)))
+	print("MIXWELL TILING gel_git planned=%s rounded_to_86px=%s" % [str(tiled_error), str(rounded_error)])
+	_check(tiled_error <= 1.0e-6 and rounded_error > 1.0e-3,
+			"Gel-Git tiled on 86 px seams (%s), evaluated directly it does not (%s)"
+			% [str(rounded_error), str(tiled_error)])
+	for preset in [Gallery.NONPAREIL, Gallery.GEL_GIT, Gallery.FEATHER, Gallery.BIRD_WING,
+			Gallery.PEACOCK, Gallery.SUPER_TORNADO]:
+		for render_size in [Vector2i(640, 360), Vector2i(1280, 720)]:
+			var periodic := Solver.new()
+			periodic.initialize(render_size, config, render_size)
+			periodic.set_preset(preset)
+			var comparison: Dictionary = periodic.get_periodic_comparison()
+			print("MIXWELL TILING %s %s max=%s conditioned=%d" % [Gallery.preset_name(preset),
+					str(render_size), str(comparison.get("max_displacement")),
+					int(comparison.get("conditioned", -1))])
+			_check(comparison.get("passes", false)
+					and float(comparison.get("max_displacement", 1.0)) <= 1.0e-5,
+					"%s tiles exactly at %s (%s)" % [Gallery.preset_name(preset), str(render_size),
+					str(comparison.get("max_displacement"))])
+
+
 func _test_progressivity_path_comparison() -> void:
 	var periodic := PackedFloat32Array([1.9, 0.0, 0.2, 0.0])
 	var fullscreen := PackedFloat32Array([-0.1, 0.0, 0.2, 0.0])
@@ -591,6 +800,27 @@ func _test_affine_extensions() -> void:
 	_check(is_finite(twisted.x) and is_finite(twisted.y)
 			and absf(twisted.length() - twist_point.length()) < 0.01,
 		"Twist midpoint integration preserves its radial support")
+	# The reverse drift is the flow of -u: carrying the result forward along u
+	# for the same unit time returns the point, and a gentle Twist turns the
+	# point back against u (a strong one wraps past half a turn).
+	var returned := Gallery.affine_advect(Gallery.TWIST, twisted, Vector2.ZERO, 0.65, 0.5, 10.0,
+			0.1, 1.0)
+	var gentle := Gallery.affine_advect(Gallery.TWIST, twist_point, Vector2.ZERO, 0.05, 0.5, 10.0)
+	var forward := Gallery.affine_drift(Gallery.TWIST, twist_point, Vector2.ZERO, 0.05, 0.5, 10.0)
+	_check(returned.distance_to(twist_point) <= 1.0e-3
+			and twist_point.angle_to(gentle) * twist_point.cross(forward) < 0.0,
+		"Twist's reverse drift undoes its flow (%s, turn %s)" % [str(returned.distance_to(twist_point)),
+		str(twist_point.angle_to(gentle))])
+	# User strokes still apply on top of an affine preset.
+	var stroke_operations: Array[Dictionary] = [{"type": Gallery.LINE, "kind": "AFFINE"},
+		{"type": Gallery.SEGMENT, "segment": Vector4(0.1, -0.3, 0.1, 0.3), "radius_px": 9.0}]
+	var affine_only: Array[Dictionary] = [stroke_operations[0]]
+	var probe := Vector2(0.12, 0.05)
+	_check(Diagnostics.cpu_advect(probe, stroke_operations, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), Gallery.TWIST, 180.0, 0.65, 10.0, 0, 0.1).distance_to(
+			Diagnostics.cpu_advect(probe, affine_only, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), Gallery.TWIST, 180.0, 0.65, 10.0, 0, 0.1)) > 1.0e-3,
+		"the CPU twin applies user strokes in affine mode")
 	var solver := Solver.new()
 	solver.initialize(Vector2i(128, 128), Config.new(), Vector2i(128, 128))
 	solver.set_preset(Gallery.TWIST)
@@ -601,7 +831,7 @@ func _test_affine_extensions() -> void:
 		"Pinch selects affine dispatch")
 
 
-func _test_slip_images_and_calibration() -> void:
+func _test_slip_images() -> void:
 	_check(Boundaries.EDGE_IMAGES.size() == 4 and Boundaries.CORNER_IMAGES.size() == 4,
 		"slip boundary declares four edge and four corner images")
 	var half_extent := Vector2(16.0 / 9.0, 1.0)
@@ -610,19 +840,27 @@ func _test_slip_images_and_calibration() -> void:
 	_check(is_equal_approx(mirrored.x, -2.0 * half_extent.x - point.x)
 			and is_equal_approx(mirrored.y, point.y),
 		"slip edge image reflects across left wall")
-	var calibration := Boundaries.calibration_matrix(Vector2.ZERO, half_extent, 0.1)
-	_check(calibration != Vector4.ZERO and is_finite(calibration.x)
-			and is_finite(calibration.y) and is_finite(calibration.z) and is_finite(calibration.w),
-		"slip calibration is a finite 2x2 inverse")
+	# A comb's tines run through the walls across its motion: its images are
+	# across the two walls it runs along only, each a full mirrored comb.
+	var comb := {"type": Gallery.LINE_COMB, "origin": Vector2.ZERO, "direction": Vector2.RIGHT,
+		"pitch": 0.2, "noise": 0.0}
+	var combs: Array[Dictionary] = [comb]
+	var inside := Vector2(0.3, 0.83)
+	var walled := Diagnostics.cpu_advect(inside, combs, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), -1, 180.0, 0.65, 10.0, 0, 0.1, half_extent)
+	var expected := inside
+	for image in [inside, Vector2(inside.x, 2.0 - inside.y), Vector2(inside.x, -2.0 - inside.y)]:
+		expected += Math.rd_nonpareil(image, 0.05, Vector2.RIGHT, 0.2, 0.0, 10.0)
+	_check(walled.distance_to(expected) <= 1.0e-6,
+		"a comb in slip walls adds its images across the two walls it runs along")
 	var config := Config.new()
 	config.boundary_mode = Config.BoundaryMode.SLIP_WALLS
 	_check(config.validate() == "", "slip wall configuration validates")
 	var solver := Solver.new()
 	solver.initialize(Vector2i(128, 128), config, Vector2i(128, 128))
 	solver.set_boundary_mode(Config.BoundaryMode.SLIP_WALLS)
-	_check(solver.get_active_boundary_mode() == Config.BoundaryMode.SLIP_WALLS
-			and solver.get_wall_calibration() == 1.0,
-		"solver activates matrix-calibrated slip images")
+	_check(solver.get_active_boundary_mode() == Config.BoundaryMode.SLIP_WALLS,
+		"solver activates slip-wall images")
 	var periodic_config := Config.new()
 	periodic_config.boundary_mode = Config.BoundaryMode.PERIODIC
 	var periodic_solver := Solver.new()

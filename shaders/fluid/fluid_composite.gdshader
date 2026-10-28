@@ -193,7 +193,19 @@ void fragment() {
 		if (dd > 0.001 && (abs(dd - fd) < abs(du - fd) || du <= 0.001)) {
 			ddy_v = pc - eye_pos_from_depth(SCREEN_UV - vec2(0.0, ts.y), dd, INV_PROJECTION_MATRIX);
 		}
-		vec3 n = normalize(cross(ddy_v, ddx_v));
+		// An axis with no fluid on either side has no slope to measure: its
+		// difference above degenerates to -pc, which gave a normal at 90 degrees to
+		// the view (reflectance 1, a sky-coloured pixel) or normalize(0) = NaN on
+		// strands and droplets narrower than the footprint. Fall back to face-on.
+		bool x_valid = dl > 0.001 || dr > 0.001;
+		bool y_valid = du > 0.001 || dd > 0.001;
+		vec3 n = -normalize(pc);
+		if (x_valid && y_valid) {
+			vec3 nc = cross(ddy_v, ddx_v);
+			if (dot(nc, nc) > 1e-20) {
+				n = normalize(nc);
+			}
+		}
 		if (dot(n, pc) > 0.0) {
 			n = -n;
 		}
@@ -268,7 +280,9 @@ void fragment() {
 			float optical_depth = thickness * 0.06;
 			vec3 incoming = normalize(pc);
 			float fresnel = dielectric_reflectance(incoming, n, 1.0, 1.4);
-			vec2 offset = n.xy * (0.12 * clamp(optical_depth, 0.0, 2.0) / max(fd, 0.5));
+			// View-space +Y is screen-up, i.e. smaller SCREEN_UV.y: flip y so the
+			// offset follows the normal on both axes.
+			vec2 offset = n.xy * vec2(1.0, -1.0) * (0.12 * clamp(optical_depth, 0.0, 2.0) / max(fd, 0.5));
 			vec2 uv = clamp(SCREEN_UV + offset, vec2(0.001), vec2(0.999));
 			if (scene_eye_depth(uv, INV_PROJECTION_MATRIX, DEPTH_TEXTURE) < fd) {
 				uv = SCREEN_UV;
@@ -341,7 +355,10 @@ void fragment() {
 			// a dark band across settled water. The length clamp is the last
 			// resort for extreme cases; fall back if the sample is in front.
 			vec3 rdir = snell_refract(in_view, n, 1.0, local_ior);
-			vec2 bend = (rdir.xy - in_view.xy)
+			// The bend is a view-space direction; view +Y is screen-up, which is
+			// smaller SCREEN_UV.y, so y flips on the way to UV. Unflipped, the
+			// vertical refraction shifted the background the wrong way.
+			vec2 bend = (rdir.xy - in_view.xy) * vec2(1.0, -1.0)
 					* (refraction_strength * clamp(thickness, 0.0, 2.0) / max(fd, 0.5));
 			float bend_len = length(bend);
 			if (bend_len > 0.08) {

@@ -22,14 +22,15 @@ func _run() -> void:
 	_test_surface_continuity()
 	_test_restoring_torque()
 	_test_pool_viscous_drag()
-	_test_rotational_drag_correlation()
+	_test_pool_wet_rotation()
+	_test_added_mass_transition()
 	await _test_runtime_honey_drag()
 	await _test_runtime_honey_entry_drag()
 	await _test_runtime_pool_and_scientific_paths()
 	await _test_runtime_air_to_water_transition()
 	await _test_runtime_honey_1100_body()
 	await _test_light_pool_throw_stability()
-	await _test_pool_momentum_passivity()
+	await _test_contact_mass()
 	await _test_repeated_drop_mix()
 	_finish("ambient_fluid_float")
 
@@ -75,7 +76,7 @@ func _test_rotated_half_volume() -> void:
 	var shapes := [
 		{faces = _cube_faces(), volume = BOX_PROFILE.volume_m3, name = "cube"},
 		{faces = _plate_faces(), volume = PLATE_PROFILE.volume_m3, name = "plate"},
-		{faces = controller._pool_faces_for(0), volume = SPHERE_PROFILE.volume_m3, name = "icosahedron"},
+		{faces = controller._pool_faces_for(0), volume = SPHERE_PROFILE.volume_m3, name = "icosphere"},
 	]
 	for shape: Dictionary in shapes:
 		for angle_degrees in [12.0, 37.0, 71.0]:
@@ -103,12 +104,9 @@ func _test_rotated_half_volume() -> void:
 func _test_wet_surface_force_centroid() -> void:
 	var center := Vector3(0.0, 0.0, 1.0)
 	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 1.0, 0.0])
-	var slip_matrix := PackedFloat64Array()
-	slip_matrix.resize(18)
-	slip_matrix[3] = -1.0
-	var result := MATH.potential_pressure_wrench(PackedVector3Array([Vector3.ZERO]),
-		PackedVector3Array([Vector3.UP]), PackedFloat64Array([1.0]), slip_matrix,
-		velocity, 1000.0, PI, PackedFloat64Array([1.0]),
+	var result := MATH.surface_wrench(PackedVector3Array([Vector3.ZERO]),
+		PackedVector3Array([Vector3.UP]), PackedFloat64Array([1.0]),
+		velocity, 1000.0, 0.0, PI, 1.0, PackedFloat64Array([1.0]),
 		PackedVector3Array([center]))
 	_check(absf(result.pressure[0] - 500.0) < 1.0e-6,
 		"partial-face pressure torque used the whole-face center instead of wet centroid")
@@ -149,68 +147,44 @@ func _test_restoring_torque() -> void:
 
 func _test_pool_viscous_drag() -> void:
 	var velocity := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, -1.0, 0.0])
-	var full := MATH.particle_drag_wrench(velocity, 185.13, 1420.0,
-		SPHERE_PROFILE.volume_m3, 1.0, SPHERE_PROFILE.total_area_m2)
-	var half := MATH.particle_drag_wrench(velocity, 185.13, 1420.0,
-		SPHERE_PROFILE.volume_m3, 0.5, SPHERE_PROFILE.total_area_m2)
-	_check(full[4] > 0.0 and absf(half[4] - full[4] * 0.5) < 1.0e-6,
+	var full := _honey_surface(SPHERE_PROFILE, velocity, 185.13, 1.0)
+	var half := _honey_surface(SPHERE_PROFILE, velocity, 185.13, 0.5)
+	_check(full.friction[4] > 0.0 and absf(half.friction[4] - full.friction[4] * 0.5) < 1.0e-6,
 		"honey drag did not oppose sinking or follow immersion")
 	var slow := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, -0.0001, 0.0])
-	var cold := MATH.particle_drag_wrench(slow, 185.13, 1420.0,
-		SPHERE_PROFILE.volume_m3, 1.0, SPHERE_PROFILE.total_area_m2)
-	var warm := MATH.particle_drag_wrench(slow, 18.513, 1420.0,
-		SPHERE_PROFILE.volume_m3, 1.0, SPHERE_PROFILE.total_area_m2)
-	var equivalent_radius := pow(3.0 * SPHERE_PROFILE.volume_m3 / (4.0 * PI), 1.0 / 3.0)
-	var stokes_force := 6.0 * PI * 185.13 * equivalent_radius * 0.0001
-	_check(cold[4] > warm[4] * 8.0,
+	var cold := _honey_surface(SPHERE_PROFILE, slow, 185.13, 1.0)
+	var warm := _honey_surface(SPHERE_PROFILE, slow, 18.513, 1.0)
+	_check(cold.friction[4] > warm.friction[4] * 8.0,
 		"low-speed viscous drag did not respond to viscosity")
-	_check(absf(cold[4]) >= stokes_force
-		and absf(cold[4]) < stokes_force * 1.01,
-		"low-Re sphere drag did not approach Stokes' law")
-	var plate_radius := pow(3.0 * PLATE_PROFILE.volume_m3 / (4.0 * PI), 1.0 / 3.0)
+	# The Stokes extension uses the radius of the sphere with the body's area.
+	var area_radius := sqrt(SPHERE_PROFILE.total_area_m2 / (4.0 * PI))
+	var stokes_force := 6.0 * PI * 185.13 * area_radius * 0.0001
+	_check(absf(cold.friction[4] - stokes_force) < stokes_force * 0.01,
+		"low-Re drag %.6f did not approach Stokes' law %.6f" % [cold.friction[4], stokes_force])
+	# Same volume, more surface: the flat plate drags more than a sphere would.
 	var plate_velocity := PackedFloat64Array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0])
-	var plate_drag := MATH.particle_drag_wrench(plate_velocity, 185.13, 1420.0,
-		PLATE_PROFILE.volume_m3, 1.0, PLATE_PROFILE.total_area_m2)
-	var equivalent_sphere_drag := MATH.particle_drag_wrench(plate_velocity, 185.13, 1420.0,
-		PLATE_PROFILE.volume_m3, 1.0, 4.0 * PI * plate_radius * plate_radius)
-	_check(plate_drag[3] < equivalent_sphere_drag[3] * 0.75,
+	var plate := _honey_surface(PLATE_PROFILE, plate_velocity, 185.13, 1.0)
+	var volume_radius := pow(3.0 * PLATE_PROFILE.volume_m3 / (4.0 * PI), 1.0 / 3.0)
+	_check(-plate.friction[3] > 6.0 * PI * 185.13 * volume_radius * 1.2,
 		"honey treated the flat plate as a sphere with the same volume")
 
 
-func _test_rotational_drag_correlation() -> void:
-	var radius := pow(3.0 * SPHERE_PROFILE.volume_m3 / (4.0 * PI), 1.0 / 3.0)
-	var fluid_density := 998.0
-	var viscosity := 0.001002
-	for rotational_reynolds: float in [0.001, 10.0, 1000.0, 30000.0]:
-		var angular_speed: float = rotational_reynolds * viscosity \
-			/ (fluid_density * radius * radius)
-		var velocity := PackedFloat64Array([0.0, angular_speed, 0.0, 0.0, 0.0, 0.0])
-		var wrench := MATH.particle_drag_wrench(velocity, viscosity, fluid_density,
-			SPHERE_PROFILE.volume_m3, 1.0, SPHERE_PROFILE.total_area_m2)
-		var expected_torque := 0.0
-		if rotational_reynolds < 6.03:
-			expected_torque = 8.0 * PI * viscosity * pow(radius, 3.0) * angular_speed
-		else:
-			var torque_coefficient: float
-			if rotational_reynolds < 20.37:
-				torque_coefficient = 5.32 / sqrt(rotational_reynolds) \
-					+ 37.2 / rotational_reynolds
-			else:
-				torque_coefficient = 6.45 / sqrt(rotational_reynolds) \
-					+ 32.1 / rotational_reynolds
-			expected_torque = 0.5 * fluid_density * pow(radius, 5.0) \
-				* torque_coefficient * angular_speed * angular_speed
-		_check(absf(absf(wrench[1]) - expected_torque) \
-			<= maxf(expected_torque * 1.0e-6, 1.0e-20),
-			"rotational drag disagreed with the sphere correlation at Reω=%.3f" \
-			% rotational_reynolds)
-		_check(MATH.vector_dot(wrench, velocity) <= 0.0,
-			"rotational drag added energy at Reω=%.3f" % rotational_reynolds)
-		if rotational_reynolds == 1000.0:
-			var half_wet := MATH.particle_drag_wrench(velocity, viscosity, fluid_density,
-				SPHERE_PROFILE.volume_m3, 0.5, SPHERE_PROFILE.total_area_m2)
-			_check(absf(half_wet[1] - wrench[1] * 0.5) < 1.0e-12,
-				"partial immersion did not scale rotational drag with wetted area")
+func _test_pool_wet_rotation() -> void:
+	var spin := PackedFloat64Array([0.0, 2.0, 0.0, 0.0, 0.0, 0.0])
+	var full := _honey_surface(SPHERE_PROFILE, spin, 0.001002, 1.0)
+	var half := _honey_surface(SPHERE_PROFILE, spin, 0.001002, 0.5)
+	_check(full.friction[1] < 0.0 and absf(half.friction[1] - full.friction[1] * 0.5) < 1.0e-9,
+		"partial immersion did not scale rotational friction with wetted area")
+
+
+func _honey_surface(profile: AmbientFluidProfile3D, velocity: PackedFloat64Array,
+		viscosity: float, wet_fraction: float) -> Dictionary:
+	var wet := PackedFloat64Array()
+	wet.resize(profile.face_centers_m.size())
+	wet.fill(wet_fraction)
+	return MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, velocity, 1420.0, viscosity, PI * 0.5,
+		profile.surface_length_m(), wet)
 
 
 func _test_runtime_honey_drag() -> void:
@@ -237,8 +211,11 @@ func _test_runtime_honey_drag() -> void:
 		water_drop, honey_drop, water_speed, honey_speed])
 	_check(honey_drop < water_drop and honey_speed < water_speed,
 		"runtime honey drag did not slow a sinking body compared with water")
-	_check(honey_pressure <= 1.0e-12 and honey_body.surface_faces() == 0,
-		"honey combined equivalent-sphere drag with the separate face-pressure model")
+	# Re ~ 20 here: Stokes drag (24/Re ~ 1) outweighs the inertial pressure (C_D 1/2).
+	var honey_friction := _wrench_norm(honey_body.friction_wrench())
+	print("AMBIENT HONEY FORCES friction=%.2f pressure=%.2f" % [honey_friction, honey_pressure])
+	_check(honey_friction > honey_pressure,
+		"viscous drag did not dominate the inertial pressure in honey")
 	_check(honey_body.friction_power_w() < 0.0,
 		"runtime honey drag added energy to the falling body")
 	demo.queue_free()
@@ -255,16 +232,19 @@ func _test_runtime_honey_entry_drag() -> void:
 		Vector3(0.0, 1.2, 0.0), Vector3(0.0, -1.0, 0.0), Vector3.ZERO)
 	await physics_frame
 	await physics_frame
-	var volume_drag := MATH.particle_drag_wrench(body._last_wrench_generalized_velocity,
-		185.13, 1420.0, body.profile.volume_m3, body.submerged_fraction,
-		body.profile.total_area_m2)
-	var area_drag := MATH.particle_drag_wrench(body._last_wrench_generalized_velocity,
-		185.13, 1420.0, body.profile.volume_m3, body.wetted_area_fraction,
-		body.profile.total_area_m2)
+	var profile := body.profile
+	var area_drag := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, body._last_wrench_generalized_velocity, 1420.0, 185.13,
+		body.config.separation_angle_rad, profile.surface_length_m(),
+		body.wet_area_fractions, body.wet_area_centers_m)
+	var whole_drag := MATH.surface_wrench(profile.face_centers_m, profile.face_normals,
+		profile.face_areas_m2, body._last_wrench_generalized_velocity, 1420.0, 185.13,
+		body.config.separation_angle_rad, profile.surface_length_m())
+	var volume_drag: float = whole_drag.friction[4] * body.submerged_fraction
 	_check(body.wetted_area_fraction > body.submerged_fraction,
 		"honey entry used its tiny cap volume as the wetted drag area")
-	_check(absf(body.friction_wrench()[4] - area_drag[4]) < 1.0e-6
-		and area_drag[4] > volume_drag[4],
+	_check(absf(body.friction_wrench()[4] - area_drag.friction[4]) < 1.0e-6
+		and area_drag.friction[4] > volume_drag,
 		"honey entry drag did not follow the clipped wetted surface")
 	print("AMBIENT HONEY ENTRY volume_fraction=%.5f area_fraction=%.5f drag_y=%.2f" % [
 		body.submerged_fraction, body.wetted_area_fraction, body.friction_wrench()[4]])
@@ -277,11 +257,24 @@ func _test_runtime_pool_and_scientific_paths() -> void:
 	root.add_child(demo)
 	await process_frame
 	_check(demo.bodies.size() == 4, "normal demo boot did not create the buoyancy mix")
-	var icosahedron_inertia: Vector3 = demo._inertia_for(0, 2.0)
-	_check(absf(icosahedron_inertia.x - 0.5788854382) < 1.0e-8
-		and absf(icosahedron_inertia.x - icosahedron_inertia.y) < 1.0e-12
-		and absf(icosahedron_inertia.y - icosahedron_inertia.z) < 1.0e-12,
-		"sphere showcase inertia does not match its solid icosahedron mesh")
+	# Polyhedral inertia (Sec. 5.2): exact for the solid unit icosahedron and
+	# the box, isotropic and near 2/5 m R^2 for the 320-face sphere.
+	var icosahedron := AmbientFluidShapes.icosphere_mesh(1.0, 0).get_faces()
+	var icosahedron_inertia := MATH.polyhedron_inertia_diagonal(icosahedron, 2.0)
+	# float32 vertices: agree to 1e-4 relative.
+	_check(absf(icosahedron_inertia.x - 0.5788854382) < 0.5788854382 * 1.0e-4
+		and absf(icosahedron_inertia.x - icosahedron_inertia.y) < 1.0e-6
+		and absf(icosahedron_inertia.y - icosahedron_inertia.z) < 1.0e-6,
+		"polyhedral inertia of the unit icosahedron is wrong: %s" % icosahedron_inertia)
+	var sphere_inertia: Vector3 = demo._inertia_for(0, 2.0)
+	_check(absf(sphere_inertia.x - 0.8) < 0.8 * 0.03
+		and absf(sphere_inertia.x - sphere_inertia.y) < 1.0e-6
+		and absf(sphere_inertia.y - sphere_inertia.z) < 1.0e-6,
+		"sphere showcase inertia does not match its solid icosphere: %s" % sphere_inertia)
+	var box_inertia: Vector3 = demo._inertia_for(1, 3.0)
+	_check(box_inertia.distance_to(Vector3(1.4 * 1.4 + 1.0, 1.8 * 1.8 + 1.0,
+		1.8 * 1.8 + 1.4 * 1.4) * (3.0 / 12.0)) < 1.0e-5,
+		"box showcase inertia is not the solid box's: %s" % box_inertia)
 	for body: AmbientFluidBody3D in demo.bodies:
 		_check(body.pool_buoyancy_enabled, "pool body boot omitted runtime buoyancy geometry")
 	demo._process(0.0)
@@ -403,6 +396,29 @@ func _test_light_pool_throw_stability() -> void:
 	await process_frame
 
 
+func _test_contact_mass() -> void:
+	# A light ball under water collides with its added mass: Jolt's mass is
+	# the K diagonal, several times the body's own; in vacuum just the body.
+	var demo: Node = SCENE.instantiate()
+	root.add_child(demo)
+	await process_frame
+	demo._clear_objects()
+	var body: AmbientFluidBody3D = demo._spawn_body(0, 100.0,
+		Vector3(0.0, -2.0, 0.0), Vector3.ZERO, Vector3.ZERO)
+	await physics_frame
+	await physics_frame
+	print("AMBIENT CONTACT MASS body=%.1f contact=%.1f" % [body.mass, body.contact_mass_kg()])
+	_check(body.contact_mass_kg() > body.mass * 5.0,
+		"submerged light ball collides without its added mass")
+	demo._set_medium(4)
+	await physics_frame
+	await physics_frame
+	_check(absf(body.contact_mass_kg() - body.mass) < 1.0e-3 * body.mass,
+		"vacuum contact mass is not the body's own")
+	demo.queue_free()
+	await process_frame
+
+
 func _test_runtime_air_to_water_transition() -> void:
 	var demo: Node = SCENE.instantiate()
 	root.add_child(demo)
@@ -455,7 +471,9 @@ func _test_runtime_honey_1100_body() -> void:
 		Vector3(0.0, -2.8, 0.0), Vector3.ZERO, Vector3.ZERO)
 	var initial_y := body.global_position.y
 	var maximum_upward_speed := 0.0
-	for _frame in 720:
+	# Underdamped in honey (Stokes damping ratio ~0.1 for the 4 m^3 sphere):
+	# the bob decays as exp(-0.25 t), so give it 18 s.
+	for _frame in 1080:
 		await physics_frame
 		maximum_upward_speed = maxf(maximum_upward_speed, body.linear_velocity.y)
 	print("AMBIENT HONEY 1100 start_y=%.3f end_y=%.3f max_up=%.3f final_up=%.3f immersion=%.4f friction_power=%.1f contacts=%d sleeping=%s" % [
@@ -497,26 +515,24 @@ func _test_repeated_drop_mix() -> void:
 	await process_frame
 
 
-func _test_pool_momentum_passivity() -> void:
-	var demo: Node = SCENE.instantiate()
-	root.add_child(demo)
-	await process_frame
-	var body: AmbientFluidBody3D = demo.bodies[0]
-	var momentum := PackedFloat64Array([0.0, 0.0, 0.0, 10.0, 0.0, 0.0])
-	var zero := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-	var sideways := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 10000.0, 0.0])
-	var drag := PackedFloat64Array([0.0, 0.0, 0.0, -100000.0, 0.0, 0.0])
-	var inverse := body.combined_inverse()
-	var before := 0.5 * MATH.vector_dot(momentum,
-		MATH.matrix_vector_multiply(inverse, momentum))
-	var next := body._pool_momentum_step(momentum, zero, sideways, drag, 1.0 / 60.0)
-	var after := 0.5 * MATH.vector_dot(next,
-		MATH.matrix_vector_multiply(inverse, next))
-	_check(after <= before + 1.0e-6 and after >= 0.0,
-		"pool pressure and drag created kinetic energy")
-	_check(next[3] >= -1.0e-6, "pool drag reversed momentum in one step")
-	demo.queue_free()
-	await process_frame
+func _test_added_mass_transition() -> void:
+	var body_tensor := MATH.diagonal_matrix(Vector3(2.0, 3.0, 4.0), 10.0)
+	var wet_tensor := MATH.matrix_add(body_tensor,
+		MATH.matrix_scale(SPHERE_PROFILE.added_mass_tensor, 0.4))
+	var velocity := PackedFloat64Array([0.3, -0.2, 0.1, 1.0, -2.0, 0.5])
+	var entering := MATH.added_mass_transition(velocity, body_tensor, wet_tensor,
+		MATH.matrix_inverse(wet_tensor))
+	var before := MATH.matrix_vector_multiply(body_tensor, velocity)
+	var after := MATH.matrix_vector_multiply(wet_tensor, entering)
+	for index in MATH.MATRIX_SIZE:
+		_check(absf(after[index] - before[index]) < 1.0e-9,
+			"entering the liquid did not conserve momentum K u")
+	_check(Vector3(entering[3], entering[4], entering[5]).length()
+		< Vector3(velocity[3], velocity[4], velocity[5]).length(),
+		"entering the liquid did not slow the body")
+	var leaving := MATH.added_mass_transition(velocity, wet_tensor, body_tensor,
+		MATH.matrix_inverse(body_tensor))
+	_check(leaving == velocity, "leaving the liquid did not keep the body velocity")
 
 
 func _cube_faces() -> PackedVector3Array:

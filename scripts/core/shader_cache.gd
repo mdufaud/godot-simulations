@@ -91,9 +91,15 @@ static func _store(path: String, bytecode: PackedByteArray) -> void:
 	if f == null:
 		push_warning("Shader cache write failed: %s" % temp)
 		return
-	f.store_buffer(MAGIC)
-	f.store_buffer(bytecode)
+	var stored := f.store_buffer(MAGIC) and f.store_buffer(bytecode)
+	var written := f.get_length()
 	f.close()
+	# A short write (disk full, I/O error) renamed into place would be trusted by
+	# every later launch, since the load only checks the header.
+	if not stored or written != MAGIC.size() + bytecode.size():
+		push_warning("Shader cache write failed: %s" % temp)
+		DirAccess.remove_absolute(temp)
+		return
 	var dir := DirAccess.open(CACHE_DIR)
 	if dir != null and dir.rename(file_name + ".tmp", file_name) == OK:
 		return

@@ -261,7 +261,7 @@ func _apply_scene() -> void:
 			softening = solver.softening,
 			attractor_softening = solver.attractor_softening,
 		}
-	solver.self_gravity = requested_self_gravity and scene_def.supports_self_gravity()
+	solver.self_gravity = _self_gravity_in_force(requested_self_gravity)
 	solver.substeps = clampi(solver.substeps, 1, NBodySolver.MAX_SUBSTEPS)
 	solver.dt = integration_dt / float(solver.substeps)
 	_sim_time = 0.0
@@ -322,7 +322,7 @@ func _restart(force_frame: bool = false) -> void:
 	var desired_count := _preferred_particle_count if _preferred_particle_count > 0 \
 		else solver.particle_count
 	var effective_count := mini(desired_count, config.self_gravity_max_particles) \
-		if requested_self_gravity and scene_def.supports_self_gravity() else desired_count
+		if _self_gravity_in_force(requested_self_gravity) else desired_count
 	if effective_count != solver.particle_count:
 		solver.particle_count = effective_count
 		solver.tex_width = _tex_width_for(effective_count)
@@ -501,7 +501,8 @@ func _sync_scene_param_sliders() -> void:
 
 func _sync_physics_controls() -> void:
 	if gravity_toggle != null:
-		gravity_toggle.visible = scene_def.supports_self_gravity()
+		gravity_toggle.visible = scene_def.supports_self_gravity() \
+			and not scene_def.requires_self_gravity()
 		gravity_toggle.set_pressed_no_signal(solver.self_gravity)
 	if time_scale_slider != null:
 		time_scale_slider.value = time_scale
@@ -570,7 +571,7 @@ func _on_scene_selected(idx: int) -> void:
 func _on_self_gravity(on: bool) -> void:
 	requested_self_gravity = on
 	_scene_self_gravity[active_preset.scene_type] = on
-	solver.self_gravity = on and scene_def.supports_self_gravity()
+	solver.self_gravity = _self_gravity_in_force(on)
 	var desired_count := _preferred_particle_count if _preferred_particle_count > 0 \
 		else solver.particle_count
 	var effective_count := mini(desired_count, config.self_gravity_max_particles) \
@@ -752,13 +753,20 @@ func _set_particle_count(n: int, remember: bool = true) -> void:
 		RenderingServer.call_on_render_thread(solver.init_render)
 
 
+## Whether pair gravity runs for [param requested] in the active scene. A scene
+## with no other mass (Globular) keeps it on regardless of toggle or tier.
+func _self_gravity_in_force(requested: bool) -> bool:
+	return scene_def.requires_self_gravity() \
+		or (requested and scene_def.supports_self_gravity())
+
+
 ## Sets the solver fields a quality tier bundles. Before init (launch restore)
 ## the fields land directly; on a tier switch the count rebuilds through the
 ## same path as the Particles option.
 func _apply_quality(values: Dictionary) -> void:
 	requested_self_gravity = values.self_gravity
 	_scene_self_gravity[active_preset.scene_type] = requested_self_gravity
-	solver.self_gravity = requested_self_gravity and scene_def.supports_self_gravity()
+	solver.self_gravity = _self_gravity_in_force(requested_self_gravity)
 	config.self_gravity_max_particles = values.self_gravity_max
 	# Particle count is widget-bound: absent from values on a tier push, so fall
 	# back to the live value.

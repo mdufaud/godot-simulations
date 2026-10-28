@@ -98,12 +98,11 @@ func _ready() -> void:
 	water.profiling = debug_info
 	# Queued as a closure rather than bound: the pool's indirection volume does not
 	# exist until the solver's own queued init_render has run on the render thread,
-	# so binding it here would capture an invalid RID. The droplets keep the dense
-	# box as their own SPH domain either way — only the fire grid became the map.
-	var sph_box := Vector3(solver.grid_dims) * solver.cell_size
+	# so binding it here would capture an invalid RID. The droplets keep their own
+	# fixed SPH box (FireWater.SPH_BOX_*) — only the fire grid became the map.
 	RenderingServer.call_on_render_thread(func() -> void:
 		water.init_render(solver.sim_dims(), solver.cell_size, solver.ambient_temperature,
-			solver.indirection_rid(), sph_box, solver.atlas_tiles()))
+			solver.indirection_rid(), solver.atlas_tiles()))
 
 	presentation = FirePresentation.new()
 	presentation.solver = solver
@@ -516,7 +515,6 @@ func set_pool_budget(index: int) -> void:
 			solver.set_pool_budget(budget)
 			water.set_indirection_rid(solver.indirection_rid()))
 	else:
-		var sph_box := Vector3(solver.grid_dims) * solver.cell_size
 		RenderingServer.call_on_render_thread(func() -> void:
 			water.set_indirection_rid(RID())
 			water.free_render()
@@ -526,7 +524,7 @@ func set_pool_budget(index: int) -> void:
 			solver.init_render()
 			if solver.initialized:
 				water.init_render(solver.sim_dims(), solver.cell_size,
-					solver.ambient_temperature, solver.indirection_rid(), sph_box,
+					solver.ambient_temperature, solver.indirection_rid(),
 					solver.atlas_tiles()))
 	solver.reset_clock()
 	_light_fire()

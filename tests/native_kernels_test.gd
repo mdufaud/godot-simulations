@@ -24,6 +24,7 @@ func _initialize() -> void:
 	if _failures == 0:
 		_rng.seed = 20261022
 		_test_matrices()
+		_test_matrix_size_guards()
 		_test_clip()
 		_test_pressure()
 		_test_fractal()
@@ -57,6 +58,25 @@ func _random_vector(span: float) -> Vector3:
 		_rng.randf_range(-span, span))
 
 
+# The kernels are bound straight to ClassDB, so a caller can bypass the GDScript
+# size checks: mismatched sizes must come back empty, not read past the buffer.
+func _test_matrix_size_guards() -> void:
+	var kernels: Object = ClassDB.instantiate(&"AmbientFluidKernels")
+	var short_matrix := PackedFloat64Array([1.0, 2.0, 3.0, 4.0, 5.0])
+	_check((kernels.matrix_vector_multiply(short_matrix, _random_array(6, 1.0)) as PackedFloat64Array).is_empty(),
+		"matrix_vector_multiply accepted a 5-element matrix for a 6-vector")
+	_check((kernels.matrix_inverse(PackedFloat64Array([1.0]), 6, 1.0e-12) as PackedFloat64Array).is_empty(),
+		"matrix_inverse accepted a 1-element matrix of size 6")
+	_check((kernels.matrix_inverse(_random_array(36, 1.0), -6, 1.0e-12) as PackedFloat64Array).is_empty(),
+		"matrix_inverse accepted a negative size")
+	var short_surface: Dictionary = kernels.surface_wrench(PackedVector3Array([Vector3.ONE]),
+		PackedVector3Array([Vector3.UP]), PackedFloat64Array([1.0]), _random_array(2, 1.0),
+		998.0, 0.001, PI * 0.5, 1.0, PackedFloat64Array(), PackedVector3Array())
+	_check(int(short_surface.attached_faces) == 0
+		and (short_surface.pressure as PackedFloat64Array) == PackedFloat64Array([0, 0, 0, 0, 0, 0]),
+		"surface_wrench accepted a 2-element generalized velocity")
+
+
 func _test_matrices() -> void:
 	for _case in 100:
 		var matrix := _random_array(MATH.MATRIX_SCALARS, 10.0)
@@ -88,9 +108,12 @@ func _test_pressure() -> void:
 			if _rng.randf() < 0.5:
 				wet = MATH.clip_convex_mesh_below_plane(faces, Vector3.ZERO, _random_vector(1.0),
 					_rng.randf_range(-0.3, 0.3))
-			_check_identical(MATH, &"potential_pressure_wrench", [profile.face_centers_m,
-				profile.face_normals, profile.face_areas_m2, profile.slip_matrix,
-				_random_array(MATH.MATRIX_SIZE, 3.0), 998.0, _rng.randf_range(PI * 0.4, PI * 1.1),
+			_check_identical(MATH, &"surface_wrench", [profile.face_centers_m,
+				profile.face_normals, profile.face_areas_m2,
+				_random_array(MATH.MATRIX_SIZE, 3.0), 998.0,
+				[0.0, 0.001002, 185.13][_rng.randi_range(0, 2)],
+				_rng.randf_range(PI * 0.4, PI * 1.1),
+				profile.surface_length_m(),
 				wet.get("wet_area_fractions", PackedFloat64Array()),
 				wet.get("wet_area_centers_m", PackedVector3Array())])
 	fixture.free()

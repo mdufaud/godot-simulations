@@ -101,8 +101,9 @@ func _setup_ui() -> void:
 			fluid.set_sph_foam_life, false, 1.0), fluid.get_sph_foam_life],
 	]
 	yield_group = menu.add_group()
-	_parameter_pairs.append([menu.add_slider("Yield threshold", 0.0, 160.0,
-		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 0.5), fluid.get_sph_yield_stress])
+	# Capped where the implicit yield solve still converges (FluidMaterial.yield_stress).
+	_parameter_pairs.append([menu.add_slider("Yield stress (Pa)", 0.0, 400.0,
+		fluid.get_sph_yield_stress(), fluid.set_sph_yield_stress, false, 5.0), fluid.get_sph_yield_stress])
 	menu.end_group()
 	menu.add_separator()
 	menu.add_section("Performance")
@@ -110,8 +111,9 @@ func _setup_ui() -> void:
 	menu.settings_reset.connect(_reset_fluid)
 	menu.add_debug_toggle("🫧", "Foam", fluid.foam_enabled, func(on): fluid.set_foam_enabled(on), false)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, profiler.set_enabled)
+	# Applied on release: each step reallocates the seven screen-space targets.
 	var water_scale := menu.add_slider("Water render scale", 0.25, 1.0, fluid.render_scale,
-		func(v): fluid.set_render_scale(v))
+		func(v): fluid.set_render_scale(v), true, 0.0, true)
 	quality.bind("water_scale", water_scale, fluid.set_render_scale)
 	menu.add_slider("Render scale", 0.4, 1.0,
 		_viewport.render_scale(), _set_render_scale)

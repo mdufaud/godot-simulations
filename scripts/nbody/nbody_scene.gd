@@ -26,6 +26,14 @@ func default_self_gravity() -> bool:
 	return false
 
 
+## True when the particles' own gravity is the only force in the scene: no
+## attractor or smooth disk stands in for the mass, so test-particle mode would
+## leave everything ballistic. The toggle is hidden and pair gravity stays on
+## whatever the quality tier asks; the tier then only caps the particle count.
+func requires_self_gravity() -> bool:
+	return false
+
+
 ## Tweakable fields of this scene, turned into sliders by the controller:
 ## [{key: String, label: String, min: float, max: float}, ...]. Changing one
 ## re-seeds the scene, so they are applied on slider release.

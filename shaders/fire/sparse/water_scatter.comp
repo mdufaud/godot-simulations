@@ -127,11 +127,15 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
-				if (grid_texel(c, dims).x < 0) {
+				// Distance first: only ~14 of the 125 offsets lie inside h_liquid,
+				// and a zero weight adds nothing, so the storage lookup (an
+				// imageLoad) is skipped for the rest. Result is unchanged.
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				float d = distance(p_local, c_local);
+				if (d >= params.h_liquid || grid_texel(c, dims).x < 0) {
 					continue;
 				}
-				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
-				w_sum += max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid);
+				w_sum += max(0.0, 1.0 - d / params.h_liquid);
 			}
 		}
 	}
@@ -146,13 +150,17 @@ void main() {
 		for (int dy = -search_rad; dy <= search_rad; ++dy) {
 			for (int dz = -search_rad; dz <= search_rad; ++dz) {
 				ivec3 c = c_base + ivec3(dx, dy, dz);
+				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
+				float d = distance(p_local, c_local);
+				if (d >= params.h_liquid) {
+					continue; // zero weight: skipped below anyway, minus the lookup
+				}
 				ivec3 t = grid_texel(c, dims);
 				if (t.x < 0) {
 					continue;
 				}
 
-				vec3 c_local = (vec3(c) + vec3(0.5)) * params.cell_size;
-				float w = max(0.0, 1.0 - distance(p_local, c_local) / params.h_liquid) / w_sum;
+				float w = max(0.0, 1.0 - d / params.h_liquid) / w_sum;
 				if (w < 1e-9) {
 					continue;
 				}

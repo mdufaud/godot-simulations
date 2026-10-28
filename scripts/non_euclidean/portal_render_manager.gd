@@ -115,7 +115,10 @@ func _preserve_capped_portals(keep: int) -> void:
 
 
 func set_portal_view_scale(scale: float) -> void:
-	portal_view_scale = clampf(scale, 0.25, 1.0)
+	var clamped := clampf(scale, 0.25, 1.0)
+	if is_equal_approx(clamped, portal_view_scale):
+		return
+	portal_view_scale = clamped
 	_resize_pool()
 
 
@@ -231,9 +234,13 @@ func _configure_camera(camera: Camera3D, portal: Portal3D, eye: Transform3D) -> 
 	camera.cull_mask = VIEW_LAYERS & ~portal.linked_portal.exit_hidden_layers
 
 
-## Aperture bounds on screen in UV, the space every view shares; a corner
-## behind the eye leaves the whole screen.
+## Aperture bounds on screen in UV, the space every view shares. A portal whose
+## drawn surface lies wholly behind the eye is off screen (empty rect: the view
+## is not rendered, e.g. the door just walked through); a corner behind the near
+## plane leaves the whole screen.
 func _screen_rect(eye: Camera3D, portal: Portal3D) -> Rect2:
+	if _surface_behind_eye(eye, portal):
+		return Rect2()
 	var size := eye.get_viewport().get_visible_rect().size
 	var points := PackedVector2Array()
 	for corner in portal.get_aperture_corners():
@@ -244,6 +251,22 @@ func _screen_rect(eye: Camera3D, portal: Portal3D) -> Rect2:
 	for point in points:
 		bounds = bounds.expand(point)
 	return bounds.grow(CLIP_MARGIN)
+
+
+## True when every corner of the portal's screen quad (overscan and offset
+## included, i.e. what is actually drawn) is behind the eye plane. Not
+## is_position_behind(): that tests the near plane, which a door the player is
+## about to step through sits inside of while it still fills the screen.
+func _surface_behind_eye(eye: Camera3D, portal: Portal3D) -> bool:
+	var forward := -eye.global_transform.basis.z.normalized()
+	var origin := eye.global_position
+	var half := (portal.opening_size + Portal3D.SCREEN_OVERSCAN) * 0.5
+	for quadrant in [Vector2(-1.0, -1.0), Vector2(1.0, -1.0), Vector2(1.0, 1.0), Vector2(-1.0, 1.0)]:
+		var corner := portal.to_global(
+			Vector3(quadrant.x * half.x, quadrant.y * half.y, Portal3D.SCREEN_OFFSET))
+		if forward.dot(corner - origin) >= 0.0:
+			return false
+	return true
 
 
 func _safe_near(portal: Portal3D, camera_pose: Transform3D) -> float:

@@ -102,7 +102,12 @@ func apply_look(look: OceanLookPreset) -> void:
 	_apply_environment()
 
 
-func update(delta: float, camera: Camera3D) -> void:
+## [param strike_delta] advances lightning, which belongs to the simulated sky:
+## the controller passes its frozen/time-scaled step, so Freeze stops strikes the
+## way it stops the waves. The mood ramp keeps [param delta] so the Mood control
+## still answers while frozen. Negative means "same as delta".
+func update(delta: float, camera: Camera3D, strike_delta: float = -1.0) -> void:
+	var strikes := delta if strike_delta < 0.0 else strike_delta
 	_mood = move_toward(_mood, mood_target, delta * 0.25)
 	_apply_environment()
 	if camera != null and _rain_material != null:
@@ -117,12 +122,12 @@ func update(delta: float, camera: Camera3D) -> void:
 
 	# Lightning, tornado-demo style: random strikes, flickery decay.
 	if lightning_enabled and _mood > 0.65:
-		_timer -= delta
+		_timer -= strikes
 		if _timer <= 0.0:
 			_trigger(camera)
 			_timer = _rng.randf_range(1.2, 5.0) / maxf(_mood, 0.1)
-	_energy = maxf(_energy - delta * 6.0, 0.0)
-	if _energy > 0.0 and _rng.randf() < 0.2:
+	_energy = maxf(_energy - strikes * 6.0, 0.0)
+	if strikes > 0.0 and _energy > 0.0 and _rng.randf() < 0.2:
 		_energy = minf(_energy + _rng.randf() * 0.4, 1.0)
 	_light.light_energy = _energy * 30.0
 	if cloudscape != null:

@@ -749,7 +749,12 @@ func _aim_tool(screen_pos: Vector2) -> void:
 	var dir := main_cam.project_ray_normal(screen_pos)
 	if absf(dir.y) < 1e-4:
 		return
-	var t := -origin.y / dir.y
+	# Intersect the preset's resting surface, not y = 0: the sand sits at
+	# base_height_m, and at the default -30 degree pitch the y = 0 plane put the
+	# brush ~h / tan(30) (0.6 m on Sandbox) beyond the cursor. Exact on the flat
+	# presets; the mountain preset (9) keeps its height-aware query pick, which
+	# the others cannot share since the balls own the query slot.
+	var t := (_preset.base_height_m - origin.y) / dir.y
 	if t < 0.0:
 		return
 	var hit := origin + dir * t

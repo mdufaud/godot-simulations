@@ -21,7 +21,11 @@ var rest_spacing := 0.06
 var stretch_compliance := 1e-8
 var shear_compliance := 1e-6
 var bend_compliance := 5e-6
-var damping := 0.995
+## Velocity retained per 1/60 s, whatever the substep count. The old per-substep
+## 0.995 retained 0.995^substeps per tick (0.98 at MEDIUM's 4 substeps), so after
+## one second LOW kept ~3x the velocity ULTRA did; 0.98 keeps the MEDIUM look on
+## every tier.
+var damping := 0.98
 var relaxation := 1.7
 var drag := 0.9
 var gravity := Vector3(0.0, -9.8, 0.0)
@@ -246,7 +250,8 @@ func _pack_push_constant(dt: float, last_iter: bool) -> PackedByteArray:
 	pc.resize(128)
 	pc.encode_float(0, dt)
 	pc.encode_float(4, 1.0 / dt)
-	pc.encode_float(8, damping)
+	# Per-substep share of the per-1/60 s damping: substeps no longer stack it.
+	pc.encode_float(8, pow(damping, dt * 60.0))
 	pc.encode_float(12, relaxation)
 	pc.encode_s32(16, grid_w)
 	pc.encode_s32(20, grid_h)

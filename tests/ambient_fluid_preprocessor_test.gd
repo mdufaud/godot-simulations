@@ -2,12 +2,14 @@ extends "res://tests/test_case.gd"
 
 const PREPROCESSOR := preload("res://scripts/ambient_fluid/ambient_fluid_preprocessor.gd")
 const PROFILE := preload("res://scripts/ambient_fluid/ambient_fluid_profile_3d.gd")
+const SHAPES := preload("res://scripts/ambient_fluid/ambient_fluid_shapes.gd")
 
 
 func _initialize() -> void:
 	_test_tetrahedron()
 	_test_cube()
 	_test_icosphere()
+	_test_spheroids()
 	_test_plate()
 	_test_invalid_meshes()
 	_test_profile_validation()
@@ -118,29 +120,72 @@ func _test_icosphere() -> void:
 		_check(refined_error < 0.25, "refined icosphere added mass is not bounded")
 		_check(refined_error <= relative_error,
 			"icosphere added mass did not converge under refinement")
-		var slip_error := _sphere_translation_slip_error(refined_profile)
-		print("BEM sphere tangential-slip relative error=%.4f" % slip_error)
-		_check(slip_error < 0.3,
-			"icosphere tangent slip does not approach the analytic 1.5U sphere solution")
+	# The demo sphere (320 faces) against 1/2 rho V.
+	var demo_sphere: AmbientFluidProfile3D = PREPROCESSOR.build_profile(
+		SHAPES.bem_mesh(SHAPES.Kind.SPHERE), 998.0)
+	if demo_sphere != null:
+		var coefficient := demo_sphere.added_mass_tensor[21] / (998.0 * demo_sphere.volume_m3)
+		print("BEM sphere C_a=%.4f (exact 0.5)" % coefficient)
+		_check(absf(coefficient - 0.5) < 0.015, "320-face sphere added mass is off by more than 3%")
+
+
+## Ellipsoids against Lamb's closed forms (Hydrodynamics, Sec. 373): a 2:1
+## prolate spheroid along and across its axis, and a 10:1 oblate one
+## broadside, the thin-plate case the old point-source solver undershot.
+func _test_spheroids() -> void:
+	var prolate := _scaled_profile(Vector3(2.0, 1.0, 1.0))
+	var oblate := _scaled_profile(Vector3(1.0, 0.1, 1.0))
+	if prolate == null or oblate == null:
+		_check(false, "spheroid preprocessing failed: %s" % PREPROCESSOR.get_last_error())
+		return
+	var e := sqrt(1.0 - 0.25)
+	var log_term := log((1.0 + e) / (1.0 - e))
+	var alpha := 2.0 * (1.0 - e * e) / (e * e * e) * (0.5 * log_term - e)
+	var beta := 1.0 / (e * e) - (1.0 - e * e) / (2.0 * e * e * e) * log_term
+	var axial := _coefficient(prolate, 21)
+	var transverse := _coefficient(prolate, 28)
+	var flat := sqrt(1.0 - 0.01)
+	var gamma := 2.0 / (flat * flat) * (1.0 - sqrt(1.0 - flat * flat) * asin(flat) / flat)
+	var broadside := _coefficient(oblate, 28)
+	print("BEM spheroids axial=%.4f/%.4f transverse=%.4f/%.4f oblate broadside=%.4f/%.4f" % [
+		axial, alpha / (2.0 - alpha), transverse, beta / (2.0 - beta),
+		broadside, gamma / (2.0 - gamma)])
+	_check(absf(axial / (alpha / (2.0 - alpha)) - 1.0) < 0.05,
+		"prolate spheroid axial added mass is off Lamb's value")
+	_check(absf(transverse / (beta / (2.0 - beta)) - 1.0) < 0.05,
+		"prolate spheroid transverse added mass is off Lamb's value")
+	_check(absf(broadside / (gamma / (2.0 - gamma)) - 1.0) < 0.08,
+		"thin oblate spheroid broadside added mass is off Lamb's value")
+
+
+func _scaled_profile(scale: Vector3) -> AmbientFluidProfile3D:
+	var mesh := SHAPES.icosphere_mesh(1.0, 2)
+	var arrays := mesh.surface_get_arrays(0)
+	var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+	for index in vertices.size():
+		vertices[index] *= scale
+	return PREPROCESSOR.build_profile(_mesh(vertices, arrays[Mesh.ARRAY_INDEX]), 998.0)
+
+
+func _coefficient(profile: AmbientFluidProfile3D, index: int) -> float:
+	return profile.added_mass_tensor[index] / (998.0 * profile.volume_m3)
 
 
 func _test_plate() -> void:
-	# Regression: the demo plate once generated an inverted tensor (edgewise z
-	# larger than broadside y) because the source offset rode past the opposite
-	# face of the 0.18 m slab. The offset guard must keep broadside dominant.
-	var box := BoxMesh.new()
-	box.size = Vector3(2.4, 0.18, 1.2)
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, box.get_mesh_arrays())
-	var profile: AmbientFluidProfile3D = PREPROCESSOR.build_profile(mesh, 998.0)
+	# The demo plate (2.4 x 0.18 x 1.2 m): broadside, its added mass is several
+	# times the displaced mass, close to an elliptic disk of the same outline
+	# (~2150 kg); the old point-source solver gave 182 kg.
+	var profile: AmbientFluidProfile3D = PREPROCESSOR.build_profile(
+		SHAPES.bem_mesh(SHAPES.Kind.PLATE), 998.0)
 	_check(profile != null, "plate preprocessing failed: %s" % PREPROCESSOR.get_last_error())
 	if profile == null:
 		return
-	_check(profile.source_offset_m <= 0.091,
-		"plate source offset rode past half the plate thickness")
 	var tensor := profile.added_mass_tensor
+	print("BEM plate added mass x=%.1f y=%.1f z=%.1f kg" % [tensor[21], tensor[28], tensor[35]])
 	_check(tensor[28] > tensor[21] and tensor[28] > tensor[35],
 		"plate broadside added mass is not dominant on y")
+	_check(tensor[28] > 1800.0 and tensor[28] < 3000.0,
+		"plate broadside added mass %.1f kg is far from the thin-disk estimate" % tensor[28])
 	_check(_profile_invariants(profile), "plate BEM invariants failed")
 
 
@@ -163,9 +208,12 @@ func _test_profile_validation() -> void:
 	if profile == null:
 		_check(false, "profile validation fixture preprocessing failed")
 		return
-	var invalid_slip: AmbientFluidProfile3D = profile.duplicate(true)
-	invalid_slip.slip_matrix[0] = NAN
-	_check(invalid_slip.validate() != "", "non-finite slip matrix was accepted")
+	var invalid_vertices: AmbientFluidProfile3D = profile.duplicate(true)
+	invalid_vertices.face_vertices_m[0] += Vector3(0.5, 0.0, 0.0)
+	_check(invalid_vertices.validate() != "", "face vertices off their face were accepted")
+	var missing_vertices: AmbientFluidProfile3D = profile.duplicate(true)
+	missing_vertices.face_vertices_m.resize(3)
+	_check(missing_vertices.validate() != "", "a profile without face vertices was accepted")
 	var invalid_area: AmbientFluidProfile3D = profile.duplicate(true)
 	invalid_area.total_area_m2 *= 1.1
 	_check(invalid_area.validate() != "", "inconsistent total area was accepted")
@@ -191,8 +239,8 @@ func _test_serialization() -> void:
 	if reloaded != null:
 		_check(_array_near(reloaded.added_mass_tensor, profile.added_mass_tensor, 1.0e-6),
 			"reloaded added mass changed")
-		_check(_array_near(reloaded.slip_matrix, profile.slip_matrix, 1.0e-6),
-			"reloaded slip matrix changed")
+		_check(reloaded.face_vertices_m == profile.face_vertices_m,
+			"reloaded face vertices changed")
 	_check(PREPROCESSOR.save_profile(profile, "user://invalid.tres") != "",
 		"profile save accepted a non-resources path")
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
@@ -206,35 +254,9 @@ func _profile_invariants(profile: AmbientFluidProfile3D) -> bool:
 	if not _positive_diagonal(profile.added_mass_tensor):
 		return false
 	_check(profile.bem_max_residual <= 1.0e-7, "BEM residual exceeds tolerance")
-	for face_index in profile.face_centers_m.size():
-		var normal := profile.face_normals[face_index]
-		var base := face_index * 18
-		for sample in [PackedFloat64Array([1.0, 2.0, -0.5, 3.0, -1.0, 0.25]),
-			PackedFloat64Array([-0.2, 0.4, 1.5, -2.0, 0.5, 4.0])]:
-			var projected := Vector3.ZERO
-			for row in 3:
-				var value := 0.0
-				for col in 6:
-					value += profile.slip_matrix[base + row * 6 + col] * sample[col]
-				projected[row] = value
-			_check(absf(normal.dot(projected)) < 1.0e-6,
-				"slip matrix has a normal component")
+	_check(profile.face_vertices_m.size() == profile.face_centers_m.size() * 3,
+		"profile does not carry its face triangles")
 	return true
-
-
-func _sphere_translation_slip_error(profile: AmbientFluidProfile3D) -> float:
-	var squared_error := 0.0
-	var squared_reference := 0.0
-	for face_index in profile.face_centers_m.size():
-		var normal := profile.face_normals[face_index]
-		var expected := -1.5 * (Vector3.RIGHT - normal * normal.x)
-		var base := face_index * 18
-		var actual := Vector3(profile.slip_matrix[base + 3],
-			profile.slip_matrix[base + 9], profile.slip_matrix[base + 15])
-		var area := profile.face_areas_m2[face_index]
-		squared_error += area * actual.distance_squared_to(expected)
-		squared_reference += area * expected.length_squared()
-	return sqrt(squared_error / squared_reference) if squared_reference > 0.0 else INF
 
 
 func _positive_diagonal(matrix: PackedFloat64Array) -> bool:

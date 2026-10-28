@@ -4,76 +4,164 @@ extends RefCounted
 const Gallery := preload("res://scripts/mixwell/mixwell_gallery.gd")
 const Math := preload("res://scripts/mixwell/mixwell_math.gd")
 const Periodicity := preload("res://scripts/mixwell/mixwell_periodicity.gd")
+const Boundaries := preload("res://scripts/mixwell/mixwell_boundaries.gd")
 
 
+## Reverse-drifts a canvas point through the operations, as the shaders do.
+## slip_half_extent, when set, adds the slip-wall images of the pattern
+## operations (strokes in a walled box are GPU-only).
 static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: bool,
 		period: Vector2, brush_radius_px: float, reference_size: Vector2i,
 		affine_mode: int, affine_radius_px: float, affine_strength: float,
-		cutoff_gamma: float, drift_compensation: int, midpoint_alpha: float) -> Vector2:
+		cutoff_gamma: float, drift_compensation: int, midpoint_alpha: float,
+		slip_half_extent := Vector2.ZERO) -> Vector2:
 	var value := point
 	if periodic:
 		value = Periodicity.wrap_coordinate(value, period)
-	var reference_min := float(maxi(mini(reference_size.x, reference_size.y), 1))
-	var epsilon := brush_radius_px * 2.0 / reference_min
-	if affine_mode >= 0:
-		var affine_radius := affine_radius_px * 2.0 / reference_min
-		value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
-			affine_strength, affine_radius, cutoff_gamma)
-		return Periodicity.wrap_coordinate(value, period) if periodic else value
-	var periodic_curve_counts := {}
+	var unit := Periodicity.units_per_pixel(reference_size)
+	var epsilon := brush_radius_px * unit
 	for operation in operations:
-		var curve_group := int(operation.get("curve_group", -1))
-		if periodic and curve_group >= 0:
-			var limit := maxi(int(operation.get("periodic_segment_count", 0)), 0)
-			var seen := int(periodic_curve_counts.get(curve_group, 0))
-			if limit <= 0 or seen >= limit:
-				continue
-			periodic_curve_counts[curve_group] = seen + 1
 		var operation_type := int(operation.get("type", Gallery.LINE))
-		if operation_type == Gallery.LINE or operation_type == Gallery.LINE_COMB:
+		if affine_mode >= 0 and operation_type == Gallery.LINE:
+			# The affine pass replaces the preset's line; user strokes still apply.
+			value = Gallery.affine_advect(affine_mode, value, Vector2.ZERO,
+				affine_strength, affine_radius_px * unit, cutoff_gamma, midpoint_alpha)
+		elif operation_type in [Gallery.LINE, Gallery.LINE_COMB, Gallery.GEL_GIT_PASS,
+				Gallery.TRI_WAVE]:
 			var direction: Vector2 = operation.get("direction", Vector2.RIGHT).normalized()
 			var perpendicular := Vector2(-direction.y, direction.x)
 			var operation_radius := float(operation.get("radius_px", -1.0))
 			var operation_epsilon := (brush_radius_px if operation_radius <= 0.0 else operation_radius) \
-					* 2.0 / reference_min
-			var count := maxi(int(operation.get("count", 1)), 1) \
-					if operation_type == Gallery.LINE_COMB else 1
-			for line_index in count:
-				var offset := 0.0
-				if operation_type == Gallery.LINE_COMB:
-					offset = (float(line_index) - 0.5 * float(count - 1)) \
-							* float(operation.get("pitch", 0.0))
-					var noise_value := float(operation.get("noise", 0.0))
-					if noise_value != 0.0:
-						var noise := _hash11(float(line_index) + noise_value)
-						offset += (noise * 2.0 - 1.0) * noise_value
-				var phase := float(operation.get("phase", 0.0))
-				var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
-						+ perpendicular * (offset + phase)
-				var drift := Math.rd_line(Math.point(value.x - origin.x, value.y - origin.y),
-						operation_epsilon, Math.point(direction.x, direction.y))
+					* unit
+			var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
+					+ perpendicular * float(operation.get("phase", 0.0))
+			match operation_type:
+				Gallery.LINE_COMB, Gallery.GEL_GIT_PASS, Gallery.TRI_WAVE:
+					var drift := _pattern_drift(operation, value - origin, operation_epsilon,
+							direction, cutoff_gamma, midpoint_alpha)
+					if slip_half_extent != Vector2.ZERO:
+						for image in _pattern_images(operation_type, direction):
+							var h := Boundaries.reflection_matrix(image)
+							var mirrored := _pattern_drift(operation, Boundaries.mirror_point(value,
+									image, slip_half_extent) - origin, operation_epsilon, direction,
+									cutoff_gamma, midpoint_alpha)
+							drift += Vector2(h.x * mirrored.x + h.y * mirrored.y,
+									h.z * mirrored.x + h.w * mirrored.y)
+					value += drift
+					if operation_type == Gallery.LINE_COMB:
+						value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
+								float(operation.get("pitch", 0.0)), direction)
+				_:
+					var drift := Math.rd_line(Math.point(value.x - origin.x, value.y - origin.y),
+							operation_epsilon, Math.point(direction.x, direction.y))
+					if drift.size() == 2:
+						value += Vector2(drift[0], drift[1]) * _line_extent_weight(value, origin,
+								direction, operation_epsilon, cutoff_gamma,
+								operation.get("extent", Vector2.ZERO))
+		elif operation_type == Gallery.USER_STROKES:
+			# Every stroke segment, newest first, each under its mask: the
+			# composition the GPU's grid search reproduces exactly.
+			var segments: PackedFloat32Array = operation.get("segments", PackedFloat32Array())
+			for index in range(segments.size() / 8 - 1, -1, -1):
+				var base := index * 8
+				var stroke_segment := Vector4(segments[base], segments[base + 1],
+						segments[base + 2], segments[base + 3])
+				var drift := Math.rd_segment(Math.point(value.x, value.y), segments[base + 4],
+						Math.point(stroke_segment.x, stroke_segment.y),
+						Math.point(stroke_segment.z, stroke_segment.w), midpoint_alpha)
 				if drift.size() == 2:
-					var weight := _line_extent_weight(value, origin, direction,
-							operation_epsilon, cutoff_gamma, operation.get("extent", Vector2.ZERO))
-					value += Vector2(drift[0], drift[1]) * weight
-			if operation_type == Gallery.LINE_COMB:
-				value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
-						float(operation.get("pitch", 0.0)), direction)
+					value += Vector2(drift[0], drift[1]) * segment_mask(value, stroke_segment,
+							segments[base + 4], cutoff_gamma)
 		elif operation_type == Gallery.SEGMENT:
 			var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 			if periodic or operation.get("period", Vector2.ZERO) != Vector2.ZERO:
 				segment = _periodic_segment_at(segment, value, operation.get("period", Vector2.ZERO))
 			var radius := float(operation.get("radius_px", -1.0))
 			var segment_epsilon := (brush_radius_px if radius <= 0.0 else radius) \
-					* 2.0 / reference_min
+					* unit
 			var drift := Math.rd_segment(Math.point(value.x, value.y), segment_epsilon,
 					Math.point(segment.x, segment.y), Math.point(segment.z, segment.w),
 					midpoint_alpha)
 			if drift.size() == 2:
-				value += Vector2(drift[0], drift[1])
+				value += Vector2(drift[0], drift[1]) * segment_mask(value, segment,
+						segment_epsilon, cutoff_gamma)
 		if periodic:
 			value = Periodicity.wrap_coordinate(value, period)
 	return Periodicity.wrap_coordinate(value, period) if periodic else value
+
+
+static func _pattern_drift(operation: Dictionary, local: Vector2, epsilon: float,
+		direction: Vector2, cutoff_gamma: float, midpoint_alpha: float) -> Vector2:
+	var gap := float(operation.get("pitch", 0.0))
+	match int(operation.get("type", Gallery.LINE)):
+		Gallery.LINE_COMB:
+			return Math.rd_nonpareil(local, epsilon, direction, gap,
+					float(operation.get("noise", 0.0)), cutoff_gamma)
+		Gallery.GEL_GIT_PASS:
+			return Math.rd_gel_git(local, epsilon, direction, gap)
+	return Math.rd_tri_wave_comb(local, epsilon, direction,
+			float(operation.get("wavelength", 0.0)), float(operation.get("amplitude", 0.0)),
+			bool(operation.get("broken", false)), gap, cutoff_gamma, midpoint_alpha)
+
+
+## Slip-wall images of a pattern pass, as in mixwell_rd_line.comp: a comb's
+## across the walls its tines run along, a wave's across every wall and corner.
+static func _pattern_images(operation_type: int, direction: Vector2) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if operation_type == Gallery.TRI_WAVE:
+		for image in Boundaries.EDGE_IMAGES + Boundaries.CORNER_IMAGES:
+			result.append(image)
+	elif absf(direction.y) <= 1.0e-6:
+		result.append_array([Vector2i(0, -1), Vector2i(0, 1)])
+	elif absf(direction.x) <= 1.0e-6:
+		result.append_array([Vector2i(-1, 0), Vector2i(1, 0)])
+	return result
+
+
+## The GPU's periodic optimisation, emulated for one screen pixel: pass k runs on
+## a domain of plan[k].current pixels and reads the previous pass at
+## pixel % its domain, and the shade reads the last pass at pixel % its domain.
+## Exact only for whole-pixel periods -- which is what the solver's planner
+## guarantees and what this checks. Returns the reverse-drifted coordinate.
+static func cpu_tiled_advect(pixel: Vector2i, plan: Array[Dictionary],
+		operations: Array[Dictionary], size: Vector2i, jitter: Vector2, brush_radius_px: float,
+		reference_size: Vector2i, cutoff_gamma: float, drift_compensation: int,
+		midpoint_alpha: float) -> Vector2:
+	var chain: Array[Vector2i] = []
+	var current := pixel
+	for index in range(plan.size() - 1, -1, -1):
+		var domain: Vector2i = plan[index].current
+		current = Vector2i(posmod(current.x, domain.x), posmod(current.y, domain.y))
+		chain.push_front(current)
+	var displacement := Vector2.ZERO
+	for index in plan.size():
+		var source := display_coordinate(chain[index], size, jitter)
+		var single: Array[Dictionary] = [operations[index]]
+		var moved := cpu_advect(source + displacement, single, false, Vector2.ZERO,
+				brush_radius_px, reference_size, -1, 0.0, 0.0, cutoff_gamma, drift_compensation,
+				midpoint_alpha)
+		displacement = moved - source
+	return display_coordinate(pixel, size, jitter) + displacement
+
+
+## Canvas coordinate of a jittered pixel, as display_coordinate in the shaders.
+static func display_coordinate(pixel: Vector2i, size: Vector2i, jitter: Vector2) -> Vector2:
+	var aspect := Vector2(float(size.x) / float(maxi(size.y, 1)), 1.0)
+	return (Vector2(pixel) + jitter) / Vector2(size) * 2.0 * aspect - aspect
+
+
+## rdSegment's local mask (Mixwell.glsl), as segment_mask in mixwell_common.comp:
+## full drift out to half the cutoff (5 epsilon at gamma 10), zero at the cutoff.
+static func segment_mask(point: Vector2, segment: Vector4, epsilon: float,
+		cutoff_gamma: float) -> float:
+	var start := Vector2(segment.x, segment.y)
+	var edge := Vector2(segment.z, segment.w) - start
+	var along := 0.0
+	if edge.length_squared() > 1.0e-30:
+		along = clampf((point - start).dot(edge) / edge.length_squared(), 0.0, 1.0)
+	var distance := point.distance_to(start + edge * along)
+	var cutoff := maxf(epsilon * cutoff_gamma, epsilon)
+	return 1.0 - _smoothstep(0.5 * cutoff, cutoff, distance)
 
 
 static func _periodic_segment_at(segment: Vector4, point: Vector2, period: Vector2) -> Vector4:
@@ -87,10 +175,6 @@ static func _periodic_segment_at(segment: Vector4, point: Vector2, period: Vecto
 		shift.y = round((point.y - start.y) / period.y) * period.y
 	return Vector4(start.x + shift.x, start.y + shift.y,
 			segment.z + shift.x, segment.w + shift.y)
-
-
-static func _hash11(value: float) -> float:
-	return fposmod(sin(value * 127.1 + 311.7) * 43758.5453123, 1.0)
 
 
 static func _line_extent_weight(point: Vector2, origin: Vector2, direction: Vector2,
@@ -340,18 +424,50 @@ static func _area_category(pixel: Vector2i, size: Vector2i, snapshot) -> String:
 					/ maxf(edge.length_squared(), 1.0e-30), 0.0, 1.0)
 			nearest = minf(nearest, coordinate.distance_to(
 				Vector2(segment.x, segment.y) + edge * parameter))
-		else:
-			var direction: Vector2 = operation.get("direction", Vector2.RIGHT).normalized()
-			var perpendicular := Vector2(-direction.y, direction.x)
-			var origin: Vector2 = operation.get("origin", Vector2.ZERO)
-			nearest = minf(nearest, absf((coordinate - origin).dot(perpendicular)))
-	var epsilon: float = snapshot.brush_radius_px * 2.0 / float(maxi(
-			mini(snapshot.reference_size.x, snapshot.reference_size.y), 1))
+		elif operation_type != Gallery.BAKED_MAP and operation_type != Gallery.USER_STROKES:
+			nearest = minf(nearest, pattern_nearest_distance(operation, coordinate))
+	var epsilon: float = snapshot.brush_radius_px \
+			* Periodicity.units_per_pixel(snapshot.reference_size)
 	if nearest < epsilon * 0.5:
 		return "singularity"
 	if nearest <= epsilon * snapshot.cutoff_gamma:
 		return "cutoff"
 	return "core"
+
+
+## Distance to the nearest tine or wave segment of a line-family operation, as
+## pattern_nearest_distance in mixwell_common.comp.
+static func pattern_nearest_distance(operation: Dictionary, coordinate: Vector2) -> float:
+	var direction: Vector2 = operation.get("direction", Vector2.RIGHT)
+	if direction.length() <= 1.0e-30:
+		return INF
+	direction = direction.normalized()
+	var perpendicular := Vector2(-direction.y, direction.x)
+	var origin: Vector2 = operation.get("origin", Vector2.ZERO)
+	var local := coordinate - origin - perpendicular * float(operation.get("phase", 0.0))
+	var y := local.dot(perpendicular)
+	var operation_type := int(operation.get("type", Gallery.LINE))
+	var gap := 0.0 if operation_type == Gallery.LINE else float(operation.get("pitch", 0.0))
+	if operation_type == Gallery.GEL_GIT_PASS:
+		return Math.min_comb_dist(y, gap) if gap > 1.0e-30 else absf(y)
+	if operation_type == Gallery.TRI_WAVE:
+		var half_wave := 0.5 * float(operation.get("wavelength", 0.0))
+		if half_wave <= 1.0e-30:
+			return absf(y)
+		var amplitude := float(operation.get("amplitude", 0.0))
+		var nearest_index := roundi(local.dot(direction) / half_wave)
+		var distance := INF
+		for i in range(nearest_index - 1, nearest_index + 2):
+			var side := -1.0 if absi(i) % 2 == 0 else 1.0
+			var centre := direction * half_wave * float(i)
+			var a := centre - direction * half_wave * 0.5 + perpendicular * amplitude * side
+			var b := centre + direction * half_wave * 0.5 - perpendicular * amplitude * side
+			var edge := b - a
+			var along := clampf((local - a).dot(edge) / maxf(edge.length_squared(), 1.0e-30),
+					0.0, 1.0)
+			distance = minf(distance, local.distance_to(a + edge * along))
+		return distance
+	return absf(y - gap * round(y / gap)) if gap > 1.0e-30 else absf(y)
 
 
 static func _smoothstep(edge0: float, edge1: float, value: float) -> float:

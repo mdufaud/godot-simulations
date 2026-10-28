@@ -1,8 +1,24 @@
 class_name SphFluidSolver
 extends RefCounted
-## GPU dual-density SPH based on SebLague and Clavet's density equations. It uses
-## a dense counting-sort grid, a Texture2DRD position buffer and GPU profiling.
-## Particle velocity is reordered with position and preserved between frames.
+## GPU SPH after SebLague's fluid simulation: force-based double-density
+## relaxation (Clavet et al. 2005's density and near-density pressures with
+## spiky kernels), sub-stepped symplectic Euler on predicted positions. The
+## materials add published models on top:
+## - viscosity: XSPH (Monaghan 1989), integrated exactly over each sub-step; the
+##   viscous materials relax by increment toward the neighbour mean, with
+##   no-slip boundary viscosity (after Akinci et al. 2012);
+## - Light Paste and Prismatic Slime: Bingham yield stress with Papanastasiou
+##   regularisation, solved implicitly (Jacobi sweeps, Picard on the strain rate);
+## - Water + Oil: a two-phase mixture, with per-particle mass from the oil
+##   fraction (Solenthaler & Pajarola 2008) and sub-particle drift
+##   (Ren et al. 2014);
+## - cohesion: Akinci et al. 2013; foam: Ihmsen et al. 2012 diffuse particles.
+## Look models without a physical reference, kept as such: honey's stretch
+## term, the gel's rest springs, the astral and slime stress parameters, and
+## lava's heat, crust and bed drag.
+## It uses a dense counting-sort grid, a Texture2DRD position buffer and GPU
+## profiling. Particle velocity is reordered with position and preserved
+## between frames.
 
 const SHADER_DIR := "res://shaders/sph/"
 const SHARED_GRID_DIR := "res://shaders/fluid/"
@@ -10,8 +26,14 @@ const GRID_STAGES := ["grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_b
 const STAGES: Array[String] = [
 	"grid_clear", "grid_scan", "grid_scan_blocks", "grid_add_back", "grid_scatter",
 	"sph_vel_snap", "sph_external", "sph_density", "sph_pressure", "sph_viscosity",
+	"sph_vel_star", "sph_yield_iter",
 	"sph_emit", "foam_prepare", "foam_update", "foam_compact",
 ]
+## Stages compiled from another stage's source with a define prepended.
+const STAGE_VARIANTS := {"sph_yield_iter": ["sph_viscosity", "#define YIELD_ITERATION\n"]}
+## Jacobi sweeps per sub-step of the implicit yield-stress viscosity solve. The
+## velocity carries over between sub-steps, so the solve is warm-started.
+const YIELD_SWEEPS := 12
 const WG := 256
 const MATERIAL_SPECTRAL_GEL := 6
 const FOAM_UBO_SIZE := 112
@@ -42,6 +64,8 @@ var near_pressure_mult := DEFAULT_NEAR_PRESSURE_MULT
 var viscosity_strength := 0.14
 var extension_strength := 0.0
 var yield_stress := 0.0
+## Two-phase oil: mixture-model drift relaxation time (s), see FluidMaterial.
+var drift_relaxation_s := 0.0
 var material_density_kg_m3 := 1000.0
 # Derived kernel constants from FluidMaterial; packed into the SceneParams
 # block (density, stiffness, inflation) and the push constant (cohesion scale).
@@ -165,6 +189,14 @@ var _sim_time := 0.0
 var _emit_cursor := 0
 var _emit_fraction := 0.0
 var _target_density := 1.0
+## Rest density over rest near-density of the spawn lattice (1 in the continuum
+## limit, 1.11 at h / spacing = 2.08). Near pressure now divides by the particle's
+## own density like the regular term (SebLague); this keeps the near stiffness of
+## a particle at rest exactly what it was when it divided by the near density.
+var _near_calibration := 1.0
+## Neighbours a particle of the spawn lattice has within h: the constant that
+## normalises pairwise terms so both partners of a pair get the same push.
+var _rest_neighbours := 1.0
 var _seed_data := PackedFloat32Array()
 var _parity := 0
 var _gel_cohort := 0
@@ -269,12 +301,17 @@ func init_render() -> void:
 	if _rd == null:
 		return
 	_target_density = _compute_rest_density()
+	_near_calibration = _target_density / _compute_rest_near_density()
+	_rest_neighbours = _count_rest_neighbours()
 
 	var common := FileAccess.get_file_as_string(SHADER_DIR + "sph_common.comp")
 	for stage in STAGES:
 		var stage_dir := SHARED_GRID_DIR if GRID_STAGES.has(stage) else SHADER_DIR
-		var stage_src := FileAccess.get_file_as_string(stage_dir + stage + ".comp")
-		var spirv := ShaderCache.compile(_rd, "sph_" + stage, "#version 450\n\n" + common + "\n" + stage_src)
+		var source_name: String = STAGE_VARIANTS[stage][0] if STAGE_VARIANTS.has(stage) else stage
+		var defines: String = STAGE_VARIANTS[stage][1] if STAGE_VARIANTS.has(stage) else ""
+		var stage_src := FileAccess.get_file_as_string(stage_dir + source_name + ".comp")
+		var spirv := ShaderCache.compile(_rd, "sph_" + stage,
+			"#version 450\n" + defines + "\n" + common + "\n" + stage_src)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("SPH stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
 			return
@@ -316,6 +353,7 @@ func init_render() -> void:
 	# Race-free neighbour reads: refreshed from `velocities` after grid_scatter
 	# each sub-step, read by sph_pressure (foam metric) and sph_viscosity (XSPH).
 	_buffers["velocities_snap"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
+	_buffers["velocities_star"] = _rd.storage_buffer_create(vec4_bytes, zero_vec4)
 	_buffers["gel_reference"] = _rd.storage_buffer_create(vec4_bytes, seed_bytes)
 	_gel_cohort = 0
 	_buffers["cell_count"] = _rd.storage_buffer_create(cells * 4, zero_cells)
@@ -388,11 +426,13 @@ func _build_uniform_sets() -> void:
 		["positions_a", "velocities_a", "predicted_a", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_b", "velocities_b",
 			"", "predicted_b", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference",
+			"velocities_star"],
 		["positions_b", "velocities_b", "predicted_b", "densities", "near_densities",
 			"cell_count", "cell_start", "block_sums", "positions_a", "velocities_a",
 			"", "predicted_a", "foam_pos", "foam_vel", "foam_count", "", "", "", "",
-			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference"],
+			"foam_pos_c", "foam_vel_c", "", "velocities_snap", "gel_reference",
+			"velocities_star"],
 	]
 	var field: RID = planet_field if planet_field.is_valid() else _dummy_field
 	for stage in _uniform_sets:
@@ -534,6 +574,17 @@ func step_render(dt: float) -> void:
 		cl = _mark(cl, "sph/density")
 		_dispatch(cl, "sph_pressure", pc, n_groups)
 		cl = _mark(cl, "sph/pressure")
+		if yield_stress > 0.0:
+			# Implicit yield-stress viscosity: Jacobi sweeps from the post-pressure
+			# velocity v* (see sph_viscosity.comp), then a snapshot of the solution
+			# for the strain rate the final pass reads. Without a yield, viscosity
+			# keeps relaxing by increment against the pre-pressure snapshot.
+			_dispatch(cl, "sph_vel_star", pc, n_groups)
+			for _sweep in YIELD_SWEEPS:
+				_dispatch(cl, "sph_vel_snap", pc, n_groups)
+				_dispatch(cl, "sph_yield_iter", pc, n_groups)
+			_dispatch(cl, "sph_vel_snap", pc, n_groups)
+			cl = _mark(cl, "sph/yield")
 		_dispatch(cl, "sph_viscosity", pc, n_groups)
 		cl = _mark(cl, "sph/viscosity")
 		# White particles advance once per frame (full dt) against the grid the
@@ -750,7 +801,7 @@ func _pack_push_constant(dt: float, last: int, seed: int = 0) -> PackedByteArray
 	pc.encode_float(64, dt)
 	pc.encode_float(68, _target_density)
 	pc.encode_float(72, pressure_mult)
-	pc.encode_float(76, near_pressure_mult)
+	pc.encode_float(76, near_pressure_mult * _near_calibration)
 	pc.encode_float(80, viscosity_strength)
 	pc.encode_float(84, collision_damping)
 	# The cohesion slider value is unscaled; the mercury kernel boost lives here,
@@ -817,7 +868,8 @@ func _pack_scene_ubo(emit_start: int, emit_count: int) -> PackedByteArray:
 	# (13 affine_inverse on the cascade) reruns only when a static input does.
 	var static_hash := hash([material, emitter_origin, emitter_velocity, emitter_enabled,
 		spacing, emitter_width, scene_obstacles, material_density_kg_m3,
-		stiffness_scale, collision_inflation, freeze_heat, yield_stress, scene_id, config.domain_origin,
+		stiffness_scale, collision_inflation, freeze_heat, yield_stress, _rest_neighbours,
+		drift_relaxation_s, scene_id, config.domain_origin,
 		config.domain_size_m])
 	if static_hash != _scene_ubo_cache_hash:
 		_scene_ubo_cache = _pack_scene_ubo_static()
@@ -849,6 +901,8 @@ func _pack_scene_ubo_static() -> PackedByteArray:
 	b.encode_float(1192, collision_inflation)
 	b.encode_float(1196, freeze_heat)
 	b.encode_float(1248, yield_stress)
+	b.encode_float(1252, _rest_neighbours)
+	b.encode_float(1256, drift_relaxation_s)
 	b.encode_s32(1200, scene_id)
 	var upper := config.domain_origin + config.domain_size_m
 	for axis in 3:
@@ -925,4 +979,32 @@ func _compute_rest_density() -> float:
 				if r < h:
 					var v := h - r
 					sum += k_sp2 * v * v
+	return sum
+
+
+# Neighbours of a rest-lattice particle within h, itself excluded.
+func _count_rest_neighbours() -> float:
+	var count := 0
+	var steps := int(ceil(h / spacing))
+	for x in range(-steps, steps + 1):
+		for y in range(-steps, steps + 1):
+			for z in range(-steps, steps + 1):
+				var r := (Vector3(x, y, z) * spacing).length()
+				if r > 0.0 and r < h:
+					count += 1
+	return float(maxi(count, 1))
+
+
+# Near density (SpikyPow3 kernel) of the same rest lattice.
+func _compute_rest_near_density() -> float:
+	var k_sp3 := 15.0 / (PI * pow(h, 6))
+	var sum := 0.0
+	var steps := int(ceil(h / spacing))
+	for x in range(-steps, steps + 1):
+		for y in range(-steps, steps + 1):
+			for z in range(-steps, steps + 1):
+				var r := (Vector3(x, y, z) * spacing).length()
+				if r < h:
+					var v := h - r
+					sum += k_sp3 * v * v * v
 	return sum

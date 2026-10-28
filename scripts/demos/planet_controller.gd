@@ -9,6 +9,9 @@ extends Node3D
 const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 
 const REGEN_DEBOUNCE := 0.25
+## The optical-depth LUT bake ends in a synchronous readback, so slider drags
+## re-bake once they settle instead of on every tick.
+const BAKE_DEBOUNCE := 0.2
 const PRESETS := [
 	preload("res://resources/planet/presets/terra.tres"),
 	preload("res://resources/planet/presets/verdant.tres"),
@@ -53,6 +56,7 @@ var _mobile := false
 ## only after that.
 var _planet_ready := false
 var _regen_timer: Timer
+var _bake_timer: Timer
 var _regen_pending := false
 var _last_sun_yaw := INF
 var _capture_pour_pending := false
@@ -108,6 +112,12 @@ func _ready() -> void:
 	_regen_timer.wait_time = REGEN_DEBOUNCE
 	_regen_timer.timeout.connect(start_generation)
 	add_child(_regen_timer)
+	_bake_timer = Timer.new()
+	_bake_timer.one_shot = true
+	_bake_timer.wait_time = BAKE_DEBOUNCE
+	_bake_timer.timeout.connect(func() -> void:
+		RenderingServer.call_on_render_thread(_atmosphere.bake_render))
+	add_child(_bake_timer)
 
 	apply_preset(clampi(int(menu.stored_value("Shape", "Preset", 0)), 0, PRESETS.size() - 1))
 	menu.settings_reset.connect(func() -> void:
@@ -283,6 +293,11 @@ func start_generation() -> void:
 			_menu_builder.set_status(generator.generated_error)
 		return
 	_menu_builder.set_status("Generating…")
+
+
+func queue_bake() -> void:
+	if _bake_timer != null:
+		_bake_timer.start()
 
 
 func queue_regen() -> void:

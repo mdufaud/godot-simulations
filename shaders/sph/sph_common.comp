@@ -1,9 +1,11 @@
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
-// Dual-density SPH (SebLague / Clavet). Particle data is ping-ponged: *_src
-// buffers hold last sub-step's cell-sorted order (canonical this sub-step);
-// grid_scatter re-sorts positions/predicted/velocities into the dst buffers that
-// every later stage indexes by slot. Velocity IS reordered (unlike the PBF
+// Force-based double-density SPH after SebLague (Clavet et al. 2005 density and
+// near-density); the material models are listed in sph_fluid_solver.gd.
+// Particle data is ping-ponged: *_src buffers hold last sub-step's cell-sorted
+// order (canonical this sub-step); grid_scatter re-sorts
+// positions/predicted/velocities into the dst buffers that every later stage
+// indexes by slot. Velocity IS reordered (unlike the PBF
 // solver, which derives velocity from position change) because SPH reads the
 // old velocity after the sort.
 layout(std430, set = 0, binding = 0) restrict buffer PositionsSrc {
@@ -135,6 +137,9 @@ const int MATERIAL_LAVA = 1;
 const int MATERIAL_MERCURY = 2;
 const int MATERIAL_HONEY = 3;
 const int MATERIAL_OIL = 4;
+// Water + Oil: rest density of the water phase (kg/m3); the oil's is
+// scene.fluid_material.x.
+const float OIL_WATER_DENSITY = 1000.0;
 const int MATERIAL_ASTRAL = 5;
 const int MATERIAL_SPECTRAL_GEL = 6;
 const int MATERIAL_FLUID_LAVA = 7;
@@ -184,7 +189,7 @@ layout(std140, set = 0, binding = 21) uniform SceneParams {
 	ivec4 scene_meta; // x = FluidSystem.Scenario id, yzw = pad
 	vec4 domain_min;
 	vec4 domain_max;
-	vec4 fluid_rheology; // x = yield deceleration in m/s^2 (0 = flows freely), yzw = pad
+	vec4 fluid_rheology; // x = Bingham yield stress in Pa (0 = flows freely), y = rest-lattice neighbour count, z = oil drift relaxation time in s, w = pad
 }
 scene;
 
@@ -203,6 +208,13 @@ layout(std430, set = 0, binding = 23) restrict buffer GelReference {
 	vec4 data[];
 }
 gel_reference;
+
+// Post-pressure velocity v* of the implicit yield solve (binding 24): fixed while
+// sph_yield_iter sweeps the iterate between velocities_snap and velocities.
+layout(std430, set = 0, binding = 24) restrict buffer VelocitiesStar {
+	vec4 data[];
+}
+velocities_star;
 
 // Live particle count, clamped: spawning bumps foam_count[0] by the unclamped
 // request, so it can read past the cap for the rest of the frame.

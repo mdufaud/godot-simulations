@@ -122,7 +122,7 @@ func build(menu: SimMenu, presets: Array, looks: Array, sun_elevation: float, su
 		solver.choppiness,
 		func(v: float):
 			solver.choppiness = v
-			solver.request_render_refresh())
+			solver.request_render_refresh(true))
 	_height_gain = _spectrum_slider(menu, "Wave height", 0.0,
 		OceanSolver.JONSWAP_MAX_HEIGHT_GAIN, solver.height_gain,
 		func(v: float): solver.height_gain = v)
@@ -300,14 +300,16 @@ func cycle_look() -> void:
 
 
 ## Spectrum-shaping sliders flip the dirty flag: regeneration is one cheap
-## dispatch per cascade and the fixed seeds keep phases continuous.
+## dispatch per cascade and the fixed seeds keep phases continuous. The spectral
+## reference integral behind it is not cheap (~0.2 s of GDScript on the main
+## thread), so these apply on release instead of on every tick of a drag.
 func _spectrum_slider(menu: SimMenu, label: String, lo: float, hi: float, value: float,
 		setter: Callable) -> HSlider:
 	return menu.add_slider(label, lo, hi, value, func(v: float):
 		setter.call(v)
 		if not _updating:
 			solver.mark_spectrum_dirty()
-	)
+	, true, 0.0, true)
 
 
 func sync_scene_mode(index: int) -> void:

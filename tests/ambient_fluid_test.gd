@@ -38,6 +38,26 @@ func _test_matrix_operations() -> void:
 	_check(MATH.is_positive_definite(diagonal), "positive diagonal matrix is not positive definite")
 	_check(MATH.matrix_inverse(MATH.zero_matrix()).is_empty(),
 		"singular 6x6 matrix was inverted")
+	# A 1 mm, 35 kg/m^3 body: inertia ~1e-13 kg.m^2, mass ~1e-7 kg, with a small
+	# coupling term. The pivot floor is relative, so this must invert and Cholesky
+	# like any other well-conditioned matrix instead of freezing the body.
+	var tiny := MATH.diagonal_matrix(Vector3(1.4e-13, 1.4e-13, 1.4e-13), 1.5e-7)
+	tiny[0 * MATH.MATRIX_SIZE + 4] = 2.0e-12
+	tiny[4 * MATH.MATRIX_SIZE + 0] = 2.0e-12
+	var tiny_inverse := MATH.matrix_inverse(tiny)
+	_check(tiny_inverse.size() == MATH.MATRIX_SCALARS, "millimetre-scale matrix was rejected")
+	_check(_array_near(MATH.matrix_multiply(tiny, tiny_inverse), MATH.identity_matrix(), 1.0e-9),
+		"millimetre-scale inverse product is not identity")
+	_check(MATH.is_positive_definite(tiny), "millimetre-scale SPD matrix failed Cholesky")
+	# The PSD check runs Jacobi rotations; they must not reach the caller's
+	# matrix (profile.validate() hands it the stored added-mass tensor).
+	var coupled := MATH.diagonal_matrix(Vector3(80.0, 60.0, 70.0), 500.0)
+	coupled[5 * MATH.MATRIX_SIZE + 5] = 30.0
+	coupled[1 * MATH.MATRIX_SIZE + 3] = 4.0
+	coupled[3 * MATH.MATRIX_SIZE + 1] = 4.0
+	var before := coupled.duplicate()
+	_check(MATH.is_positive_semidefinite(coupled), "coupled SPD tensor failed the PSD check")
+	_check(coupled == before, "the PSD check diagonalised the caller's tensor")
 
 
 func _test_profile_and_tensor() -> void:
@@ -61,7 +81,8 @@ func _test_profile_and_tensor() -> void:
 	for index in [21, 28, 35]:
 		_check(absf(profile.added_mass_tensor[index] - expected_added_mass) < 1.0e-6,
 			"sphere translation added mass is anisotropic")
-	_check(profile.slip_matrix.is_empty(), "analytic profile unexpectedly has slip matrix")
+	_check(profile.face_vertices_m.size() == profile.face_centers_m.size() * 3,
+		"analytic profile does not carry its face triangles")
 
 
 func _test_acceleration_closed_form() -> void:
@@ -122,7 +143,8 @@ func _test_scene_body() -> void:
 	_check(body.collision_layer == 0 and body.collision_mask == 0,
 		"ambient fluid body has collision enabled")
 	_check(profile.format_version == AmbientFluidProfile3D.FORMAT_ANALYTIC
-		and profile.slip_matrix.is_empty(), "ambient fluid body is not using analytic profile")
+		and profile.format_version == AmbientFluidProfile3D.FORMAT_ANALYTIC,
+		"ambient fluid body is not using analytic profile")
 	_check(body.global_position.y < start_y, "scene body did not fall under gravity")
 	_check(body.combined_tensor()[21] > 0.0, "scene body tensor was not built")
 	body.queue_free()

@@ -11,8 +11,18 @@ var cohesion := 0.0
 var collision_damping := 0.15
 ## Honey-only stretch term, applied in the pressure pass (0 = no kernel work).
 var extension_strength := 0.0
-## Bingham plug: yield deceleration (m/s^2) of supported fluid; 0 = flows freely.
+## Bingham yield stress (Pa); 0 = flows freely. Solved implicitly with
+## Papanastasiou regularisation (shaders/sph/sph_viscosity.comp). At the default
+## SphFluidSolver.YIELD_SWEEPS a settled pile stands within 2% of the fully
+## converged height up to 300 Pa and 5% lower at 400 Pa (the slider's top);
+## stiffer yields need more sweeps.
 var yield_stress := 0.0
+## Water + Oil only: drift relaxation time (s) of the two-phase mixture model
+## (Ren et al. 2014). Below the particle scale oil slips past water at
+## u = tau * g * (1000 - density_kg_m3) / rho_mixture; 0 = no slip. 0.3 s gives
+## an isolated oil parcel 0.48 m/s, about the terminal rise of an oil blob one
+## particle spacing (12 cm) across at drag coefficient ~1.
+var drift_relaxation_s := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
 var emission_cycle_seconds := 24.0
@@ -64,7 +74,6 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 9000.0
 			spec.collision_damping = 0.02
 			spec.extension_strength = 24.0
-			spec.yield_stress = 6.0
 			spec.radius = 0.24
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.WATER_OIL:
@@ -72,6 +81,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.cohesion = 250.0
 			spec.collision_damping = 0.15
 			spec.density_kg_m3 = 850.0
+			spec.drift_relaxation_s = 0.3
 		FluidSystem.FluidKind.ASTRAL:
 			spec.viscosity = 0.25
 			spec.cohesion = 1200.0
@@ -86,14 +96,14 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.emission_cycle_seconds = 60.0
 		FluidSystem.FluidKind.PRISMATIC_SLIME:
 			spec.viscosity = 2.6
-			spec.yield_stress = 12.0
+			spec.yield_stress = 120.0
 			spec.cohesion = 1800.0
 			spec.collision_damping = 0.06
 			spec.radius = 0.22
 			spec.emission_cycle_seconds = 48.0
 		FluidSystem.FluidKind.LIGHT_PASTE:
 			spec.viscosity = 0.45
-			spec.yield_stress = 30.0
+			spec.yield_stress = 300.0
 			spec.cohesion = 2200.0
 			spec.collision_damping = 0.03
 			spec.radius = 0.23

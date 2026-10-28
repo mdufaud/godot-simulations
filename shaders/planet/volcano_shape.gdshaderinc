@@ -28,9 +28,13 @@ vec4 volcano_sample(vec3 direction, vec4 volcano, float size, float height,
 	float ravines = pow(flow, 8.0) * 0.23 * flank * (1.0 - smoothstep(0.78, 1.0, u));
 	float summit = pow(max(1.0 - u, 0.0), 1.45)
 			* (1.0 - ravines + snoise(vec3(point * 4.0, phase)) * 0.06 * flank);
-	float apron = 0.055 * exp(-pow((u - 0.83) / 0.17, 2.0));
+	// Gaussians squared by hand: pow() is undefined in GLSL for a negative base,
+	// which these are inside the cone, and drivers may return NaN for it.
+	float apron_t = (u - 0.83) / 0.17;
+	float apron = 0.055 * exp(-apron_t * apron_t);
 	float caldera = smoothstep(-0.25, 0.55, sin(phase * 1.37));
-	float old_rim = 0.42 * exp(-pow((u - 0.68) / 0.15, 2.0))
+	float old_rim_t = (u - 0.68) / 0.15;
+	float old_rim = 0.42 * exp(-old_rim_t * old_rim_t)
 			* smoothstep(-0.45, 0.05, sin(angle + phase)) * caldera;
 	float top = volcano.w + height * clamp(max(summit, max(apron, old_rim)), 0.0, 1.0);
 	float floor_radius = volcano.w + height * floor_fraction;

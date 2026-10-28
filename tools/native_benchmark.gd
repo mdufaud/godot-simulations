@@ -50,10 +50,11 @@ func _initialize() -> void:
 		_record(timings, "clip_convex_mesh_below_plane", start, CALLS)
 		start = Time.get_ticks_usec()
 		for _call in CALLS:
-			MATH.potential_pressure_wrench(PROFILE.face_centers_m, PROFILE.face_normals,
-				PROFILE.face_areas_m2, PROFILE.slip_matrix, velocity, 998.0, 2.0,
+			MATH.surface_wrench(PROFILE.face_centers_m, PROFILE.face_normals,
+				PROFILE.face_areas_m2, velocity, 998.0, 0.001002, 2.0,
+				PROFILE.surface_length_m(),
 				wet.wet_area_fractions, wet.wet_area_centers_m)
-		_record(timings, "potential_pressure_wrench", start, CALLS)
+		_record(timings, "surface_wrench", start, CALLS)
 		for params in fractal_params:
 			start = Time.get_ticks_usec()
 			for _call in CALLS:

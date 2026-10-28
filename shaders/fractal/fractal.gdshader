@@ -132,7 +132,10 @@ vec3 eval_pert(vec2 dc) {
 
 	int ri = 0;
 	bool crit = false;
-	vec2 z = fetch_ref(0, crit) + dz;
+	// Zr is ref[ri] of the current orbit: the next step's Z is the texel this
+	// step's z already read, so it is fetched once and refetched only on rebase.
+	vec2 Zr = fetch_ref(0, crit);
+	vec2 z = Zr + dz;
 	float trap = 1e10;
 	float n = 0.0;
 	int cap = min(max_iterations, MAX_HARD);
@@ -140,11 +143,11 @@ vec3 eval_pert(vec2 dc) {
 
 	for (int i = 0; i < MAX_HARD; i++) {
 		if (i >= cap) break;
-		vec2 Z = fetch_ref(ri, crit);
-		dz = cmul(2.0 * Z + dz, dz);
+		dz = cmul(2.0 * Zr + dz, dz);
 		if (fractal_type == 0) dz += dc;
 		ri++;
-		z = fetch_ref(ri, crit) + dz;
+		Zr = fetch_ref(ri, crit);
+		z = Zr + dz;
 
 		trap = min(trap, trap_dist(z));
 		n += 1.0;
@@ -155,10 +158,12 @@ vec3 eval_pert(vec2 dc) {
 			if (fractal_type == 0 || crit) {
 				dz = z;
 				ri = 0;
+				Zr = fetch_ref(0, crit);
 			} else if (ref_len_crit > 0) {
 				crit = true;
 				dz = z;
 				ri = 0;
+				Zr = fetch_ref(0, crit);
 			} else if (ri >= ref_len - 1) {
 				// No critical orbit and the reference ended: approximate.
 				escaped = dot(z, z) > 4.0;

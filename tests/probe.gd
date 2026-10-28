@@ -3675,18 +3675,20 @@ func _run_fluid_materials() -> void:
 	demo.fluid.sph_solver.emitter_enabled = false
 	await _wait_sim(demo, 2.0)
 	var final := await _sample_fluid_phases(demo.fluid.sph_solver)
-	print("FLUMAT water=%d oil=%d pouring_oil=%d settled_delta=%.3f sim=%.2f" % [
-		int(final.get("water_count", 0)), int(final.get("oil_count", 0)),
-		int(pouring.get("oil_count", 0)),
+	print("FLUMAT water=%.1f oil=%.1f pouring_oil=%.1f settled_delta=%.3f sim=%.2f" % [
+		float(final.get("water_volume", 0.0)), float(final.get("oil_volume", 0.0)),
+		float(pouring.get("oil_volume", 0.0)),
 		float(final.get("oil_y", 0.0)) - float(final.get("water_y", 0.0)),
 		demo.fluid.sph_solver._sim_time])
-	_check(int(pouring.get("oil_count", 0)) > 0 and
-		int(filled.get("oil_count", 0)) > int(pouring.get("oil_count", 0)) + 1000,
+	_check(float(pouring.get("oil_volume", 0.0)) > 0.0 and
+		float(filled.get("oil_volume", 0.0)) > float(pouring.get("oil_volume", 0.0)) + 1000.0,
 		"fluid_materials: oil was not poured")
-	_check(int(final.get("water_count", 0)) > 0 and
-		int(final.get("water_count", 0)) == int(filled.get("water_count", -1)) and
-		int(final.get("oil_count", 0)) == int(filled.get("oil_count", -1)),
-		"fluid_materials: phases changed after the pour filled the basin")
+	# Particles carry oil volume fractions that drift between neighbours; each
+	# phase's total volume (in particles) must survive the separation.
+	_check(float(final.get("water_volume", 0.0)) > 0.0 and
+		absf(float(final.get("water_volume", 0.0)) - float(filled.get("water_volume", -1.0))) < 1.0 and
+		absf(float(final.get("oil_volume", 0.0)) - float(filled.get("oil_volume", -1.0))) < 1.0,
+		"fluid_materials: phase volumes changed after the pour filled the basin")
 	_check(float(final.get("oil_y", 0.0)) > float(final.get("water_y", 0.0)) + 0.3,
 		"fluid_materials: oil did not settle above water")
 	demo.queue_free()
@@ -3715,6 +3717,12 @@ func _run_fluid_honey_fall() -> void:
 			not demo.fluid.active_solver.initialized):
 		await process_frame
 	var pour_speed: float = demo.fluid.sph_solver.emitter_velocity.y
+	# Honey is extruded as a rope: it leaves at the speed that carries the
+	# emitted volume at rest density, whatever the particle tier.
+	var pour_solver: SphFluidSolver = demo.fluid.sph_solver
+	var extrusion: float = float(pour_solver.particle_count) * demo.fluid.flow_rate \
+		/ pour_solver.emission_cycle_seconds * pour_solver.spacing \
+		/ float(pour_solver.emitter_width * pour_solver.emitter_width)
 	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.POOL)
 	deadline = Time.get_ticks_msec() + 30000
 	while Time.get_ticks_msec() < deadline and (demo.fluid._pending_init or
@@ -3732,8 +3740,8 @@ func _run_fluid_honey_fall() -> void:
 	var vy: float = float(state.get("vy", 0.0))
 	print("FLUHONEY y=%.3f vy=%.3f pour_vy=%.1f sim=%.2f" % [
 		y, vy, pour_speed, solver._sim_time])
-	_check(is_equal_approx(pour_speed, -6.0),
-		"fluid_honey_fall: Basin honey emitter has a different launch speed")
+	_check(is_equal_approx(pour_speed, -extrusion),
+		"fluid_honey_fall: Basin honey rope does not leave at its rest-density extrusion speed")
 	_check(y < 9.0 and vy < -4.0,
 		"fluid_honey_fall: honey free-fall is damped by its material viscosity")
 	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.CASCADE)
@@ -3783,8 +3791,12 @@ func _read_honey_stream(solver: SphFluidSolver, result: Dictionary) -> void:
 		if positions[i * 4 + 1] < 10.5:
 			continue
 		airborne += 1
-		if absf(positions[i * 4] - solver.emitter_origin.x) > 1.0 or \
-				absf(positions[i * 4 + 2] - solver.emitter_origin.z) > 1.0:
+		# Outside the top chute's footprint: past its side rails (half-width 1.9 m)
+		# or beyond the ramp's ends. Honey pooling on the ramp itself -- it heaps
+		# around the impact and creeps uphill against the stop -- is not spray.
+		var along := positions[i * 4] - solver.emitter_origin.x
+		if absf(positions[i * 4 + 2] - solver.emitter_origin.z) > 1.9 \
+				or along < -3.4 or along > 4.2:
 			escaped += 1
 	result["airborne"] = airborne
 	result["escaped"] = escaped
@@ -3857,19 +3869,17 @@ func _sample_fluid_phases(solver: SphFluidSolver) -> Dictionary:
 func _read_fluid_phases(solver: SphFluidSolver, result: Dictionary) -> void:
 	var key := "positions_a" if solver.current_parity() == 0 else "positions_b"
 	var positions := solver._rd.buffer_get_data(solver._buffers[key]).to_float32_array()
+	# w is the particle's oil volume fraction: weight each phase by it.
 	var sums := Vector2.ZERO
-	var counts := Vector2i.ZERO
+	var volumes := Vector2.ZERO
 	for i in solver.live_count():
-		if positions[i * 4 + 3] > 0.5:
-			sums.y += positions[i * 4 + 1]
-			counts.y += 1
-		else:
-			sums.x += positions[i * 4 + 1]
-			counts.x += 1
-	result["water_count"] = counts.x
-	result["oil_count"] = counts.y
-	result["water_y"] = sums.x / maxf(float(counts.x), 1.0)
-	result["oil_y"] = sums.y / maxf(float(counts.y), 1.0)
+		var oil := positions[i * 4 + 3]
+		sums += Vector2(1.0 - oil, oil) * positions[i * 4 + 1]
+		volumes += Vector2(1.0 - oil, oil)
+	result["water_volume"] = volumes.x
+	result["oil_volume"] = volumes.y
+	result["water_y"] = sums.x / maxf(volumes.x, 1e-6)
+	result["oil_y"] = sums.y / maxf(volumes.y, 1e-6)
 	result["done"] = true
 
 
@@ -6549,6 +6559,9 @@ func _run_mixbake() -> void:
 	var solver := MixwellSolver.new()
 	solver.initialize(size, MixwellConfig.new(), size)
 	solver.set_preset(2)
+	# The baked map now serves the drawing preview only (converging samples
+	# evaluate strokes exactly); this measures that preview's fidelity.
+	solver.set_exact_strokes(false)
 	RenderingServer.call_on_render_thread(solver.init_render.bind(solver.create_render_snapshot()))
 	for i in 3:
 		await process_frame

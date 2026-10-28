@@ -22,21 +22,22 @@ extends RefCounted
 ## before the return reads it, so Sum m_p is meant to fall and the conservation
 ## check only applies with [member evaporation_active] false.
 
-## Droplet radius drives the SPH smoothing length; the paper's h_s range is
-## 0.06-0.4 m (Tab. 3) and the neighbour search needs cell_size == h.
+## The droplet SPH's smoothing length, cell size, neighbour grid and wall box.
+## SphFluidSolver.init_render() takes all four from its FluidConfig, so these are
+## the values in force: the stock fluid-demo grid, h = cell = 0.25 m, walls at
+## x/z ±8 m and y 0..16 m around the origin. The paper's h_s range is 0.06-0.4 m
+## (Tab. 3) and the neighbour search needs cell_size == h.
 ##
-## Sized against the RENDERED volume, not just the neighbourhood: a parcel occupies
-## a spacing^3 = (h/2)^3 cell of the surface the screen-space renderer reconstructs,
-## while it only carries DROPLET_MASS kilograms into the grid. At h = 0.2 m that was
-## 1e-3 m^3 of visible water per 0.025 kg, i.e. an effective 25 kg/m^3 -- the stream
-## looked forty times bigger than the water it actually delivered to evaporation.
-## Halving h cuts the parcel volume 8x and brings the ratio to ~5x. Going further
-## (h = 0.07 for a physical 1:1) costs 9M neighbour-grid cells and is not worth it.
-##
-## Neither the delivered kg/s nor the particle count moves with this: the emitter
-## frequency and DROPLET_MASS are untouched, and _stream_radius shrinks with
-## spacing^1.5, so the jet gets thinner rather than denser in parcels.
-const SPH_H := 0.1
+## An earlier revision set h = 0.1 m on the solver directly, but init_render
+## overwrote it from the default config, so 0.25 m is what the droplets have always
+## run with and what the jet, the drain cutoff and the balance tests are tuned to.
+const SPH_H := 0.25
+const SPH_BOX_ORIGIN := Vector3(-8.0, 0.0, -8.0)
+const SPH_BOX_SIZE := Vector3(16.0, 16.0, 16.0)
+## Rest spacing of a parcel: feeds the rest-density estimate and the nozzle mouth
+## (_stream_radius), and is deliberately a fraction of h rather than the fluid
+## demo's 0.12 m.
+const SPH_SPACING := 0.05
 ## Mass one particle stands for, not the mass of one droplet: a 1 mm droplet is
 ## 5e-7 kg. Fire-X Tab. 3 "Particle Emitter Parameter / Mass" gives 0.1-1.0 kg.
 ##
@@ -152,12 +153,6 @@ var _tile_args := RID()
 ## Extent the accumulators and the gather dispatch cover: the tile atlas. Never
 ## the virtual map, which has 2.1 G cells.
 var _accum_dims := Vector3i.ZERO
-## Corner of the SPH neighbour grid, which is NOT the fire grid's: the droplets
-## need a dense uniform grid at the smoothing length, and the virtual map at 0.1 m
-## would be 17 G cells. The box stays around the emitter and the fire's own domain
-## is the one that grew.
-var _sph_origin := Vector3.ZERO
-
 var initialized := false
 
 ## Σ m_p at spawn, and the same sum read back after the round trip.
@@ -184,13 +179,11 @@ const MEASURE_INTERVAL := 30
 ## virtual tile grid.
 ##
 ## [param indir_tex] is the tile pool's indirection volume, which the two particle
-## passes resolve every cell through. [param sph_box] is the world-space extent the
-## droplets themselves are simulated in; leave it zero to use the fire domain,
-## which is only sensible when that domain is a box. [param ambient_temperature] is
-## the fire solver's, the temperature an empty cell's liquid reads as.
+## passes resolve every cell through. The droplets themselves are simulated in
+## their own fixed box (SPH_BOX_*), not in the fire domain. [param ambient_temperature]
+## is the fire solver's, the temperature an empty cell's liquid reads as.
 func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temperature: float,
-		indir_tex := RID(), sph_box := Vector3.ZERO,
-		atlas_tiles := FireTilePool.ATLAS_TILES) -> void:
+		indir_tex := RID(), atlas_tiles := FireTilePool.ATLAS_TILES) -> void:
 	if _rd != null:
 		return
 	_rd = GpuPreflight.device("FireWater")
@@ -211,9 +204,7 @@ func init_render(fire_grid_dims: Vector3i, fire_cell_size: float, ambient_temper
 	# The droplets keep a bounded box of their own around the emitter; only the fire
 	# grid became the map. Both are centred on the origin in x/z, so a world position
 	# still means the same thing to each and neither needs a second transform.
-	var sph_domain := sph_box if sph_box != Vector3.ZERO else domain
-	_sph_origin = Vector3(-0.5 * sph_domain.x, 0.0, -0.5 * sph_domain.z)
-	_init_sph(sph_domain)
+	_init_sph()
 
 	_accum_dims = atlas_tiles * FireTilePool.TILE
 	var num_cells := _accum_dims.x * _accum_dims.y * _accum_dims.z
@@ -283,15 +274,17 @@ func _tile_args_reset() -> PackedByteArray:
 ## droplet's world position means the same thing to the SPH grid and to the fire
 ## grid and the scatter needs no second transform — even where the two boxes differ
 ## in size, which they do.
-func _init_sph(domain: Vector3) -> void:
+func _init_sph() -> void:
 	sph = SphFluidSolver.new()
 	sph.particle_count = particle_count
-	sph.cell_size = SPH_H
-	sph.h = SPH_H
+	var config := FluidConfig.new()
+	config.cell_size_m = SPH_H
+	config.grid_origin = SPH_BOX_ORIGIN
+	config.grid_dims = Vector3i((SPH_BOX_SIZE / SPH_H).round())
+	config.domain_origin = SPH_BOX_ORIGIN
+	config.domain_size_m = SPH_BOX_SIZE
+	sph.config = config
 	sph.hash_grid_enabled = true
-	sph.grid_origin = _sph_origin
-	sph.grid_dims = Vector3i(
-		ceili(domain.x / SPH_H), ceili(domain.y / SPH_H), ceili(domain.z / SPH_H))
 	sph.gravity = Vector3(0.0, -9.81, 0.0)
 	# Nothing poured yet. active_count is raised by spawn_droplets.
 	sph.active_count = 0
@@ -303,9 +296,7 @@ func _init_sph(domain: Vector3) -> void:
 	# Water arrives at the floor fast and should stay there and spread, not bounce:
 	# a lively restitution is what turns the impact ring into flying droplets.
 	sph.collision_damping = 0.0
-	# Spawn spacing feeds the rest-density estimate; at the droplet smoothing length
-	# it wants to be a fraction of h, not the demo's fixed 0.12 m.
-	sph.spacing = SPH_H * 0.5
+	sph.spacing = SPH_SPACING
 
 	var seed := PackedFloat32Array()
 	seed.resize(particle_count * 4)
@@ -440,13 +431,20 @@ func emit_jet(rate_dt: float, move_dt: float) -> void:
 		vel[i * 4 + 2] = v.z
 		vel[i * 4 + 3] = DROPLET_MASS
 
-	# One contiguous run per call, wrapped at the end of the buffer, so the burst
-	# is at most two buffer_update calls instead of one per droplet.
+	_append_droplets(seed, vel, count)
+
+
+## Writes [param count] droplets at the emitter cursor: past the live slots until
+## the cap is reached, then wrapping round the buffer like the nozzle always did.
+## One contiguous run per wrap, so a burst is at most two buffer_update calls per
+## buffer instead of one per droplet. Render thread only.
+func _append_droplets(seed: PackedFloat32Array, vel: PackedFloat32Array, count: int) -> void:
 	var written := 0
 	while written < count:
 		var run := mini(count - written, particle_cap - _jet_cursor)
 		var pos_bytes := seed.slice(written * 4, (written + run) * 4).to_byte_array()
 		var vel_bytes := vel.slice(written * 4, (written + run) * 4).to_byte_array()
+		# Both parities, so the write lands wherever the next sub-step reads from.
 		for parity in 2:
 			_rd.buffer_update(sph.parity_positions_rid(parity),
 				_jet_cursor * 16, pos_bytes.size(), pos_bytes)
@@ -514,22 +512,9 @@ func spawn_droplets(count: int, pos: Vector3, radius: float,
 		vel[i * 4 + 2] = velocity.z
 		vel[i * 4 + 3] = DROPLET_MASS
 
-	var seed_bytes := seed.to_byte_array()
-	var vel_bytes := vel.to_byte_array()
-	# Both parities, so the write lands wherever the next sub-step reads from.
-	for parity in 2:
-		var pos_rid: RID = sph.parity_positions_rid(parity)
-		var vel_rid: RID = sph.parity_velocities_rid(parity)
-		_rd.buffer_update(pos_rid, 0, seed_bytes.size(), seed_bytes)
-		_rd.buffer_update(vel_rid, 0, vel_bytes.size(), vel_bytes)
-
-	particles_active = n
-	sph.active_count = n
-	initial_mass = DROPLET_MASS * float(n)
-	mass_measured_once = false
-	# The nozzle appends after whatever this dropped in, rather than overwriting it.
-	_jet_cursor = n % particle_cap
-	_jet_emitted = n
+	# Appended like a nozzle burst: a pour used to rewrite slots 0..n and cut
+	# particles_active back to n, deleting every droplet already on the map.
+	_append_droplets(seed, vel, n)
 
 
 func set_particle_cap(value: int) -> void:

@@ -18,7 +18,10 @@ void main() {
     uint w0 = stride * (2u * i + 0u) + j;
     uint w1 = stride * (2u * i + 1u) + j;
 
-    vec2 read_indices = vec2(uintBitsToFloat(r0), uintBitsToFloat(r1));
+    // Indices stored as exact float values (exact below 2^24), not raw uint bits:
+    // as bits, 1..1023 are denormals, which GPUs that flush denormals (common on
+    // mobile) read back as 0. ocean_fft.comp rounds them back.
+    vec2 read_indices = vec2(float(r0), float(r1));
     butterfly[stage * MAP_SIZE + w0] = vec4(read_indices, twiddle);
     butterfly[stage * MAP_SIZE + w1] = vec4(read_indices, -twiddle);
 }

@@ -2,7 +2,8 @@ class_name NBodyQualityProfile
 extends SimQualityProfile
 ## Quality tiers for the GPU N-body gallery. Low to High use massless test
 ## particles; Ultra uses direct particle self-gravity on the black-hole disk,
-## capped at 32k particles because the pairwise force pass is O(N²).
+## capped at 32k particles because the pairwise force pass is O(N²). A scene with
+## no other mass (Globular) runs self-gravity on every tier, at the tier's cap.
 
 ## Counts the menu proposes, smallest first; 32k is the direct-gravity tier.
 const PARTICLE_COUNTS := [16384, 32768, 65536, 262144, 1048576]
