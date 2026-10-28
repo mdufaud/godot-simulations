@@ -64,6 +64,8 @@ func start() -> void:
 	_set_look("turbulence_texture", turbulence_texture)
 	_set_look("streak_texture", load("res://resources/river/waterfall_streaks.png"))
 	_set_look("short_spill_m", Solver.SPILL_SHORT_DROP_M)
+	_set_look("gravity_m_s2", Solver.GRAVITY_M_S2)
+	_foam_material.set_shader_parameter("drop_offset_m", Solver.SPILL_DROP_OFFSET_M)
 	swe.materials.append(_sheet_material)
 	set_quality(quality_tier)
 	apply_config(water)

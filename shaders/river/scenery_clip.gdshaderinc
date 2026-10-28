@@ -15,7 +15,7 @@ vec2 river_nearby_water(vec2 point) {
 	vec2 water = vec2(-1.0e6, 0.0);
 	for (int k = 0; k < 9; k++) {
 		vec4 state = texelFetch(swe_surface, clamp(cell + ivec2(k % 3 - 1, k / 3 - 1), ivec2(0), size - 1), 0);
-		water = state.w > 0.004 ? max(water, state.zw) : water;
+		water = state.w > swe_wet_depth_m ? max(water, state.zw) : water;
 	}
 	return water;
 }
@@ -35,7 +35,7 @@ float river_cliff_wetness(vec3 position, float wet) {
 
 float river_surface_height(vec3 position) {
 	float reference = texture(river_height_texture, (position.xz - river_domain_origin_m) / river_domain_m + 0.5).g;
-	if (swe_spill_enabled && texture(swe_surface, river_swe_uv(position.xz)).w < 0.004) { return reference; }
+	if (swe_spill_enabled && texture(swe_surface, river_swe_uv(position.xz)).w < swe_wet_depth_m) { return reference; }
 	return river_swe_height(position.xz, reference);
 }
 

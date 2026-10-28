@@ -14,6 +14,7 @@ extends Node3D
 ##   spray.set_rock_impacts(rock_hits, downstream)           # Vector4(x, y, z, rate)
 ##   spray.tick(intensity, false)                    # every frame, intensity in [0, 1]
 
+const Solver := preload("res://scripts/river/river_swe_solver.gd")
 const BOIL_COUNT := [36, 60, 96, 144]
 const MIST_COUNT := [10, 16, 24, 32]
 const SPLASH_COUNT := [48, 128, 192, 288]
@@ -87,7 +88,7 @@ func start() -> void:
 	splash.spread = 50.0
 	splash.initial_velocity_min = 3.0
 	splash.initial_velocity_max = 6.0
-	splash.gravity = Vector3(0.0, -9.81, 0.0)
+	splash.gravity = Vector3.DOWN * Solver.GRAVITY_M_S2
 	splash.scale_min = 0.6
 	splash.scale_max = 1.4
 	splash.particle_flag_align_y = true
@@ -97,7 +98,7 @@ func start() -> void:
 	rock_splash.spread = 55.0
 	rock_splash.initial_velocity_min = 1.0
 	rock_splash.initial_velocity_max = 3.0
-	rock_splash.gravity = Vector3(0.0, -9.81, 0.0)
+	rock_splash.gravity = Vector3.DOWN * Solver.GRAVITY_M_S2
 	rock_splash.scale_min = 0.5
 	rock_splash.scale_max = 1.2
 	rock_splash.particle_flag_align_y = true

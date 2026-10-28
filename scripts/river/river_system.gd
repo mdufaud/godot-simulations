@@ -171,7 +171,6 @@ func apply_config(value: RiverConfig) -> void:
 	water_material.set_shader_parameter("foam_amount", config.foam_amount)
 	if _skirt_material != null:
 		_skirt_material.set_shader_parameter("deep_color", config.deep_color)
-		_skirt_material.set_shader_parameter("whitewater_strength", config.whitewater_strength)
 	if waterfall != null:
 		waterfall.apply_config(config)
 	set_reflection_enabled(_reflection_requested)

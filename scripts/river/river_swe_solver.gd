@@ -2,6 +2,8 @@ extends RefCounted
 
 const CELL_M := 0.125
 const GRAVITY_M_S2 := 9.81
+# Shallower water is a dry cell, for the solver, its spilled water and everything drawing them.
+const WET_DEPTH_M := 0.004
 const MAX_STEP_S := 0.003
 const MAX_SUBSTEPS := 64
 const MAX_QUERIES := 32
@@ -33,10 +35,16 @@ const SPILL_IMPACT_WEIGHT_UNITS := 16.0
 const SPILL_ROCK_HIT_M_S := 2.5
 # A landing throws spray and foam in proportion to how far it fell, from nothing below x to fully past y.
 const SPILL_SPRAY_DROP_M := Vector2(0.5, 1.5)
+# A drawn particle's break-up distance starts this far above zero, so one that just left its lip is not an unused slot.
+const SPILL_DROP_OFFSET_M := 0.01
 const SPILL_IMPACT_READ_S := 0.25
 # Falling water enters a pool at its level averaged over this time: the boil its own landings raise must not catch the
 # water still in the air, or every landing piles the next one into a pulse.
 const SPILL_LANDING_SETTLE_S := 0.5
+# A free overfall's brink depth over the critical depth of its discharge, for water arriving subcritical (Rouse 1936).
+const BRINK_DEPTH_SHARE := 0.715
+# The pool surface bends down to a brink over this many critical depths, where its flow is not hydrostatic (Chanson).
+const BRINK_ZONE_DEPTHS := 3.5
 
 var region_m := Rect2()
 ## Radius the spill particles are drawn with: a fresh particle is drawn this much lower until it has dropped as far.
@@ -74,6 +82,12 @@ var _spill_outflow := RID()
 var _spill_state := RID()
 var _spill_out := RID()
 var _corners := RID()
+var _brink_zone := RID()
+var _brink_spread := RID()
+var _brink_from_spread := false
+var _brink_shader := RID()
+var _brink_pipeline := RID()
+var _brink_sets: Array[RID] = []
 var _spill_positions := RID()
 var _spill_motion := RID()
 var _spill_lips := RID()
@@ -179,7 +193,8 @@ func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
 		config.water_level_m, config.foam_amount, MAX_STEP_S, time_s,
 		_source_domain.position.x, _source_domain.position.y, _source_domain.size.x, _source_domain.size.y,
 		0.0, config.whitewater_strength, 0.0, 0.0,
-		config.current_guidance_hz, config.level_guidance_hz, SPILL_LANDING_SETTLE_S, 0.0,
+		config.current_guidance_hz, config.level_guidance_hz, SPILL_LANDING_SETTLE_S, WET_DEPTH_M,
+		BRINK_DEPTH_SHARE, BRINK_ZONE_DEPTHS, SPILL_NAPPE_FROUDE.x, SPILL_NAPPE_FROUDE.y,
 	]).to_byte_array()
 
 
@@ -203,13 +218,21 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_rd = GpuPreflight.device("RiverSWE")
 	if _rd == null:
 		return
-	var spirv := ShaderCache.compile(_rd, "river_swe",
-		FileAccess.get_file_as_string("res://shaders/river/river_swe.comp"))
+	var source := FileAccess.get_file_as_string("res://shaders/river/river_swe.comp")
+	var spirv := ShaderCache.compile(_rd, "river_swe", source)
 	if not spirv.compile_error_compute.is_empty():
 		push_error("River SWE compile error: " + spirv.compile_error_compute)
 		return
 	_shader = _rd.shader_create_from_spirv(spirv)
 	_pipeline = _rd.compute_pipeline_create(_shader)
+	if _spilling:
+		# The brink pass has its own pipeline, so its registers do not slow the solver's step.
+		var brink_spirv := ShaderCache.compile(_rd, "river_swe_brink", source.replace("#version 450", "#version 450\n#define BRINK_PASS"))
+		if not brink_spirv.compile_error_compute.is_empty():
+			push_error("River SWE brink compile error: " + brink_spirv.compile_error_compute)
+			return
+		_brink_shader = _rd.shader_create_from_spirv(brink_spirv)
+		_brink_pipeline = _rd.compute_pipeline_create(_brink_shader)
 	_source = _texture_render(source_size, terrain_bytes)
 	_source_size = source_size
 	_render_origin = Vector2(parameters_bytes.decode_float(0), parameters_bytes.decode_float(4))
@@ -234,6 +257,8 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_spill_state = _rd.storage_buffer_create(SPILL_STATE_BYTES, _spill_header(SPILL_SLOPE if spilling else 0.0))
 	_spill_out = _texture_render(size if spilling else Vector2i.ONE)
 	_corners = _texture_render(size if spilling else Vector2i.ONE)
+	_brink_zone = _texture_render(size if spilling else Vector2i.ONE)
+	_brink_spread = _texture_render(size if spilling else Vector2i.ONE)
 	_spill_phase_s = 0.0
 	_impact_window_s = 0.0
 	for index in 2:
@@ -250,7 +275,11 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 		uniforms.append(_uniform(10, _spill_state, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER))
 		uniforms.append(_uniform(11, _spill_out, RenderingDevice.UNIFORM_TYPE_IMAGE))
 		uniforms.append(_uniform(12, _corners, RenderingDevice.UNIFORM_TYPE_IMAGE))
+		uniforms.append(_uniform(13, _brink_zone, RenderingDevice.UNIFORM_TYPE_IMAGE))
+		uniforms.append(_uniform(14, _brink_spread, RenderingDevice.UNIFORM_TYPE_IMAGE))
 		_sets.append(_rd.uniform_set_create(uniforms, _shader, 0))
+		if _brink_shader.is_valid():
+			_brink_sets.append(_rd.uniform_set_create(uniforms, _brink_shader, 0))
 	if spilling:
 		_init_spill_render(size)
 	var list := _rd.compute_list_begin()
@@ -258,7 +287,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_rd.compute_list_end()
 	_mutex.lock()
 	_status = {"ready": true, "surface": _surface, "foam": _foam, "terrain": _terrain, "spill": _spill_out,
-		"corners": _corners, "state": _states[0], "gpu_ms": 0.0, "time_s": 0.0}
+		"corners": _corners, "brink_zone": _brink_zone, "state": _states[0], "gpu_ms": 0.0, "time_s": 0.0}
 	if spilling:
 		_status["spill_positions"] = _spill_positions
 		_status["spill_motion"] = _spill_motion
@@ -340,8 +369,8 @@ func _dispatch_spill(list: int, parameters_bytes: PackedByteArray, mode: float) 
 		SPILL_FRICTION_HZ, SPILL_MAX_AGE_S, mode, SPILL_ISSUANCE_JITTER,
 		SPILL_IMPACT_TILE_M, SPILL_ROCK_HIT_M_S, SPILL_IMPACT_WEIGHT_UNITS, 0.0,
 		SPILL_SPRAY_DROP_M.x, SPILL_SPRAY_DROP_M.y, spill_breakup_reference_units, spill_breakup_exponent,
-		spill_breakup_length_m, SPILL_NAPPE_FROUDE.x, SPILL_NAPPE_FROUDE.y, 0.0,
-		0.0, 0.0, 0.0, SPILL_MAX_THINNING,
+		spill_breakup_length_m, SPILL_NAPPE_FROUDE.x, SPILL_NAPPE_FROUDE.y, SPILL_DROP_OFFSET_M,
+		WET_DEPTH_M, 0.0, 0.0, SPILL_MAX_THINNING,
 		SPILL_FALL_CLEARANCE.x, SPILL_FALL_CLEARANCE.y, 0.0, 0.0,
 	]).to_byte_array()
 	_rd.compute_list_bind_compute_pipeline(list, _spill_pipeline)
@@ -427,6 +456,10 @@ func advance_render(delta_s: float, parameters_bytes: PackedByteArray, reset: bo
 	parameters_bytes.encode_float(24, duration)
 	_dispatch_render(list, parameters_bytes, 2.0)
 	if spilling:
+		# Brinks first, then their zones spreading a step up the surface, into the scratch or back, and its corners.
+		_rd.compute_list_add_barrier(list)
+		_dispatch_render(list, parameters_bytes, 10.0 if _brink_from_spread else 9.0)
+		_brink_from_spread = not _brink_from_spread
 		_dispatch_spill(list, parameters_bytes, 2.0)
 		_rd.compute_list_add_barrier(list)
 		_dispatch_spill(list, parameters_bytes, 3.0)
@@ -542,8 +575,10 @@ func take_query_batch() -> Dictionary:
 
 func _dispatch_render(list: int, parameters_bytes: PackedByteArray, mode: float) -> void:
 	parameters_bytes.encode_float(64, mode)
-	_rd.compute_list_bind_compute_pipeline(list, _pipeline)
-	_rd.compute_list_bind_uniform_set(list, _sets[_index], 0)
+	# Modes 9 and 10 are the brink pass (river_swe.comp BRINK_PASS).
+	var brink := mode > 8.5
+	_rd.compute_list_bind_compute_pipeline(list, _brink_pipeline if brink else _pipeline)
+	_rd.compute_list_bind_uniform_set(list, (_brink_sets if brink else _sets)[_index], 0)
 	_rd.compute_list_set_push_constant(list, parameters_bytes, parameters_bytes.size())
 	_rd.compute_list_dispatch(list, ceili(parameters_bytes.decode_float(16) / 8.0), ceili(parameters_bytes.decode_float(20) / 8.0), 1)
 
@@ -577,11 +612,12 @@ func _free_render() -> void:
 		return
 	if pending_query:
 		_rd.buffer_get_data(_query_results, 0, 16)
-	for set_rid in _sets + _spill_sets:
+	for set_rid in _sets + _spill_sets + _brink_sets:
 		if set_rid.is_valid():
 			_rd.free_rid(set_rid)
 	_sets.clear()
 	_spill_sets.clear()
+	_brink_sets.clear()
 	for buffer in [_spill_particles, _spill_deposits, _spill_outflow, _spill_state, _spill_impacts]:
 		if buffer.is_valid():
 			_rd.free_rid(buffer)
@@ -590,17 +626,21 @@ func _free_render() -> void:
 	_spill_outflow = RID()
 	_spill_state = RID()
 	_spill_impacts = RID()
-	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _corners, _spill_positions, _spill_motion, _spill_lips, _spill_lip_flow, _sampler, _query_points, _query_results]:
+	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _corners, _brink_zone, _brink_spread, _spill_positions, _spill_motion, _spill_lips, _spill_lip_flow, _sampler, _query_points, _query_results]:
 		if texture.is_valid():
 			_rd.free_rid(texture)
 	_states.clear()
-	for rid in [_pipeline, _shader, _spill_pipeline, _spill_shader]:
+	for rid in [_pipeline, _shader, _spill_pipeline, _spill_shader, _brink_pipeline, _brink_shader]:
 		if rid.is_valid():
 			_rd.free_rid(rid)
 	_spill_pipeline = RID()
 	_spill_shader = RID()
+	_brink_pipeline = RID()
+	_brink_shader = RID()
 	_spill_out = RID()
 	_corners = RID()
+	_brink_zone = RID()
+	_brink_spread = RID()
 	_spill_positions = RID()
 	_spill_motion = RID()
 	_spill_lips = RID()

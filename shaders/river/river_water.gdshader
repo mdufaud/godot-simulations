@@ -55,8 +55,6 @@ uniform bool reflection_enabled = true;
 uniform bool foam_enabled = true;
 uniform bool foam_detail = true;
 uniform vec4 geometry_region_m = vec4(-6.0, -7.0, 16.0, 24.0);
-// Per solver cell, the surface height at its corners (river_swe.comp); infinite where no surface is drawn.
-uniform sampler2D swe_corners : filter_nearest, repeat_disable, hint_default_black;
 // Cells across the domain when the mesh is one quad of four vertices per solver cell, zero for a shared-vertex grid.
 uniform ivec2 cell_grid = ivec2(0);
 uniform float cell_size_m = 0.125;
@@ -82,7 +80,7 @@ float live_share(vec2 point) {
 	if (guided_coverage && weight > 0.0) {
 		vec2 guided = texture(bed_height_texture, domain_uv(point)).rg;
 		float live_depth = texture(swe_surface, river_swe_uv(point)).w;
-		weight *= 1.0 - step(0.015, guided.y - guided.x) * (1.0 - smoothstep(0.004, 0.015, live_depth));
+		weight *= 1.0 - step(0.015, guided.y - guided.x) * (1.0 - smoothstep(swe_wet_depth_m, 0.015, live_depth));
 	}
 	return weight;
 }
@@ -168,11 +166,6 @@ vec4 planar_sample(int index, vec3 position) {
 	return vec4(color, valid);
 }
 
-// v[i] with a runtime i compiles to OpVectorExtractDynamic, which Godot's SPIR-V pass rejects at every compile.
-float component(vec4 v, int i) {
-	return i == 0 ? v.x : (i == 1 ? v.y : (i == 2 ? v.z : v.w));
-}
-
 // A quad corner of a cell surface: its height, its slope along x and z from the neighbours sharing that corner, and
 // whether all four cells around it share it (false on a lip, a front or a wall, where a side may hang from it).
 // False where the cell draws no surface.
@@ -180,7 +173,7 @@ bool cell_corner(vec2 centre, int corner, out float level, out vec2 slope, out b
 	ivec2 size = textureSize(swe_corners, 0);
 	ivec2 cell = clamp(ivec2(floor(river_swe_uv(centre) * vec2(size))), ivec2(0), size - 1);
 	vec4 own = texelFetch(swe_corners, cell, 0);
-	level = component(own, corner);
+	level = river_swe_corner(own, corner);
 	slope = vec2(0.0);
 	inner = false;
 	if (isinf(level)) { return false; }
@@ -189,17 +182,17 @@ bool cell_corner(vec2 centre, int corner, out float level, out vec2 slope, out b
 	ivec2 cell_z = clamp(cell + ivec2(0, side.y), ivec2(0), size - 1);
 	vec4 across_x = texelFetch(swe_corners, cell_x, 0);
 	vec4 across_z = texelFetch(swe_corners, cell_z, 0);
-	float across_d = component(texelFetch(swe_corners, clamp(cell + side, ivec2(0), size - 1), 0), corner ^ 3);
-	bool meets_x = abs(component(across_x, corner ^ 1) - level) < SHARED_CORNER_M;
-	bool meets_z = abs(component(across_z, corner ^ 2) - level) < SHARED_CORNER_M;
+	float across_d = river_swe_corner(texelFetch(swe_corners, clamp(cell + side, ivec2(0), size - 1), 0), corner ^ 3);
+	bool meets_x = abs(river_swe_corner(across_x, corner ^ 1) - level) < SHARED_CORNER_M;
+	bool meets_z = abs(river_swe_corner(across_z, corner ^ 2) - level) < SHARED_CORNER_M;
 	inner = meets_x && meets_z && abs(across_d - level) < SHARED_CORNER_M;
 	// Centred where a wet neighbour shares the corner; one-sided against another surface or a dry cell carrying this one.
-	bool shared_x = meets_x && texelFetch(swe_surface, cell_x, 0).w > 0.004;
-	bool shared_z = meets_z && texelFetch(swe_surface, cell_z, 0).w > 0.004;
-	float back_x = component(own, corner ^ 1);
-	float back_z = component(own, corner ^ 2);
-	float rise_x = shared_x ? (component(across_x, corner) - back_x) * 0.5 : level - back_x;
-	float rise_z = shared_z ? (component(across_z, corner) - back_z) * 0.5 : level - back_z;
+	bool shared_x = meets_x && texelFetch(swe_surface, cell_x, 0).w > swe_wet_depth_m;
+	bool shared_z = meets_z && texelFetch(swe_surface, cell_z, 0).w > swe_wet_depth_m;
+	float back_x = river_swe_corner(own, corner ^ 1);
+	float back_z = river_swe_corner(own, corner ^ 2);
+	float rise_x = shared_x ? (river_swe_corner(across_x, corner) - back_x) * 0.5 : level - back_x;
+	float rise_z = shared_z ? (river_swe_corner(across_z, corner) - back_z) * 0.5 : level - back_z;
 	slope = vec2(rise_x, rise_z) * vec2(side) * vec2(size) / swe_region_m.zw;
 	return true;
 }
@@ -278,7 +271,7 @@ void fragment() {
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
 	float fall_impact = swe_spill_enabled ? smoothstep(0.0, LANDING_FOAM_M_S, spill_landing(world_position.xz)) * live_weight : 0.0;
 	field.b = max(field.b, fall_impact);
-	field.a = mix(field.a, smoothstep(0.004, 0.04, live.w), live_weight);
+	field.a = mix(field.a, smoothstep(swe_wet_depth_m, 0.04, live.w), live_weight);
 	float phase_offset = texture(turbulence_texture, world_position.xz * 0.009).r;
 	float phase = fract(flow_distance_m / 1.5 + phase_offset);
 	float phase2 = fract(phase + 0.5);

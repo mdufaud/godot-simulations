@@ -20,19 +20,30 @@ layout(std430, set = 0, binding = 9) buffer SpillOutflow { vec4 outflow[]; } spi
 // 15 spilling faces summed over outputs, 16 outputs.
 layout(std430, set = 0, binding = 10) buffer SpillState { uint words[]; } spill;
 // Per cell: bits 0-3 the east, west, north and south faces this cell spills over, bits 4-7 the faces spilling onto it;
-// then the landing rate in m/s of depth, then 1 where the cell spills over any face, for smooth sampling, then the
-// cell's level averaged over relaxation.z seconds, which falling water lands at.
+// then the landing rate in m/s of depth, then the level its water leaves its brink at (its own level when it spills
+// nowhere), then the cell's level averaged over relaxation.z seconds, which falling water lands at.
 layout(rgba32f, set = 0, binding = 11) uniform image2D spill_out;
 // Per cell: the water surface height at its -x-z, +x-z, -x+z and +x+z corners; infinite where the cell draws none.
 layout(rgba32f, set = 0, binding = 12) uniform writeonly image2D corners_out;
+// Per cell: the brink level its surface bends down to (see spread_brink), its distance from that brink (negative for
+// none), the length of that bend and the level the water arrives at.
+layout(rgba32f, set = 0, binding = 13) uniform image2D brink_zone;
+// The other half of brink_zone's ping-pong: each frame spreads the zones a step from one into the other.
+layout(rgba32f, set = 0, binding = 14) uniform image2D brink_spread;
 layout(push_constant, std430) uniform Params {
     vec4 domain;
     vec4 grid;
     vec4 water;
     vec4 source_domain;
     vec4 control;
+    // Current and level guidance rates (x, y), seconds falling water's landing level settles over (z), wet depth (w).
     vec4 relaxation;
+    // Brink depth over critical depth (x), bend length in critical depths (y), Froude numbers of water arriving at a lip
+    // over which it leaves as it comes instead of bending down to a brink (z, w).
+    vec4 brink;
 } params;
+
+#define WET_DEPTH_M params.relaxation.w
 
 const ivec2 FACES[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
 // Side by side wet cells farther apart in level than this many spill-slope steps are separate surfaces.
@@ -41,6 +52,8 @@ const float LEVEL_GAP_STEPS = 2.0;
 const float SHORE_RISE_M = 0.02;
 // Shallower cells keep a flat surface and velocity: thin films and fronts are where a reconstruction would overshoot.
 const float SLOPE_DEPTH_M = 0.02;
+// A bend down to a brink never reaches farther from it.
+const int BRINK_SPREAD_CELLS = 24;
 // The four edges of a 2x2 block of cells numbered -x-z, +x-z, -x+z, +x+z.
 const int EDGE_FROM[4] = int[4](0, 2, 0, 1);
 const int EDGE_TO[4] = int[4](1, 3, 2, 3);
@@ -50,7 +63,7 @@ ivec2 bound_cell(ivec2 p) {
 }
 
 vec2 velocity(vec4 q) {
-    return q.x > 0.004 ? q.yz / q.x : vec2(0.0);
+    return q.x > WET_DEPTH_M ? q.yz / q.x : vec2(0.0);
 }
 
 vec4 seed_state(ivec2 p) {
@@ -81,9 +94,13 @@ vec4 interpolate_surface(vec2 cell, ivec2 size) {
 }
 
 // The bed drops steeper than the spill slope and the low side's water stays below the high bed (Chentanez & Mueller).
-bool spills(float high_bed, float low_bed, float low_depth) {
+bool spills(float high_bed, float low_bed, float low_depth, float run) {
     float slope = uintBitsToFloat(spill.words[12]);
-    return slope > 0.0 && high_bed - low_bed > slope * params.domain.z && high_bed > low_bed + low_depth;
+    return slope > 0.0 && high_bed - low_bed > slope * run && high_bed > low_bed + low_depth;
+}
+
+bool spills(float high_bed, float low_bed, float low_depth) {
+    return spills(high_bed, low_bed, low_depth, params.domain.z);
 }
 
 // Half the limited change of surface, depth and velocity across a cell toward +axis (MUSCL, minmod). A first order
@@ -105,7 +122,7 @@ vec4 face_flux(vec4 ql, float zl, vec4 qr, float zr, vec4 own, vec4 other, vec2 
     spill_side = 0;
     // A spill face is a wall for the cell below; the cell above loses its outflow to particles instead.
     if (spills(zr, zl, ql.x)) {
-        spill_side = qr.x > 0.004 ? -1 : 0;
+        spill_side = qr.x > WET_DEPTH_M ? -1 : 0;
         return vec4(0.0, normal * 0.5 * params.domain.w * ql.x * ql.x, 0.0);
     }
     spill_side = spills(zl, zr, qr.x) ? 1 : 0;
@@ -129,16 +146,22 @@ vec4 face_flux(vec4 ql, float zl, vec4 qr, float zr, vec4 own, vec4 other, vec2 
     float sl = min(nl - cl, nr - cr);
     float sr = max(nl + cl, nr + cr);
     // Against a dry side (Toro): its velocity is meaningless, as for the plunge pool below a lip.
-    if (hl < 0.004 && hr > 0.004) { sl = nr - 2.0 * cr; sr = nr + cr; }
-    if (hr < 0.004 && hl > 0.004) { sl = nl - cl; sr = nl + 2.0 * cl; }
+    if (hl < WET_DEPTH_M && hr > WET_DEPTH_M) { sl = nr - 2.0 * cr; sr = nr + cr; }
+    if (hr < WET_DEPTH_M && hl > WET_DEPTH_M) { sl = nl - cl; sr = nl + 2.0 * cl; }
     vec3 flux;
     if (sl >= 0.0) flux = fl;
     else if (sr <= 0.0) flux = fr;
     else flux = (sr * fl - sl * fr + sl * sr * (ur - ul)) / max(sr - sl, 1.0e-8);
-    float concentration = flux.x >= 0.0 ? ql.w / max(ql.x, 0.004) : qr.w / max(qr.x, 0.004);
+    float concentration = flux.x >= 0.0 ? ql.w / max(ql.x, WET_DEPTH_M) : qr.w / max(qr.x, WET_DEPTH_M);
     float foam_flux = flux.x * clamp(concentration, 0.0, 1.0);
     flux.yz += normal * 0.5 * params.domain.w * (depth_l * depth_l - hl * hl);
     return vec4(flux, foam_flux);
+}
+
+// Depth at the brink a face spills this discharge (m2/s) over: Rouse's share of its critical depth, never deeper than the
+// cell, as water arriving fast leaves its lip as it comes.
+float brink_depth(float discharge, float depth) {
+    return min(params.brink.x * pow(discharge * discharge / params.domain.w, 1.0 / 3.0), depth);
 }
 
 float agitation(ivec2 p, vec4 q) {
@@ -154,7 +177,7 @@ float agitation(ivec2 p, vec4 q) {
     float compression = max(-(east.x - west.x + north.y - south.y) / (2.0 * params.domain.z), 0.0);
     float froude = length(v) / sqrt(max(params.domain.w * q.x, 0.01));
     float breaking = smoothstep(0.2, 1.0, compression);
-    vec4 wet = step(vec4(0.004), vec4(qe.x, qw.x, qn.x, qs.x));
+    vec4 wet = step(vec4(WET_DEPTH_M), vec4(qe.x, qw.x, qn.x, qs.x));
     float curvature = length(mix(v, east, wet.x) + mix(v, west, wet.y) + mix(v, north, wet.z)
         + mix(v, south, wet.w) - 4.0 * v) / params.domain.z;
     float surface = imageLoad(terrain, p).x + q.x;
@@ -190,24 +213,122 @@ vec4 consume_deposit(int cell, vec4 q) {
     return q;
 }
 
-// Spill faces of this cell (see spill_out) and its landing rate since the last output, which runs once per frame.
+// Spill faces of this cell (see spill_out), its landing rate since the last output, which runs once per frame, and the
+// level of its brink: the one height every part of a fall starts from.
 vec3 spill_record(ivec2 p, vec4 q, float bed) {
     int cell = p.y * int(params.grid.x) + p.x;
     int faces = 0;
+    float discharge = 0.0;
     for (int i = 0; i < 4; ++i) {
         ivec2 other = p + FACES[i];
         if (any(lessThan(other, ivec2(0))) || any(greaterThanEqual(other, ivec2(params.grid.xy)))) continue;
         vec4 qo = imageLoad(state_in, other);
         float other_bed = imageLoad(terrain, other).x;
-        if (q.x > 0.004 && spills(bed, other_bed, qo.x)) faces |= 1 << i;
-        if (qo.x > 0.004 && spills(other_bed, bed, q.x)) faces |= 16 << i;
+        if (q.x > WET_DEPTH_M && spills(bed, other_bed, qo.x)) {
+            faces |= 1 << i;
+            int side;
+            // The face flux the solver spills, first order on a spill face as in the step.
+            discharge = max(discharge, face_flux(q, bed, qo, other_bed, vec4(0.0), vec4(0.0), vec2(FACES[i]), side).x);
+        }
+        if (qo.x > WET_DEPTH_M && spills(other_bed, bed, q.x)) faces |= 16 << i;
     }
     float landed = float(spill_deposits.deposits[cell * 4 + 3]) * uintBitsToFloat(spill.words[13])
         / (params.domain.z * params.domain.z);
     spill_deposits.deposits[cell * 4 + 3] = 0;
     if ((faces & 15) != 0) atomicAdd(spill.words[15], uint(bitCount(faces & 15)));
     if (cell == 0) atomicAdd(spill.words[16], 1u);
-    return vec3(float(faces), landed / max(params.grid.z, 1.0e-4), float((faces & 15) != 0));
+    float brink = (faces & 15) != 0 ? bed + brink_depth(discharge, q.x) : bed + q.x;
+    return vec3(float(faces), landed / max(params.grid.z, 1.0e-4), brink);
+}
+
+// The level water arrives at a lip with: the highest level up its flow within reach_m, short of any fall.
+float approach_level(ivec2 lip, float reach_m) {
+    float highest = imageLoad(terrain, lip).x + read_state(lip).x;
+    vec2 position = vec2(lip) + 0.5;
+    ivec2 last = lip;
+    for (int step = 0; step < int(ceil(reach_m / params.domain.z)); ++step) {
+        vec4 q = read_state(last);
+        float speed = length(velocity(q));
+        if (speed < 1.0e-3) break;
+        position -= velocity(q) / speed;
+        ivec2 cell = ivec2(floor(position));
+        if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, ivec2(params.grid.xy)))) break;
+        vec4 next = read_state(cell);
+        float bed = imageLoad(terrain, cell).x;
+        float last_bed = imageLoad(terrain, last).x;
+        float run = length(vec2(cell - last)) * params.domain.z;
+        if (next.x <= WET_DEPTH_M || spills(bed, last_bed, q.x, run) || spills(last_bed, bed, next.x, run)) break;
+        highest = max(highest, bed + next.x);
+        last = cell;
+    }
+    return highest;
+}
+
+vec4 brink_zone_at(ivec2 cell, bool spread) {
+    return spread ? imageLoad(brink_spread, cell) : imageLoad(brink_zone, cell);
+}
+
+// How far from its brink a cell is through its neighbour i (8 around it), with that neighbour's zone; far away when the
+// zone ends short of the cell or does not reach across. Water bending down to a brink stands above it, and no fall lies
+// between: the lower surface past the end of a lip is no part of its bend.
+float brink_reach(ivec2 p, int i, float bed, float depth, bool spread, out vec4 zone) {
+    ivec2 offset = i < 4 ? FACES[i] : ivec2(i & 1, (i >> 1) & 1) * 2 - 1;
+    ivec2 cell = p + offset;
+    zone = vec4(0.0, -1.0, 0.0, 0.0);
+    if (any(lessThan(cell, ivec2(0))) || any(greaterThanEqual(cell, ivec2(params.grid.xy)))) return 1.0e9;
+    zone = brink_zone_at(cell, spread);
+    float run = length(vec2(offset)) * params.domain.z;
+    if (zone.y < 0.0 || zone.y + run >= zone.z || zone.x > bed + depth) return 1.0e9;
+    float other_bed = imageLoad(terrain, cell).x;
+    if (spills(bed, other_bed, read_state(cell).x, run) || spills(other_bed, bed, depth, run)) return 1.0e9;
+    return zone.y + run;
+}
+
+// One step of the brink zones spreading up from the lips. A wet cell spilling over a face holds its own: its brink level,
+// the distance from that brink, the length its surface bends over (params.brink.y critical depths, shrinking to nothing
+// for water arriving as a torrent, which leaves as it comes) and the level water arrives at. Any other wet cell takes the
+// zone of its nearest neighbour (brink_reach), blended over a cell with the next nearest so no seam shows where two lips'
+// zones meet. A distance field, not a walk down the flow: neighbouring cells always get neighbouring zones, whatever the
+// flow does around rocks and pillars.
+vec4 spread_brink(ivec2 p, bool spread) {
+    vec4 none = vec4(0.0, -1.0, 0.0, 0.0);
+    vec4 q = read_state(p);
+    if (q.x <= WET_DEPTH_M) return none;
+    float bed = imageLoad(terrain, p).x;
+    vec4 spilled = imageLoad(spill_out, p);
+    if ((int(spilled.x + 0.5) & 15) != 0) {
+        float froude = length(velocity(q)) / sqrt(params.domain.w * q.x);
+        float length_m = min(params.brink.y * (spilled.z - bed) / params.brink.x, float(BRINK_SPREAD_CELLS) * params.domain.z)
+            * (1.0 - smoothstep(params.brink.z, params.brink.w, froude));
+        float distance = 0.5 * params.domain.z;
+        return distance < length_m ? vec4(spilled.z, distance, length_m, approach_level(p, length_m)) : none;
+    }
+    vec4 zone;
+    float nearest = 1.0e9;
+    for (int i = 0; i < 8; ++i) nearest = min(nearest, brink_reach(p, i, bed, q.x, spread, zone));
+    if (nearest > 1.0e8) return none;
+    // Second sweep over the same, cached neighbours: holding them in arrays costs the registers that hide memory latency.
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        float weight = max(1.0 - (brink_reach(p, i, bed, q.x, spread, zone) - nearest) / params.domain.z, 0.0);
+        sum += weight * zone.xzw;
+        weights += weight;
+    }
+    sum /= weights;
+    return vec4(sum.x, nearest, sum.y, sum.z);
+}
+
+// The level a wet cell draws: within its brink zone the surface bends from the level the water arrives at down to the
+// brink, as a free overfall does (hydrostatic, the solver squeezes that drawdown into a cell or two), and fades into
+// the solver's own level over the far end of the zone. A drawdown only ever lowers the water: down a chute, where the
+// water already falls faster than the bend, it keeps its own level.
+float drawn_level(ivec2 cell, float level, bool spread) {
+    vec4 zone = brink_zone_at(cell, spread);
+    if (zone.y < 0.0) return level;
+    float t = min(zone.y / zone.z, 1.0);
+    float bend = zone.x + max(zone.w - zone.x, 0.0) * (1.0 - (1.0 - t) * (1.0 - t));
+    return mix(level, min(level, bend), 1.0 - smoothstep(0.7, 1.0, t));
 }
 
 float surface_height(ivec2 p, vec4 q, vec4 bed) {
@@ -224,26 +345,31 @@ float surface_height(ivec2 p, vec4 q, vec4 bed) {
 
 // Side by side cells share a surface: both wet, no spill face between them and levels close.
 bool joined(vec4 qa, float za, vec4 qb, float zb, float gap) {
-    return qa.x > 0.004 && qb.x > 0.004 && !spills(za, zb, qb.x) && !spills(zb, za, qa.x)
+    return qa.x > WET_DEPTH_M && qb.x > WET_DEPTH_M && !spills(za, zb, qb.x) && !spills(zb, za, qa.x)
         && abs(za + qa.x - zb - qb.x) < gap;
 }
 
-// Each corner takes the mean level of the cells joined to this one around it, summed in block order so every cell of a
-// surface gets the same value: the surface stays watertight while lips and walls split it. A dry cell takes the lowest
-// surface around a corner that its bed stands above, so the rock, not the mesh, ends the water at the shore.
-vec4 surface_corners(ivec2 p) {
+// Each corner takes the mean drawn level (drawn_level) of the cells joined to this one around it, or, where the cells of
+// that surface spill over block edges meeting at the corner, the mean level of their brinks: the corner is then the lip
+// a fall leaves from. Sums run in block order so every cell of a surface gets the same value: the surface stays
+// watertight while lips and walls split it. A dry cell takes the lowest surface around a corner that its bed stands
+// above, so the rock, not the mesh, ends the water at the shore.
+vec4 surface_corners(ivec2 p, bool spread) {
     float dry = uintBitsToFloat(0x7F800000u);
     float gap = LEVEL_GAP_STEPS * uintBitsToFloat(spill.words[12]) * params.domain.z;
     vec4 q[9];
     float bed[9];
     float level[9];
+    bool wet = false;
     for (int n = 0; n < 9; ++n) {
         ivec2 cell = bound_cell(p + ivec2(n % 3, n / 3) - 1);
         q[n] = imageLoad(state_in, cell);
         bed[n] = imageLoad(terrain, cell).x;
-        level[n] = q[n].x > 0.004 ? bed[n] + q[n].x : dry;
+        level[n] = q[n].x > WET_DEPTH_M ? drawn_level(cell, bed[n] + q[n].x, spread) : dry;
+        wet = wet || q[n].x > WET_DEPTH_M;
     }
     vec4 corners = vec4(dry);
+    if (!wet) return corners;
     for (int k = 0; k < 4; ++k) {
         int base = (k >> 1) * 3 + (k & 1);
         int cells[4] = int[4](base, base + 1, base + 3, base + 4);
@@ -259,6 +385,14 @@ vec4 surface_corners(ivec2 p) {
                 }
             }
         }
+        // The cell of each block edge that spills over it, -1 for none.
+        int lips[4];
+        for (int e = 0; e < 4; ++e) {
+            int a = cells[EDGE_FROM[e]];
+            int b = cells[EDGE_TO[e]];
+            lips[e] = q[a].x > WET_DEPTH_M && spills(bed[a], bed[b], q[b].x) ? EDGE_FROM[e]
+                : (q[b].x > WET_DEPTH_M && spills(bed[b], bed[a], q[a].x) ? EDGE_TO[e] : -1);
+        }
         int own = 3 - k;
         for (int i = 0; i < 4; ++i) {
             if (isinf(level[cells[i]]) || (!isinf(level[4]) && i != own)) continue;
@@ -270,7 +404,16 @@ vec4 surface_corners(ivec2 p) {
                     count += 1.0;
                 }
             }
-            float mean = sum / count;
+            float brinks = 0.0;
+            float spilling = 0.0;
+            for (int e = 0; e < 4; ++e) {
+                if (lips[e] >= 0 && labels[lips[e]] == labels[i]) {
+                    int lip = cells[lips[e]];
+                    brinks += imageLoad(spill_out, bound_cell(p + ivec2(lip % 3, lip / 3) - 1)).z;
+                    spilling += 1.0;
+                }
+            }
+            float mean = spilling > 0.0 ? brinks / spilling : sum / count;
             if (!isinf(level[4])) corners[k] = mean;
             else if (bed[4] >= mean - SHORE_RISE_M) corners[k] = min(corners[k], mean);
         }
@@ -283,6 +426,16 @@ vec4 surface_corners(ivec2 p) {
 
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+#ifdef BRINK_PASS
+    // Its own pipeline, after the output pass, frames alternating: the brink zones spread a step up from the lips, from
+    // brink_zone into brink_spread (9) or back (10), and the corners are drawn from the zones read, a frame old.
+    if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
+    bool spread = params.control.x > 9.5;
+    vec4 zone = spread_brink(p, spread);
+    if (spread) imageStore(brink_zone, p, zone);
+    else imageStore(brink_spread, p, zone);
+    imageStore(corners_out, p, surface_corners(p, spread));
+#else
     bool spilling = uintBitsToFloat(spill.words[12]) > 0.0;
     if (params.control.x > 7.5) {
         if (any(greaterThanEqual(p, ivec2(params.grid.xy)))) return;
@@ -290,7 +443,7 @@ void main() {
         vec4 bed = source_bed(world);
         vec4 q = read_state(p);
         float depth = max(q.x - max(bed.x - imageLoad(terrain, p).x, 0.0), 0.0);
-        q = depth > 0.004 ? vec4(depth, q.yzw * (depth / max(q.x, 0.004))) : vec4(0.0);
+        q = depth > WET_DEPTH_M ? vec4(depth, q.yzw * (depth / max(q.x, WET_DEPTH_M))) : vec4(0.0);
         imageStore(terrain, p, bed);
         imageStore(state_in, p, q);
         return;
@@ -332,7 +485,7 @@ void main() {
             vec2 cell = uv * params.grid.xy - 0.5;
             vec4 pool = interpolate_surface(cell, ivec2(params.grid.xy));
             float pool_depth = pool.w;
-            if (pool_depth > 0.004 && query.y < pool.z + 0.8 && query.y > pool.z - pool_depth - 0.8) {
+            if (pool_depth > WET_DEPTH_M && query.y < pool.z + 0.8 && query.y > pool.z - pool_depth - 0.8) {
                 contacts = vec4(query.x, pool.z, query.z, pool.w);
                 motion = vec4(pool.x, 0.0, pool.y, 1.0);
                 normals = vec4(0.0, 1.0, 0.0, query.y - pool.z);
@@ -357,8 +510,10 @@ void main() {
         imageStore(surface_out, p, vec4(velocity(q), q.x > 0.02 ? bed.x + q.x : bed.y + params.water.x, q.x));
         imageStore(foam_out, p, vec4(0.0));
         if (spilling) {
-            imageStore(spill_out, p, vec4(0.0, 0.0, 0.0, bed.x + q.x));
-            imageStore(corners_out, p, vec4(q.x > 0.004 ? bed.x + q.x : uintBitsToFloat(0x7F800000u)));
+            imageStore(spill_out, p, vec4(0.0, 0.0, bed.x + q.x, bed.x + q.x));
+            imageStore(brink_zone, p, vec4(0.0, -1.0, 0.0, 0.0));
+            imageStore(brink_spread, p, vec4(0.0, -1.0, 0.0, 0.0));
+            imageStore(corners_out, p, vec4(q.x > WET_DEPTH_M ? bed.x + q.x : uintBitsToFloat(0x7F800000u)));
         }
         return;
     }
@@ -366,12 +521,11 @@ void main() {
     float source = activity * params.water.y * (0.6 + params.control.y);
     if (params.control.x > 1.5) {
         imageStore(surface_out, p, vec4(velocity(q), surface_height(p, q, bed), q.x));
-        imageStore(foam_out, p, vec4(clamp(q.w / max(q.x, 0.004), 0.0, 1.0),
+        imageStore(foam_out, p, vec4(clamp(q.w / max(q.x, WET_DEPTH_M), 0.0, 1.0),
             source / (1.0 + source), clamp(activity, 0.0, 1.0), q.x));
         if (spilling) {
             float settled = mix(imageLoad(spill_out, p).w, bed.x + q.x, 1.0 - exp(-params.grid.z / params.relaxation.z));
             imageStore(spill_out, p, vec4(spill_record(p, q, bed.x), settled));
-            imageStore(corners_out, p, surface_corners(p));
         }
         return;
     }
@@ -379,9 +533,9 @@ void main() {
     int cell = p.y * int(params.grid.x) + p.x;
     if (spilling) q = consume_deposit(cell, q);
     float reference_depth = max(bed.y + params.water.x - bed.x, 0.0);
-    if (q.x <= 0.004 && read_state(p + ivec2(1, 0)).x <= 0.004
-        && read_state(p - ivec2(1, 0)).x <= 0.004 && read_state(p + ivec2(0, 1)).x <= 0.004
-        && read_state(p - ivec2(0, 1)).x <= 0.004 && reference_depth <= 0.004) {
+    if (q.x <= WET_DEPTH_M && read_state(p + ivec2(1, 0)).x <= WET_DEPTH_M
+        && read_state(p - ivec2(1, 0)).x <= WET_DEPTH_M && read_state(p + ivec2(0, 1)).x <= WET_DEPTH_M
+        && read_state(p - ivec2(0, 1)).x <= WET_DEPTH_M && reference_depth <= WET_DEPTH_M) {
         imageStore(state_out, p, vec4(0.0));
         return;
     }
@@ -414,9 +568,9 @@ void main() {
             if (outgoing[i] <= 0.0) continue;
             vec2 normal = vec2(FACES[i]);
             float volume = outgoing[i] * dt * params.domain.z;
-            // The sheet leaves the brink at least as fast as the face flux carries it.
-            vec2 brink = v + normal * max(outgoing[i] / max(q.x, 0.004) - dot(v, normal), 0.0);
-            sums += vec4(volume, volume * brink, volume * clamp(q.w / max(q.x, 0.004), 0.0, 1.0));
+            // The sheet leaves the brink at least as fast as the face flux carries it through the brink depth.
+            vec2 brink = v + normal * max(outgoing[i] / max(brink_depth(outgoing[i], q.x), WET_DEPTH_M) - dot(v, normal), 0.0);
+            sums += vec4(volume, volume * brink, volume * clamp(q.w / max(q.x, WET_DEPTH_M), 0.0, 1.0));
         }
         spill_outflow.outflow[cell * 2] += sums;
         spill_outflow.outflow[cell * 2 + 1] += outgoing * dt * params.domain.z;
@@ -436,7 +590,7 @@ void main() {
             for (int i = 0; i < 4; ++i) {
                 vec2 normal = vec2(FACES[i]);
                 vec2 leaving = v + normal * max(-dot(v, normal), 0.0);
-                sums += shares[i] * volume * vec4(1.0, leaving, clamp(next.w / max(next.x, 0.004), 0.0, 1.0));
+                sums += shares[i] * volume * vec4(1.0, leaving, clamp(next.w / max(next.x, WET_DEPTH_M), 0.0, 1.0));
             }
             spill_outflow.outflow[cell * 2] += sums;
             spill_outflow.outflow[cell * 2 + 1] += shares * volume;
@@ -450,7 +604,7 @@ void main() {
     ) / (2.0 * params.domain.z);
     // Terraces are held by the reference surface. A spilling field has none: its steps spill and its slopes run.
     if (!spilling) next.yz += dt * params.domain.w * next.x * reference_gradient;
-    if (next.x > 0.004) {
+    if (next.x > WET_DEPTH_M) {
         // A spilling field runs free, its lips setting each reach's level: guidance would brake and pump water against them.
         if (!spilling) next.yz += dt * params.relaxation.x * (bed.zw * params.grid.w * next.x - next.yz);
         next.yz /= 1.0 + dt * (0.06 + 0.018 * length(velocity(next)) / max(next.x, 0.05));
@@ -460,7 +614,7 @@ void main() {
     } else next.yzw = vec3(0.0);
     float level_rate = spilling ? 0.0 : params.relaxation.y;
     float relaxed_depth = mix(next.x, reference_depth, 1.0 - exp(-dt * level_rate));
-    next.yzw *= relaxed_depth / max(next.x, 0.004);
+    next.yzw *= relaxed_depth / max(next.x, WET_DEPTH_M);
     next.x = relaxed_depth;
     float edge = min(min(float(p.x), params.grid.x - 1.0 - float(p.x)),
         min(float(p.y), params.grid.y - 1.0 - float(p.y))) * params.domain.z;
@@ -474,7 +628,7 @@ void main() {
         vec2 v = velocity(next);
         v -= outward * min(dot(v, outward), 0.0);
         float held = min(next.x, reference_depth);
-        next = held > 0.004 ? vec4(held, v * held, next.w * held / next.x) : vec4(0.0);
+        next = held > WET_DEPTH_M ? vec4(held, v * held, next.w * held / next.x) : vec4(0.0);
     } else {
         vec2 edge_m = vec2(min(float(p.x), params.grid.x - 1.0 - float(p.x)),
             min(float(p.y), params.grid.y - 1.0 - float(p.y))) * params.domain.z;
@@ -485,4 +639,5 @@ void main() {
         next = mix(next, seed_state(p), restore);
     }
     imageStore(state_out, p, next);
+#endif
 }

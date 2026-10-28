@@ -1,4 +1,5 @@
 // Shading of spilled water: a clear sheet at the lip that tears and whitens as its core breaks up over the fall.
+#include "res://shaders/river/river_spill_breakup.gdshaderinc"
 
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D turbulence_texture : filter_linear_mipmap, repeat_enable;
@@ -7,16 +8,11 @@ uniform vec3 deep_color : source_color = vec3(0.035, 0.19, 0.17);
 uniform float clarity = 0.82;
 uniform float foam_amount = 0.65;
 uniform float simulation_time_s = 0.0;
-uniform float breakup_length_m = 3.0;
 uniform float unit_discharge_m2_s = 0.1;
 uniform float source_speed_m_s = 0.85;
-// How white the sheet turns once broken up: a thin, slow sheet keeps to threads where a torrent turns to foam.
-uniform float aeration_strength = 1.0;
+// Set from river_swe_solver.gd GRAVITY_M_S2.
+uniform float gravity_m_s2 = 0.0;
 
-const float GRAVITY_M_S2 = 9.81;
-// Fractions of the break-up length: the sheet is clear past the lip, torn and white where its core is gone.
-const float AERATION_ONSET = 0.1;
-const float AERATION_FULL = 1.0;
 // Streak texture tiles per metre across the lip: broad aerated streamers, fine threads of a thin sheet.
 const float STREAMERS_PER_M = 0.45;
 const float THREADS_PER_M = 1.2;
@@ -78,11 +74,11 @@ struct WaterfallLook {
 // lip_m, lip_weight: lip point and how much the lip runs along x and z (a turning tangent races the pattern).
 WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, float flight_s, vec2 lip_m, vec2 lip_weight,
 		float stream_share, float side_share, float above_pool_m, vec3 view, vec2 screen_uv) {
-	float speed = sqrt(source_speed_m_s * source_speed_m_s + 2.0 * GRAVITY_M_S2 * fall_m);
+	float speed = sqrt(source_speed_m_s * source_speed_m_s + 2.0 * gravity_m_s2 * fall_m);
 	float film_m = unit_discharge_m2_s / max(speed, 0.05);
 	// A feature that left the lip at one time keeps the same pattern coordinate all the way down.
 	float ride_s = flight_s - simulation_time_s;
-	float strong = smoothstep(0.25, 0.6, aeration_strength);
+	float strong = aerated(aeration_strength);
 
 	LipPattern along_x = lip_pattern(lip_m.x, ride_s);
 	LipPattern along_z = lip_pattern(lip_m.y + 17.3, ride_s);
@@ -97,11 +93,11 @@ WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, f
 	float breakup = fall_m / breakup_length_m + (broad - 0.5) * 0.2;
 	float thin = 1.0 - smoothstep(0.01, 0.06, film_m);
 	float trickle = 1.0 - smoothstep(0.0, 1.0, stream_share);
-	float tear = max(max(smoothstep(AERATION_ONSET, AERATION_FULL, breakup), thin * (1.0 - strong)), trickle);
+	float tear = max(max(smoothstep(BREAKUP_SHARE.x, BREAKUP_SHARE.y, breakup), thin * (1.0 - strong)), trickle);
 	float cut = mix(-0.4, mix(TEAR_CUT.x, TEAR_CUT.y, strong * (1.0 - trickle)), tear);
 	float softness = mix(TEAR_SOFTNESS.x, TEAR_SOFTNESS.y, strong);
 	cut = mix(cut, max(cut, 0.0) + 0.6, smoothstep(0.0, 1.0, side_share));
-	float glass = 1.0 - smoothstep(0.0, AERATION_ONSET, breakup);
+	float glass = 1.0 - smoothstep(0.0, BREAKUP_SHARE.x, breakup);
 	// Aerated water turns grainy below its lip; it thins only low in the fall and at its sides, so no hole at the lip.
 	float grainy = strong * smoothstep(0.03, 0.25, breakup);
 	float apart = grainy * max(smoothstep(0.5, 1.2, breakup), smoothstep(0.0, 1.0, side_share));

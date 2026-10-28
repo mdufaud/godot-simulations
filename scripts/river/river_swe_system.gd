@@ -220,6 +220,7 @@ func _bind() -> void:
 		material.set_shader_parameter("swe_spill", spill_texture)
 		material.set_shader_parameter("swe_corners", corners_texture)
 		material.set_shader_parameter("swe_spill_enabled", field.spills and active)
+		material.set_shader_parameter("swe_wet_depth_m", Solver.WET_DEPTH_M)
 		material.set_shader_parameter("swe_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
 		if material != _spray_material:
 			material.set_shader_parameter("swe_enabled", active)

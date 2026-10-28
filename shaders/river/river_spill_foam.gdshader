@@ -2,6 +2,7 @@ shader_type spatial;
 render_mode skip_vertex_transform, cull_disabled, depth_draw_never, shadows_disabled, specular_disabled, diffuse_lambert_wrap, fog_disabled;
 
 // Broken-up spilled water: each spill particle drawn as a soft white streak along its velocity.
+#include "res://shaders/river/river_spill_breakup.gdshaderinc"
 
 uniform sampler2D positions : filter_nearest;
 uniform sampler2D motions : filter_nearest;
@@ -9,16 +10,12 @@ uniform sampler2D turbulence_texture : filter_linear_mipmap, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
 uniform int texture_width = 256;
 uniform float radius_m = 0.09;
-uniform float breakup_length_m = 3.0;
-uniform float aeration_strength = 1.0;
 uniform float simulation_time_s = 0.0;
+// Drawn break-up distance of a live particle starts this far above zero (river_swe_solver.gd SPILL_DROP_OFFSET_M).
+uniform float drop_offset_m = 0.0;
 
 // Seconds of motion each streak spans, as a camera exposure would blur it.
 const float EXPOSURE_S = 0.04;
-// Drawn break-up share starts above zero for a live particle (river_spill.comp DROP_OFFSET_M).
-const float DROP_OFFSET_M = 0.01;
-// Fractions of the break-up length over which the streaks take over from the sheet, as river_waterfall_look.
-const vec2 BREAKUP_SHARE = vec2(0.1, 1.0);
 const float OPACITY = 0.45;
 // Streaks fade into whatever they pass through over this depth, rather than cutting along it.
 const float SOFT_DEPTH_M = 0.15;
@@ -31,9 +28,9 @@ void vertex() {
 	ivec2 texel = ivec2(INSTANCE_ID % texture_width, INSTANCE_ID / texture_width);
 	vec4 body = texelFetch(positions, texel, 0);
 	vec4 motion = texelFetch(motions, texel, 0);
-	float broken = smoothstep(BREAKUP_SHARE.x, BREAKUP_SHARE.y, (body.w - DROP_OFFSET_M) / max(breakup_length_m, 0.01));
+	float broken = smoothstep(BREAKUP_SHARE.x, BREAKUP_SHARE.y, (body.w - drop_offset_m) / max(breakup_length_m, 0.01));
 	// A small drop scatters little light: alone, its blur would read as a white needle.
-	opacity = body.w > 0.0 ? OPACITY * broken * smoothstep(0.25, 0.6, aeration_strength) * motion.w : 0.0;
+	opacity = body.w > 0.0 ? OPACITY * broken * aerated(aeration_strength) * motion.w : 0.0;
 	if (opacity < 0.005) {
 		POSITION = vec4(2.0, 2.0, 2.0, 1.0);
 	} else {

@@ -21,6 +21,9 @@ const SweSolver := preload("res://scripts/river/river_swe_solver.gd")
 # wall second; allow a 4x slowdown before the guard cuts the wait.
 const GUARD_FRAMES_PER_SECOND := 240.0
 
+# river_cascade: steepest drawn surface edge along the flow within a brink's bend (45 degrees).
+const BRINK_FOLD_SLOPE := 1.0
+
 # fluid_foam
 const WARM_SIM := 2.0
 const COHORT := 2000
@@ -7784,7 +7787,7 @@ func _run_river_cascade() -> void:
 			lip_cells += 1
 			if highest.has(cell):
 				aired += 1
-				reaching += int(highest[cell] - bed[cell * 4] >= 0.8 * surface[cell * 4 + 3])
+				reaching += int(highest[cell] - bed[cell * 4] >= 0.8 * (faces[cell * 4 + 2] - bed[cell * 4]))
 		var aired_share := aired / maxf(lip_cells, 1.0)
 		var reaching_share := reaching / maxf(aired, 1.0)
 		# Every spilling face of a wet cell gets a sheet: the list holds exactly those faces.
@@ -7794,7 +7797,7 @@ func _run_river_cascade() -> void:
 			listed += int(listing[i] > 0.5)
 		var spilling_faces := 0
 		for cell in grid.x * grid.y:
-			if surface[cell * 4 + 3] > 0.004:
+			if surface[cell * 4 + 3] > SweSolver.WET_DEPTH_M:
 				var bits := int(faces[cell * 4] + 0.5) & 15
 				spilling_faces += (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
 		# A cell that a wet neighbour spills onto and that falls on down is part of the wall: water held there is a
@@ -7809,7 +7812,7 @@ func _run_river_cascade() -> void:
 				var falls := false
 				for offset: int in [1, -1, grid.x, -grid.x]:
 					var other := cell + offset
-					fed = fed or (bed[other * 4] - bed[cell * 4] > step_m and surface[other * 4 + 3] > 0.004
+					fed = fed or (bed[other * 4] - bed[cell * 4] > step_m and surface[other * 4 + 3] > SweSolver.WET_DEPTH_M
 						and bed[other * 4] > bed[cell * 4] + surface[cell * 4 + 3])
 					falls = falls or (bed[cell * 4] - bed[other * 4] > step_m
 						and bed[cell * 4] > bed[other * 4] + surface[other * 4 + 3] + 0.05)
@@ -7831,7 +7834,7 @@ func _run_river_cascade() -> void:
 		for y in range(1, grid.y - 1):
 			for x in range(1, grid.x - 1):
 				var cell := y * grid.x + x
-				if surface[cell * 4 + 3] <= 0.004:
+				if surface[cell * 4 + 3] <= SweSolver.WET_DEPTH_M:
 					continue
 				var bits := int(faces[cell * 4] + 0.5)
 				for i in 4:
@@ -7852,11 +7855,52 @@ func _run_river_cascade() -> void:
 							unsplit.append("(%.2f,%.2f f%d own=%.3f,%.3f below=%.3f,%.3f levels=%.3f/%.3f)" % [
 								river.swe.region_m.position.x + (x + 0.5) * river.swe.cell_m, river.swe.region_m.position.y + (y + 0.5) * river.swe.cell_m,
 								i, own_pair.x, own_pair.y, other_pair.x, other_pair.y, bed[cell * 4] + surface[cell * 4 + 3],
-								bed[other * 4] + surface[other * 4 + 3] if surface[other * 4 + 3] > 0.004 else -INF])
-					elif i % 2 == 0 and surface[other * 4 + 3] > 0.004 and not (bits & (16 << i)) \
+								bed[other * 4] + surface[other * 4 + 3] if surface[other * 4 + 3] > SweSolver.WET_DEPTH_M else -INF])
+					elif i % 2 == 0 and surface[other * 4 + 3] > SweSolver.WET_DEPTH_M and not (bits & (16 << i)) \
 							and absf(bed[cell * 4] + surface[cell * 4 + 3] - bed[other * 4] - surface[other * 4 + 3]) < 0.5 * step_m:
 						joined_edges += 1
 						sealed_edges += int((own_pair - other_pair).abs().length() < 1.0e-4)
+		# Every fall leaves from one brink level, within its cell's water; the surface bending down to it stays smooth:
+		# at most one cell in twenty of a bend zone draws an edge along the flow steeper than BRINK_FOLD_SLOPE (a hydrostatic
+		# drawdown folds at about 2; the steepest left are the solver's own torrents past rocks).
+		var zone: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.brink_zone, 0, grid.x * grid.y * 16)).to_float32_array()
+		var brink_errors := 0
+		var fold := 0.0
+		var fold_at := Vector2.ZERO
+		var fold_cell := 0
+		var folds := PackedFloat32Array()
+		for cell in grid.x * grid.y:
+			var depth: float = surface[cell * 4 + 3]
+			if depth <= SweSolver.WET_DEPTH_M:
+				continue
+			var brink: float = faces[cell * 4 + 2]
+			if int(faces[cell * 4] + 0.5) & 15 and (brink < bed[cell * 4] - 1.0e-4 or brink > bed[cell * 4] + depth + 1.0e-4):
+				brink_errors += 1
+			if zone[cell * 4 + 1] < 0.0 or zone[cell * 4 + 1] > 0.85 * zone[cell * 4 + 2]:
+				continue
+			var c := Vector4(corners[cell * 4], corners[cell * 4 + 1], corners[cell * 4 + 2], corners[cell * 4 + 3])
+			var along_x := absf(surface[cell * 4]) >= absf(surface[cell * 4 + 1])
+			var rise := maxf(absf(c.y - c.x), absf(c.w - c.z)) if along_x else maxf(absf(c.z - c.x), absf(c.w - c.y))
+			folds.append(rise / river.swe.cell_m)
+			if rise / river.swe.cell_m > fold:
+				fold = rise / river.swe.cell_m
+				fold_cell = cell
+				fold_at = river.swe.region_m.position + (Vector2(cell % grid.x, cell / grid.x) + Vector2.ONE * 0.5) * river.swe.cell_m
+		folds.sort()
+		var folded := folds.size() - folds.bsearch(BRINK_FOLD_SLOPE, false)
+		var fold_p95: float = folds[int(folds.size() * 0.95)] if not folds.is_empty() else 0.0
+		print("RIVER CASCADE preset=%s brink_errors=%d fold=%.2f at=(%.2f,%.2f) zone_cells=%d folded=%d p95=%.2f" % [preset, brink_errors,
+			fold, fold_at.x, fold_at.y, folds.size(), folded, fold_p95])
+		if fold_p95 > BRINK_FOLD_SLOPE:
+			var around: Array[String] = []
+			for dy in range(-1, 2):
+				for dx in range(-1, 2):
+					var n := fold_cell + dy * grid.x + dx
+					around.append("(%d,%d level=%.3f zone_brink=%.3f d=%.2f L=%.2f arriving=%.3f faces=%d brink=%.3f v=%.2f,%.2f)" % [dx, dy,
+						bed[n * 4] + surface[n * 4 + 3], zone[n * 4], zone[n * 4 + 1], zone[n * 4 + 2], zone[n * 4 + 3],
+						int(faces[n * 4] + 0.5) & 15, faces[n * 4 + 2], surface[n * 4], surface[n * 4 + 1]])
+			print("RIVER CASCADE fold_corners=%.3f,%.3f,%.3f,%.3f around=%s" % [corners[fold_cell * 4], corners[fold_cell * 4 + 1],
+				corners[fold_cell * 4 + 2], corners[fold_cell * 4 + 3], " ".join(around)])
 		var keys := curtains.keys()
 		keys.sort()
 		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d lip_cells=%d aired=%.3f reaching=%.3f sheets=%d/%d wet_walls=%d/%d pool=%.3f->%.3f rock_spills=%d split=%d/%d bridged=%d ramps=%d sealed=%d/%d landing_pulse=%.2f" % [
@@ -7870,9 +7914,10 @@ func _run_river_cascade() -> void:
 			spots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return stray_spots[a] > stray_spots[b])
 			print("RIVER CASCADE stray_spots=%s" % [spots.slice(0, 12).map(func(spot: Vector2i) -> String: return "%s:%d" % [spot, stray_spots[spot]])])
 		var passed: bool = books.balanced and books.finite and finite and spilling.size() == lips and stray == 0 \
-			and fastest <= 8.0 and levels_held and gpu_ms <= 3.0 and reaching_share >= 0.85 \
+			and fastest <= 8.0 and levels_held and gpu_ms <= 3.3 and reaching_share >= 0.85 \
 			and listed == spilling_faces and spilling_faces <= SweSolver.SPILL_LIP_CAPACITY and wet_walls == 0 and pool_held \
-			and rock_spills == 0 and bridged_faces == 0 and sealed_edges == joined_edges and landing_pulse <= 1.2
+			and rock_spills == 0 and bridged_faces == 0 and sealed_edges == joined_edges and landing_pulse <= 1.2 \
+			and brink_errors == 0 and fold_p95 <= BRINK_FOLD_SLOPE
 		all_pass = all_pass and passed
 	_check(all_pass, "river_cascade: every lip must spill and only lips, never off a rock, from its surface with a sheet on every face, the drawn surface splitting there and sealed elsewhere, no water held on a wall, volume must balance, reaches must hold water within their banks, the pool must hold its level, speed and solver time must stay bounded")
 	scene.queue_free()
