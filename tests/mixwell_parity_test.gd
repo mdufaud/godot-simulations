@@ -49,6 +49,7 @@ func _run() -> void:
 		return
 	for preset in PRESETS:
 		await _check_preset(solver, config, preset)
+	await _check_exact_strokes(solver, config)
 	# Slip walls (method of images): the pattern passes against the CPU twin's
 	# images, and a stroke driven into a wall moves no fluid across it.
 	# Each pass alone must match tightly; composed, the waves' images stretch
@@ -151,6 +152,50 @@ func _advect(coordinate: Vector2, operations: Array[Dictionary], config: Mixwell
 			config.affine_radius_px, config.affine_strength, config.cutoff_gamma,
 			config.drift_compensation, config.midpoint_alpha,
 			Vector2(aspect, 1.0) if _slip else Vector2.ZERO)
+
+
+# Crossing strokes, evaluated exactly through the stroke grid, must equal
+# every segment applied in turn (the live path with its window opened to all of
+# them: same per-segment code, nothing skipped), in every boundary mode; and
+# match the CPU twin's composition.
+func _check_exact_strokes(solver: MixwellSolver, config: MixwellConfig) -> void:
+	var strokes: Array = []
+	for index in 4:
+		var stroke := MixwellStroke.new()
+		stroke.radius_px = 6.0 + 2.0 * index
+		var angle := 0.7 * float(index)
+		var centre := Vector2(160.0, 90.0) + Vector2(cos(angle * 3.0), sin(angle * 2.0)) * 40.0
+		for step in 24:
+			var t := float(step) / 23.0 - 0.5
+			stroke.points_px.append(centre + Vector2(cos(angle), sin(angle)) * 260.0 * t
+					+ Vector2(-sin(angle), cos(angle)) * 18.0 * sin(t * 9.0))
+		strokes.append(stroke)
+	for mode in [MixwellConfig.BoundaryMode.FULLSCREEN, MixwellConfig.BoundaryMode.SLIP_WALLS,
+			MixwellConfig.BoundaryMode.PERIODIC]:
+		solver.set_boundary_mode(mode)
+		solver.live_segment_limit = 256
+		solver.set_strokes([], Gallery.FREEHAND_LAB)
+		solver.set_strokes(strokes, Gallery.FREEHAND_LAB)
+		solver.set_exact_strokes(true)
+		var exact_snapshot = solver.create_render_snapshot()
+		var exact := await _render_displacement(solver)
+		solver.set_exact_strokes(false)
+		var sequential := await _render_displacement(solver)
+		solver.set_exact_strokes(true)
+		var worst := 0.0
+		for index in range(0, exact.size(), 2):
+			worst = maxf(worst, Vector2(exact[index] - sequential[index],
+					exact[index + 1] - sequential[index + 1]).length())
+		print("MIXWELL STROKES mode=%d segments=%d grid=%s exact_vs_sequential=%.6f px" % [mode,
+				exact_snapshot.stroke_segments.size() / 8, str(exact_snapshot.stroke_grid.dims),
+				worst * float(SIZE.y) / 2.0])
+		_check(exact_snapshot.exact_strokes and worst * float(SIZE.y) / 2.0 <= 1.0e-3,
+				"exact strokes match every segment applied in turn (mode %d)" % mode)
+		if mode == MixwellConfig.BoundaryMode.FULLSCREEN:
+			await _check_snapshot(solver, config, "exact strokes", false, false)
+	solver.live_segment_limit = MixwellSolver.LIVE_SEGMENT_LIMIT
+	solver.set_boundary_mode(MixwellConfig.BoundaryMode.FULLSCREEN)
+	solver.set_strokes([], Gallery.SINGLE_LINE)
 
 
 # A stroke ending just short of the y = +1 wall. Without walls it drags fluid

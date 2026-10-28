@@ -28,6 +28,8 @@ const SEGMENT := 2
 const BAKED_MAP := 3
 const GEL_GIT_PASS := 4
 const TRI_WAVE := 5
+## Every user stroke segment, evaluated exactly per sample (mixwell_rd_strokes).
+const USER_STROKES := 6
 
 ## Tine pitch of each of Gel-Git's two combs.
 const GEL_GIT_PITCH := 0.23703704

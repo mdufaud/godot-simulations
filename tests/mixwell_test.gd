@@ -66,6 +66,7 @@ func _initialize() -> void:
 	_test_gallery_published_passes()
 	_test_gallery_retained_stroke_passes()
 	_test_baked_stroke_prefix()
+	_test_stroke_grid()
 	_test_pattern_round_trip()
 	_test_pattern_physical_order()
 	_test_pattern_curve_and_transform_expansion()
@@ -428,6 +429,42 @@ func _line_stroke(y: float, segments: int) -> MixwellStroke:
 	return stroke
 
 
+# The exact stroke pass finds segments through a uniform grid: a cell must be
+# at least the mask reach plus half a segment, and every segment must be listed
+# in the cell of its midpoint, in ascending order.
+func _test_stroke_grid() -> void:
+	var solver := Solver.new()
+	solver.initialize(Vector2i(320, 180), Config.new(), Vector2i(320, 180))
+	var strokes: Array = []
+	for row in 3:
+		var stroke := Stroke.new()
+		stroke.radius_px = 6.0 + 3.0 * row
+		for index in 40:
+			stroke.points_px.append(Vector2(30.0 + 6.5 * index, 40.0 + 50.0 * row + 20.0 * sin(index * 0.4)))
+		strokes.append(stroke)
+	solver.set_strokes(strokes, Gallery.FREEHAND_LAB)
+	var snapshot = solver.create_render_snapshot()
+	var grid: Dictionary = snapshot.stroke_grid
+	var segments: PackedFloat32Array = snapshot.stroke_segments
+	var reach := 0.0
+	var listed := true
+	for index in segments.size() / 8:
+		var base := index * 8
+		var start := Vector2(segments[base], segments[base + 1])
+		var end := Vector2(segments[base + 2], segments[base + 3])
+		reach = maxf(reach, segments[base + 4] * snapshot.cutoff_gamma + 0.5 * start.distance_to(end))
+		var cell := Vector2i(((start + end) * 0.5 - grid.origin) / grid.cell)
+		var flat: int = cell.y * grid.dims.x + cell.x
+		var items: PackedInt32Array = grid.items.slice(grid.starts[flat], grid.starts[flat + 1])
+		listed = listed and items.has(index)
+	var ascending := true
+	for flat in grid.dims.x * grid.dims.y:
+		for at in range(grid.starts[flat] + 1, grid.starts[flat + 1]):
+			ascending = ascending and grid.items[at - 1] < grid.items[at]
+	_check(grid.cell >= reach and listed and ascending,
+		"stroke grid: cell %s >= reach %s, every midpoint listed, ascending" % [str(grid.cell), str(reach)])
+
+
 func _test_baked_stroke_prefix() -> void:
 	var solver := Solver.new()
 	solver.initialize(Vector2i(256, 256), Config.new(), Vector2i(256, 256))
@@ -440,6 +477,17 @@ func _test_baked_stroke_prefix() -> void:
 		"recent strokes stay live while they fit the window")
 	var third := _line_stroke(120.0, 10)
 	solver.set_strokes([first, second, third], Gallery.FREEHAND_LAB)
+	# Converging samples evaluate every stroke exactly: one pass, all 30
+	# segments in drawing order (the baked stroke first).
+	var exact = solver.create_render_snapshot()
+	_check(exact.exact_strokes and exact.operations.size() == 1
+			and int(exact.operations[0].type) == Gallery.USER_STROKES
+			and int(exact.operations[0].count) == 30
+			and is_equal_approx(exact.stroke_segments[1], exact.stroke_segments[3])
+			and exact.stroke_segments[1] < exact.stroke_segments[10 * 8 + 1],
+		"converging samples evaluate all strokes exactly, oldest first in the buffer")
+	# The one-sample drawing preview reads the oldest stroke from the map.
+	solver.set_exact_strokes(false)
 	var operations: Array = solver.create_render_snapshot().operations
 	_check(solver.get_baked_segment_count() == 10 and solver.get_segment_count() == 30,
 		"the oldest stroke is baked whole once the live window overflows")

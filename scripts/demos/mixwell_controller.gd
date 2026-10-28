@@ -167,6 +167,9 @@ func _process(delta: float) -> void:
 		display_material.set_shader_parameter("comparison_mode", comparison_mode)
 		texture_bound = true
 	var spp_limit := 1 if _preview_active else config.target_spp
+	# The one-sample preview while drawing reads strokes from the baked map;
+	# converging samples evaluate every stroke exactly.
+	solver.set_exact_strokes(not _preview_active)
 	var batch := solver.get_samples_for_budget(sample_index, spp_limit, _preview_active)
 	if batch > 0:
 		var index := sample_index

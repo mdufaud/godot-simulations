@@ -10,10 +10,10 @@ const Diagnostics := preload("res://scripts/mixwell/mixwell_diagnostics.gd")
 const SHADER_DIR := "res://shaders/mixwell/"
 const WG := 256
 const STAGES := ["init", "rd_line", "rd_segment", "affine", "shade", "diagnostics", "accumulate",
-	"diagnostics_reduce", "bake", "lookup", "replay"]
+	"diagnostics_reduce", "bake", "lookup", "replay", "rd_strokes"]
 const STAGE_INCLUDES := {
 	"rd_segment": ["segments"], "bake": ["segments", "baked"], "lookup": ["baked"],
-	"replay": ["segments"],
+	"replay": ["segments"], "rd_strokes": ["segments"],
 }
 const DESKTOP_SEGMENT_LIMIT := 256
 const MOBILE_SEGMENT_LIMIT := 128
@@ -30,6 +30,11 @@ const KEYFRAME_BUDGET_BYTES := 192 * 1024 * 1024
 const REPLAY_SEGMENT_LIMIT := 192
 ## Predicted bilinear error of the baked map above which a pixel is replayed.
 const REPLAY_ERROR_PX := 1.0
+## Strokes up to this many segments converge through the exact per-sample pass;
+## beyond it (and in the one-sample preview while drawing) the baked map serves.
+const EXACT_STROKE_LIMIT := 8192
+## Cells per axis of the stroke grid at most (cells grow past the mask reach).
+const STROKE_GRID_MAX_CELLS := 128
 ## A period within this many pixels of a whole number tiles; others don't.
 const WHOLE_PIXEL_TOLERANCE := 1.0e-3
 ## Tiled-against-direct difference (canvas units) the CPU periodic check
@@ -116,6 +121,11 @@ var _keyframe_capacity := 2
 var _replay_sets := {}
 var _replay_list := RID()
 var _replay := {}
+## Converge user strokes through the exact pass (see EXACT_STROKE_LIMIT).
+var exact_strokes := true
+var _stroke_buffers := {}
+var _stroke_capacity := {}
+var _uploaded_stroke_snapshot = null
 
 
 func initialize(size: Vector2i, value: MixwellConfig = null,
@@ -172,6 +182,26 @@ func create_render_snapshot(size_override := Vector2i.ZERO,
 	result.pattern = pattern_descriptor
 	result.pattern_step = _pattern_step
 	result.operations = _physical_operations()
+	var user_segments := _user_segment_values()
+	var user_count := user_segments.size() / BAKED_SEGMENT_FLOATS
+	result.exact_strokes = exact_strokes and user_count > 0 and user_count <= EXACT_STROKE_LIMIT
+	if result.exact_strokes:
+		var passes: Array[Dictionary] = []
+		var holds_strokes := false
+		for operation in result.operations:
+			if int(operation.get("curve_group", -1)) == USER_CURVE_GROUP \
+					or int(operation.get("type", Gallery.LINE)) == Gallery.BAKED_MAP:
+				holds_strokes = true
+			else:
+				passes.append(operation)
+		if holds_strokes:
+			# The strokes were drawn last, so they reverse-drift first.
+			passes.push_front({"type": Gallery.USER_STROKES, "kind": "USER_STROKES",
+				"count": user_count, "segments": user_segments, "period": Vector2.ZERO,
+				"direction": Vector2.ZERO})
+		result.operations = passes
+		result.stroke_segments = user_segments
+		result.stroke_grid = _stroke_grid(user_segments, result)
 	result.baked_segments = _baked_segments
 	result.bake_generation = _bake_generation
 	result.bake_revision = _bake_revision
@@ -276,6 +306,78 @@ func set_strokes(strokes: Array, base_preset := Gallery.FREEHAND_LAB) -> void:
 				"radius_px": stroke.radius_px, "curve_group": USER_CURVE_GROUP})
 	_pattern.set_operations(operations)
 	_refresh_periodicity()
+
+
+func set_exact_strokes(enabled: bool) -> void:
+	if enabled != exact_strokes:
+		exact_strokes = enabled
+		_snapshot_version += 1
+
+
+## Every user segment in drawing order -- baked strokes, then the live window --
+## as [start, end, epsilon, 0, 0, 0] in canvas units.
+func _user_segment_values() -> PackedFloat32Array:
+	var values := _baked_segments.duplicate()
+	var unit := Periodicity.units_per_pixel(_reference_size)
+	for operation in _pattern.operations:
+		if operation.curve_group == USER_CURVE_GROUP and operation.render_type == Gallery.SEGMENT:
+			var segment: Vector4 = operation.segment
+			values.append_array([segment.x, segment.y, segment.z, segment.w,
+				operation.radius_px * unit, 0.0, 0.0, 0.0])
+	return values
+
+
+## Uniform grid over the user segments for the exact pass. A cell is at least
+## the widest mask reach plus half the longest segment, so the 3x3 cells around
+## a point hold every segment that can move it; each segment is listed where
+## its midpoint falls, and where a slip image or periodic copy of the midpoint
+## falls within one cell of the canvas.
+func _stroke_grid(segments: PackedFloat32Array, snapshot) -> Dictionary:
+	var count := segments.size() / BAKED_SEGMENT_FLOATS
+	var half := Vector2(float(snapshot.size.x) / float(maxi(snapshot.size.y, 1)), 1.0)
+	var cell := 1.0e-3
+	for index in count:
+		var base := index * BAKED_SEGMENT_FLOATS
+		var length := Vector2(segments[base + 2] - segments[base],
+				segments[base + 3] - segments[base + 1]).length()
+		var epsilon: float = segments[base + 4]
+		cell = maxf(cell, maxf(epsilon * snapshot.cutoff_gamma, epsilon) + 0.5 * length)
+	cell *= 1.001
+	var span := 2.0 * half + Vector2(2.0 * cell, 2.0 * cell)
+	cell = maxf(cell, maxf(span.x, span.y) / float(STROKE_GRID_MAX_CELLS))
+	var origin := -half - Vector2(cell, cell)
+	var dims := Vector2i(ceili(span.x / cell), ceili(span.y / cell))
+	var buckets: Array[PackedInt32Array] = []
+	buckets.resize(dims.x * dims.y)
+	var copies: Array[Vector2i] = [Vector2i.ZERO]
+	if snapshot.active_boundary_mode != MixwellConfig.BoundaryMode.FULLSCREEN:
+		copies.append_array(Boundaries.EDGE_IMAGES + Boundaries.CORNER_IMAGES)
+	var period := 2.0 * half
+	for index in count:
+		var base := index * BAKED_SEGMENT_FLOATS
+		var midpoint := Vector2(segments[base] + segments[base + 2],
+				segments[base + 1] + segments[base + 3]) * 0.5
+		for copy in copies:
+			var position := midpoint
+			if copy != Vector2i.ZERO:
+				position = Boundaries.mirror_point(midpoint, copy, half) \
+						if snapshot.active_boundary_mode == MixwellConfig.BoundaryMode.SLIP_WALLS \
+						else midpoint + Vector2(copy) * period
+			var cell_index := Vector2i(floori((position.x - origin.x) / cell),
+					floori((position.y - origin.y) / cell))
+			if cell_index.x < 0 or cell_index.y < 0 or cell_index.x >= dims.x \
+					or cell_index.y >= dims.y:
+				continue
+			var flat := cell_index.y * dims.x + cell_index.x
+			if buckets[flat].is_empty() or buckets[flat][-1] != index:
+				buckets[flat].append(index)
+	var starts := PackedInt32Array()
+	var items := PackedInt32Array()
+	for bucket in buckets:
+		starts.append(items.size())
+		items.append_array(bucket)
+	starts.append(items.size())
+	return {"origin": origin, "cell": cell, "dims": dims, "starts": starts, "items": items}
 
 
 func get_baked_segment_count() -> int:
@@ -662,7 +764,9 @@ func render_sample(index: int, snapshot = null) -> void:
 	# Always bracketed, bake included: the per-frame sample budget needs the cost.
 	_rd.capture_timestamp("mixwell/start")
 	_sync_bake_render(active_snapshot)
-	_replay = _choose_replay(active_snapshot, _upload_segment_buffer(operations))
+	_upload_strokes(active_snapshot)
+	var used_segments := _upload_segment_buffer(operations)
+	_replay = {} if active_snapshot.exact_strokes else _choose_replay(active_snapshot, used_segments)
 	if active_snapshot.diagnostics_enabled:
 		_upload_diagnostic_operations(operations)
 	if not _replay.is_empty():
@@ -691,6 +795,8 @@ func render_sample(index: int, snapshot = null) -> void:
 				else ("rd_line" if int(operation.type) != Gallery.SEGMENT else "rd_segment")
 		if int(operation.type) == Gallery.BAKED_MAP:
 			stage = "lookup"
+		elif int(operation.type) == Gallery.USER_STROKES:
+			stage = "rd_strokes"
 		var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 		var radius: float = _operation_radius(operation, active_snapshot)
 		var current_domain: Vector2i = period_pass["current"]
@@ -706,6 +812,14 @@ func render_sample(index: int, snapshot = null) -> void:
 		if stage == "rd_segment":
 			operation_pc.encode_float(88, float(operation_count))
 			operation_pc.encode_float(92, float(segment_buffer_offset))
+		elif stage == "rd_strokes":
+			var grid: Dictionary = active_snapshot.stroke_grid
+			operation_pc.encode_float(32, grid.origin.x)
+			operation_pc.encode_float(36, grid.origin.y)
+			operation_pc.encode_float(40, grid.cell)
+			operation_pc.encode_float(48, float(grid.dims.x))
+			operation_pc.encode_float(52, float(grid.dims.y))
+			operation_pc.encode_float(88, float(operation.count))
 		var operation_groups := ceili(float(current_domain.x * current_domain.y) / WG)
 		_dispatch(cl, stage, operation_pc, operation_groups)
 		if stage == "lookup" and int(_replay.get("count", 0)) > 0:
@@ -1013,6 +1127,10 @@ func init_render(snapshot = null) -> void:
 	_diagnostic_reduction_buffer = _rd.storage_buffer_create(
 			DIAGNOSTIC_REDUCTION_STRIDE * _diagnostic_group_count * 4)
 	_replay_list = _rd.storage_buffer_create((_size.x * _size.y + 1) * 4)
+	for key in ["segments", "starts", "items"]:
+		_stroke_capacity[key] = 256
+		_stroke_buffers[key] = _rd.storage_buffer_create(256 * 4)
+	_uploaded_stroke_snapshot = null
 	for stage in STAGES:
 		var sets: Array[RID] = []
 		for parity in 2:
@@ -1089,6 +1207,12 @@ func free_render() -> void:
 		_rd.free_rid(_diagnostic_reduction_buffer)
 	if _replay_list.is_valid():
 		_rd.free_rid(_replay_list)
+	for key in _stroke_buffers:
+		if _stroke_buffers[key].is_valid():
+			_rd.free_rid(_stroke_buffers[key])
+	_stroke_buffers.clear()
+	_stroke_capacity.clear()
+	_uploaded_stroke_snapshot = null
 	for stage in _pipelines:
 		if _pipelines[stage].is_valid():
 			_rd.free_rid(_pipelines[stage])
@@ -1172,6 +1296,13 @@ func _create_uniform_set(shader: RID, parity: int, stage := "", keyframe := RID(
 		segment_uniform.binding = 8
 		segment_uniform.add_id(_segment_buffer)
 		uniforms.append(segment_uniform)
+	if stage == "rd_strokes":
+		for entry in [[8, "segments"], [12, "starts"], [13, "items"]]:
+			var buffer_uniform := RDUniform.new()
+			buffer_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+			buffer_uniform.binding = entry[0]
+			buffer_uniform.add_id(_stroke_buffers[entry[1]])
+			uniforms.append(buffer_uniform)
 	if stage == "lookup" or stage == "replay":
 		var list_uniform := RDUniform.new()
 		list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1272,6 +1403,42 @@ func _upload_segment_buffer(operations: Array[Dictionary]) -> int:
 		var bytes := values.to_byte_array()
 		_rd.buffer_update(_segment_buffer, 0, bytes.size(), bytes)
 	return values.size() / 8
+
+
+## Puts the snapshot's strokes and grid on the GPU, growing the buffers (and
+## rebuilding the pass's uniform sets) when they no longer fit.
+func _upload_strokes(snapshot) -> void:
+	if snapshot == _uploaded_stroke_snapshot or not snapshot.exact_strokes:
+		return
+	_uploaded_stroke_snapshot = snapshot
+	var grid: Dictionary = snapshot.stroke_grid
+	var data := {
+		"segments": snapshot.stroke_segments.to_byte_array(),
+		"starts": PackedInt32Array(grid.starts).to_byte_array(),
+		"items": PackedInt32Array(grid.items).to_byte_array(),
+	}
+	var grow := false
+	for key in data:
+		grow = grow or data[key].size() > _stroke_capacity[key]
+	if grow:
+		# The sets reference the buffers: free them first, then regrow.
+		for uniform_set in _uniform_sets.rd_strokes:
+			if _rd.uniform_set_is_valid(uniform_set):
+				_rd.free_rid(uniform_set)
+		for key in data:
+			var capacity: int = _stroke_capacity[key]
+			while capacity < data[key].size():
+				capacity *= 2
+			if capacity != _stroke_capacity[key]:
+				_rd.free_rid(_stroke_buffers[key])
+				_stroke_buffers[key] = _rd.storage_buffer_create(capacity)
+				_stroke_capacity[key] = capacity
+		_uniform_sets.rd_strokes = [_create_uniform_set(_shaders.rd_strokes, 0, "rd_strokes"),
+			_create_uniform_set(_shaders.rd_strokes, 1, "rd_strokes")]
+	for key in data:
+		var bytes: PackedByteArray = data[key]
+		if not bytes.is_empty():
+			_rd.buffer_update(_stroke_buffers[key], 0, bytes.size(), bytes)
 
 
 ## Oldest base the replay budget reaches (identity or a keyframe); its segments

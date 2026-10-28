@@ -6559,6 +6559,9 @@ func _run_mixbake() -> void:
 	var solver := MixwellSolver.new()
 	solver.initialize(size, MixwellConfig.new(), size)
 	solver.set_preset(2)
+	# The baked map now serves the drawing preview only (converging samples
+	# evaluate strokes exactly); this measures that preview's fidelity.
+	solver.set_exact_strokes(false)
 	RenderingServer.call_on_render_thread(solver.init_render.bind(solver.create_render_snapshot()))
 	for i in 3:
 		await process_frame

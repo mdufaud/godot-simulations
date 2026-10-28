@@ -58,6 +58,20 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 						value += Vector2(drift[0], drift[1]) * _line_extent_weight(value, origin,
 								direction, operation_epsilon, cutoff_gamma,
 								operation.get("extent", Vector2.ZERO))
+		elif operation_type == Gallery.USER_STROKES:
+			# Every stroke segment, newest first, each under its mask: the
+			# composition the GPU's grid search reproduces exactly.
+			var segments: PackedFloat32Array = operation.get("segments", PackedFloat32Array())
+			for index in range(segments.size() / 8 - 1, -1, -1):
+				var base := index * 8
+				var stroke_segment := Vector4(segments[base], segments[base + 1],
+						segments[base + 2], segments[base + 3])
+				var drift := Math.rd_segment(Math.point(value.x, value.y), segments[base + 4],
+						Math.point(stroke_segment.x, stroke_segment.y),
+						Math.point(stroke_segment.z, stroke_segment.w), midpoint_alpha)
+				if drift.size() == 2:
+					value += Vector2(drift[0], drift[1]) * segment_mask(value, stroke_segment,
+							segments[base + 4], cutoff_gamma)
 		elif operation_type == Gallery.SEGMENT:
 			var segment: Vector4 = operation.get("segment", Vector4.ZERO)
 			if periodic or operation.get("period", Vector2.ZERO) != Vector2.ZERO:
@@ -410,7 +424,7 @@ static func _area_category(pixel: Vector2i, size: Vector2i, snapshot) -> String:
 					/ maxf(edge.length_squared(), 1.0e-30), 0.0, 1.0)
 			nearest = minf(nearest, coordinate.distance_to(
 				Vector2(segment.x, segment.y) + edge * parameter))
-		elif operation_type != Gallery.BAKED_MAP:
+		elif operation_type != Gallery.BAKED_MAP and operation_type != Gallery.USER_STROKES:
 			nearest = minf(nearest, pattern_nearest_distance(operation, coordinate))
 	var epsilon: float = snapshot.brush_radius_px \
 			* Periodicity.units_per_pixel(snapshot.reference_size)
