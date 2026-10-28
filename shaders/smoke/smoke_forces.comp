@@ -65,24 +65,35 @@ vec4 updated_face(float v, ivec3 t, int a, inout int walls) {
 	return vec4(v);
 }
 
+// The forced velocity, or with STAGE_FORCE_FIELD the force that makes it (0 on walls).
+vec4 forced_face(float v, ivec3 t, int a, inout int walls) {
+	vec4 forced = updated_face(v, t, a, walls);
+	if ((pc.counts.z & STAGE_FORCE_FIELD) == 0) {
+		return forced;
+	}
+	return (walls & (1 << a)) != 0 ? vec4(0.0) : vec4((forced.r - v) / pc.sim.x);
+}
+
 void main() {
 	ivec3 t = ivec3(gl_GlobalInvocationID);
 	if (any(greaterThan(t, pc.dims.xyz))) {
 		return;
 	}
-	int walls = 0;
-	if (face_valid(t, 0)) {
-		imageStore(velocity_out[0], t, updated_face(imageLoad(velocity_in[0], t).r, t, 0, walls));
+	if ((pc.counts.z & STAGE_SCALARS_ONLY) == 0) {
+		int walls = 0;
+		if (face_valid(t, 0)) {
+			imageStore(velocity_out[0], t, forced_face(imageLoad(velocity_in[0], t).r, t, 0, walls));
+		}
+		if (face_valid(t, 1)) {
+			imageStore(velocity_out[1], t, forced_face(imageLoad(velocity_in[1], t).r, t, 1, walls));
+		}
+		if (face_valid(t, 2)) {
+			imageStore(velocity_out[2], t, forced_face(imageLoad(velocity_in[2], t).r, t, 2, walls));
+		}
+		imageStore(walls_out, t, vec4(float(walls)));
 	}
-	if (face_valid(t, 1)) {
-		imageStore(velocity_out[1], t, updated_face(imageLoad(velocity_in[1], t).r, t, 1, walls));
-	}
-	if (face_valid(t, 2)) {
-		imageStore(velocity_out[2], t, updated_face(imageLoad(velocity_in[2], t).r, t, 2, walls));
-	}
-	imageStore(walls_out, t, vec4(float(walls)));
 
-	if (!in_grid(t)) {
+	if (!in_grid(t) || (pc.counts.z & STAGE_VELOCITY_ONLY) != 0) {
 		return;
 	}
 	if (imageLoad(obstacle, t).w > 0.5) {

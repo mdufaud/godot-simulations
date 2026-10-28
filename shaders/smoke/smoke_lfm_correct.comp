@@ -1,0 +1,73 @@
+// Reinitialisation, last pass: half the round-trip error pulled back and removed,
+// clamped to the pulled velocity's neighbours (the reference code's BFECC clamp).
+// The result is an impulse u + grad xi whose gauge xi is unknown on the open
+// sides, so the reinit projection holds their faces at the last mid-step velocity
+// (the reference code's velocity boundary). It projects the gap to that velocity,
+// zero on open and wall faces: a closed problem whose source sums to zero.
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D pulled[3];
+layout(set = 0, binding = 1) uniform sampler3D error_field[3];
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image3D psi[3];
+layout(set = 0, binding = 3, rgba32f) uniform restrict readonly image3D jacobian[3];
+layout(set = 0, binding = 4, r32f) uniform restrict readonly image3D walls;
+layout(set = 0, binding = 5, r32f) uniform restrict writeonly image3D velocity[3];
+layout(set = 0, binding = 6, r32f) uniform restrict readonly image3D last_mid[3];
+
+float pulled_at(int a, ivec3 t) {
+	return a == 0 ? imageLoad(pulled[0], t).r : a == 1 ? imageLoad(pulled[1], t).r
+		: imageLoad(pulled[2], t).r;
+}
+
+float mid_at(int a, ivec3 t) {
+	return a == 0 ? imageLoad(last_mid[0], t).r : a == 1 ? imageLoad(last_mid[1], t).r
+		: imageLoad(last_mid[2], t).r;
+}
+
+// The floor is a wall.
+bool open_face(ivec3 t, int a) {
+	int at = int(axis(vec3(t), a));
+	return (at == 0 && a != 1) || at == int(axis(vec3(pc.dims.xyz), a));
+}
+
+float corrected(int a, ivec3 t) {
+	vec3 p = (a == 0 ? imageLoad(psi[0], t) : a == 1 ? imageLoad(psi[1], t) : imageLoad(psi[2], t)).xyz;
+	vec3 col = (a == 0 ? imageLoad(jacobian[0], t) : a == 1 ? imageLoad(jacobian[1], t)
+		: imageLoad(jacobian[2], t)).xyz;
+	float u = pulled_at(a, t);
+	float lo = 1e30;
+	float hi = -1e30;
+	for (int k = 0; k < 6; k++) {
+		ivec3 n = t + (k % 2 == 0 ? 1 : -1) * unit(k / 2);
+		if (face_valid(n, a)) {
+			float m = pulled_at(a, n);
+			lo = min(lo, m);
+			hi = max(hi, m);
+		}
+	}
+	if (lo > hi) {
+		lo = u;
+		hi = u;
+	}
+	vec3 e = field_at(error_field[0], error_field[1], error_field[2], p);
+	return clamp(u - 0.5 * dot(col, e), lo, hi) - mid_at(a, t);
+}
+
+float gap(int a, ivec3 t, int wall_mask) {
+	return (wall_mask & (1 << a)) != 0 || open_face(t, a) ? 0.0 : corrected(a, t);
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	int wall_mask = int(imageLoad(walls, t).r);
+	if (face_valid(t, 0)) {
+		imageStore(velocity[0], t, vec4(gap(0, t, wall_mask)));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(velocity[1], t, vec4(gap(1, t, wall_mask)));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(velocity[2], t, vec4(gap(2, t, wall_mask)));
+	}
+}

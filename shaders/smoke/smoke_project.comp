@@ -14,6 +14,10 @@ void main() {
 		return;
 	}
 	int wall_mask = int(imageLoad(walls, t).r);
+	if ((pc.counts.z & STAGE_CLOSED) != 0) {
+		wall_mask |= (t.x == 0 || t.x == pc.dims.x ? 1 : 0) | (t.y == pc.dims.y ? 2 : 0)
+			| (t.z == 0 || t.z == pc.dims.z ? 4 : 0);
+	}
 	float high = pressure_at(t);
 	float inv_h = 1.0 / pc.domain.w;
 	if (face_valid(t, 0) && (wall_mask & 1) == 0) {

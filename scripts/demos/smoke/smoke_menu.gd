@@ -132,6 +132,8 @@ func build(menu: SimMenu, host, presets: Array[SmokePreset]) -> void:
 		func(on: bool) -> void: host.set_quality_value("maccormack", on), false)
 	quality.bind("maccormack", maccormack,
 		func(on: bool) -> void: host.set_quality_value("maccormack", on))
+	menu.add_toggle("Flow maps (high-end GPU)", config.flow_maps,
+		func(on: bool) -> void: host.set_quality_value("flow_maps", on), false)
 	menu.add_debug_toggle("📊", "Profiler overlay", false, host.profiler.set_enabled)
 	menu.add_separator()
 

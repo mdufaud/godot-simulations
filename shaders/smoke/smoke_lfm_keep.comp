@@ -1,0 +1,15 @@
+// A copy of source; entering the closed solve (STAGE_CLOSED) also clears source,
+// whose open-side guess belongs to another problem.
+layout(set = 0, binding = 0, r32f) uniform restrict image3D source;
+layout(set = 0, binding = 1, r32f) uniform restrict writeonly image3D kept;
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(c)) {
+		return;
+	}
+	imageStore(kept, c, imageLoad(source, c));
+	if ((pc.counts.z & STAGE_CLOSED) != 0) {
+		imageStore(source, c, vec4(0.0));
+	}
+}

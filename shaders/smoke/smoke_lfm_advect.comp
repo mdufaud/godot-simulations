@@ -1,0 +1,30 @@
+// Mid-step velocity: the source velocity traced back along the advecting one over
+// pc.wind.w seconds. The forces pass then applies that interval's forces.
+layout(set = 0, binding = 0) uniform sampler3D source_field[3];
+layout(set = 0, binding = 1) uniform sampler3D advecting_field[3];
+layout(set = 0, binding = 2, r32f) uniform restrict writeonly image3D velocity_out[3];
+
+vec3 advecting_at(vec3 p) {
+	return field_at(advecting_field[0], advecting_field[1], advecting_field[2], p);
+}
+
+vec3 trace(vec3 x, float h) {
+	return x - h * advecting_at(x - 0.5 * h * advecting_at(x));
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	float h = pc.wind.w / pc.domain.w;
+	if (face_valid(t, 0)) {
+		imageStore(velocity_out[0], t, vec4(n2_face(source_field[0], trace(face_pos(t, 0), h), 0).x));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(velocity_out[1], t, vec4(n2_face(source_field[1], trace(face_pos(t, 1), h), 1).x));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(velocity_out[2], t, vec4(n2_face(source_field[2], trace(face_pos(t, 2), h), 2).x));
+	}
+}

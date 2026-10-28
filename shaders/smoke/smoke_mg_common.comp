@@ -9,12 +9,18 @@ ivec3 level_unknowns(int level) {
 	return ivec3(levels[2 * level].xyz);
 }
 
+// Closed, every coarse cell over a fine one is unknown (level is then pc's + 1), so
+// restriction drops no residual and the coarse source still sums to zero.
 bool is_unknown(ivec3 c, int level) {
-	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, level_unknowns(level)));
+	ivec3 n = (pc.counts.z & STAGE_CLOSED) != 0 ? (pc.dims.xyz + 1) / 2 : level_unknowns(level);
+	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, n));
 }
 
 // The floor (low y) is closed.
 float open_weight(ivec3 c, int level) {
+	if ((pc.counts.z & STAGE_CLOSED) != 0) {
+		return 0.0;
+	}
 	vec4 low = levels[2 * level];
 	vec4 high = levels[2 * level + 1];
 	ivec3 last = ivec3(low.xyz) - 1;

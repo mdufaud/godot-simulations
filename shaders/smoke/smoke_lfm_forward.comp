@@ -1,0 +1,52 @@
+// Forward map phi and its Jacobian column F = dphi/dX_a, one step along a
+// mid-step velocity. The step's force, taken at the half-step position, joins the
+// cycle's start velocity: u0_a(X) += dt F_a(X) . f(phi(X)) (the paper's path
+// integral).
+layout(set = 0, binding = 0) uniform sampler3D velocity_field[3];
+layout(set = 0, binding = 1) uniform sampler3D force_field[3];
+layout(set = 0, binding = 2, rgba32f) uniform restrict image3D phi[3];
+layout(set = 0, binding = 3, rgba32f) uniform restrict image3D jacobian[3];
+layout(set = 0, binding = 4, r32f) uniform restrict image3D start_velocity[3];
+
+vec3 force_at(vec3 p) {
+	return field_at(force_field[0], force_field[1], force_field[2], p);
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	float h = pc.sim.x / pc.domain.w;
+	bool first = (pc.counts.z & STAGE_MAP_START) != 0;
+	for (int a = 0; a < 3; a++) {
+		if (!face_valid(t, a)) {
+			continue;
+		}
+		vec3 p = face_pos(t, a);
+		vec3 col = vec3(unit(a));
+		if (!first) {
+			p = (a == 0 ? imageLoad(phi[0], t) : a == 1 ? imageLoad(phi[1], t) : imageLoad(phi[2], t)).xyz;
+			col = (a == 0 ? imageLoad(jacobian[0], t) : a == 1 ? imageLoad(jacobian[1], t)
+				: imageLoad(jacobian[2], t)).xyz;
+		}
+		vec3 half_p = p;
+		vec3 half_col = col;
+		march_map(velocity_field[0], velocity_field[1], velocity_field[2], half_p, half_col, 0.5 * h);
+		float impulse = pc.sim.x * dot(half_col, force_at(half_p));
+		march_map(velocity_field[0], velocity_field[1], velocity_field[2], p, col, h);
+		if (a == 0) {
+			imageStore(phi[0], t, vec4(p, 0.0));
+			imageStore(jacobian[0], t, vec4(col, 0.0));
+			imageStore(start_velocity[0], t, imageLoad(start_velocity[0], t) + impulse);
+		} else if (a == 1) {
+			imageStore(phi[1], t, vec4(p, 0.0));
+			imageStore(jacobian[1], t, vec4(col, 0.0));
+			imageStore(start_velocity[1], t, imageLoad(start_velocity[1], t) + impulse);
+		} else {
+			imageStore(phi[2], t, vec4(p, 0.0));
+			imageStore(jacobian[2], t, vec4(col, 0.0));
+			imageStore(start_velocity[2], t, imageLoad(start_velocity[2], t) + impulse);
+		}
+	}
+}

@@ -10,7 +10,7 @@ layout(set = 0, binding = 3, r32f) uniform restrict readonly image3D coarse_p;
 // Across the floor and solids it mirrors the centre.
 float coarse_value(ivec3 n, float centre) {
 	int level = pc.counts.w + 1;
-	if (n.y < 0) {
+	if (n.y < 0 || ((pc.counts.z & STAGE_CLOSED) != 0 && !is_unknown(n, level))) {
 		return centre;
 	}
 	if (!is_unknown(n, level)) {

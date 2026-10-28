@@ -1,0 +1,12 @@
+layout(set = 0, binding = 0, r32f) uniform restrict readonly image3D velocity[3];
+layout(set = 0, binding = 1, r32f) uniform restrict writeonly image3D stored[3];
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	imageStore(stored[0], t, imageLoad(velocity[0], t));
+	imageStore(stored[1], t, imageLoad(velocity[1], t));
+	imageStore(stored[2], t, imageLoad(velocity[2], t));
+}

@@ -7,7 +7,7 @@ layout(push_constant, std430) uniform Params {
 	vec4 decay;     // density, temperature, velocity, wind relax (Hz)
 	vec4 wind;      // wind x, wind z (m/s), extinction 1/m, unused
 	vec4 light;     // xyz direction to the sun, w light march step (cells)
-	ivec4 counts;   // sources, obstacles, red-black parity, multigrid level
+	ivec4 counts;   // sources, obstacles, red-black parity or STAGE_* flags, multigrid level
 } pc;
 
 // Pressure neighbour code: bits 0-5 fluid neighbours (+x -x +y -y +z -z), bits
@@ -16,6 +16,11 @@ const int CODE_OPEN = 64;
 const int CODE_SOLID = 512;
 // Multigrid coarse cell past an open side, held at p = 0.
 const int CODE_FIXED = 1024;
+
+// Stage flags in counts.z (flow maps, STAGE_* defines): advect and forces skip
+// velocity or scalars, a flow-map march starts at identity, forces write the force
+// (m/s2) instead of the forced velocity, the reinit projection holds the open
+// sides' face velocity (p Neumann).
 
 bool in_grid(ivec3 c) {
 	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, pc.dims.xyz));

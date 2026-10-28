@@ -1,0 +1,13 @@
+// The projected gap back onto the last mid-step velocity.
+layout(set = 0, binding = 0, r32f) uniform restrict image3D velocity[3];
+layout(set = 0, binding = 1, r32f) uniform restrict readonly image3D last_mid[3];
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	imageStore(velocity[0], t, imageLoad(velocity[0], t) + imageLoad(last_mid[0], t));
+	imageStore(velocity[1], t, imageLoad(velocity[1], t) + imageLoad(last_mid[1], t));
+	imageStore(velocity[2], t, imageLoad(velocity[2], t) + imageLoad(last_mid[2], t));
+}

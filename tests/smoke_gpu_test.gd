@@ -5,7 +5,8 @@ extends "res://tests/test_case.gd"
 ## v-cycle count converges on its own grid, advection keeps mass without decay,
 ## heat and smoke weight move smoke the right way, air does not flow into solids
 ## nor smoke through a wall, clear() empties, dyed sources keep their colour,
-## MacCormack keeps a transported blob sharper than first-order advection.
+## MacCormack keeps a transported blob sharper than first-order advection, flow
+## maps stay finite on an odd grid and gain no energy once a jet stops.
 
 const DIMS := Vector3i(16, 24, 16)
 const FACES := DIMS + Vector3i.ONE
@@ -38,6 +39,11 @@ func _run() -> void:
 	var maccormack := await _peak_after_transport(true)
 	print("SMOKE GPU transported peak first-order=%.4f maccormack=%.4f" % [first_order, maccormack])
 	_check(maccormack > first_order * 1.1, "MacCormack kept no sharper peak than first order")
+	var energy := await _flow_map_jet_energy()
+	print("SMOKE GPU flow-map jet energy at stop=%.4f 1 s later=%.4f" % [energy.x, energy.y])
+	_check(energy.x > 0.01, "the jet put no energy in (%f)" % energy.x)
+	_check(is_finite(energy.y) and energy.y <= energy.x * 1.05,
+		"flow maps gained energy after the jet stopped: %f -> %f" % [energy.x, energy.y])
 	_finish("smoke_gpu")
 
 
@@ -306,6 +312,35 @@ func _peak_after_transport(maccormack: bool) -> float:
 
 
 ## |L p - div| / |div| over fluid cells, with the pressure pass's own neighbour codes.
+## Kinetic energy (m5/s2, unit density) when a 0.2 s jet stops and 1 s later, on a
+## 17 x 25 x 17 grid: odd sizes, open sides and two dozen flow-map reinitialisations.
+func _flow_map_jet_energy() -> Vector2:
+	var dims := Vector3i(17, 25, 17)
+	var solver := _solver()
+	solver.config.domain_size_m = Vector3(dims) * CELL_M
+	solver.config.grid_cell_budget = dims.x * dims.y * dims.z
+	solver.config.flow_maps = true
+	if not await _start(solver, dims):
+		return Vector2.ZERO
+	solver.set_sources(SmokeSolver.pack_source(Vector3(-0.4, 1.2, 0.0), Vector3(0.2, 0.3, 0.3), 0.0,
+		0.0, Vector3(4.0, 0.0, 0.0), 30.0))
+	await _steps(solver, 12)
+	solver.set_sources(PackedFloat32Array())
+	var at_stop := _kinetic_energy(solver)
+	await _steps(solver, 60)
+	var later := _kinetic_energy(solver)
+	solver.stop()
+	return Vector2(at_stop, later)
+
+
+func _kinetic_energy(solver: SmokeSolver) -> float:
+	var energy := 0.0
+	for values in _read_velocity(solver):
+		for v in values:
+			energy += 0.5 * v * v * pow(CELL_M, 3)
+	return energy
+
+
 func _poisson_residual(solver: SmokeSolver, dims: Vector3i, cell_m: float) -> float:
 	var div_code := solver.read_field("divergence")
 	var pressure := solver.read_field("pressure")

@@ -24,7 +24,9 @@ extends RefCounted
 
 const SHADER_DIR := "res://shaders/smoke/"
 const STAGES: Array[String] = ["obstacles", "advect", "maccormack", "forces", "curl",
-	"vorticity", "divergence", "project", "light", "mg_smooth", "mg_restrict", "mg_prolong"]
+	"vorticity", "divergence", "project", "light", "mg_smooth", "mg_restrict", "mg_prolong",
+	"lfm_advect", "lfm_forward", "lfm_march", "lfm_pull", "lfm_error", "lfm_correct",
+	"lfm_store", "lfm_keep", "lfm_add"]
 ## Binding of the per-level parameters (smoke_mg_common.comp) in each multigrid stage.
 const MG_LEVELS_BINDING := {"mg_smooth": 2, "mg_restrict": 4, "mg_prolong": 4}
 const WG := Vector3i(8, 8, 4)
@@ -44,6 +46,23 @@ const MG_MIN_DIM := 4
 ## Coarse levels' pressure (R32F) and right-hand side (RG32F): 12 B per cell,
 ## an eighth per level, rounded up per fine cell.
 const MG_BYTES_PER_CELL := 2
+## Flow maps (config.flow_maps): mid-step velocities kept per cycle; the velocity
+## is pulled back along the long map and reprojected every FLOW_MAP_STEPS steps.
+const FLOW_MAP_STEPS := 5
+## Flow maps hold about one cell per step (the reference code's Courant number):
+## each simulation step splits into steps of at most 1 / FLOW_MAP_RATE_HZ.
+const FLOW_MAP_RATE_HZ := 120.0
+## STAGE_* flags of smoke_common.comp.
+const STAGE_SCALARS_ONLY := 1
+const STAGE_VELOCITY_ONLY := 2
+const STAGE_MAP_START := 4
+const STAGE_FORCE_FIELD := 8
+const STAGE_CLOSED := 16
+## Step (s) over which the force field differentiates the forces pass: short
+## enough to read stiff source relaxation as its instantaneous force.
+const FORCE_PROBE_S := 0.001
+## The pulled-back impulse carries a large gradient for the projection to remove.
+const REINIT_VCYCLES := 8
 ## Full-resolution fields and their float32 channels; "light" is the downsampled extra.
 ## A velocity field is one texture per axis and binds as an array of the three.
 const GRID_FIELDS := {"velocity_x": 1, "velocity_y": 1, "velocity_z": 1, "velocity_tmp_x": 1,
@@ -81,6 +100,8 @@ var _sources := PackedFloat32Array()
 var _obstacles := PackedFloat32Array()
 var _static_occupancy := PackedFloat32Array()
 var _timing_store := GpuTimingStore.new()
+# Render thread: step of the current flow-map cycle.
+var _flow_step := 0
 
 
 ## Validates the config and queues GPU allocation; [method is_ready] turns true
@@ -97,7 +118,8 @@ func start() -> String:
 		occupancy = PackedFloat32Array()
 		occupancy.resize(_cell_count())
 	RenderingServer.call_on_render_thread(
-		_init_render.bind(_dims, _light_dims, occupancy.to_byte_array(), config.maccormack))
+		_init_render.bind(_dims, _light_dims, occupancy.to_byte_array(), config.maccormack,
+			config.flow_maps))
 	return ""
 
 
@@ -249,20 +271,41 @@ static func pack_box(xform: Transform3D, half_extents_m: Vector3, linear_mps: Ve
 		xform.basis.orthonormalized(), linear_mps, angular_rad_s)
 
 
-## GRID_FIELDS a solver allocates; the MacCormack pair only when it runs.
-static func grid_fields(maccormack: bool) -> Array[String]:
+## GRID_FIELDS a solver allocates; the MacCormack pair only when it runs, the
+## flow-map fields only with flow maps.
+static func grid_fields(maccormack: bool, flow_maps: bool = false) -> Array[String]:
 	var fields: Array[String] = []
 	for field in GRID_FIELDS:
 		if maccormack or not MACCORMACK_FIELDS.has(field):
 			fields.append(field)
+	if flow_maps:
+		fields.append_array(flow_map_fields().keys())
 	return fields
 
 
+## Flow-map face fields and their float32 channels.
+static func flow_map_fields() -> Dictionary:
+	var fields := {"lfm_pressure": 1}
+	var vectors: Array[String] = ["lfm_u0", "lfm_force", "lfm_error"]
+	for step in FLOW_MAP_STEPS:
+		vectors.append("lfm_mid%d" % step)
+	for axis in ["_x", "_y", "_z"]:
+		for vector in vectors:
+			fields[vector + axis] = 1
+		for map in ["lfm_psi", "lfm_psi_jacobian", "lfm_phi", "lfm_phi_jacobian"]:
+			fields[map + axis] = 4
+	return fields
+
+
+static func field_channels(field: String) -> int:
+	return GRID_FIELDS[field] if GRID_FIELDS.has(field) else flow_map_fields()[field]
+
+
 ## GPU bytes per grid cell, light volume excluded.
-static func bytes_per_cell(maccormack: bool) -> int:
+static func bytes_per_cell(maccormack: bool, flow_maps: bool = false) -> int:
 	var total := MG_BYTES_PER_CELL
-	for field in grid_fields(maccormack):
-		total += 4 * int(GRID_FIELDS[field])
+	for field in grid_fields(maccormack, flow_maps):
+		total += 4 * field_channels(field)
 	return total
 
 
@@ -313,6 +356,11 @@ static func glsl_defines() -> String:
 		"#define SOURCE_VEC4S %d" % SOURCE_VEC4S,
 		"#define OBSTACLE_VEC4S %d" % OBSTACLE_VEC4S,
 		"#define OBSTACLE_SPHERE %d" % OBSTACLE_SPHERE,
+		"#define STAGE_SCALARS_ONLY %d" % STAGE_SCALARS_ONLY,
+		"#define STAGE_VELOCITY_ONLY %d" % STAGE_VELOCITY_ONLY,
+		"#define STAGE_MAP_START %d" % STAGE_MAP_START,
+		"#define STAGE_FORCE_FIELD %d" % STAGE_FORCE_FIELD,
+		"#define STAGE_CLOSED %d" % STAGE_CLOSED,
 	])) + "\n"
 
 
@@ -341,7 +389,7 @@ func _set_ready(value: bool) -> void:
 
 
 func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArray,
-		maccormack: bool) -> void:
+		maccormack: bool, flow_maps: bool) -> void:
 	_free_render()
 	_rd = GpuPreflight.device("SmokeSolver")
 	if _rd == null:
@@ -350,6 +398,8 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 		+ FileAccess.get_file_as_string(SHADER_DIR + "smoke_common.comp") + "\n"
 	for stage in STAGES:
 		var source := FileAccess.get_file_as_string(SHADER_DIR + "smoke_%s.comp" % stage)
+		if stage.begins_with("lfm_"):
+			source = FileAccess.get_file_as_string(SHADER_DIR + "smoke_lfm_common.comp") + "\n" + source
 		if MG_LEVELS_BINDING.has(stage):
 			source = "#define MG_LEVELS_BINDING %d\n" % MG_LEVELS_BINDING[stage] \
 				+ FileAccess.get_file_as_string(SHADER_DIR + "smoke_mg_common.comp") + "\n" + source
@@ -360,9 +410,10 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 			return
 		_shaders[stage] = _rd.shader_create_from_spirv(spirv)
 		_pipelines[stage] = _rd.compute_pipeline_create(_shaders[stage])
-	for field in grid_fields(maccormack):
-		_textures[field] = _create_texture(dims + Vector3i.ONE if FACE_FIELDS.has(field) else dims,
-			CHANNEL_FORMATS[GRID_FIELDS[field]],
+	for field in grid_fields(maccormack, flow_maps):
+		var face := FACE_FIELDS.has(field) or field.begins_with("lfm_")
+		_textures[field] = _create_texture(dims + Vector3i.ONE if face else dims,
+			CHANNEL_FORMATS[field_channels(field)],
 			occupancy if field == "occupancy" else PackedByteArray())
 	var levels := mg_level_dims(dims)
 	for level in range(1, levels.size()):
@@ -406,7 +457,42 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 		_make_set("mg_prolong", fields.duplicate(), "mg_prolong%d" % level)
 	_make_set("project", [_image("pressure"), _image("walls"), _image("velocity")])
 	_make_set("light", [_sampled("scalar"), _image("light")])
+	if flow_maps:
+		_make_flow_map_sets()
+	_flow_step = 0
 	_set_ready(true)
+
+
+# Leapfrog: step 0 goes half a step from u0, step 1 one step from the first
+# mid-step velocity, later steps two steps from the one before last.
+func _make_flow_map_sets() -> void:
+	for step in FLOW_MAP_STEPS:
+		var velocity := "lfm_mid%d" % step
+		_make_set("forces", [_image(velocity), _image("scalar"), _image("obstacle"),
+			_image("lfm_force"), _image("scalar_tmp"), _storage("sources"), _image("walls"),
+			_image("dye"), _image("dye_tmp")], "lfm_force_" + velocity)
+	for step in FLOW_MAP_STEPS:
+		var source := "lfm_u0" if step == 0 else "lfm_mid%d" % maxi(step - 2, 0)
+		var advecting := "lfm_u0" if step == 0 else "lfm_mid%d" % (step - 1)
+		_make_set("lfm_advect", [_sampled(source), _sampled(advecting), _image("velocity_tmp")],
+			"lfm_advect%d" % step)
+		_make_set("lfm_store", [_image("velocity"), _image("lfm_mid%d" % step)],
+			"lfm_store%d" % step)
+		_make_set("lfm_forward", [_sampled("lfm_mid%d" % step), _sampled("lfm_force"),
+			_image("lfm_phi"), _image("lfm_phi_jacobian"), _image("lfm_u0")], "lfm_forward%d" % step)
+		_make_set("lfm_march", [_sampled("lfm_mid%d" % step), _image("lfm_psi"),
+			_image("lfm_psi_jacobian")], "lfm_march%d" % step)
+	_make_set("lfm_store", [_image("velocity"), _image("lfm_u0")], "lfm_store_u0")
+	_make_set("lfm_pull", [_sampled("lfm_u0"), _image("lfm_psi"), _image("lfm_psi_jacobian"),
+		_image("velocity_tmp")])
+	_make_set("lfm_error", [_sampled("velocity_tmp"), _image("lfm_phi"),
+		_image("lfm_phi_jacobian"), _image("lfm_u0"), _image("lfm_error")])
+	_make_set("lfm_correct", [_image("velocity_tmp"), _sampled("lfm_error"), _image("lfm_psi"),
+		_image("lfm_psi_jacobian"), _image("walls"), _image("velocity"),
+		_image("lfm_mid%d" % (FLOW_MAP_STEPS - 1))])
+	_make_set("lfm_add", [_image("velocity"), _image("lfm_mid%d" % (FLOW_MAP_STEPS - 1))])
+	_make_set("lfm_keep", [_image("pressure"), _image("lfm_pressure")], "lfm_keep_save")
+	_make_set("lfm_keep", [_image("lfm_pressure"), _image("pressure")], "lfm_keep_restore")
 
 
 func _advance_render(substeps: int, vcycles: int, pc: PackedByteArray,
@@ -429,6 +515,13 @@ func _advance_render(substeps: int, vcycles: int, pc: PackedByteArray,
 	# rasterisation serves every substep.
 	if substeps > 0:
 		_dispatch(cl, "obstacles", pc, groups)
+	if _uniform_sets.has("lfm_pull"):
+		var split := ceili(FLOW_MAP_RATE_HZ * pc.decode_float(32) - 1e-3)
+		var fine := pc.duplicate()
+		fine.encode_float(32, pc.decode_float(32) / split)
+		for substep in substeps * split:
+			cl = _flow_map_step(cl, fine, vcycles, maccormack)
+		substeps = 0
 	for substep in substeps:
 		if maccormack:
 			_dispatch(cl, "advect", pc, face_groups, "advect_hat")
@@ -450,6 +543,81 @@ func _advance_render(substeps: int, vcycles: int, pc: PackedByteArray,
 	cl = _mark(cl, "smoke/light")
 	_rd.compute_list_end()
 	_rd.capture_timestamp("smoke/end")
+
+
+# One leapfrog flow-map step (Sun et al. 2025): scalars advect as before; the
+# velocity is a mid-step one, traced from the step before last, forced over the
+# leapfrog interval (exactly, so stiff source relaxation stays stable) and
+# projected. The previous mid-step's instantaneous force joins u0 along the
+# forward map. The cycle's last step rebuilds u0 from the long maps with
+# back-and-forth error compensation.
+func _flow_map_step(cl: int, pc: PackedByteArray, vcycles: int, maccormack: bool) -> int:
+	var face_groups := _groups(_dims_of("scalar") + Vector3i.ONE)
+	var dt := pc.decode_float(32)
+	var step := _flow_step
+	var scalars := _with_flags(pc, STAGE_SCALARS_ONLY)
+	if maccormack:
+		_dispatch(cl, "advect", scalars, face_groups, "advect_hat")
+		_dispatch(cl, "maccormack", scalars, face_groups)
+	else:
+		_dispatch(cl, "advect", scalars, face_groups)
+	_dispatch(cl, "forces", scalars, face_groups)
+	var force := _with_flags(pc, STAGE_VELOCITY_ONLY | STAGE_FORCE_FIELD)
+	force.encode_float(32, FORCE_PROBE_S)
+	if step > 0:
+		_dispatch(cl, "forces", force, face_groups, "lfm_force_lfm_mid%d" % (step - 1))
+		_forward(cl, pc, step - 1, face_groups)
+	var interval := dt * (0.5 if step == 0 else 1.0 if step == 1 else 2.0)
+	var leap := pc.duplicate()
+	leap.encode_float(76, interval)
+	_dispatch(cl, "lfm_advect", leap, face_groups, "lfm_advect%d" % step)
+	var forced := _with_flags(pc, STAGE_VELOCITY_ONLY)
+	forced.encode_float(32, interval)
+	_dispatch(cl, "forces", forced, face_groups)
+	cl = _mark(cl, "smoke/advect")
+	_project(cl, pc, vcycles)
+	_dispatch(cl, "lfm_store", pc, face_groups, "lfm_store%d" % step)
+	cl = _mark(cl, "smoke/project")
+	_flow_step = (step + 1) % FLOW_MAP_STEPS
+	if _flow_step != 0:
+		return cl
+	var last := FLOW_MAP_STEPS - 1
+	_dispatch(cl, "forces", force, face_groups, "lfm_force_lfm_mid%d" % last)
+	_forward(cl, pc, last, face_groups)
+	for back in range(last, -1, -1):
+		_dispatch(cl, "lfm_march", _with_flags(pc, STAGE_MAP_START if back == last else 0),
+			face_groups, "lfm_march%d" % back)
+	_dispatch(cl, "lfm_pull", pc, face_groups)
+	_dispatch(cl, "lfm_error", pc, face_groups)
+	_dispatch(cl, "lfm_correct", pc, face_groups)
+	cl = _mark(cl, "smoke/flow_map")
+	var cell_groups := _groups(_dims_of("scalar"))
+	var closed := _with_flags(pc, STAGE_CLOSED)
+	_dispatch(cl, "lfm_keep", closed, cell_groups, "lfm_keep_save")
+	_project(cl, closed, REINIT_VCYCLES)
+	_dispatch(cl, "lfm_keep", pc, cell_groups, "lfm_keep_restore")
+	_dispatch(cl, "lfm_add", pc, face_groups)
+	_dispatch(cl, "lfm_store", pc, face_groups, "lfm_store_u0")
+	return _mark(cl, "smoke/project")
+
+
+func _forward(cl: int, pc: PackedByteArray, step: int, face_groups: Vector3i) -> void:
+	_dispatch(cl, "lfm_forward", _with_flags(pc, STAGE_MAP_START if step == 0 else 0),
+		face_groups, "lfm_forward%d" % step)
+
+
+func _project(cl: int, pc: PackedByteArray, vcycles: int) -> void:
+	var dims := _dims_of("scalar")
+	_dispatch(cl, "divergence", pc, _groups(dims))
+	for cycle in vcycles:
+		_vcycle(cl, pc)
+	_dispatch(cl, "project", pc, _groups(dims + Vector3i.ONE))
+
+
+func _with_flags(pc: PackedByteArray, flags: int) -> PackedByteArray:
+	var out := pc.duplicate()
+	out.encode_s32(104, flags)
+	return out
 
 
 # Level 0 is the divergence / pressure pair; restriction zeroes each coarse guess.
@@ -478,7 +646,7 @@ func _vcycle(cl: int, pc: PackedByteArray) -> void:
 func _smooth(cl: int, level: int, dims: Vector3i, pc: PackedByteArray, sweeps: int) -> void:
 	var groups := _groups(Vector3i((dims.x + 1) / 2, dims.y, dims.z))
 	var pc_odd := pc.duplicate()
-	pc_odd.encode_s32(104, 1)
+	pc_odd.encode_s32(104, pc.decode_s32(104) | 1)
 	for sweep in sweeps:
 		_dispatch(cl, "mg_smooth", pc, groups, "mg_smooth%d" % level)
 		_dispatch(cl, "mg_smooth", pc_odd, groups, "mg_smooth%d" % level)
@@ -497,9 +665,10 @@ func _clear_render() -> void:
 		return
 	for field in ["velocity", "velocity_tmp", "scalar", "scalar_tmp", "dye", "dye_tmp", "pressure",
 			"divergence",
-			"curl", "light"]:
+			"curl", "light", "lfm_u0", "lfm_force", "lfm_error"]:
 		for rid in _texture_ids(field):
 			_rd.texture_clear(rid, Color(0, 0, 0, 0), 0, 1, 0, 1)
+	_flow_step = 0
 
 
 func _upload_occupancy_render(occupancy: PackedByteArray) -> void:

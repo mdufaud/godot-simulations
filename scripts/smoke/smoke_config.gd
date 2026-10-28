@@ -19,6 +19,10 @@ class_name SmokeConfig extends Resource
 ## Second-order advection: keeps vortices and thin wisps, costs two passes and
 ## two more fields.
 @export var maccormack := true
+## Leapfrog flow maps (Sun et al. 2025): the velocity rides long forward and
+## backward maps and keeps its vortices; vorticity confinement is off. Steps at
+## 120 Hz inside the simulation rate; about 2.5x the GPU time and 292 B per cell.
+@export var flow_maps := false
 
 @export_group("Air")
 @export_range(0.0, 0.5, 0.001) var buoyancy_mps2_per_k := 0.04

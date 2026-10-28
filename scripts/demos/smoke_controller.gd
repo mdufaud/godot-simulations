@@ -75,7 +75,9 @@ func apply_preset(index: int) -> void:
 	if error != "":
 		push_error("Smoke preset '%s': %s" % [preset.display_name, error])
 		return
+	var flow_maps := solver.config.flow_maps
 	solver.config = preset.config.duplicate()
+	solver.config.flow_maps = flow_maps
 	quality.reapply()
 	world.environment = preset.environment
 	orbit_cam.target = preset.camera_target_m
@@ -209,6 +211,9 @@ func set_quality_value(key: String, value: Variant) -> void:
 		"maccormack":
 			_rebuild_pending = _rebuild_pending or config.maccormack != bool(value)
 			config.maccormack = bool(value)
+		"flow_maps":
+			_rebuild_pending = _rebuild_pending or config.flow_maps != bool(value)
+			config.flow_maps = bool(value)
 		"sim_rate_hz":
 			config.sim_rate_hz = float(value)
 			_clock.reference_step = 1.0 / config.sim_rate_hz

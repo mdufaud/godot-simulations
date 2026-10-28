@@ -93,6 +93,7 @@ These papers are implemented from their published method. No code is copied from
 - Mei et al. 2007, hydraulic erosion (`scripts/terrain/`).
 - Chen et al., Vertex Block Descent, SIGGRAPH 2024; Smith et al., Stable Neo-Hookean Flesh Simulation, 2018; Ericson, Real-Time Collision Detection 5.1.5, closest point on a triangle (`scripts/softbody/`, `shaders/softbody/`).
 - Chen et al., Vertex Block Descent, SIGGRAPH 2024; Giles et al., Augmented Vertex Block Descent, SIGGRAPH 2025 (`scripts/cloth/`, `shaders/cloth/`).
+- Sun et al., Leapfrog Flow Maps for Real-Time Fluid Simulation, SIGGRAPH 2025; its MIT reference code (github.com/yuchen-sun-cg/lfm) was read, not copied (`shaders/smoke/smoke_lfm_*.comp`).
 - Mixwell, SIGGRAPH 2026 (`scripts/mixwell/`, `shaders/mixwell/`).
 - NIST-JANAF thermochemical coefficients (Chase 1998), via the NIST Chemistry WebBook: https://webbook.nist.gov. NIST terms apply.
 

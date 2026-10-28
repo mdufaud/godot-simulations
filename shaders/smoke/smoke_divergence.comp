@@ -9,7 +9,7 @@ int neighbor_code(ivec3 n, int bit) {
 		return 0;
 	}
 	if (!in_grid(n)) {
-		return CODE_OPEN;
+		return (pc.counts.z & STAGE_CLOSED) != 0 ? 0 : CODE_OPEN;
 	}
 	return imageLoad(obstacle, n).w > 0.5 ? 0 : bit;
 }

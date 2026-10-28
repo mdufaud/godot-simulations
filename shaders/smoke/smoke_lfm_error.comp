@@ -1,0 +1,30 @@
+// Reinitialisation, second pass: the pulled velocity pushed forward again along
+// the forward map; its gap to u0 is the round trip's error.
+layout(set = 0, binding = 0) uniform sampler3D pulled_field[3];
+layout(set = 0, binding = 1, rgba32f) uniform restrict readonly image3D phi[3];
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image3D jacobian[3];
+layout(set = 0, binding = 3, r32f) uniform restrict readonly image3D start_velocity[3];
+layout(set = 0, binding = 4, r32f) uniform restrict writeonly image3D error_out[3];
+
+vec3 pulled_at(vec3 p) {
+	return field_at(pulled_field[0], pulled_field[1], pulled_field[2], p);
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	if (face_valid(t, 0)) {
+		float back = dot(imageLoad(jacobian[0], t).xyz, pulled_at(imageLoad(phi[0], t).xyz));
+		imageStore(error_out[0], t, vec4(back - imageLoad(start_velocity[0], t).r));
+	}
+	if (face_valid(t, 1)) {
+		float back = dot(imageLoad(jacobian[1], t).xyz, pulled_at(imageLoad(phi[1], t).xyz));
+		imageStore(error_out[1], t, vec4(back - imageLoad(start_velocity[1], t).r));
+	}
+	if (face_valid(t, 2)) {
+		float back = dot(imageLoad(jacobian[2], t).xyz, pulled_at(imageLoad(phi[2], t).xyz));
+		imageStore(error_out[2], t, vec4(back - imageLoad(start_velocity[2], t).r));
+	}
+}

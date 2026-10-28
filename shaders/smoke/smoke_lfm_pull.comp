@@ -1,0 +1,26 @@
+// Reinitialisation, first pass: the cycle's start velocity pulled back along the
+// long backward map, u_a(x) = T_a(x) . u0(psi_a(x)).
+layout(set = 0, binding = 0) uniform sampler3D start_field[3];
+layout(set = 0, binding = 1, rgba32f) uniform restrict readonly image3D psi[3];
+layout(set = 0, binding = 2, rgba32f) uniform restrict readonly image3D jacobian[3];
+layout(set = 0, binding = 3, r32f) uniform restrict writeonly image3D pulled[3];
+
+vec3 start_at(vec3 p) {
+	return field_at(start_field[0], start_field[1], start_field[2], p);
+}
+
+void main() {
+	ivec3 t = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThan(t, pc.dims.xyz))) {
+		return;
+	}
+	if (face_valid(t, 0)) {
+		imageStore(pulled[0], t, vec4(dot(imageLoad(jacobian[0], t).xyz, start_at(imageLoad(psi[0], t).xyz))));
+	}
+	if (face_valid(t, 1)) {
+		imageStore(pulled[1], t, vec4(dot(imageLoad(jacobian[1], t).xyz, start_at(imageLoad(psi[1], t).xyz))));
+	}
+	if (face_valid(t, 2)) {
+		imageStore(pulled[2], t, vec4(dot(imageLoad(jacobian[2], t).xyz, start_at(imageLoad(psi[2], t).xyz))));
+	}
+}
