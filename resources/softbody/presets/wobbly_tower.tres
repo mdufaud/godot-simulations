@@ -1,0 +1,55 @@
+[gd_resource type="Resource" script_class="SoftBodyPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/softbody/softbody_shape.gd" id="1_fliis"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_config.gd" id="2_6lm5k"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_preset.gd" id="3_frxul"]
+
+[sub_resource type="Resource" id="Resource_ebbri"]
+script = ExtResource("1_fliis")
+size_m = Vector3(0.35, 1, 0.35)
+position_m = Vector3(-0.4, 0.5, 0)
+youngs_modulus_pa = 400000.0
+color = Color(0.3, 0.8, 0.35, 1)
+
+[sub_resource type="Resource" id="Resource_sbuel"]
+script = ExtResource("1_fliis")
+size_m = Vector3(0.4, 0.4, 0.4)
+position_m = Vector3(0.45, 0.2, 0)
+youngs_modulus_pa = 120000.0
+color = Color(0.86, 0.2, 0.28, 1)
+
+[sub_resource type="Resource" id="Resource_2af7g"]
+script = ExtResource("1_fliis")
+size_m = Vector3(0.4, 0.4, 0.4)
+position_m = Vector3(0.45, 0.62, 0)
+youngs_modulus_pa = 100000.0
+color = Color(0.95, 0.6, 0.15, 1)
+
+[sub_resource type="Resource" id="Resource_fe846"]
+script = ExtResource("1_fliis")
+kind = 2
+size_m = Vector3(0.15, 1, 0)
+position_m = Vector3(0, 0.15, 0.7)
+rotation_deg = Vector3(0, 0, 90)
+youngs_modulus_pa = 60000.0
+color = Color(0.6, 0.3, 0.85, 1)
+
+[sub_resource type="Resource" id="Resource_cm0bq"]
+script = ExtResource("2_6lm5k")
+
+[sub_resource type="Resource" id="Resource_5bij7"]
+script = ExtResource("1_fliis")
+size_m = Vector3(0.35, 0.35, 0.35)
+position_m = Vector3(0, 0, 0)
+youngs_modulus_pa = 30000.0
+color = Color(0.25, 0.5, 0.95, 1)
+
+[resource]
+script = ExtResource("3_frxul")
+display_name = "Wobbly tower"
+hint = "A jelly column and a two-block stack: throw balls at them or pull them."
+config = SubResource("Resource_cm0bq")
+bodies = Array[ExtResource("1_fliis")]([SubResource("Resource_ebbri"), SubResource("Resource_sbuel"), SubResource("Resource_2af7g"), SubResource("Resource_fe846")])
+drop_shape = SubResource("Resource_5bij7")
+camera_distance_m = 4.5
+camera_pitch_deg = -12.0

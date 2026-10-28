@@ -1,0 +1,18 @@
+// Starts a substep: remembers x, sets the inertial target y = x + h v + h^2 g,
+// starts the descent from x + h v and empties the incoming contact lists.
+void main() {
+	int i = int(gl_GlobalInvocationID.x);
+	if (i >= pc.range.z) {
+		return;
+	}
+	incoming_counts.data[i] = 0;
+	if (!body_active(i)) {
+		return;
+	}
+	vec3 x = positions.data[i].xyz;
+	vec3 v = velocities.data[i].xyz;
+	float h = pc.step.x;
+	previous.data[i].xyz = x;
+	inertial.data[i] = vec4(x + h * v + h * h * pc.gravity.xyz, 0.0);
+	positions.data[i].xyz = x + h * v;
+}

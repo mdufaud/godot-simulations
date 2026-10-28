@@ -1,0 +1,56 @@
+// Finds, once per substep, the boundary triangle of another body nearest to each
+// surface vertex (searched around the other bodies' surface vertices hashed next to
+// it), and registers the vertex with the triangle's three vertices so they take
+// the contact's reaction.
+void main() {
+	int i = int(gl_GlobalInvocationID.x);
+	if (i >= pc.range.z) {
+		return;
+	}
+	int found = -1;
+	if (previous.data[i].w > 0.5 && body_active(i)) {
+		vec3 x = positions.data[i].xyz;
+		float body = velocities.data[i].w;
+		float best = pc.contact.x;
+		ivec3 home = hash_cell(x);
+		for (int dz = -1; dz <= 1; dz++) {
+			for (int dy = -1; dy <= 1; dy++) {
+				for (int dx = -1; dx <= 1; dx++) {
+					int b = hash_bucket(home + ivec3(dx, dy, dz));
+					int n = min(hash_counts.data[b], pc.counts.z);
+					for (int s = 0; s < n; s++) {
+						int j = hash_slots.data[b * pc.counts.z + s];
+						if (velocities.data[j].w == body
+								|| distance(x, positions.data[j].xyz) >= 2.0 * pc.contact.x) {
+							continue;
+						}
+						for (int e = triangle_offsets.data[j]; e < triangle_offsets.data[j + 1]; e++) {
+							int t = triangle_entries.data[e];
+							ivec4 tri = triangles.data[t];
+							vec3 a = positions.data[tri.x].xyz;
+							vec3 bb = positions.data[tri.y].xyz;
+							vec3 c = positions.data[tri.z].xyz;
+							vec3 w = closest_on_triangle(x, a, bb, c);
+							float d = distance(x, w.x * a + w.y * bb + w.z * c);
+							if (d < best) {
+								best = d;
+								found = t;
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	contacts.data[i] = found;
+	if (found >= 0) {
+		ivec4 tri = triangles.data[found];
+		for (int k = 0; k < 3; k++) {
+			int v = tri[k];
+			int slot = atomicAdd(incoming_counts.data[v], 1);
+			if (slot < INCOMING_SLOTS) {
+				incoming.data[v * INCOMING_SLOTS + slot] = i;
+			}
+		}
+	}
+}

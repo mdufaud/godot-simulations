@@ -1,0 +1,238 @@
+// One vertex block descent step (Chen et al. 2024) for every vertex of one colour:
+// the local energy (inertia, stable Neo-Hookean elasticity with Rayleigh damping,
+// penalty contacts with friction, the mouse spring) is minimised by one Newton
+// step on the vertex alone, its neighbours held fixed.
+
+void add_contact(float depth, vec3 n, vec3 slip, float k, float friction, inout vec3 f,
+		inout mat3 H, out vec3 contact_force) {
+	float normal_force = k * depth;
+	contact_force = normal_force * n;
+	mat3 nn = outerProduct(n, n);
+	H += k * nn;
+	vec3 tangential = slip - dot(slip, n) * n;
+	float c = friction * normal_force / max(length(tangential), 0.01 * pc.step.x);
+	contact_force -= c * tangential;
+	H += c * (mat3(1.0) - nn);
+	f += contact_force;
+}
+
+// Signed distance to a collider and its outward normal.
+float collider_distance(int c, vec3 x, out vec3 n) {
+	vec4 c0 = colliders.data[c * COLLIDER_VEC4S];
+	vec4 ax = colliders.data[c * COLLIDER_VEC4S + 1];
+	vec4 ay = colliders.data[c * COLLIDER_VEC4S + 2];
+	vec4 az = colliders.data[c * COLLIDER_VEC4S + 3];
+	vec3 d = x - c0.xyz;
+	int kind = int(c0.w);
+	if (kind == COLLIDER_BOX) {
+		vec3 q = vec3(dot(d, ax.xyz), dot(d, ay.xyz), dot(d, az.xyz));
+		vec3 half_size = vec3(ax.w, ay.w, az.w);
+		vec3 over = abs(q) - half_size;
+		vec3 local_n;
+		float dist;
+		if (any(greaterThan(over, vec3(0.0)))) {
+			vec3 outside = max(over, vec3(0.0));
+			dist = length(outside);
+			local_n = sign(q) * outside / max(dist, 1e-9);
+		} else if (over.x > over.y && over.x > over.z) {
+			dist = over.x;
+			local_n = vec3(sign(q.x), 0.0, 0.0);
+		} else if (over.y > over.z) {
+			dist = over.y;
+			local_n = vec3(0.0, sign(q.y), 0.0);
+		} else {
+			dist = over.z;
+			local_n = vec3(0.0, 0.0, sign(q.z));
+		}
+		n = local_n.x * ax.xyz + local_n.y * ay.xyz + local_n.z * az.xyz;
+		return dist;
+	}
+	if (kind == COLLIDER_CAPSULE) {
+		d -= clamp(dot(d, ay.xyz), -ay.w, ay.w) * ay.xyz;
+	}
+	float l = length(d);
+	n = l > 1e-9 ? d / l : vec3(0.0, 1.0, 0.0);
+	return l - ax.w;
+}
+
+// Depth of vertex j under the gap kept from triangle t, its barycentric weights on
+// the triangle and the triangle's outward normal; <= 0 when out of contact.
+float triangle_contact(int j, int t, out vec3 w, out vec3 n) {
+	ivec4 tri = triangles.data[t];
+	vec3 a = positions.data[tri.x].xyz;
+	vec3 b = positions.data[tri.y].xyz;
+	vec3 c = positions.data[tri.z].xyz;
+	vec3 face = cross(b - a, c - a);
+	float area = length(face);
+	w = vec3(0.0);
+	n = vec3(0.0, 1.0, 0.0);
+	if (area < 1e-12) {
+		return 0.0;
+	}
+	n = face / area;
+	vec3 x = positions.data[j].xyz;
+	w = closest_on_triangle(x, a, b, c);
+	vec3 r = x - (w.x * a + w.y * b + w.z * c);
+	float gap = dot(r, n);
+	// Past a corner the nearest face is not the one in contact.
+	if (gap < -0.5 * pc.contact.x || length(r - gap * n) > 0.25 * pc.contact.x) {
+		return 0.0;
+	}
+	return pc.contact.y - gap;
+}
+
+void accumulate_reaction(int c, vec3 x, vec3 force) {
+	vec3 r = x - colliders.data[c * COLLIDER_VEC4S].xyz;
+	vec3 torque = cross(r, -force);
+	float scale = pc.contact.w;
+	atomicAdd(reactions.data[c * 6], int(round(-force.x * scale)));
+	atomicAdd(reactions.data[c * 6 + 1], int(round(-force.y * scale)));
+	atomicAdd(reactions.data[c * 6 + 2], int(round(-force.z * scale)));
+	atomicAdd(reactions.data[c * 6 + 3], int(round(torque.x * scale)));
+	atomicAdd(reactions.data[c * 6 + 4], int(round(torque.y * scale)));
+	atomicAdd(reactions.data[c * 6 + 5], int(round(torque.z * scale)));
+}
+
+void main() {
+	uint entry = gl_GlobalInvocationID.x;
+	if (entry >= uint(pc.range.y)) {
+		return;
+	}
+	int i = color_vertices.data[pc.range.x + int(entry)];
+	int body = int(velocities.data[i].w);
+	vec4 material = bodies.data[body * 2];
+	if (material.w < 0.5) {
+		return;
+	}
+	float friction = bodies.data[body * 2 + 1].x;
+	float mu = material.x;
+	float lambda = material.y;
+	float alpha = 1.0 + mu / max(lambda, 1e-6);
+	vec3 x = positions.data[i].xyz;
+	vec3 x_prev = previous.data[i].xyz;
+	float h = pc.step.x;
+	float inertia = positions.data[i].w * material.z * pc.step.y;
+
+	vec3 f = -inertia * (x - inertial.data[i].xyz);
+	mat3 H = mat3(inertia);
+
+	float damping = pc.step.z / h;
+	vec3 f_elastic = vec3(0.0);
+	mat3 H_elastic = mat3(0.0);
+	for (int a = adjacency_offsets.data[i]; a < adjacency_offsets.data[i + 1]; a++) {
+		int e = adjacency_entries.data[a];
+		int tet = e >> 2;
+		int corner = e & 3;
+		ivec4 v = tets.data[tet];
+		vec3 x0 = positions.data[v.x].xyz;
+		mat3 Ds = mat3(positions.data[v.y].xyz - x0, positions.data[v.z].xyz - x0,
+			positions.data[v.w].xyz - x0);
+		vec4 r0 = tet_rest.data[tet * 3];
+		vec4 r1 = tet_rest.data[tet * 3 + 1];
+		vec4 r2 = tet_rest.data[tet * 3 + 2];
+		mat3 rest_inverse = transpose(mat3(r0.xyz, r1.xyz, r2.xyz));
+		mat3 F = Ds * rest_inverse;
+		vec3 p0 = previous.data[v.x].xyz;
+		mat3 dF = (Ds - mat3(previous.data[v.y].xyz - p0, previous.data[v.z].xyz - p0,
+			previous.data[v.w].xyz - p0)) * rest_inverse;
+		vec3 g = corner == 0 ? -(r0.xyz + r1.xyz + r2.xyz)
+			: (corner == 1 ? r0.xyz : (corner == 2 ? r1.xyz : r2.xyz));
+		mat3 cofactor = mat3(cross(F[1], F[2]), cross(F[2], F[0]), cross(F[0], F[1]));
+		float J = dot(F[0], cofactor[0]);
+		mat3 P = mu * F + lambda * (J - alpha) * cofactor;
+		vec3 dJ = cofactor * g;
+		// Rayleigh damping on the tetrahedron's strain rate: rigid motion is free.
+		float dJ_rate = dot(cofactor[0], dF[0]) + dot(cofactor[1], dF[1]) + dot(cofactor[2], dF[2]);
+		f_elastic -= r0.w * (P * g + damping * (mu * (dF * g) + lambda * dJ_rate * dJ));
+		H_elastic += r0.w * (mu * dot(g, g) * mat3(1.0) + lambda * outerProduct(dJ, dJ));
+	}
+	f += f_elastic;
+	H += (1.0 + damping) * H_elastic;
+
+	float k_contact = pc.step.w * inertia;
+	vec3 slip = x - x_prev;
+	vec3 contact_force;
+	if (x.y < 0.0) {
+		add_contact(-x.y, vec3(0.0, 1.0, 0.0), slip, k_contact, friction, f, H, contact_force);
+	}
+	bool accumulate = pc.range.w != 0;
+	for (int c = 0; c < pc.counts.x; c++) {
+		vec4 c0 = colliders.data[c * COLLIDER_VEC4S];
+		vec4 linear = colliders.data[c * COLLIDER_VEC4S + 4];
+		if (distance(x, c0.xyz) > linear.w) {
+			continue;
+		}
+		vec3 n;
+		float dist = collider_distance(c, x, n);
+		if (dist >= 0.0) {
+			continue;
+		}
+		vec4 angular = colliders.data[c * COLLIDER_VEC4S + 5];
+		vec3 surface_velocity = linear.xyz + cross(angular.xyz, x - c0.xyz);
+		// A dynamic body moves under the reaction, a frame late: a softer contact keeps
+		// that explicit coupling smooth.
+		float k = angular.w > 0.5 ? k_contact * DYNAMIC_CONTACT_SCALE : k_contact;
+		add_contact(-dist, n, slip - surface_velocity * h, k, friction, f, H, contact_force);
+		if (accumulate && angular.w > 0.5) {
+			accumulate_reaction(c, x, contact_force);
+		}
+	}
+	// Vertex-triangle contacts with other bodies: this vertex against its triangle,
+	// and as a corner of the triangles other vertices pressed on, which takes its
+	// barycentric share of their reaction.
+	int own = contacts.data[i];
+	if (own >= 0) {
+		vec3 w;
+		vec3 n;
+		float depth = triangle_contact(i, own, w, n);
+		if (depth > 0.0) {
+			ivec4 tri = triangles.data[own];
+			vec3 surface_motion = w.x * (positions.data[tri.x].xyz - previous.data[tri.x].xyz)
+				+ w.y * (positions.data[tri.y].xyz - previous.data[tri.y].xyz)
+				+ w.z * (positions.data[tri.z].xyz - previous.data[tri.z].xyz);
+			add_contact(depth, n, slip - surface_motion, k_contact, friction, f, H, contact_force);
+		}
+	}
+	int pressing = min(incoming_counts.data[i], INCOMING_SLOTS);
+	for (int s = 0; s < pressing; s++) {
+		int j = incoming.data[i * INCOMING_SLOTS + s];
+		int t = contacts.data[j];
+		vec3 w;
+		vec3 n;
+		float depth = triangle_contact(j, t, w, n);
+		if (depth <= 0.0) {
+			continue;
+		}
+		ivec4 tri = triangles.data[t];
+		float share = i == tri.x ? w.x : (i == tri.y ? w.y : w.z);
+		if (share <= 0.0) {
+			continue;
+		}
+		vec3 surface_motion = w.x * (positions.data[tri.x].xyz - previous.data[tri.x].xyz)
+			+ w.y * (positions.data[tri.y].xyz - previous.data[tri.y].xyz)
+			+ w.z * (positions.data[tri.z].xyz - previous.data[tri.z].xyz);
+		vec3 other_slip = positions.data[j].xyz - previous.data[j].xyz - surface_motion;
+		// The pressing vertex's contact, seen from this corner: share times the force,
+		// share squared times the stiffness.
+		vec3 f_other = vec3(0.0);
+		mat3 H_other = mat3(0.0);
+		float k_other = pc.step.w * vertex_mass(j) * pc.step.y;
+		add_contact(depth, n, other_slip, k_other, friction, f_other, H_other, contact_force);
+		f -= share * f_other;
+		H += share * share * H_other;
+	}
+	if (i == pc.grab_vertex.x) {
+		float k_grab = pc.grab.w * inertia;
+		f += k_grab * (pc.grab.xyz - x);
+		H += mat3(k_grab);
+	}
+
+	if (abs(determinant(H)) > 1e-20) {
+		vec3 dx = inverse(H) * f;
+		float l = length(dx);
+		if (l > pc.contact.x) {
+			dx *= pc.contact.x / l;
+		}
+		positions.data[i].xyz = x + dx;
+	}
+}

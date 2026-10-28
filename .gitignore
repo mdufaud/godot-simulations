@@ -28,6 +28,9 @@ resources/terrain/presets/*
 !resources/cloth/
 !resources/cloth/presets/
 !resources/cloth/presets/*.tres
+!resources/softbody/
+!resources/softbody/presets/
+!resources/softbody/presets/*.tres
 !resources/nbody/
 !resources/nbody/presets/
 !resources/nbody/presets/*.tres

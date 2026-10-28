@@ -91,6 +91,7 @@ These papers are implemented from their published method. No code is copied from
 - Tessendorf, Simulating Ocean Water; Horvath, empirical directional wave spectra; Matusiak, FFT of real-valued sequences (`shaders/ocean/`).
 - Macklin & Müller, position-based fluids and XPBD; Clavet et al., double-density relaxation (`scripts/fluid/`, `scripts/cloth/`).
 - Mei et al. 2007, hydraulic erosion (`scripts/terrain/`).
+- Chen et al., Vertex Block Descent, SIGGRAPH 2024; Smith et al., Stable Neo-Hookean Flesh Simulation, 2018; Ericson, Real-Time Collision Detection 5.1.5, closest point on a triangle (`scripts/softbody/`, `shaders/softbody/`).
 - Mixwell, SIGGRAPH 2026 (`scripts/mixwell/`, `shaders/mixwell/`).
 - NIST-JANAF thermochemical coefficients (Chase 1998), via the NIST Chemistry WebBook: https://webbook.nist.gov. NIST terms apply.
 

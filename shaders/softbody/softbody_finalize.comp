@@ -1,0 +1,16 @@
+// Ends a substep: velocity from the displacement, damped and capped, and the
+// position texel the surface shader reads.
+void main() {
+	int i = int(gl_GlobalInvocationID.x);
+	if (i >= pc.range.z || !body_active(i)) {
+		return;
+	}
+	vec3 x = positions.data[i].xyz;
+	vec3 v = (x - previous.data[i].xyz) / pc.step.x * pc.gravity.w;
+	float speed = length(v);
+	if (speed > pc.contact.z) {
+		v *= pc.contact.z / speed;
+	}
+	velocities.data[i].xyz = v;
+	imageStore(position_tex, ivec2(i % pc.counts.w, i / pc.counts.w), vec4(x, 1.0));
+}

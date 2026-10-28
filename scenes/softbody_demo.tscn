@@ -1,0 +1,88 @@
+[gd_scene load_steps=12 format=3]
+
+[ext_resource type="Script" path="res://scripts/demos/softbody_controller.gd" id="1_controller"]
+[ext_resource type="Script" path="res://scripts/camera/orbit_camera.gd" id="2_orbit_camera"]
+[ext_resource type="PackedScene" path="res://scenes/ui/sim_menu.tscn" id="3_sim_menu"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_renderer.gd" id="4_renderer"]
+[ext_resource type="Script" path="res://scripts/demos/softbody/softbody_props.gd" id="5_props"]
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
+sky_top_color = Color(0.2, 0.32, 0.52, 1)
+sky_horizon_color = Color(0.7, 0.74, 0.8, 1)
+ground_bottom_color = Color(0.12, 0.12, 0.13, 1)
+ground_horizon_color = Color(0.5, 0.5, 0.52, 1)
+sun_angle_max = 30.0
+sun_curve = 0.15
+
+[sub_resource type="Sky" id="Sky_env"]
+sky_material = SubResource("ProceduralSkyMaterial_sky")
+
+[sub_resource type="Environment" id="Environment_softbody"]
+background_mode = 2
+sky = SubResource("Sky_env")
+ambient_light_source = 2
+ambient_light_color = Color(0.55, 0.6, 0.7, 1)
+ambient_light_energy = 0.7
+reflected_light_source = 2
+tonemap_mode = 3
+ssao_enabled = true
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ground"]
+albedo_color = Color(0.32, 0.33, 0.35, 1)
+roughness = 0.9
+uv1_scale = Vector3(40, 40, 40)
+
+[sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
+size = Vector2(60, 60)
+
+[sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
+size = Vector3(60, 1, 60)
+
+[node name="SoftBodyDemo" type="Node3D"]
+script = ExtResource("1_controller")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("Environment_softbody")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.866, -0.354, 0.354, 0, 0.707, 0.707, -0.5, -0.612, 0.612, 0, 8, 0)
+light_color = Color(1, 0.96, 0.9, 1)
+light_energy = 1.4
+shadow_enabled = true
+directional_shadow_max_distance = 30.0
+
+[node name="Ground" type="StaticBody3D" parent="."]
+
+[node name="Mesh" type="MeshInstance3D" parent="Ground"]
+mesh = SubResource("PlaneMesh_ground")
+surface_material_override/0 = SubResource("StandardMaterial3D_ground")
+
+[node name="Shape" type="CollisionShape3D" parent="Ground"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+shape = SubResource("BoxShape3D_ground")
+
+[node name="SoftBodies" type="Node3D" parent="."]
+script = ExtResource("4_renderer")
+
+[node name="Props" type="Node3D" parent="."]
+script = ExtResource("5_props")
+
+[node name="CameraPivot" type="Node3D" parent="."]
+script = ExtResource("2_orbit_camera")
+target = Vector3(0, 0.6, 0)
+distance = 4.5
+pitch = -18.0
+yaw = 25.0
+min_distance = 1.5
+max_distance = 15.0
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot"]
+current = true
+fov = 60.0
+near = 0.05
+far = 200.0
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
+title = "🍮 Soft Bodies (VBD)"

@@ -12,7 +12,7 @@ const QUALITY_KEYS := [
 	"cloth_quality_profile", "destruction_quality_profile", "grass_quality_profile",
 	"mixwell_quality_profile", "fractal_quality_profile", "non_euclidean_quality_profile",
 	"ssr_quality_profile", "ambient_fluid_quality_profile", "parallax_quality_profile",
-	"smoke_quality_profile",
+	"smoke_quality_profile", "softbody_quality_profile",
 ]
 
 ## Profile script → the exact key set values(tier) must return for every tier.
@@ -47,6 +47,7 @@ func _profile_table() -> void:
 		SmokeQualityProfile: ["grid_cell_budget", "sim_rate_hz", "pressure_vcycles",
 			"march_step_cells", "light_downsample", "light_step_cells", "maccormack",
 			"scene_shadows", "msaa"],
+		SoftBodyQualityProfile: ["lattice_cell_m", "substeps", "iterations", "max_bodies", "msaa"],
 	}
 
 

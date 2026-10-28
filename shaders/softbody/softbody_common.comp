@@ -1,0 +1,195 @@
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+// xyz = position, w = volume share (mass per unit density).
+layout(std430, set = 0, binding = 0) restrict buffer Positions {
+	vec4 data[];
+}
+positions;
+
+// xyz = velocity, w = body index.
+layout(std430, set = 0, binding = 1) restrict buffer Velocities {
+	vec4 data[];
+}
+velocities;
+
+// Inertial target of the substep.
+layout(std430, set = 0, binding = 2) restrict buffer Inertial {
+	vec4 data[];
+}
+inertial;
+
+// xyz = position at the start of the substep, w = 1 on the surface.
+layout(std430, set = 0, binding = 3) restrict buffer Previous {
+	vec4 data[];
+}
+previous;
+
+layout(std430, set = 0, binding = 4) restrict readonly buffer Tets {
+	ivec4 data[];
+}
+tets;
+
+// Three rows of the inverse rest edge matrix per tetrahedron; row 0's w = rest volume.
+layout(std430, set = 0, binding = 5) restrict readonly buffer TetRest {
+	vec4 data[];
+}
+tet_rest;
+
+layout(std430, set = 0, binding = 6) restrict readonly buffer AdjacencyOffsets {
+	int data[];
+}
+adjacency_offsets;
+
+// tetrahedron * 4 + corner.
+layout(std430, set = 0, binding = 7) restrict readonly buffer AdjacencyEntries {
+	int data[];
+}
+adjacency_entries;
+
+// Vertex indices grouped by colour.
+layout(std430, set = 0, binding = 8) restrict readonly buffer ColorVertices {
+	int data[];
+}
+color_vertices;
+
+// Two per body: (mu, lambda, density, active), (friction, 0, 0, 0).
+layout(std430, set = 0, binding = 9) restrict readonly buffer Bodies {
+	vec4 data[];
+}
+bodies;
+
+// COLLIDER_VEC4S per collider: (centre, kind), (axis x, half x or radius),
+// (axis y, half y or capsule half segment), (axis z, half z),
+// (linear velocity, bounding radius), (angular velocity, 1 = dynamic).
+layout(std430, set = 0, binding = 10) restrict readonly buffer Colliders {
+	vec4 data[];
+}
+colliders;
+
+// Six per collider, fixed point: force xyz, torque xyz.
+layout(std430, set = 0, binding = 11) restrict buffer Reactions {
+	int data[];
+}
+reactions;
+
+layout(std430, set = 0, binding = 12) restrict buffer HashCounts {
+	int data[];
+}
+hash_counts;
+
+layout(std430, set = 0, binding = 13) restrict buffer HashSlots {
+	int data[];
+}
+hash_slots;
+
+// Nearest boundary triangle of another body, or -1.
+layout(std430, set = 0, binding = 14) restrict buffer Contacts {
+	int data[];
+}
+contacts;
+
+layout(rgba32f, set = 0, binding = 15) uniform restrict writeonly image2D position_tex;
+
+// Boundary triangles: three vertices wound outward, w = body.
+layout(std430, set = 0, binding = 16) restrict readonly buffer Triangles {
+	ivec4 data[];
+}
+triangles;
+
+layout(std430, set = 0, binding = 17) restrict readonly buffer TriangleOffsets {
+	int data[];
+}
+triangle_offsets;
+
+// Boundary triangles around each vertex.
+layout(std430, set = 0, binding = 18) restrict readonly buffer TriangleEntries {
+	int data[];
+}
+triangle_entries;
+
+// Vertices whose contact triangle holds this vertex, INCOMING_SLOTS each.
+layout(std430, set = 0, binding = 19) restrict buffer Incoming {
+	int data[];
+}
+incoming;
+
+layout(std430, set = 0, binding = 20) restrict buffer IncomingCounts {
+	int data[];
+}
+incoming_counts;
+
+layout(push_constant, std430) uniform Params {
+	vec4 step; // x = h, y = 1 / h^2, z = Rayleigh damping (s), w = contact stiffness (x m / h^2)
+	vec4 gravity; // xyz = gravity, w = velocity retained per substep
+	ivec4 range; // x = first colour entry, y = entries, z = vertex count, w = 1: accumulate reactions
+	ivec4 counts; // x = colliders, y = hash buckets, z = slots per bucket, w = texture width
+	vec4 grab; // xyz = target, w = stiffness (x m / h^2)
+	ivec4 grab_vertex; // x = grabbed vertex or -1
+	vec4 contact; // x = hash cell and contact reach (m), y = self-contact gap (m), z = max speed, w = reaction scale
+}
+pc;
+
+const int COLLIDER_VEC4S = 6;
+const int COLLIDER_SPHERE = 1;
+const int COLLIDER_BOX = 2;
+const int COLLIDER_CAPSULE = 3;
+const int INCOMING_SLOTS = 8;
+const float DYNAMIC_CONTACT_SCALE = 0.1;
+
+bool body_active(int vertex) {
+	return bodies.data[int(velocities.data[vertex].w) * 2].w > 0.5;
+}
+
+ivec3 hash_cell(vec3 p) {
+	return ivec3(floor(p / pc.contact.x));
+}
+
+int hash_bucket(ivec3 c) {
+	return ((c.x * 73856093) ^ (c.y * 19349663) ^ (c.z * 83492791)) & (pc.counts.y - 1);
+}
+
+// Barycentric weights of the point of triangle abc closest to p (Ericson,
+// Real-Time Collision Detection 5.1.5).
+vec3 closest_on_triangle(vec3 p, vec3 a, vec3 b, vec3 c) {
+	vec3 ab = b - a;
+	vec3 ac = c - a;
+	vec3 ap = p - a;
+	float d1 = dot(ab, ap);
+	float d2 = dot(ac, ap);
+	if (d1 <= 0.0 && d2 <= 0.0) {
+		return vec3(1.0, 0.0, 0.0);
+	}
+	vec3 bp = p - b;
+	float d3 = dot(ab, bp);
+	float d4 = dot(ac, bp);
+	if (d3 >= 0.0 && d4 <= d3) {
+		return vec3(0.0, 1.0, 0.0);
+	}
+	float vc = d1 * d4 - d3 * d2;
+	if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+		float t = d1 / (d1 - d3);
+		return vec3(1.0 - t, t, 0.0);
+	}
+	vec3 cp = p - c;
+	float d5 = dot(ab, cp);
+	float d6 = dot(ac, cp);
+	if (d6 >= 0.0 && d5 <= d6) {
+		return vec3(0.0, 0.0, 1.0);
+	}
+	float vb = d5 * d2 - d1 * d6;
+	if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+		float t = d2 / (d2 - d6);
+		return vec3(1.0 - t, 0.0, t);
+	}
+	float va = d3 * d6 - d5 * d4;
+	if (va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0) {
+		float t = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		return vec3(0.0, 1.0 - t, t);
+	}
+	float denom = 1.0 / (va + vb + vc);
+	return vec3(1.0 - (vb + vc) * denom, vb * denom, vc * denom);
+}
+
+float vertex_mass(int i) {
+	return positions.data[i].w * bodies.data[int(velocities.data[i].w) * 2].z;
+}

@@ -51,6 +51,7 @@ var settings: Dictionary = {
 	"parallax_quality_profile": 1,
 	"wildfire_quality_profile": 1,
 	"smoke_quality_profile": 1,
+	"softbody_quality_profile": 1,
 }
 
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
@@ -96,6 +97,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/terrain_demo.tscn"},
 	{key = "cloth_demo",    title = "Cloth in the Wind", icon = "🏳️", category = "rigid",
 		scene = "res://scenes/cloth_demo.tscn"},
+	{key = "softbody_demo", title = "Soft Bodies", icon = "🍮", category = "rigid",
+		scene = "res://scenes/softbody_demo.tscn"},
 	{key = "destruction_demo", title = "Voronoi Destruction", icon = "🧱", category = "rigid",
 		scene = "res://scenes/destruction_demo.tscn"},
 	{key = "ambient_fluid_demo", title = "Ambient Fluid Rigid Body", icon = "🍃", category = "rigid",

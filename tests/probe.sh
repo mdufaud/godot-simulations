@@ -58,6 +58,8 @@ PROBE_TABLE=(
 	"tornado_boot_look|180|^TEST PASS tornado_boot_look$|"
 	"smoke_boot|300|^TEST PASS smoke_boot$|SMOKE BOOT "
 	"smoke_metrics|300|^TEST PASS smoke_metrics$|SMOKE METRICS "
+	"softbody_boot|300|^TEST PASS softbody_boot$|SOFTBODY BOOT "
+	"softbody_actions|300|^TEST PASS softbody_actions$|SOFTBODY ACTIONS "
 	"fps|120|^FPS PROBE target=|FPS PROBE "
 	"foam_convergence|600|^FOAM CONVERGENCE DONE|FOAM "
 	"foam_histogram|300|^HISTO DONE|HISTO "

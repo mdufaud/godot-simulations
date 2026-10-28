@@ -529,6 +529,181 @@ func _run_smoke_metrics() -> void:
 	_finish("smoke_metrics")
 
 
+func _softbody_ready(demo) -> bool:
+	return await _smoke_ready(demo)
+
+
+func _softbody_active(demo) -> int:
+	var count := 0
+	for body in demo.solver.body_count():
+		count += 1 if demo.solver.is_body_active(body) else 0
+	return count
+
+
+func _softbody_check_state(demo, label: String) -> void:
+	var preset: SoftBodyPreset = demo.PRESETS[demo.preset_idx]
+	var config: SoftBodyConfig = demo.solver.config
+	var values: Dictionary = SoftBodyQualityProfile.values(demo.quality.effective)
+	_check(config != preset.config and config.poisson_ratio == preset.config.poisson_ratio
+		and config.density_kg_m3 == preset.config.density_kg_m3
+		and config.damping_s == preset.config.damping_s
+		and config.stiffness_scale == preset.config.stiffness_scale,
+		"softbody_boot %s: running config differs from the preset's material" % label)
+	_check(config.lattice_cell_m == values.lattice_cell_m and config.substeps == values.substeps
+		and config.iterations == values.iterations and config.max_bodies == values.max_bodies,
+		"softbody_boot %s: running config differs from tier %d" % [label, demo.quality.effective])
+	_check(demo.solver.body_count() == config.max_bodies
+		and _softbody_active(demo) == preset.bodies.size(),
+		"softbody_boot %s: %d bodies, %d active, preset has %d" % [label,
+			demo.solver.body_count(), _softbody_active(demo), preset.bodies.size()])
+	_check(demo.bodies.is_bound(), "softbody_boot %s: renderer not bound" % label)
+	_check(is_equal_approx(demo.softbody_menu._stiffness.value, config.stiffness_scale)
+		and is_equal_approx(demo.softbody_menu._poisson.value, config.poisson_ratio),
+		"softbody_boot %s: material sliders differ from the config" % label)
+	_check(demo.softbody_menu._press.visible == demo.props.press_available(),
+		"softbody_boot %s: press action visible without a press" % label)
+
+
+func _softbody_finite(demo) -> bool:
+	var positions: PackedFloat32Array = demo.solver.read_positions()
+	for value in positions:
+		if not is_finite(value):
+			return false
+	return not positions.is_empty()
+
+
+func _run_softbody_boot() -> void:
+	var demo = (load("res://scenes/softbody_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	if not await _softbody_ready(demo):
+		_check(false, "softbody_boot: boot scene never became ready")
+		_finish("softbody_boot")
+		return
+	var boot_preset := clampi(int(demo.menu.stored_value("Scene", "Preset", 0)), 0,
+		demo.PRESETS.size() - 1)
+	_check(demo.preset_idx == boot_preset, "softbody_boot: booted on preset %d, stored %d" % [
+		demo.preset_idx, boot_preset])
+	_softbody_check_state(demo, "boot")
+	for index in demo.PRESETS.size():
+		demo.apply_preset(index)
+		_check(await _softbody_ready(demo), "softbody_boot: preset %d never became ready" % index)
+		_softbody_check_state(demo, "preset %d" % index)
+	for tier in SoftBodyQualityProfile.tier_count():
+		demo.set_quality_profile(tier)
+		_check(await _softbody_ready(demo), "softbody_boot: tier %d never became ready" % tier)
+		_softbody_check_state(demo, "tier %d" % tier)
+	demo.set_quality_profile(SoftBodyQualityProfile.default_tier())
+	_check(await _softbody_ready(demo), "softbody_boot: default tier never became ready")
+	demo.apply_preset(3)
+	_check(await _softbody_ready(demo), "softbody_boot: press preset never became ready")
+	var active: int = _softbody_active(demo)
+	demo.drop_body()
+	demo.throw_ball()
+	demo.rock_rain()
+	demo.set_press(true)
+	demo.set_material("stiffness_scale", 2.0)
+	demo.set_paused(true)
+	await _boot_frames(3)
+	demo.set_paused(false)
+	await _boot_frames(60)
+	_check(_softbody_active(demo) == active + 1, "softbody_boot: drop activated %d bodies" % [
+		_softbody_active(demo) - active])
+	_check(demo.props.dynamic_count() == 1 + demo.ROCKS_PER_RAIN,
+		"softbody_boot: throw and rocks made %d rigid bodies" % demo.props.dynamic_count())
+	_check(demo.solver.config.stiffness_scale == 2.0, "softbody_boot: stiffness slider lost")
+	_check(_softbody_finite(demo), "softbody_boot: positions not finite after the actions")
+	demo.next_preset()
+	_check(await _softbody_ready(demo), "softbody_boot: next preset never became ready")
+	demo.reset_scene()
+	_check(await _softbody_ready(demo), "softbody_boot: reset never became ready")
+	_softbody_check_state(demo, "after actions")
+	print("SOFTBODY BOOT presets=%d tiers=%d failures=%d" % [demo.PRESETS.size(),
+		SoftBodyQualityProfile.tier_count(), _failures])
+	demo.queue_free()
+	await process_frame
+	_finish("softbody_boot")
+
+
+## Rock rain at Medium (or tier=N), in step with Jolt: a ball dropped on the slab
+## comes to rest carried by the jelly, a grabbed vertex follows the pointer, drops
+## stack up, and per-stage GPU ms.
+func _run_softbody_actions() -> void:
+	var demo = (load("res://scenes/softbody_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var tier := SoftBodyQualityProfile.Tier.MEDIUM
+	for arg in _extra:
+		var pair: PackedStringArray = str(arg).split("=", true, 1)
+		if pair.size() == 2 and pair[0] == "tier":
+			tier = pair[1].to_int()
+	if not await _softbody_ready(demo):
+		_check(false, "softbody_actions: scene never became ready")
+		_finish("softbody_actions")
+		return
+	demo.set_quality_profile(tier)
+	demo.apply_preset(4)
+	_check(await _softbody_ready(demo), "softbody_actions: rock rain never became ready")
+	demo.props.clear_dynamic()
+	demo.solver.profiling = true
+	await _boot_frames(60)
+	var ball_origin := Vector3(-0.4, 0.55, -0.3)
+	demo.props.throw_ball(ball_origin, Vector3.ZERO)
+	var ball: RigidBody3D = demo.props._dynamic[-1]
+	var slot: int = demo.props._bodies.find(ball)
+	var lowest := INF
+	var fastest := 0.0
+	var lift_sum := 0.0
+	var samples := 0
+	for i in 120:
+		await _boot_frames(2)
+		var r: PackedFloat32Array = demo.solver.reactions()
+		lowest = minf(lowest, ball.global_position.y)
+		if i >= 60:
+			fastest = maxf(fastest, ball.linear_velocity.length())
+			lift_sum += r[slot * 6 + 1] if r.size() > slot * 6 + 1 else 0.0
+			samples += 1
+	var lift := lift_sum / maxf(samples, 1.0)
+	var weight := ball.mass * 9.8
+	print("SOFTBODY ACTIONS ball lowest y=%.3f late speed<=%.3f mean push=%.1f N weight=%.1f N" % [
+		lowest, fastest, lift, weight])
+	# The slab top sits at 0.35 m: the ball stays in a dent shallower than its radius.
+	_check(lowest > 0.35, "softbody_actions: ball sank into the slab")
+	# Explicit coupling keeps a small jitter on the jelly; it must stay small.
+	_check(fastest < 0.3, "softbody_actions: ball still bouncing at %.2f m/s" % fastest)
+	_check(absf(lift - weight) < 0.2 * weight,
+		"softbody_actions: jelly pushes %.1f N under a %.1f N ball" % [lift, weight])
+
+	var positions: PackedFloat32Array = demo.solver.read_positions()
+	var vertex: int = demo.solver.nearest_vertex(positions, Vector3(0.6, 2.0, 0.4), Vector3.DOWN,
+		0.2)
+	_check(vertex >= 0, "softbody_actions: no vertex under the grab ray")
+	if vertex >= 0:
+		var start := Vector3(positions[vertex * 4], positions[vertex * 4 + 1], positions[vertex * 4 + 2])
+		var target := start + Vector3(0.0, 0.3, 0.0)
+		demo.solver.set_grab(vertex, target)
+		await _boot_frames(60)
+		positions = demo.solver.read_positions()
+		var held := Vector3(positions[vertex * 4], positions[vertex * 4 + 1], positions[vertex * 4 + 2])
+		print("SOFTBODY ACTIONS grab %.3f -> %.3f m from target" % [start.distance_to(target),
+			held.distance_to(target)])
+		_check(held.distance_to(target) < 0.5 * start.distance_to(target),
+			"softbody_actions: grabbed vertex did not follow")
+		demo.solver.release_grab()
+	for i in 3:
+		demo.drop_body()
+		await _boot_frames(40)
+	await _boot_frames(120)
+	_check(_softbody_active(demo) == demo.PRESETS[4].bodies.size() + 3,
+		"softbody_actions: %d bodies active after 3 drops" % _softbody_active(demo))
+	_check(_softbody_finite(demo), "softbody_actions: positions not finite")
+	var t: Dictionary = demo.solver.get_timings()
+	print("SOFTBODY ACTIONS tier=%d vertices=%d ms total=%.2f predict=%.2f contacts=%.2f vbd=%.2f finalize=%.2f" % [
+		demo.quality.effective, demo.solver.vertex_count(), t.get("total", 0.0),
+		t.get("predict", 0.0), t.get("contacts", 0.0), t.get("vbd", 0.0), t.get("finalize", 0.0)])
+	demo.queue_free()
+	await process_frame
+	_finish("softbody_actions")
+
+
 func _smoke_residual(solver: SmokeSolver, dims: Vector3i, cell_m: float) -> float:
 	var div_code := solver.read_field("divergence")
 	var pressure := solver.read_field("pressure")

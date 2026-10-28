@@ -1,0 +1,43 @@
+[gd_resource type="Resource" script_class="SoftBodyPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/softbody/softbody_shape.gd" id="1_fgn76"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_config.gd" id="2_vnyum"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_preset.gd" id="3_j3q2w"]
+
+[sub_resource type="Resource" id="Resource_a0nyr"]
+script = ExtResource("1_fgn76")
+size_m = Vector3(1.6, 0.35, 1.2)
+position_m = Vector3(0, 0.175, 0)
+youngs_modulus_pa = 20000.0
+color = Color(0.3, 0.8, 0.35, 1)
+
+[sub_resource type="Resource" id="Resource_wwlu8"]
+script = ExtResource("1_fgn76")
+kind = 3
+size_m = Vector3(0.3, 0.12, 0)
+position_m = Vector3(0.1, 0.5, 0)
+youngs_modulus_pa = 40000.0
+color = Color(0.86, 0.2, 0.28, 1)
+
+[sub_resource type="Resource" id="Resource_5neq7"]
+script = ExtResource("2_vnyum")
+
+[sub_resource type="Resource" id="Resource_rvn61"]
+script = ExtResource("1_fgn76")
+size_m = Vector3(0.35, 0.35, 0.35)
+position_m = Vector3(0, 0, 0)
+youngs_modulus_pa = 30000.0
+color = Color(0.95, 0.6, 0.15, 1)
+
+[resource]
+script = ExtResource("3_j3q2w")
+display_name = "Rock rain"
+hint = "Rocks pelt a slab of jelly and a ring lying on it."
+config = SubResource("Resource_5neq7")
+bodies = Array[ExtResource("1_fgn76")]([SubResource("Resource_a0nyr"), SubResource("Resource_wwlu8")])
+drop_shape = SubResource("Resource_rvn61")
+rock_count = 10
+camera_target_m = Vector3(0, 0.4, 0)
+camera_distance_m = 4.5
+camera_pitch_deg = -25.0
+camera_yaw_deg = 20.0

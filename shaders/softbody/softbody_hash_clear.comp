@@ -1,0 +1,6 @@
+void main() {
+	int b = int(gl_GlobalInvocationID.x);
+	if (b < pc.counts.y) {
+		hash_counts.data[b] = 0;
+	}
+}

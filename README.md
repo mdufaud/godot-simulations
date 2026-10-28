@@ -44,6 +44,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | Tornado Simulation | Analytic wind field + volumetric raymarch + rigid-body debris |
 | Water & Stone | Multi-material heightfield: sediment transport, rainfall, snow, erosion and uplift; dig/pour/smooth/water/pack brushes, throwable balls |
 | Cloth in the Wind | GPU XPBD cloth with its own CPU gust wind (the tornado coupling is conceptual) |
+| Soft Bodies | GPU vertex block descent on tetrahedral lattices (stable Neo-Hookean), vertex-triangle contact between bodies, two-way Jolt coupling; grab, drop, press, throw |
 | Voronoi Destruction | Voronoi pre-fracture + Jolt sleep islands |
 | Ambient Fluid Rigid Body | Padilla et al. 2026: Kirchhoff added mass from an offline source-panel BEM, per-face separated surface pressure and skin friction, Algorithm 2 integration (CPU + native kernels) driving Jolt bodies |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
@@ -98,6 +99,7 @@ Vulkan-capable device; Compatibility does not provide `RenderingDevice`.
 | Tornado | `scripts/tornado/` | — |
 | Water & Stone (terrain) | `scripts/terrain/` | `shaders/terrain/*.comp` |
 | Cloth | `scripts/cloth/` | `shaders/cloth/*.comp` |
+| Soft bodies | `scripts/softbody/` | `shaders/softbody/*.comp` |
 | Destruction | `scripts/destruction/` | — |
 | Non-Euclidean | `scripts/non_euclidean/` | — |
 | Planet | `scripts/planet/` | `shaders/planet/*.comp` |

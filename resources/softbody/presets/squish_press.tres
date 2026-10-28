@@ -1,0 +1,51 @@
+[gd_resource type="Resource" script_class="SoftBodyPreset" format=3]
+
+[ext_resource type="Script" path="res://scripts/softbody/softbody_shape.gd" id="1_7ku3h"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_config.gd" id="2_rquot"]
+[ext_resource type="Script" path="res://scripts/softbody/softbody_preset.gd" id="3_vnk1t"]
+
+[sub_resource type="Resource" id="Resource_cpk6r"]
+script = ExtResource("1_7ku3h")
+size_m = Vector3(0.4, 0.4, 0.4)
+position_m = Vector3(-0.55, 0.2, 0)
+youngs_modulus_pa = 40000.0
+color = Color(0.86, 0.2, 0.28, 1)
+
+[sub_resource type="Resource" id="Resource_81nvo"]
+script = ExtResource("1_7ku3h")
+kind = 1
+size_m = Vector3(0.22, 0, 0)
+position_m = Vector3(0, 0.22, 0)
+youngs_modulus_pa = 30000.0
+color = Color(0.95, 0.6, 0.15, 1)
+
+[sub_resource type="Resource" id="Resource_1dulp"]
+script = ExtResource("1_7ku3h")
+kind = 3
+size_m = Vector3(0.22, 0.1, 0)
+position_m = Vector3(0.55, 0.1, 0)
+youngs_modulus_pa = 30000.0
+color = Color(0.3, 0.8, 0.35, 1)
+
+[sub_resource type="Resource" id="Resource_phlws"]
+script = ExtResource("2_rquot")
+
+[sub_resource type="Resource" id="Resource_fcb0u"]
+script = ExtResource("1_7ku3h")
+kind = 1
+size_m = Vector3(0.2, 0, 0)
+position_m = Vector3(0, 0, 0)
+youngs_modulus_pa = 30000.0
+color = Color(0.25, 0.5, 0.95, 1)
+
+[resource]
+script = ExtResource("3_vnk1t")
+display_name = "Squish press"
+hint = "Toggle the press to flatten a block, a ball and a ring."
+layout = 3
+config = SubResource("Resource_phlws")
+bodies = Array[ExtResource("1_7ku3h")]([SubResource("Resource_cpk6r"), SubResource("Resource_81nvo"), SubResource("Resource_1dulp")])
+drop_shape = SubResource("Resource_fcb0u")
+camera_distance_m = 4.2
+camera_pitch_deg = -12.0
+camera_yaw_deg = 15.0

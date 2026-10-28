@@ -1,0 +1,12 @@
+// Surface vertices of active bodies go into a fixed-capacity spatial hash.
+void main() {
+	int i = int(gl_GlobalInvocationID.x);
+	if (i >= pc.range.z || previous.data[i].w < 0.5 || !body_active(i)) {
+		return;
+	}
+	int b = hash_bucket(hash_cell(positions.data[i].xyz));
+	int slot = atomicAdd(hash_counts.data[b], 1);
+	if (slot < pc.counts.z) {
+		hash_slots.data[b * pc.counts.z + slot] = i;
+	}
+}
