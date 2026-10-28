@@ -26,22 +26,23 @@ Third-party components
 
 This license covers the original code of this repository only. Portions of the
 project are derived from, or bundled with, third-party work that remains under
-its own license. Summary:
+its own license. Copyright lines, sources and obligations are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Summary:
 
-- Godot Engine — MIT — Godot contributors, Juan Linietsky, Ariel Manzur
+- Godot Engine — MIT — Godot Engine contributors; Juan Linietsky, Ariel Manzur
 - Jolt Physics — MIT — Jorrit Rouwe
+- godot-cpp — MIT — Godot Engine contributors
 - Fluid-Planet (planet, marching cubes, parts of SPH) — MIT — Sebastian Lague
   https://github.com/SebLague/Fluid-Planet
-- GodotGrass (grass system and shader) — MIT — 2Retr0
-  https://github.com/2Retr0/GodotGrass
 - webgl-noise simplex noise — MIT — Ashima Arts, Stefan Gustavson;
   NoiseShader port — MIT — Keijiro Takahashi
-- Contact-refinement parallax mapping — CC0 — LiveTrower; related technique
-  from O3DE / Andrea Riccardi — Apache-2.0
-- Parallax self-shadowing excerpt — CC BY-SA 4.0 — Stack Overflow contribution
+- Contact-refinement parallax mapping, adapted from O3DE's implementation of
+  Andrea Riccardi's technique — Apache-2.0 (or MIT, at O3DE's option)
+- Parallax occlusion and self-shadowing — CC0 (as declared on the source page)
+  — LiveTrower https://godotshaders.com/shader/parallax-occlusion-mapping-with-self-shadowing/
+- Parallax self-shadow ray trace excerpt — CC BY-SA 4.0 — Stack Overflow contribution
   (share-alike; this excerpt is not relicensed under MIT)
-- Hash functions in grass and ocean shaders — MIT — nimitz (Shadertoy)
-- Poly Haven rock models and materials (downloaded, not stored in this
+- Poly Haven rock models, materials and HDRI (downloaded, not stored in this
   repository) — CC0 — https://polyhaven.com/license
 - icon.svg resembles the Godot logo — CC BY 4.0 — Andrea Calabró
 
