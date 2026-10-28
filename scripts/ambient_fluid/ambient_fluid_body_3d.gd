@@ -231,13 +231,8 @@ func _integrate_forces_impl(state: PhysicsDirectBodyState3D) -> void:
 	_true_linear_velocity_world = end_basis * Vector3(next_velocity[3], next_velocity[4],
 		next_velocity[5]) + fluid_velocity_world
 	_last_end_origin = end_origin
-	var turn := (end_basis * jolt_basis.transposed()).get_rotation_quaternion()
-	var angle := turn.get_angle()
-	var axis := turn.get_axis() if angle > 1.0e-9 else Vector3.ZERO
-	if angle > PI:
-		angle = TAU - angle
-		axis = -axis
-	_given_angular_velocity_world = axis * (angle / state.step)
+	_given_angular_velocity_world = _rotation_vector(end_basis * jolt_basis.transposed()) \
+		/ state.step
 	_given_linear_velocity_world = (end_origin - jolt_origin) / state.step
 	state.angular_velocity = _given_angular_velocity_world
 	state.linear_velocity = _given_linear_velocity_world
@@ -808,6 +803,20 @@ func _basis_is_valid(basis: Basis) -> bool:
 		and absf(basis.x.dot(basis.z)) <= 1.0e-3 \
 		and absf(basis.y.dot(basis.z)) <= 1.0e-3 \
 		and absf(basis.determinant() - 1.0) <= 1.0e-3
+
+
+## Axis times angle (in [0, pi]) of a rotation. Built from the quaternion's
+## vector part with atan2: Quaternion.get_axis() skips normalising below
+## ~0.009 rad, which dropped slow turns, and acos(w) loses ~1e-5 rad in float.
+func _rotation_vector(rotation: Basis) -> Vector3:
+	var turn := rotation.get_rotation_quaternion()
+	if turn.w < 0.0:
+		turn = -turn
+	var axis := Vector3(turn.x, turn.y, turn.z)
+	var sine := axis.length()
+	if sine <= 1.0e-12:
+		return axis * 2.0
+	return axis * (2.0 * atan2(sine, turn.w) / sine)
 
 
 func _rotation_increment(local_spin: Vector3, delta: float) -> Basis:

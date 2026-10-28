@@ -200,6 +200,7 @@ func _test_runtime_quality() -> void:
 	await _test_demo_scenarios()
 	await _test_rotational_convergence()
 	await _test_torque_free_angular_momentum()
+	await _test_slow_turn_reaches_jolt()
 	await _test_coupled_gyroscopic_stability()
 	_finish("ambient_fluid_phase3")
 
@@ -406,6 +407,35 @@ func _test_torque_free_angular_momentum() -> void:
 			"torque-free angular momentum direction drifted (%.7f, spin %s)" % [worst_direction, spin])
 		_check(worst_energy_drift < 0.005,
 			"torque-free rotational energy drifted %.5f (spin %s)" % [worst_energy_drift, spin])
+
+
+func _test_slow_turn_reaches_jolt() -> void:
+	# A slow spin turns less than 0.009 rad a tick; Jolt must still be handed
+	# the turn (Quaternion.get_axis() once collapsed it ~200-fold).
+	for rate in [0.05, 0.3, 2.0]:
+		var config := CONFIG.new()
+		config.body_density_kg_m3 = 500.0
+		config.initial_spin_rad_s = Vector3(0.0, rate, 0.0)
+		var body := BODY.new()
+		body.profile = PROFILE
+		body.config = config
+		body.fluid_enabled = false
+		body.contacts_enabled = false
+		body.gravity_scale = 0.0
+		root.add_child(body)
+		await process_frame
+		while body._pending_reset:
+			await physics_frame
+		for _frame in 60:
+			await physics_frame
+		await physics_frame
+		var basis := PhysicsServer3D.body_get_direct_state(body.get_rid()).transform.basis
+		var turned := atan2(basis.z.x, basis.z.z)
+		body.queue_free()
+		await process_frame
+		print("AMBIENT SLOW TURN rate=%.2f turned=%.5f expected=%.5f" % [rate, turned, rate * 61.0 / 60.0])
+		_check(absf(turned - rate * 61.0 / 60.0) < absf(rate) * 0.03 + 1.0e-4,
+			"a %.2f rad/s spin turned the Jolt pose %.5f rad in 61 ticks" % [rate, turned])
 
 
 func _rotational_energy(body: AmbientFluidBody3D) -> float:
