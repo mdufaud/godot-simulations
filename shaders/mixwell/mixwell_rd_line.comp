@@ -5,6 +5,19 @@
 //   across by it), segment.y epsilon, segment.zw LINE extent or TRI_WAVE
 //   (wavelength, amplitude); operation.y comb gap (pitch), operation.z TRI_WAVE
 //   broken flag, operation.w comb noise.
+vec2 pattern_drift(int operation_type, vec2 local, float epsilon, vec2 direction) {
+	if (operation_type == 1) {
+		return rd_nonpareil(local, epsilon, direction, params.operation.y, params.operation.w,
+				params.field.z);
+	}
+	if (operation_type == 4) {
+		return rd_gel_git(local, epsilon, direction, params.operation.y);
+	}
+	return rd_tri_wave_comb(local, epsilon, direction, params.segment.z, params.segment.w,
+			params.operation.z > 0.5, params.operation.y, params.field.z, params.field.y);
+}
+
+
 void main() {
 	uint index = gl_GlobalInvocationID.x;
 	ivec2 work_size = work_dims();
@@ -28,14 +41,23 @@ void main() {
 	vec2 origin = params.line.xy + perpendicular * params.segment.x;
 	vec2 local = coordinate - origin;
 	vec2 drift;
-	if (operation_type == 1) {
-		drift = rd_nonpareil(local, epsilon, direction, params.operation.y, params.operation.w,
-				params.field.z) + drift_compensation(direction, epsilon);
-	} else if (operation_type == 4) {
-		drift = rd_gel_git(local, epsilon, direction, params.operation.y);
-	} else if (operation_type == 5) {
-		drift = rd_tri_wave_comb(local, epsilon, direction, params.segment.z, params.segment.w,
-				params.operation.z > 0.5, params.operation.y, params.field.z, params.field.y);
+	if (operation_type == 1 || operation_type == 4 || operation_type == 5) {
+		drift = pattern_drift(operation_type, local, epsilon, direction);
+		if (slip_enabled()) {
+			// Images of the pattern (H f(M p)): a comb's across the walls its
+			// tines run along, a wave's across every wall and corner.
+			for (int index = 0; index < 8; index++) {
+				ivec2 image = operation_type == 5 ? SLIP_IMAGES[index]
+						: (index < 2 ? parallel_wall_image(direction, 2 * index - 1) : ivec2(0));
+				if (image != ivec2(0)) {
+					drift += reflection_matrix(image) * pattern_drift(operation_type,
+							mirror_point(coordinate, image) - origin, epsilon, direction);
+				}
+			}
+		}
+		if (operation_type == 1) {
+			drift += drift_compensation(direction, epsilon);
+		}
 	} else {
 		float extent_weight = line_extent_weight(coordinate, origin, direction, epsilon,
 				params.field.z, params.segment.zw);

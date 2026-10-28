@@ -82,7 +82,7 @@ func _initialize() -> void:
 	_test_progressivity_budget_progression()
 	_test_progressivity_render_snapshot()
 	_test_affine_extensions()
-	_test_slip_images_and_calibration()
+	_test_slip_images()
 	_test_diagnostics_contract()
 	_test_controller_contract()
 	_test_cpu_preset_matrix()
@@ -762,7 +762,7 @@ func _test_affine_extensions() -> void:
 		"Pinch selects affine dispatch")
 
 
-func _test_slip_images_and_calibration() -> void:
+func _test_slip_images() -> void:
 	_check(Boundaries.EDGE_IMAGES.size() == 4 and Boundaries.CORNER_IMAGES.size() == 4,
 		"slip boundary declares four edge and four corner images")
 	var half_extent := Vector2(16.0 / 9.0, 1.0)
@@ -771,19 +771,27 @@ func _test_slip_images_and_calibration() -> void:
 	_check(is_equal_approx(mirrored.x, -2.0 * half_extent.x - point.x)
 			and is_equal_approx(mirrored.y, point.y),
 		"slip edge image reflects across left wall")
-	var calibration := Boundaries.calibration_matrix(Vector2.ZERO, half_extent, 0.1)
-	_check(calibration != Vector4.ZERO and is_finite(calibration.x)
-			and is_finite(calibration.y) and is_finite(calibration.z) and is_finite(calibration.w),
-		"slip calibration is a finite 2x2 inverse")
+	# A comb's tines run through the walls across its motion: its images are
+	# across the two walls it runs along only, each a full mirrored comb.
+	var comb := {"type": Gallery.LINE_COMB, "origin": Vector2.ZERO, "direction": Vector2.RIGHT,
+		"pitch": 0.2, "noise": 0.0}
+	var combs: Array[Dictionary] = [comb]
+	var inside := Vector2(0.3, 0.83)
+	var walled := Diagnostics.cpu_advect(inside, combs, false, Vector2.ZERO, 9.0,
+			Vector2i(640, 360), -1, 180.0, 0.65, 10.0, 0, 0.1, half_extent)
+	var expected := inside
+	for image in [inside, Vector2(inside.x, 2.0 - inside.y), Vector2(inside.x, -2.0 - inside.y)]:
+		expected += Math.rd_nonpareil(image, 0.05, Vector2.RIGHT, 0.2, 0.0, 10.0)
+	_check(walled.distance_to(expected) <= 1.0e-6,
+		"a comb in slip walls adds its images across the two walls it runs along")
 	var config := Config.new()
 	config.boundary_mode = Config.BoundaryMode.SLIP_WALLS
 	_check(config.validate() == "", "slip wall configuration validates")
 	var solver := Solver.new()
 	solver.initialize(Vector2i(128, 128), config, Vector2i(128, 128))
 	solver.set_boundary_mode(Config.BoundaryMode.SLIP_WALLS)
-	_check(solver.get_active_boundary_mode() == Config.BoundaryMode.SLIP_WALLS
-			and solver.get_wall_calibration() == 1.0,
-		"solver activates matrix-calibrated slip images")
+	_check(solver.get_active_boundary_mode() == Config.BoundaryMode.SLIP_WALLS,
+		"solver activates slip-wall images")
 	var periodic_config := Config.new()
 	periodic_config.boundary_mode = Config.BoundaryMode.PERIODIC
 	var periodic_solver := Solver.new()

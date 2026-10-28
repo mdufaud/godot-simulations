@@ -4,12 +4,17 @@ extends RefCounted
 const Gallery := preload("res://scripts/mixwell/mixwell_gallery.gd")
 const Math := preload("res://scripts/mixwell/mixwell_math.gd")
 const Periodicity := preload("res://scripts/mixwell/mixwell_periodicity.gd")
+const Boundaries := preload("res://scripts/mixwell/mixwell_boundaries.gd")
 
 
+## Reverse-drifts a canvas point through the operations, as the shaders do.
+## slip_half_extent, when set, adds the slip-wall images of the pattern
+## operations (strokes in a walled box are GPU-only).
 static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: bool,
 		period: Vector2, brush_radius_px: float, reference_size: Vector2i,
 		affine_mode: int, affine_radius_px: float, affine_strength: float,
-		cutoff_gamma: float, drift_compensation: int, midpoint_alpha: float) -> Vector2:
+		cutoff_gamma: float, drift_compensation: int, midpoint_alpha: float,
+		slip_half_extent := Vector2.ZERO) -> Vector2:
 	var value := point
 	if periodic:
 		value = Periodicity.wrap_coordinate(value, period)
@@ -31,20 +36,22 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 					* unit
 			var origin: Vector2 = operation.get("origin", Vector2.ZERO) \
 					+ perpendicular * float(operation.get("phase", 0.0))
-			var gap := float(operation.get("pitch", 0.0))
 			match operation_type:
-				Gallery.LINE_COMB:
-					value += Math.rd_nonpareil(value - origin, operation_epsilon, direction, gap,
-							float(operation.get("noise", 0.0)), cutoff_gamma)
-					value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
-							gap, direction)
-				Gallery.GEL_GIT_PASS:
-					value += Math.rd_gel_git(value - origin, operation_epsilon, direction, gap)
-				Gallery.TRI_WAVE:
-					value += Math.rd_tri_wave_comb(value - origin, operation_epsilon, direction,
-							float(operation.get("wavelength", 0.0)),
-							float(operation.get("amplitude", 0.0)),
-							bool(operation.get("broken", false)), gap, cutoff_gamma, midpoint_alpha)
+				Gallery.LINE_COMB, Gallery.GEL_GIT_PASS, Gallery.TRI_WAVE:
+					var drift := _pattern_drift(operation, value - origin, operation_epsilon,
+							direction, cutoff_gamma, midpoint_alpha)
+					if slip_half_extent != Vector2.ZERO:
+						for image in _pattern_images(operation_type, direction):
+							var h := Boundaries.reflection_matrix(image)
+							var mirrored := _pattern_drift(operation, Boundaries.mirror_point(value,
+									image, slip_half_extent) - origin, operation_epsilon, direction,
+									cutoff_gamma, midpoint_alpha)
+							drift += Vector2(h.x * mirrored.x + h.y * mirrored.y,
+									h.z * mirrored.x + h.w * mirrored.y)
+					value += drift
+					if operation_type == Gallery.LINE_COMB:
+						value += Gallery.compensation_vector(drift_compensation, operation_epsilon,
+								float(operation.get("pitch", 0.0)), direction)
 				_:
 					var drift := Math.rd_line(Math.point(value.x - origin.x, value.y - origin.y),
 							operation_epsilon, Math.point(direction.x, direction.y))
@@ -68,6 +75,34 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 		if periodic:
 			value = Periodicity.wrap_coordinate(value, period)
 	return Periodicity.wrap_coordinate(value, period) if periodic else value
+
+
+static func _pattern_drift(operation: Dictionary, local: Vector2, epsilon: float,
+		direction: Vector2, cutoff_gamma: float, midpoint_alpha: float) -> Vector2:
+	var gap := float(operation.get("pitch", 0.0))
+	match int(operation.get("type", Gallery.LINE)):
+		Gallery.LINE_COMB:
+			return Math.rd_nonpareil(local, epsilon, direction, gap,
+					float(operation.get("noise", 0.0)), cutoff_gamma)
+		Gallery.GEL_GIT_PASS:
+			return Math.rd_gel_git(local, epsilon, direction, gap)
+	return Math.rd_tri_wave_comb(local, epsilon, direction,
+			float(operation.get("wavelength", 0.0)), float(operation.get("amplitude", 0.0)),
+			bool(operation.get("broken", false)), gap, cutoff_gamma, midpoint_alpha)
+
+
+## Slip-wall images of a pattern pass, as in mixwell_rd_line.comp: a comb's
+## across the walls its tines run along, a wave's across every wall and corner.
+static func _pattern_images(operation_type: int, direction: Vector2) -> Array[Vector2i]:
+	var result: Array[Vector2i] = []
+	if operation_type == Gallery.TRI_WAVE:
+		for image in Boundaries.EDGE_IMAGES + Boundaries.CORNER_IMAGES:
+			result.append(image)
+	elif absf(direction.y) <= 1.0e-6:
+		result.append_array([Vector2i(0, -1), Vector2i(0, 1)])
+	elif absf(direction.x) <= 1.0e-6:
+		result.append_array([Vector2i(-1, 0), Vector2i(1, 0)])
+	return result
 
 
 ## The GPU's periodic optimisation, emulated for one screen pixel: pass k runs on

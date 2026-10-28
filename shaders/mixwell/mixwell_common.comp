@@ -290,23 +290,37 @@ float line_extent_weight(vec2 point, vec2 origin, vec2 direction, float epsilon,
 }
 
 
+// Slip walls (an extension: the reference library has no walls) by the method
+// of images, first ring. A line, comb or Gel-Git tine runs through the walls
+// across its motion, so it has images only across the two walls it runs along
+// (mirroring it across the others gives back the line itself, and adding that
+// tripled its drift). Images of a line moving along a wall move the same way.
+const ivec2 SLIP_IMAGES[8] = ivec2[8](
+	ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
+	ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
+
+
+ivec2 parallel_wall_image(vec2 direction, int side) {
+	vec2 unit = normalize(direction);
+	if (abs(unit.y) <= 1.0e-6) {
+		return ivec2(0, side);
+	}
+	if (abs(unit.x) <= 1.0e-6) {
+		return ivec2(side, 0);
+	}
+	return ivec2(0);
+}
+
+
 vec2 slip_line_velocity(vec2 point, vec2 origin, vec2 direction, float epsilon) {
 	vec2 result = line_velocity(point, origin, direction, epsilon);
 	if (slip_enabled()) {
-		const ivec2 edge_left = ivec2(-1, 0);
-		const ivec2 edge_right = ivec2(1, 0);
-		const ivec2 edge_bottom = ivec2(0, -1);
-		const ivec2 edge_top = ivec2(0, 1);
-		const ivec2 corner_lb = ivec2(-1, -1);
-		const ivec2 corner_lt = ivec2(-1, 1);
-		const ivec2 corner_rb = ivec2(1, -1);
-		const ivec2 corner_rt = ivec2(1, 1);
-		const ivec2 images[8] = ivec2[8](edge_left, edge_right, edge_bottom, edge_top,
-			corner_lb, corner_lt, corner_rb, corner_rt);
-		for (int image_index = 0; image_index < 8; image_index++) {
-			ivec2 image = images[image_index];
-			result += reflection_matrix(image) * line_velocity(point,
-				mirror_point(origin, image), mirror_vector(direction, image), epsilon);
+		for (int side = -1; side <= 1; side += 2) {
+			ivec2 image = parallel_wall_image(direction, side);
+			if (image != ivec2(0)) {
+				result += reflection_matrix(image) * line_velocity(point,
+					mirror_point(origin, image), mirror_vector(direction, image), epsilon);
+			}
 		}
 	}
 	return result;
@@ -318,23 +332,15 @@ vec2 slip_segment_velocity(vec2 relative, vec2 endpoint, vec2 direction,
 	if (!slip_enabled()) {
 		return body_kernel_mul(relative, direction, epsilon);
 	}
-	const ivec2 images[8] = ivec2[8](
-		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
-	mat2 calibration = kernel_matrix(vec2(0.0), epsilon);
-	for (int image_index = 0; image_index < 8; image_index++) {
-		ivec2 image = images[image_index];
-		mat2 h = reflection_matrix(image);
-		calibration += kernel_matrix(endpoint - mirror_point(endpoint, image), epsilon) * h;
-	}
-	vec2 calibrated_direction = inverse(calibration) * direction;
+	// A brush in a walled box: it moves at its own velocity, and each of its
+	// images (first ring, across every wall and corner) moves at the mirrored
+	// one, so the fluid on a wall never crosses it.
 	vec2 point = endpoint + relative;
-	vec2 result = body_kernel_mul(relative, calibrated_direction, epsilon);
+	vec2 result = body_kernel_mul(relative, direction, epsilon);
 	for (int image_index = 0; image_index < 8; image_index++) {
-		ivec2 image = images[image_index];
-		vec2 image_end = mirror_point(endpoint, image);
-		result += kernel_matrix(point - image_end, epsilon) * reflection_matrix(image) \
-				* calibrated_direction;
+		ivec2 image = SLIP_IMAGES[image_index];
+		result += kernel_matrix(point - mirror_point(endpoint, image), epsilon)
+				* reflection_matrix(image) * direction;
 	}
 	return result;
 }
@@ -350,11 +356,8 @@ float slip_segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
 	if (!slip_enabled()) {
 		return influence;
 	}
-	const ivec2 images[8] = ivec2[8](
-		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
 	for (int image_index = 0; image_index < 8; image_index++) {
-		ivec2 image = images[image_index];
+		ivec2 image = SLIP_IMAGES[image_index];
 		influence = max(influence, segment_influence(
 			point, mirror_point(start, image),
 			mirror_point(end, image), epsilon, cutoff_gamma));
@@ -405,11 +408,8 @@ vec2 affine_velocity(vec2 point, vec2 centre, float strength, float radius,
 	if (!slip_enabled()) {
 		return result;
 	}
-	const ivec2 images[8] = ivec2[8](
-		ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1),
-		ivec2(-1, -1), ivec2(-1, 1), ivec2(1, -1), ivec2(1, 1));
 	for (int image_index = 0; image_index < 8; image_index++) {
-		ivec2 image = images[image_index];
+		ivec2 image = SLIP_IMAGES[image_index];
 		mat2 h = reflection_matrix(image);
 		result += affine_field(point - mirror_point(centre, image), strength, radius,
 				kind, h * coefficient * h);

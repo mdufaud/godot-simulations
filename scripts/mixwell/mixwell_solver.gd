@@ -67,7 +67,6 @@ var _gpu_periodic_comparison := {}
 var _gpu_oracle_comparison := {}
 var _force_periodic_validation := false
 var _affine_mode := -1
-var _wall_calibration := 1.0
 var _last_sample_gpu_ms := 1.0
 var _timing_store := GpuTimingStore.new()
 var _metrics := {
@@ -467,10 +466,6 @@ func get_gpu_oracle_comparison() -> Dictionary:
 	var result := _gpu_oracle_comparison.duplicate()
 	_comparison_mutex.unlock()
 	return result
-
-
-func get_wall_calibration() -> float:
-	return _wall_calibration
 
 
 func get_drift_compensation() -> int:
@@ -1733,7 +1728,6 @@ func _lcm(a: int, b: int) -> int:
 
 
 func _refresh_periodicity() -> void:
-	_refresh_wall_calibration()
 	_period_fixed = Periodicity.quantize_period(_periodic_coordinate_period(get_periodic_domain_size()))
 	if config.boundary_mode != MixwellConfig.BoundaryMode.PERIODIC:
 		_comparison_mutex.lock()
@@ -1829,6 +1823,3 @@ func _normalize_segment(segment: Vector4) -> Vector4:
 		(segment.x - half.x) * scale, (segment.y - half.y) * scale,
 		(segment.z - half.x) * scale, (segment.w - half.y) * scale)
 
-
-func _refresh_wall_calibration() -> void:
-	_wall_calibration = 1.0
