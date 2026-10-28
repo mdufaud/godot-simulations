@@ -212,8 +212,8 @@ func set_quality_value(key: String, value: Variant) -> void:
 		"sim_rate_hz":
 			config.sim_rate_hz = float(value)
 			_clock.reference_step = 1.0 / config.sim_rate_hz
-		"pressure_iterations":
-			config.pressure_iterations = int(value)
+		"pressure_vcycles":
+			config.pressure_vcycles = int(value)
 		"march_step_cells":
 			config.march_step_cells = float(value)
 		"light_step_cells":
@@ -231,6 +231,12 @@ func _apply_quality(values: Dictionary) -> void:
 
 func capture_ready() -> bool:
 	return solver.is_ready() and volume.is_bound() and not _rebuild_pending
+
+
+## Capture harness (param=key:value): tier keys, through the menu's path.
+func set_capture_params(params: Dictionary) -> void:
+	for key in params:
+		set_quality_value(key, params[key])
 
 
 func set_capture_fixed_delta(dt: float) -> void:

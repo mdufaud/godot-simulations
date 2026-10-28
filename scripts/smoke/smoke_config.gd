@@ -11,7 +11,8 @@ class_name SmokeConfig extends Resource
 @export_group("Quality")
 @export_range(10.0, 120.0, 1.0) var sim_rate_hz := 60.0
 @export_range(4096, 4000000, 1) var grid_cell_budget := 400000
-@export_range(1, 256, 1) var pressure_iterations := 24
+## Multigrid V-cycles of the pressure solve, warm-started each step.
+@export_range(1, 8, 1) var pressure_vcycles := 2
 @export_range(0.25, 2.0, 0.05) var march_step_cells := 0.75
 @export_range(1, 4, 1) var light_downsample := 2
 @export_range(0.25, 4.0, 0.05) var light_step_cells := 1.5
@@ -48,8 +49,8 @@ func validate() -> String:
 	var dims := grid_dims()
 	if dims.x < 8 or dims.y < 8 or dims.z < 8:
 		return "domain too thin for the cell budget: %s cells" % dims
-	if pressure_iterations < 1:
-		return "pressure_iterations must be at least 1"
+	if pressure_vcycles < 1:
+		return "pressure_vcycles must be at least 1"
 	if march_step_cells <= 0.0 or light_step_cells <= 0.0:
 		return "march steps must be positive"
 	if light_downsample < 1 or light_downsample > 4:

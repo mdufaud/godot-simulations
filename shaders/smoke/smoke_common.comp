@@ -7,13 +7,15 @@ layout(push_constant, std430) uniform Params {
 	vec4 decay;     // density, temperature, velocity, wind relax (Hz)
 	vec4 wind;      // wind x, wind z (m/s), extinction 1/m, unused
 	vec4 light;     // xyz direction to the sun, w light march step (cells)
-	ivec4 counts;   // sources, obstacles, red-black parity, unused
+	ivec4 counts;   // sources, obstacles, red-black parity, multigrid level
 } pc;
 
 // Pressure neighbour code: bits 0-5 fluid neighbours (+x -x +y -y +z -z), bits
 // 6-8 count of open (p = 0) neighbours, CODE_SOLID for a solid cell.
 const int CODE_OPEN = 64;
 const int CODE_SOLID = 512;
+// Multigrid coarse cell past an open side, held at p = 0.
+const int CODE_FIXED = 1024;
 
 bool in_grid(ivec3 c) {
 	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, pc.dims.xyz));

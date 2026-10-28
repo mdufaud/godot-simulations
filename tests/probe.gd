@@ -452,6 +452,114 @@ func _run_smoke_boot() -> void:
 	_finish("smoke_boot")
 
 
+## Vortex cannon at Medium (or tier=N), fixed 1/60 s frames: Poisson residual,
+## kinetic energy, the strongest vortex and per-stage GPU ms. Extra key=value
+## arguments go through set_quality_value, so a solver variant runs on the same scene.
+func _run_smoke_metrics() -> void:
+	var demo = (load("res://scenes/smoke_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var tier := SmokeQualityProfile.Tier.MEDIUM
+	var frames := 361
+	var overrides := {}
+	var air := {}
+	for arg in _extra:
+		var pair: PackedStringArray = str(arg).split("=", true, 1)
+		if pair.size() != 2:
+			continue
+		if pair[0] == "tier":
+			tier = pair[1].to_int()
+		elif pair[0] == "seconds":
+			frames = int(pair[1].to_float() * 60.0) + 1
+		elif pair[0] in ["vorticity_confinement", "velocity_decay_hz"]:
+			air[pair[0]] = pair[1].to_float()
+		else:
+			overrides[pair[0]] = str_to_var(pair[1])
+	if not await _smoke_ready(demo):
+		_check(false, "smoke_metrics: scene never became ready")
+		_finish("smoke_metrics")
+		return
+	demo.set_capture_fixed_delta(1.0 / 60.0)
+	demo.set_quality_profile(tier)
+	demo.apply_preset(2)
+	for key in overrides:
+		demo.set_quality_value(key, overrides[key])
+	for key in air:
+		demo.solver.config.set(key, air[key])
+	_check(await _smoke_ready(demo), "smoke_metrics: vortex cannon never became ready")
+	demo.solver.profiling = true
+	var solver: SmokeSolver = demo.solver
+	var dims := solver.grid_dims()
+	var cell_m := solver.config.cell_size_m()
+	var totals := {}
+	var samples := 0
+	for frame in frames:
+		await process_frame
+		if frame >= 60 and frame % 30 == 0:
+			var timings: Dictionary = solver.get_timings()
+			for key in timings:
+				totals[key] = totals.get(key, 0.0) + float(timings[key])
+			samples += 1
+		if frame >= 120 and frame % 60 == 0:
+			var curl := solver.read_field("curl")
+			var best := 0.0
+			var best_cell := 0
+			var enstrophy := 0.0
+			for cell in curl.size() / 4:
+				var w := curl[cell * 4 + 3]
+				enstrophy += w * w
+				if w > best:
+					best = w
+					best_cell = cell
+			var at := Vector3i(best_cell % dims.x, (best_cell / dims.x) % dims.y,
+				best_cell / (dims.x * dims.y))
+			var residual := _smoke_residual(solver, dims, cell_m)
+			var kinetic := _smoke_kinetic(solver)
+			_check(is_finite(residual) and is_finite(kinetic) and is_finite(enstrophy),
+				"smoke_metrics: non-finite field at frame %d" % frame)
+			print("SMOKE METRICS t=%.1fs residual=%.5f ke=%.2f enstrophy=%.0f max_curl=%.2f at=%s pos=%s" % [
+				frame / 60.0, residual, kinetic, enstrophy * pow(cell_m, 3), best, at,
+				solver.config.domain_origin_m + (Vector3(at) + Vector3.ONE * 0.5) * cell_m])
+	var line := PackedStringArray()
+	for key in totals:
+		line.append("%s=%.3f" % [key, totals[key] / maxi(samples, 1)])
+	line.sort()
+	print("SMOKE METRICS dims=%s ms %s" % [dims, " ".join(line)])
+	demo.queue_free()
+	await process_frame
+	_finish("smoke_metrics")
+
+
+func _smoke_residual(solver: SmokeSolver, dims: Vector3i, cell_m: float) -> float:
+	var div_code := solver.read_field("divergence")
+	var pressure := solver.read_field("pressure")
+	var steps := [1, -1, dims.x, -dims.x, dims.x * dims.y, -dims.x * dims.y]
+	var residual_sq := 0.0
+	var div_sq := 0.0
+	for cell in pressure.size():
+		var code := int(div_code[cell * 2 + 1])
+		if code >= 512:
+			continue
+		var total := 0.0
+		var count := (code >> 6) & 7
+		for bit in 6:
+			if code & (1 << bit):
+				total += pressure[cell + steps[bit]]
+				count += 1
+		var div := div_code[cell * 2]
+		var r := (total - count * pressure[cell]) / (cell_m * cell_m) - div
+		residual_sq += r * r
+		div_sq += div * div
+	return sqrt(residual_sq / maxf(div_sq, 1e-18))
+
+
+func _smoke_kinetic(solver: SmokeSolver) -> float:
+	var energy := 0.0
+	for axis in ["velocity_x", "velocity_y", "velocity_z"]:
+		for value in solver.read_field(axis):
+			energy += value * value
+	return 0.5 * energy * pow(solver.config.cell_size_m(), 3)
+
+
 func _smoke_ready(demo) -> bool:
 	var deadline := Time.get_ticks_msec() + 30000
 	while Time.get_ticks_msec() < deadline:
@@ -474,7 +582,7 @@ func _smoke_check_state(demo, label: String) -> void:
 		and config.wind_speed_mps == preset.config.wind_speed_mps,
 		"smoke_boot %s: running config differs from the preset's air and look" % label)
 	_check(config.grid_cell_budget == values.grid_cell_budget
-		and config.pressure_iterations == values.pressure_iterations
+		and config.pressure_vcycles == values.pressure_vcycles
 		and config.march_step_cells == values.march_step_cells
 		and config.light_downsample == values.light_downsample
 		and config.light_step_cells == values.light_step_cells

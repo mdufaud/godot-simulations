@@ -48,7 +48,7 @@ Launched from the main menu (`scenes/main_menu.tscn`).
 | Ambient Fluid Rigid Body | Padilla et al. 2026: Kirchhoff added mass from an offline source-panel BEM, per-face separated surface pressure and skin friction, Algorithm 2 integration (CPU + native kernels) driving Jolt bodies |
 | Non-Euclidean Lab | Camera-mapped portals, traversal continuity + recursive visibility |
 | Procedural Planet | GPU marching cubes over a ridged-FBM density field + raymarched Rayleigh atmosphere, with SPH fluid colliding against the live density field under radial gravity |
-| Smoke Simulation | GPU stable fluids on a MAC grid: MacCormack advection, buoyancy, vorticity confinement, red-black Gauss-Seidel pressure, voxelized mesh obstacles + Jolt bodies, self-shadowed volume raymarch |
+| Smoke Simulation | GPU stable fluids on a MAC grid: MacCormack advection, buoyancy, vorticity confinement, multigrid V-cycle pressure, voxelized mesh obstacles + Jolt bodies, self-shadowed volume raymarch |
 
 ## Layout
 

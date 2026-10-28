@@ -2,7 +2,7 @@ class_name SmokeSolver
 extends RefCounted
 ## GPU stable-fluids smoke (Stam 1999) on a dense MAC grid (velocity on cell
 ## faces): RK2 semi-Lagrangian or MacCormack advection, buoyancy, vorticity
-## confinement, red-black Gauss-Seidel pressure projection, plus a per-frame
+## confinement, multigrid pressure projection, plus a per-frame
 ## transmittance volume toward the sun and the zenith for self-shadowing.
 ##
 ## Owns every RenderingDevice resource of the grid. The host assigns [member config],
@@ -24,7 +24,9 @@ extends RefCounted
 
 const SHADER_DIR := "res://shaders/smoke/"
 const STAGES: Array[String] = ["obstacles", "advect", "maccormack", "forces", "curl",
-	"vorticity", "divergence", "pressure", "project", "light"]
+	"vorticity", "divergence", "project", "light", "mg_smooth", "mg_restrict", "mg_prolong"]
+## Binding of the per-level parameters (smoke_mg_common.comp) in each multigrid stage.
+const MG_LEVELS_BINDING := {"mg_smooth": 2, "mg_restrict": 4, "mg_prolong": 4}
 const WG := Vector3i(8, 8, 4)
 const MAX_SOURCES := 16
 const MAX_OBSTACLES := 32
@@ -33,6 +35,15 @@ const OBSTACLE_VEC4S := 7
 const OBSTACLE_SPHERE := 0
 const OBSTACLE_BOX := 1
 const PUSH_CONSTANT_BYTES := 112
+## Multigrid V-cycle: red-black sweeps before and after each coarse correction,
+## sweeps on the coarsest level, and the size below which no level is added.
+const MG_PRE_SWEEPS := 2
+const MG_POST_SWEEPS := 2
+const MG_COARSE_SWEEPS := 16
+const MG_MIN_DIM := 4
+## Coarse levels' pressure (R32F) and right-hand side (RG32F): 12 B per cell,
+## an eighth per level, rounded up per fine cell.
+const MG_BYTES_PER_CELL := 2
 ## Full-resolution fields and their float32 channels; "light" is the downsampled extra.
 ## A velocity field is one texture per axis and binds as an array of the three.
 const GRID_FIELDS := {"velocity_x": 1, "velocity_y": 1, "velocity_z": 1, "velocity_tmp_x": 1,
@@ -143,7 +154,7 @@ func advance(substeps: int) -> void:
 		return
 	var pc := make_push_constants(source_count(), _obstacles.size() / (OBSTACLE_VEC4S * 4), 0)
 	RenderingServer.call_on_render_thread(_advance_render.bind(maxi(substeps, 0),
-		config.pressure_iterations, pc, _sources.to_byte_array(), _obstacles.to_byte_array()))
+		config.pressure_vcycles, pc, _sources.to_byte_array(), _obstacles.to_byte_array()))
 
 
 func density_texture_rid() -> RID:
@@ -249,10 +260,48 @@ static func grid_fields(maccormack: bool) -> Array[String]:
 
 ## GPU bytes per grid cell, light volume excluded.
 static func bytes_per_cell(maccormack: bool) -> int:
-	var total := 0
+	var total := MG_BYTES_PER_CELL
 	for field in grid_fields(maccormack):
 		total += 4 * int(GRID_FIELDS[field])
 	return total
+
+
+## Per level, 8 floats for smoke_mg_common.comp: unknown cells per axis, the low-side
+## open weight, the high-side open weights. A coarse cell is unknown while its centre
+## lies inside the fine grid's p = 0 ghost centres (-0.5 and n + 0.5 fine cells);
+## the weight H / d is that boundary's distance to the outermost unknown centre.
+static func mg_level_params(dims: Vector3i) -> PackedFloat32Array:
+	var params := PackedFloat32Array()
+	var levels := mg_level_dims(dims)
+	for level in levels.size():
+		if level == 0:
+			params.append_array(PackedFloat32Array([dims.x, dims.y, dims.z, 0.0, 0.0, 0.0, 0.0, 0.0]))
+			continue
+		var size := float(1 << level)
+		var unknowns := PackedFloat32Array()
+		var high := PackedFloat32Array()
+		for axis in 3:
+			var boundary := float(dims[axis]) + 0.5
+			var count := 0
+			while count < levels[level][axis] and (count + 0.5) * size < boundary:
+				count += 1
+			unknowns.append(count)
+			high.append(size / (boundary - (count - 0.5) * size))
+		params.append_array(unknowns)
+		params.append(size / (0.5 * size + 0.5))
+		params.append_array(high)
+		params.append(0.0)
+	return params
+
+
+## Grid of every multigrid level, finest first: halved (rounded up) while every
+## axis stays above MG_MIN_DIM.
+static func mg_level_dims(dims: Vector3i) -> Array[Vector3i]:
+	var levels: Array[Vector3i] = [dims]
+	while mini(dims.x, mini(dims.y, dims.z)) > MG_MIN_DIM:
+		dims = (dims + Vector3i.ONE) / 2
+		levels.append(dims)
+	return levels
 
 
 ## Defines every smoke stage shares with this script.
@@ -301,6 +350,9 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 		+ FileAccess.get_file_as_string(SHADER_DIR + "smoke_common.comp") + "\n"
 	for stage in STAGES:
 		var source := FileAccess.get_file_as_string(SHADER_DIR + "smoke_%s.comp" % stage)
+		if MG_LEVELS_BINDING.has(stage):
+			source = "#define MG_LEVELS_BINDING %d\n" % MG_LEVELS_BINDING[stage] \
+				+ FileAccess.get_file_as_string(SHADER_DIR + "smoke_mg_common.comp") + "\n" + source
 		var spirv := ShaderCache.compile(_rd, "smoke_" + stage, header + source)
 		if not spirv.compile_error_compute.is_empty():
 			push_error("Smoke stage '%s' compile error:\n%s" % [stage, spirv.compile_error_compute])
@@ -308,14 +360,19 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 			return
 		_shaders[stage] = _rd.shader_create_from_spirv(spirv)
 		_pipelines[stage] = _rd.compute_pipeline_create(_shaders[stage])
-
 	for field in grid_fields(maccormack):
 		_textures[field] = _create_texture(dims + Vector3i.ONE if FACE_FIELDS.has(field) else dims,
 			CHANNEL_FORMATS[GRID_FIELDS[field]],
 			occupancy if field == "occupancy" else PackedByteArray())
+	var levels := mg_level_dims(dims)
+	for level in range(1, levels.size()):
+		_textures["mg_b%d" % level] = _create_texture(levels[level], CHANNEL_FORMATS[2])
+		_textures["mg_p%d" % level] = _create_texture(levels[level], CHANNEL_FORMATS[1])
 	_textures["light"] = _create_texture(light_dims, CHANNEL_FORMATS[2])
 	_buffers["sources"] = _rd.storage_buffer_create(MAX_SOURCES * SOURCE_VEC4S * 16)
 	_buffers["obstacles"] = _rd.storage_buffer_create(MAX_OBSTACLES * OBSTACLE_VEC4S * 16)
+	var level_params := mg_level_params(dims).to_byte_array()
+	_buffers["mg_levels"] = _rd.storage_buffer_create(level_params.size(), level_params)
 	var sampler_state := RDSamplerState.new()
 	sampler_state.mag_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
 	sampler_state.min_filter = RenderingDevice.SAMPLER_FILTER_LINEAR
@@ -339,13 +396,20 @@ func _init_render(dims: Vector3i, light_dims: Vector3i, occupancy: PackedByteArr
 	_make_set("curl", [_image("velocity"), _image("curl")])
 	_make_set("vorticity", [_image("curl"), _image("walls"), _image("velocity")])
 	_make_set("divergence", [_image("velocity"), _image("obstacle"), _image("divergence")])
-	_make_set("pressure", [_image("divergence"), _image("pressure")])
+	for level in levels.size():
+		_make_set("mg_smooth", [_image(_mg_b(level)), _image(_mg_p(level)), _storage("mg_levels")],
+			"mg_smooth%d" % level)
+	for level in levels.size() - 1:
+		var fields: Array[RDUniform] = [_image(_mg_b(level)), _image(_mg_p(level)),
+			_image(_mg_b(level + 1)), _image(_mg_p(level + 1)), _storage("mg_levels")]
+		_make_set("mg_restrict", fields, "mg_restrict%d" % level)
+		_make_set("mg_prolong", fields.duplicate(), "mg_prolong%d" % level)
 	_make_set("project", [_image("pressure"), _image("walls"), _image("velocity")])
 	_make_set("light", [_sampled("scalar"), _image("light")])
 	_set_ready(true)
 
 
-func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
+func _advance_render(substeps: int, vcycles: int, pc: PackedByteArray,
 		sources: PackedByteArray, obstacles: PackedByteArray) -> void:
 	if _rd == null or _pipelines.is_empty():
 		return
@@ -354,12 +418,9 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 		_rd.buffer_update(_buffers["sources"], 0, sources.size(), sources)
 	if not obstacles.is_empty():
 		_rd.buffer_update(_buffers["obstacles"], 0, obstacles.size(), obstacles)
-	var pc_odd := pc.duplicate()
-	pc_odd.encode_s32(104, 1)
 	var dims := _dims_of("scalar")
 	var groups := _groups(dims)
 	var face_groups := _groups(dims + Vector3i.ONE)
-	var pressure_groups := _groups(Vector3i((dims.x + 1) / 2, dims.y, dims.z))
 	var maccormack := _uniform_sets.has("maccormack")
 	_rd.capture_timestamp("smoke/start")
 	var cl := _rd.compute_list_begin()
@@ -380,9 +441,8 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 		_dispatch(cl, "vorticity", pc, face_groups)
 		_dispatch(cl, "divergence", pc, groups)
 		cl = _mark(cl, "smoke/vorticity")
-		for i in iterations:
-			_dispatch(cl, "pressure", pc, pressure_groups)
-			_dispatch(cl, "pressure", pc_odd, pressure_groups)
+		for cycle in vcycles:
+			_vcycle(cl, pc)
 		cl = _mark(cl, "smoke/pressure")
 		_dispatch(cl, "project", pc, face_groups)
 		cl = _mark(cl, "smoke/project")
@@ -390,6 +450,46 @@ func _advance_render(substeps: int, iterations: int, pc: PackedByteArray,
 	cl = _mark(cl, "smoke/light")
 	_rd.compute_list_end()
 	_rd.capture_timestamp("smoke/end")
+
+
+# Level 0 is the divergence / pressure pair; restriction zeroes each coarse guess.
+func _vcycle(cl: int, pc: PackedByteArray) -> void:
+	var levels := mg_level_dims(_dims)
+	var pcs: Array[PackedByteArray] = []
+	for level in levels.size():
+		var level_pc := pc.duplicate()
+		level_pc.encode_s32(0, levels[level].x)
+		level_pc.encode_s32(4, levels[level].y)
+		level_pc.encode_s32(8, levels[level].z)
+		level_pc.encode_float(28, pc.decode_float(28) * float(1 << level))
+		level_pc.encode_s32(108, level)
+		pcs.append(level_pc)
+	var last := levels.size() - 1
+	for level in last:
+		_smooth(cl, level, levels[level], pcs[level], MG_PRE_SWEEPS)
+		_dispatch(cl, "mg_restrict", pcs[level], _groups(levels[level + 1]),
+			"mg_restrict%d" % level)
+	_smooth(cl, last, levels[last], pcs[last], MG_COARSE_SWEEPS)
+	for level in range(last - 1, -1, -1):
+		_dispatch(cl, "mg_prolong", pcs[level], _groups(levels[level]), "mg_prolong%d" % level)
+		_smooth(cl, level, levels[level], pcs[level], MG_POST_SWEEPS)
+
+
+func _smooth(cl: int, level: int, dims: Vector3i, pc: PackedByteArray, sweeps: int) -> void:
+	var groups := _groups(Vector3i((dims.x + 1) / 2, dims.y, dims.z))
+	var pc_odd := pc.duplicate()
+	pc_odd.encode_s32(104, 1)
+	for sweep in sweeps:
+		_dispatch(cl, "mg_smooth", pc, groups, "mg_smooth%d" % level)
+		_dispatch(cl, "mg_smooth", pc_odd, groups, "mg_smooth%d" % level)
+
+
+func _mg_b(level: int) -> String:
+	return "divergence" if level == 0 else "mg_b%d" % level
+
+
+func _mg_p(level: int) -> String:
+	return "pressure" if level == 0 else "mg_p%d" % level
 
 
 func _clear_render() -> void:

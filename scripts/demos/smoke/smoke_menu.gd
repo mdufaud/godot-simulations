@@ -124,11 +124,10 @@ func build(menu: SimMenu, host, presets: Array[SmokePreset]) -> void:
 	quality.bind("sim_rate_hz", rate,
 		func(v: float) -> void: host.set_quality_value("sim_rate_hz", v),
 		func(v: float) -> int: return SmokeQualityProfile.SIM_RATES_HZ.find(v))
-	var pressure := menu.add_slider("Pressure iterations", 4.0, 64.0,
-		float(config.pressure_iterations),
-		func(v: float) -> void: host.set_quality_value("pressure_iterations", v), false, 1.0)
-	quality.bind("pressure_iterations", pressure,
-		func(v: float) -> void: host.set_quality_value("pressure_iterations", v))
+	var vcycles := menu.add_slider("V-cycles", 1.0, 6.0, float(config.pressure_vcycles),
+		func(v: float) -> void: host.set_quality_value("pressure_vcycles", v), false, 1.0)
+	quality.bind("pressure_vcycles", vcycles,
+		func(v: float) -> void: host.set_quality_value("pressure_vcycles", v))
 	var maccormack := menu.add_toggle("MacCormack advection", config.maccormack,
 		func(on: bool) -> void: host.set_quality_value("maccormack", on), false)
 	quality.bind("maccormack", maccormack,

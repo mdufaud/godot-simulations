@@ -1,7 +1,8 @@
 extends "res://tests/test_case.gd"
-## GPU gates of SmokeSolver on a 16 x 24 x 16 grid of 10 cm cells: the pressure
+## GPU gates of SmokeSolver on a 16 x 24 x 16 grid of 10 cm cells: each multigrid
+## V-cycle cuts the residual on even and odd grids, the pressure
 ## solve converges and removes most of an impulse's divergence, the Medium tier's
-## iteration count converges on its own grid, advection keeps mass without decay,
+## v-cycle count converges on its own grid, advection keeps mass without decay,
 ## heat and smoke weight move smoke the right way, air does not flow into solids
 ## nor smoke through a wall, clear() empties, dyed sources keep their colour,
 ## MacCormack keeps a transported blob sharper than first-order advection.
@@ -22,6 +23,8 @@ func _run() -> void:
 		_check(false, "no RenderingDevice")
 		_finish("smoke_gpu")
 		return
+	await _multigrid_case(Vector3i(16, 24, 16))
+	await _multigrid_case(Vector3i(17, 25, 17))
 	await _divergence_case()
 	await _tier_convergence_case()
 	await _mass_case()
@@ -74,7 +77,7 @@ func _steps(solver: SmokeSolver, count: int) -> void:
 
 func _divergence_case() -> void:
 	var solver := _solver()
-	solver.config.pressure_iterations = 200
+	solver.config.pressure_vcycles = 6
 	if not await _start(solver):
 		return
 	solver.set_sources(SmokeSolver.pack_source(Vector3(0.0, 1.2, 0.0), Vector3.ONE * 0.4, 0.0, 0.0,
@@ -86,7 +89,7 @@ func _divergence_case() -> void:
 	print("SMOKE GPU divergence rms before=%.5f after=%.5f ratio=%.4f poisson residual=%.5f" % [
 		before, after, after / maxf(before, 1e-9), residual])
 	_check(before > 0.1, "the impulse produced no divergence (%f)" % before)
-	_check(residual < 0.05, "200 iterations left a %.1f%% Poisson residual" % (100.0 * residual))
+	_check(residual < 0.05, "6 v-cycles left a %.1f%% Poisson residual" % (100.0 * residual))
 	_check(after < before * 0.01, "projection left %.2f%% of the divergence" % (100.0 * after / before))
 	solver.clear()
 	await process_frame
@@ -98,11 +101,32 @@ func _divergence_case() -> void:
 	solver.stop()
 
 
+## One impulse solved cold by k V-cycles: the residual falls with every cycle.
+func _multigrid_case(dims: Vector3i) -> void:
+	var residuals := PackedFloat32Array()
+	for vcycles in [1, 2, 3, 4]:
+		var solver := _solver()
+		solver.config.domain_size_m = Vector3(dims) * CELL_M
+		solver.config.grid_cell_budget = dims.x * dims.y * dims.z
+		solver.config.pressure_vcycles = vcycles
+		if not await _start(solver, dims):
+			return
+		solver.set_sources(SmokeSolver.pack_source(Vector3(0.0, 1.2, 0.0), Vector3.ONE * 0.4, 0.0,
+			0.0, Vector3(3.0, 1.0, 0.0), 30.0))
+		await _steps(solver, 1)
+		residuals.append(_poisson_residual(solver, dims, CELL_M))
+		solver.stop()
+	print("SMOKE GPU multigrid %s residual per v-cycle count %s" % [dims, residuals])
+	for i in range(1, residuals.size()):
+		_check(residuals[i] < residuals[i - 1] * 0.7,
+			"multigrid on %s did not converge: %s" % [dims, residuals])
+
+
 ## A warm-started plume at the Medium tier's iteration count, on the Medium grid.
 func _tier_convergence_case() -> void:
 	var config := SmokeConfig.new()
 	config.grid_cell_budget = SmokeQualityProfile.GRID_CELL_BUDGET[SmokeQualityProfile.Tier.MEDIUM]
-	config.pressure_iterations = SmokeQualityProfile.PRESSURE_ITERATIONS[SmokeQualityProfile.Tier.MEDIUM]
+	config.pressure_vcycles = SmokeQualityProfile.PRESSURE_VCYCLES[SmokeQualityProfile.Tier.MEDIUM]
 	config.vorticity_confinement = 0.0
 	config.wind_relax_hz = 0.0
 	var solver := SmokeSolver.new()
@@ -113,7 +137,7 @@ func _tier_convergence_case() -> void:
 		400.0, Vector3(0.0, 1.5, 0.0), 4.0))
 	await _steps(solver, 60)
 	var residual := _poisson_residual(solver, config.grid_dims(), config.cell_size_m())
-	print("SMOKE GPU medium tier %d iterations poisson residual=%.5f" % [config.pressure_iterations,
+	print("SMOKE GPU medium tier %d v-cycles poisson residual=%.5f" % [config.pressure_vcycles,
 		residual])
 	_check(residual < 0.05, "Medium tier left a %.1f%% Poisson residual" % (100.0 * residual))
 	solver.stop()

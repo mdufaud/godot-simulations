@@ -57,6 +57,7 @@ PROBE_TABLE=(
 	"mixshot|240|^MIXSHOT DONE$|MIXSHOT "
 	"tornado_boot_look|180|^TEST PASS tornado_boot_look$|"
 	"smoke_boot|300|^TEST PASS smoke_boot$|SMOKE BOOT "
+	"smoke_metrics|300|^TEST PASS smoke_metrics$|SMOKE METRICS "
 	"fps|120|^FPS PROBE target=|FPS PROBE "
 	"foam_convergence|600|^FOAM CONVERGENCE DONE|FOAM "
 	"foam_histogram|300|^HISTO DONE|HISTO "

@@ -1,0 +1,68 @@
+// Fine level pc.counts.w, described by pc.dims and pc.domain.w; one thread per
+// coarse cell.
+layout(set = 0, binding = 0, rg32f) uniform restrict readonly image3D fine_b;
+layout(set = 0, binding = 1, r32f) uniform restrict readonly image3D fine_p;
+layout(set = 0, binding = 2, rg32f) uniform restrict writeonly image3D coarse_b;
+layout(set = 0, binding = 3, r32f) uniform restrict writeonly image3D coarse_p;
+
+ivec3 child(ivec3 c, int i) {
+	return 2 * c + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+}
+
+bool fine_fluid(ivec3 f) {
+	return in_grid(f) && int(imageLoad(fine_b, f).y) < CODE_SOLID;
+}
+
+bool coarse_solid(ivec3 c) {
+	for (int i = 0; i < 8; i++) {
+		if (fine_fluid(child(c, i))) {
+			return false;
+		}
+	}
+	return true;
+}
+
+// Open sides are the weight's job: only fluid neighbours get a bit.
+int coarse_code(ivec3 n, int bit) {
+	return is_unknown(n, pc.counts.w + 1) && !coarse_solid(n) ? bit : 0;
+}
+
+float fluid_neighbor(int code, int bit, ivec3 n) {
+	return (code & bit) != 0 ? imageLoad(fine_p, n).r : 0.0;
+}
+
+float residual(ivec3 f, vec2 cell) {
+	int code = int(cell.y);
+	float sum = fluid_neighbor(code, 1, f + ivec3(1, 0, 0)) + fluid_neighbor(code, 2, f - ivec3(1, 0, 0))
+		+ fluid_neighbor(code, 4, f + ivec3(0, 1, 0)) + fluid_neighbor(code, 8, f - ivec3(0, 1, 0))
+		+ fluid_neighbor(code, 16, f + ivec3(0, 0, 1)) + fluid_neighbor(code, 32, f - ivec3(0, 0, 1));
+	float h = pc.domain.w;
+	return cell.x - (sum - diagonal(f, code, pc.counts.w) * imageLoad(fine_p, f).r) / (h * h);
+}
+
+void main() {
+	ivec3 c = ivec3(gl_GlobalInvocationID);
+	if (any(greaterThanEqual(c, (pc.dims.xyz + 1) / 2))) {
+		return;
+	}
+	imageStore(coarse_p, c, vec4(0.0));
+	if (!is_unknown(c, pc.counts.w + 1)) {
+		imageStore(coarse_b, c, vec4(0.0, float(CODE_FIXED), 0.0, 0.0));
+		return;
+	}
+	if (coarse_solid(c)) {
+		imageStore(coarse_b, c, vec4(0.0, float(CODE_SOLID), 0.0, 0.0));
+		return;
+	}
+	float total = 0.0;
+	for (int i = 0; i < 8; i++) {
+		ivec3 f = child(c, i);
+		if (fine_fluid(f)) {
+			total += residual(f, imageLoad(fine_b, f).xy);
+		}
+	}
+	int code = coarse_code(c + ivec3(1, 0, 0), 1) + coarse_code(c - ivec3(1, 0, 0), 2)
+		+ coarse_code(c + ivec3(0, 1, 0), 4) + coarse_code(c - ivec3(0, 1, 0), 8)
+		+ coarse_code(c + ivec3(0, 0, 1), 16) + coarse_code(c - ivec3(0, 0, 1), 32);
+	imageStore(coarse_b, c, vec4(total * 0.125, float(code), 0.0, 0.0));
+}

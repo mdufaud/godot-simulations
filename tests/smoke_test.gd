@@ -41,7 +41,7 @@ func _test_validation() -> void:
 		bad.append(SmokeConfig.new())
 	bad[0].domain_size_m = Vector3(6.0, -1.0, 6.0)
 	bad[1].grid_cell_budget = 1000
-	bad[2].pressure_iterations = 0
+	bad[2].pressure_vcycles = 0
 	bad[3].scattering_albedo = 1.5
 	bad[4].phase_g = 1.0
 	bad[5].light_downsample = 5
@@ -64,9 +64,21 @@ func _test_grid_sizing() -> void:
 	config.grid_cell_budget = 400000
 	config.light_downsample = 4
 	_check(config.light_dims() == Vector3i(16, 25, 16), "quarter light grid is %s" % config.light_dims())
-	_check(SmokeSolver.bytes_per_cell(true) == 160 and SmokeSolver.bytes_per_cell(false) == 124,
+	_check(SmokeSolver.bytes_per_cell(true) == 162 and SmokeSolver.bytes_per_cell(false) == 126,
 		"grid cells cost %d / %d bytes" % [SmokeSolver.bytes_per_cell(true),
 			SmokeSolver.bytes_per_cell(false)])
+	var levels := SmokeSolver.mg_level_dims(Vector3i(117, 58, 58))
+	_check(levels == [Vector3i(117, 58, 58), Vector3i(59, 29, 29), Vector3i(30, 15, 15),
+		Vector3i(15, 8, 8), Vector3i(8, 4, 4)], "multigrid levels are %s" % [levels])
+	_check(SmokeSolver.mg_level_dims(Vector3i(16, 24, 16)) == [Vector3i(16, 24, 16),
+		Vector3i(8, 12, 8), Vector3i(4, 6, 4)], "test grid multigrid levels differ")
+	var even := SmokeSolver.mg_level_params(Vector3i(16, 24, 16))
+	_check(even.slice(8, 16) == PackedFloat32Array([8, 12, 8, 4.0 / 3.0, 4.0 / 3.0, 4.0 / 3.0,
+		4.0 / 3.0, 0.0]) and is_equal_approx(even[19], 1.6) and is_equal_approx(even[20], 1.6),
+		"even-grid multigrid weights are %s" % even)
+	var odd := SmokeSolver.mg_level_params(Vector3i(16, 97, 16))
+	_check(odd[9] == 49.0 and is_equal_approx(odd[13], 4.0) and odd[17] == 24.0
+		and is_equal_approx(odd[21], 4.0 / 3.5), "odd-grid multigrid params are %s" % odd)
 
 
 func _test_world_to_cell() -> void:

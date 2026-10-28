@@ -1,0 +1,28 @@
+// Per level: (unknown cells xyz, low-side open weight), (high-side open weights xyz,
+// unused). The weight H / d puts each coarse level's p = 0 where the fine grid has
+// it; level 0 keeps its open neighbours in the code bits and has weight 0.
+layout(set = 0, binding = MG_LEVELS_BINDING, std430) restrict readonly buffer Levels {
+	vec4 levels[];
+};
+
+ivec3 level_unknowns(int level) {
+	return ivec3(levels[2 * level].xyz);
+}
+
+bool is_unknown(ivec3 c, int level) {
+	return all(greaterThanEqual(c, ivec3(0))) && all(lessThan(c, level_unknowns(level)));
+}
+
+// The floor (low y) is closed.
+float open_weight(ivec3 c, int level) {
+	vec4 low = levels[2 * level];
+	vec4 high = levels[2 * level + 1];
+	ivec3 last = ivec3(low.xyz) - 1;
+	return (c.x == 0 ? low.w : 0.0) + (c.z == 0 ? low.w : 0.0)
+		+ (c.x == last.x ? high.x : 0.0) + (c.y == last.y ? high.y : 0.0)
+		+ (c.z == last.z ? high.z : 0.0);
+}
+
+float diagonal(ivec3 c, int code, int level) {
+	return float(bitCount(code & 63) + ((code >> 6) & 7)) + open_weight(c, level);
+}

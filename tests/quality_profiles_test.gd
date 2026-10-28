@@ -44,7 +44,7 @@ func _profile_table() -> void:
 		RiverQualityProfile: ["water_cell_size_m", "foam_size_px", "reflection_scale", "rapids_reflection",
 			"grass_density", "grass_distance_m", "grass_detail", "grass_shadows", "msaa", "ssao",
 			"reflection_planes", "surface_detail", "foam_detail", "volumetric_mist"],
-		SmokeQualityProfile: ["grid_cell_budget", "sim_rate_hz", "pressure_iterations",
+		SmokeQualityProfile: ["grid_cell_budget", "sim_rate_hz", "pressure_vcycles",
 			"march_step_cells", "light_downsample", "light_step_cells", "maccormack",
 			"scene_shadows", "msaa"],
 	}

@@ -1,0 +1,44 @@
+// Fine level pc.counts.w, described by pc.dims; one thread per fine cell adds the
+// trilinear interpolation of the coarse correction.
+layout(set = 0, binding = 0, rg32f) uniform restrict readonly image3D fine_b;
+layout(set = 0, binding = 1, r32f) uniform restrict image3D fine_p;
+layout(set = 0, binding = 2, rg32f) uniform restrict readonly image3D coarse_b;
+layout(set = 0, binding = 3, r32f) uniform restrict readonly image3D coarse_p;
+
+// Past an open side the correction falls linearly to 0 at the boundary, which the
+// coarse level's weight w = H / d places: one cell out it is centre * (1 - w).
+// Across the floor and solids it mirrors the centre.
+float coarse_value(ivec3 n, float centre) {
+	int level = pc.counts.w + 1;
+	if (n.y < 0) {
+		return centre;
+	}
+	if (!is_unknown(n, level)) {
+		vec4 low = levels[2 * level];
+		vec4 high = levels[2 * level + 1];
+		ivec3 m = ivec3(low.xyz);
+		float g = centre;
+		g *= n.x < 0 ? 1.0 - low.w : (n.x >= m.x ? 1.0 - high.x : 1.0);
+		g *= n.y >= m.y ? 1.0 - high.y : 1.0;
+		g *= n.z < 0 ? 1.0 - low.w : (n.z >= m.z ? 1.0 - high.z : 1.0);
+		return g;
+	}
+	return int(imageLoad(coarse_b, n).y) >= CODE_SOLID ? centre : imageLoad(coarse_p, n).r;
+}
+
+void main() {
+	ivec3 f = ivec3(gl_GlobalInvocationID);
+	if (!in_grid(f) || int(imageLoad(fine_b, f).y) >= CODE_SOLID) {
+		return;
+	}
+	ivec3 c = f / 2;
+	ivec3 s = (f & 1) * 2 - 1;
+	float centre = imageLoad(coarse_p, c).r;
+	float e = 0.0;
+	for (int i = 0; i < 8; i++) {
+		ivec3 corner = ivec3(i & 1, (i >> 1) & 1, i >> 2);
+		vec3 w = mix(vec3(0.75), vec3(0.25), vec3(corner));
+		e += w.x * w.y * w.z * (i == 0 ? centre : coarse_value(c + corner * s, centre));
+	}
+	imageStore(fine_p, f, vec4(imageLoad(fine_p, f).r + e));
+}
