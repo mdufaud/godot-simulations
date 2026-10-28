@@ -80,7 +80,7 @@ float live_share(vec2 point) {
 	if (guided_coverage && weight > 0.0) {
 		vec2 guided = texture(bed_height_texture, domain_uv(point)).rg;
 		float live_depth = texture(swe_surface, river_swe_uv(point)).w;
-		weight *= 1.0 - step(0.015, guided.y - guided.x) * (1.0 - smoothstep(swe_wet_depth_m, 0.015, live_depth));
+		weight *= 1.0 - step(RIVER_FILM_DEPTH_M, guided.y - guided.x) * (1.0 - smoothstep(swe_wet_depth_m, RIVER_FILM_DEPTH_M, live_depth));
 	}
 	return weight;
 }
@@ -258,7 +258,7 @@ void fragment() {
 		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, river_swe_uv(world_position.xz)).r, 0.0));
 		float depth = mix(max(bed.y - bed.x, 0.0), live_depth, live_weight);
 		float edge_width = max(fwidth(depth), 0.002);
-		wet_coverage = mix(wet_coverage, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
+		wet_coverage = mix(wet_coverage, smoothstep(RIVER_FILM_DEPTH_M - edge_width, RIVER_FILM_DEPTH_M + edge_width, depth), live_weight);
 		// Past this triangle slope the heightfield climbs a rock or steps down a crest: what is behind shows instead.
 		vec3 facet = cross(dFdx(world_position), dFdy(world_position));
 		float slope = length(facet.xz) / max(abs(facet.y), 1.0e-6);
@@ -308,7 +308,7 @@ void fragment() {
 	if (cell_shore) {
 		// Solver depth stays positive across a lip, where both cells are wet: it only fades films and edges over dry cells.
 		float edge_width = max(fwidth(live.w), 0.002);
-		float film = smoothstep(0.015 - edge_width, 0.015 + edge_width, live.w);
+		float film = smoothstep(RIVER_FILM_DEPTH_M - edge_width, RIVER_FILM_DEPTH_M + edge_width, live.w);
 		wet_coverage = mix(wet_coverage, film * smoothstep(0.0, SHORE_SOFT_M, behind_m), live_weight);
 		if (wet_coverage <= 0.0) { discard; }
 	}

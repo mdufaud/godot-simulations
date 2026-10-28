@@ -268,9 +268,15 @@ vec4 brink_zone_at(ivec2 cell, bool spread) {
     return spread ? imageLoad(brink_spread, cell) : imageLoad(brink_zone, cell);
 }
 
+// Whether water crosses the face between two side by side cells, wet or not: no fall either way.
+bool crosses(float bed, float depth, float other_bed, float other_depth) {
+    return !spills(bed, other_bed, other_depth) && !spills(other_bed, bed, depth);
+}
+
 // How far from its brink a cell is through its neighbour i (8 around it), with that neighbour's zone; far away when the
 // zone ends short of the cell or does not reach across. Water bending down to a brink stands above it, and no fall lies
-// between: the lower surface past the end of a lip is no part of its bend.
+// between: the lower surface past the end of a lip is no part of its bend. As the solver and the corners join cells only
+// across faces, a diagonal neighbour reaches across only through a wet cell beside both.
 float brink_reach(ivec2 p, int i, float bed, float depth, bool spread, out vec4 zone) {
     ivec2 offset = i < 4 ? FACES[i] : ivec2(i & 1, (i >> 1) & 1) * 2 - 1;
     ivec2 cell = p + offset;
@@ -280,8 +286,16 @@ float brink_reach(ivec2 p, int i, float bed, float depth, bool spread, out vec4 
     float run = length(vec2(offset)) * params.domain.z;
     if (zone.y < 0.0 || zone.y + run >= zone.z || zone.x > bed + depth) return 1.0e9;
     float other_bed = imageLoad(terrain, cell).x;
-    if (spills(bed, other_bed, read_state(cell).x, run) || spills(other_bed, bed, depth, run)) return 1.0e9;
-    return zone.y + run;
+    float other_depth = read_state(cell).x;
+    if (i < 4) return crosses(bed, depth, other_bed, other_depth) ? zone.y + run : 1.0e9;
+    for (int k = 0; k < 2; ++k) {
+        ivec2 via = p + (k == 0 ? ivec2(offset.x, 0) : ivec2(0, offset.y));
+        float via_depth = read_state(via).x;
+        float via_bed = imageLoad(terrain, via).x;
+        if (via_depth > WET_DEPTH_M && crosses(bed, depth, via_bed, via_depth)
+                && crosses(via_bed, via_depth, other_bed, other_depth)) return zone.y + run;
+    }
+    return 1.0e9;
 }
 
 // One step of the brink zones spreading up from the lips. A wet cell spilling over a face holds its own: its brink level,
@@ -351,7 +365,8 @@ bool joined(vec4 qa, float za, vec4 qb, float zb, float gap) {
 
 // Each corner takes the mean drawn level (drawn_level) of the cells joined to this one around it, or, where the cells of
 // that surface spill over block edges meeting at the corner, the mean level of their brinks: the corner is then the lip
-// a fall leaves from. Sums run in block order so every cell of a surface gets the same value: the surface stays
+// a fall leaves from, never above any of its cells' water, so the water running round the end of a lip and down beside it
+// does not tent up to the brink. Sums run in block order so every cell of a surface gets the same value: the surface stays
 // watertight while lips and walls split it. A dry cell takes the lowest surface around a corner that its bed stands
 // above, so the rock, not the mesh, ends the water at the shore.
 vec4 surface_corners(ivec2 p, bool spread) {
@@ -398,10 +413,12 @@ vec4 surface_corners(ivec2 p, bool spread) {
             if (isinf(level[cells[i]]) || (!isinf(level[4]) && i != own)) continue;
             float sum = 0.0;
             float count = 0.0;
+            float lowest = dry;
             for (int j = 0; j < 4; ++j) {
                 if (labels[j] == labels[i]) {
                     sum += level[cells[j]];
                     count += 1.0;
+                    lowest = min(lowest, level[cells[j]]);
                 }
             }
             float brinks = 0.0;
@@ -413,7 +430,7 @@ vec4 surface_corners(ivec2 p, bool spread) {
                     spilling += 1.0;
                 }
             }
-            float mean = spilling > 0.0 ? brinks / spilling : sum / count;
+            float mean = spilling > 0.0 ? min(brinks / spilling, lowest) : sum / count;
             if (!isinf(level[4])) corners[k] = mean;
             else if (bed[4] >= mean - SHORE_RISE_M) corners[k] = min(corners[k], mean);
         }

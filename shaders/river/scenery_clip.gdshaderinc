@@ -33,10 +33,40 @@ float river_cliff_wetness(vec3 position, float wet) {
 	return max(wet, 0.8 * (1.0 - smoothstep(pouring, pouring + 0.1, position.y)));
 }
 
+float river_reference_height(vec3 position) {
+	return texture(river_height_texture, (position.xz - river_domain_origin_m) / river_domain_m + 0.5).g;
+}
+
+// The level of the water over a point, and whether that water shows. On a spilling field it is the surface the cell
+// mesh draws (river_water.gdshader), shown where thicker than the film it fades out under; over a cell drawing no
+// quad, the guided surface, which the mesh draws only outside the solver's blend.
+float river_water_level(vec3 position, out bool shown) {
+	float reference = river_reference_height(position);
+	float weight = river_swe_weight(position.xz);
+	shown = true;
+	if (!swe_spill_enabled || weight <= 0.0) { return river_swe_height(position.xz, reference); }
+	float drawn = river_drawn_level(position.xz);
+	if (isinf(drawn)) {
+		vec2 centre = swe_region_m.xy + (vec2(river_swe_cell(position.xz)) + 0.5) * swe_region_m.zw / vec2(textureSize(swe_corners, 0));
+		shown = river_swe_weight(centre) <= 0.0;
+		return reference;
+	}
+	shown = texture(swe_surface, river_swe_uv(position.xz)).w > RIVER_FILM_DEPTH_M;
+	return mix(reference, drawn, weight);
+}
+
+// The level of the water showing over a point; where none shows, never above the point, so ground under a faded film
+// stands at the water, wet, and ground under none is above it.
 float river_surface_height(vec3 position) {
-	float reference = texture(river_height_texture, (position.xz - river_domain_origin_m) / river_domain_m + 0.5).g;
-	if (swe_spill_enabled && texture(swe_surface, river_swe_uv(position.xz)).w < swe_wet_depth_m) { return reference; }
-	return river_swe_height(position.xz, reference);
+	bool shown;
+	float level = river_water_level(position, shown);
+	return shown ? level : min(level, position.y);
+}
+
+// Height above the water that ground grows by: on a spilling field never above the guided surface either, so a pocket
+// the live water leaves dry under it stays bare.
+float river_growth_height(vec3 position, float height) {
+	return swe_spill_enabled ? min(height, position.y - river_reference_height(position)) : height;
 }
 
 bool river_reflection_clipped(vec3 position, uint camera_layers) {
@@ -45,6 +75,7 @@ bool river_reflection_clipped(vec3 position, uint camera_layers) {
 		if ((camera_layers & (river_reflection_layer << uint(1))) != uint(0)) { return position.y < river_pool_levels_m.y; }
 		return false;
 	}
+	bool shown;
 	return (camera_layers & river_reflection_layer) != uint(0)
-		&& position.y < river_surface_height(position);
+		&& position.y < river_water_level(position, shown);
 }

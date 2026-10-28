@@ -85,6 +85,8 @@ var _corners := RID()
 var _brink_zone := RID()
 var _brink_spread := RID()
 var _brink_from_spread := false
+# The zones this frame's corners were drawn from: the snapshot's brink_zone.
+var _brink_read := RID()
 var _brink_shader := RID()
 var _brink_pipeline := RID()
 var _brink_sets: Array[RID] = []
@@ -322,6 +324,7 @@ func _init_spill_render(size: Vector2i) -> void:
 			_uniform(9, _spill_out, RenderingDevice.UNIFORM_TYPE_IMAGE),
 			_uniform(10, _spill_lips, RenderingDevice.UNIFORM_TYPE_IMAGE),
 			_uniform(11, _spill_lip_flow, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(12, _corners, RenderingDevice.UNIFORM_TYPE_IMAGE),
 		]
 		_spill_sets.append(_rd.uniform_set_create(uniforms, _spill_shader, 0))
 
@@ -456,10 +459,13 @@ func advance_render(delta_s: float, parameters_bytes: PackedByteArray, reset: bo
 	parameters_bytes.encode_float(24, duration)
 	_dispatch_render(list, parameters_bytes, 2.0)
 	if spilling:
-		# Brinks first, then their zones spreading a step up the surface, into the scratch or back, and its corners.
+		# Brinks first, then their zones spreading a step up the surface, into the scratch or back, and its corners, which
+		# the lips' leaving speed is read from.
 		_rd.compute_list_add_barrier(list)
+		_brink_read = _brink_spread if _brink_from_spread else _brink_zone
 		_dispatch_render(list, parameters_bytes, 10.0 if _brink_from_spread else 9.0)
 		_brink_from_spread = not _brink_from_spread
+		_rd.compute_list_add_barrier(list)
 		_dispatch_spill(list, parameters_bytes, 2.0)
 		_rd.compute_list_add_barrier(list)
 		_dispatch_spill(list, parameters_bytes, 3.0)
@@ -472,6 +478,8 @@ func advance_render(delta_s: float, parameters_bytes: PackedByteArray, reset: bo
 			_read_impacts_render()
 	_mutex.lock()
 	_status["state"] = _states[_index]
+	if spilling:
+		_status["brink_zone"] = _brink_read
 	_status["gpu_ms"] = float(timing.get("total", 0.0))
 	_status["cpu_ms"] = float(Time.get_ticks_usec() - cpu_start) / 1000.0 if profiling else 0.0
 	_status["time_s"] = (0.0 if reset else float(_status["time_s"])) + duration
@@ -641,6 +649,7 @@ func _free_render() -> void:
 	_corners = RID()
 	_brink_zone = RID()
 	_brink_spread = RID()
+	_brink_read = RID()
 	_spill_positions = RID()
 	_spill_motion = RID()
 	_spill_lips = RID()

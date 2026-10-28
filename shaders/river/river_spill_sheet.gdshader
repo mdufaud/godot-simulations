@@ -28,6 +28,9 @@ varying vec2 lip_point;
 // How much the lip runs along world x and along world z (river_waterfall_look).
 varying vec2 lip_weight;
 varying float fall_m;
+// Height the water has fallen from its lip: fall_m also counts the break-up it arrives with, so a short step in fast
+// water would read as a tall fall and never merge with its pool.
+varying float fallen_m;
 varying float presence;
 // Seconds since the water left its lip.
 varying float flight_s;
@@ -37,10 +40,10 @@ varying float side_share;
 
 struct Column {
 	vec2 velocity;
-	// Where the sheet leaves: the pool surface's corner at its lip (river_swe.comp), and how steeply that surface runs
-	// down into it, which the sheet carries on.
+	// Where the sheet leaves: the pool surface's corner at its lip (river_swe.comp), and how fast that surface already
+	// falls there as it pours off (river_spill.comp leaving_speed).
 	float top;
-	float slope;
+	float down;
 	float depth;
 	float foam;
 	vec2 normal;
@@ -76,8 +79,8 @@ float rock(vec2 point) {
 }
 
 // Flow of the cells spilling at this corner, so the strips meeting there fall together; the corner itself, where the sheet
-// leaves, is the pool surface's corner, and lip_cell's surface slopes down into it over its last quad.
-Column corner_column(ivec2 corner, ivec2 lip_cell, ivec2 normal, float cell_m) {
+// leaves, is lip_cell's pool surface corner.
+Column corner_column(ivec2 corner, ivec2 lip_cell) {
 	Column sum = Column(vec2(0.0), 0.0, 0.0, 0.0, 0.0, vec2(0.0), 0.0, 0.0);
 	float count = 0.0;
 	float meeting = 0.0;
@@ -99,17 +102,14 @@ Column corner_column(ivec2 corner, ivec2 lip_cell, ivec2 normal, float cell_m) {
 		sum.depth += depth;
 		sum.foam += texelFetch(swe_foam, cell, 0).r;
 		sum.nappe += flow.z;
+		sum.down += flow.w;
 		count += 1.0;
 	}
 	count = max(count, 1.0);
-	// This corner of the lip cell, and the one across the cell from it against the flow.
 	ivec2 at = corner - lip_cell;
-	ivec2 back = at - normal;
-	vec4 corners = texelFetch(swe_corners, lip_cell, 0);
-	float top = river_swe_corner(corners, at.x + 2 * at.y);
-	float slope = max(river_swe_corner(corners, back.x + 2 * back.y) - top, 0.0) / cell_m;
-	return Column(sum.velocity / count, top, slope, sum.depth / count, sum.foam / count, sum.normal, sum.nappe / count,
-		float(meeting < 2.0));
+	float top = river_swe_corner(texelFetch(swe_corners, lip_cell, 0), at.x + 2 * at.y);
+	return Column(sum.velocity / count, top, sum.down / count, sum.depth / count, sum.foam / count, sum.normal,
+		sum.nappe / count, float(meeting < 2.0));
 }
 
 float row_drop(int row, float drop) {
@@ -137,20 +137,18 @@ void vertex() {
 		float cell_m = swe_region_m.z / float(size.x);
 		float across = UV.x * 2.0 - 1.0;
 		vec2 end = vec2(cell) + 0.5 + 0.5 * normal;
-		ivec2 step = ivec2(round(normal));
-		Column first = corner_column(ivec2(round(end - 0.5 * tangent)), cell, step, cell_m);
-		Column last = corner_column(ivec2(round(end + 0.5 * tangent)), cell, step, cell_m);
+		Column first = corner_column(ivec2(round(end - 0.5 * tangent)), cell);
+		Column last = corner_column(ivec2(round(end + 0.5 * tangent)), cell);
 		// Corners are shared with the neighbouring faces and with the pool surface's quads, and the middle lies between
 		// them as the quad edge does, so the strips join each other and the surface edge to edge.
 		Column column = across < -0.5 ? first : (across > 0.5 ? last : Column(0.5 * (first.velocity + last.velocity),
-			0.5 * (first.top + last.top), 0.5 * (first.slope + last.slope), 0.5 * (first.depth + last.depth),
+			0.5 * (first.top + last.top), 0.5 * (first.down + last.down), 0.5 * (first.depth + last.depth),
 			0.5 * (first.foam + last.foam), first.normal + last.normal, 0.5 * (first.nappe + last.nappe),
 			0.5 * (first.free_side + last.free_side)));
 		side_share = column.free_side;
 		vec2 face_point = swe_region_m.xy + (end + 0.5 * across * tangent) * cell_m;
 		vec2 facing = length(column.normal) > 0.01 ? normalize(column.normal) : normal;
-		// It leaves along the surface it pours off: falling already as fast as that slope runs down.
-		float down_m_s = max(dot(column.velocity, facing), 0.0) * column.slope;
+		float down_m_s = column.down;
 		// Deep enough to reach the ground below the face, below the path itself, or the foot of the wall it runs down.
 		float drop = column.top - min(landing(face_point + facing * cell_m), landing(face_point + facing * DRAPE_REACH_CELLS * cell_m));
 		for (int k = 0; k < 3; k++) {
@@ -206,6 +204,7 @@ void vertex() {
 		stream_share = clamp(ratio / handover.z, 0.0, 1.0);
 		float thinning = pow(clamp(1.0 / max(ratio, 0.0001), 1.0, handover.w), thinning_exponent);
 		fall_m = fallen * thinning + max(column.foam, 1.0 - column.nappe) * breakup_length_m;
+		fallen_m = fallen;
 		// A trickle far below whole-stream share is a film on the rock, not a fall.
 		presence = smoothstep(0.2 * handover.z, 0.6 * handover.z, ratio);
 		POSITION = PROJECTION_MATRIX * (VIEW_MATRIX * vec4(point, 1.0));
@@ -228,5 +227,5 @@ void fragment() {
 	BACKLIGHT = look.backlight;
 	// Clear water seen edge-on is a thin film, not a glossy ribbon; aerated water shows its body from any side.
 	float edge_on = mix(smoothstep(0.08, 0.35, abs(dot(view_normal, VIEW))), 1.0, look.foam);
-	ALPHA = presence * spill_apart(above_pool_m, fall_m) * look.coverage * edge_on;
+	ALPHA = presence * spill_apart(above_pool_m, fallen_m) * look.coverage * edge_on;
 }

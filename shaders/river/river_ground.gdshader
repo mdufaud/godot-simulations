@@ -35,7 +35,7 @@ void fragment() {
 	vec2 uv = world_position.xz * 0.48;
 	float variation = sin(world_position.x * 0.9 + sin(world_position.z * 0.47));
 	float height = world_position.y - river_surface_height(world_position);
-	float vegetation = smoothstep(0.55, 1.0, height - river_plane.w + variation * 0.08);
+	float vegetation = smoothstep(0.55, 1.0, river_growth_height(world_position, height) - river_plane.w + variation * 0.08);
 
 	vec3 normal = normalize(world_normal);
 	float breakup = sin(world_position.x * 0.9 + world_position.z * 0.6) * 0.5 + sin(world_position.y * 2.3 + world_position.x * 0.4) * 0.5;

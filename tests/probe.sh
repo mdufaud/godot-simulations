@@ -74,6 +74,7 @@ PROBE_TABLE=(
 	"river_slope|900|^TEST PASS river_slope$|RIVER SLOPE "
 	"river_spill|240|^TEST PASS river_spill$|RIVER SPILL "
 	"river_cascade|600|^TEST PASS river_cascade$|RIVER CASCADE "
+	"river_wet_ground|420|^TEST PASS river_wet_ground$|RIVER WET GROUND "
 	"river_domain|180|^TEST PASS river_domain$|RIVER DOMAIN "
 	"river_fixtures|1200|^RIVER FIXTURES DONE|RIVER FIXTURE "
 	"ocean_contracts|60|^TEST PASS ocean_contracts$|OCEAN CONTRACTS "

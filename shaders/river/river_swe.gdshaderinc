@@ -10,6 +10,8 @@ uniform float swe_wet_depth_m = 0.0;
 uniform bool swe_enabled = false;
 uniform bool swe_spill_enabled = false;
 uniform float swe_blend = 1.0;
+// Thinner water is drawn as a film fading out (river_water.gdshader), and the ground under it as above the water.
+const float RIVER_FILM_DEPTH_M = 0.015;
 
 vec2 river_swe_uv(vec2 point) {
 	return (point - swe_region_m.xy) / swe_region_m.zw;
@@ -40,6 +42,18 @@ ivec2 river_swe_cell(vec2 point) {
 // rejects at every compile.
 float river_swe_corner(vec4 corners, int corner) {
 	return corner == 0 ? corners.x : (corner == 1 ? corners.y : (corner == 2 ? corners.z : corners.w));
+}
+
+// Height of the water surface the cell mesh draws at a point (river_water.gdshader): the triangle of its cell's quad
+// holding the point, the quad split from its -x-z to its +x+z corner; infinite where the cell draws no quad.
+float river_drawn_level(vec2 point) {
+	ivec2 size = textureSize(swe_corners, 0);
+	vec2 at = river_swe_uv(point) * vec2(size);
+	ivec2 cell = clamp(ivec2(floor(at)), ivec2(0), size - 1);
+	vec4 c = texelFetch(swe_corners, cell, 0);
+	if (any(isinf(c))) { return uintBitsToFloat(0x7F800000u); }
+	vec2 f = clamp(at - vec2(cell), vec2(0.0), vec2(1.0));
+	return f.x >= f.y ? c.x + (c.y - c.x) * f.x + (c.w - c.y) * f.y : c.x + (c.w - c.z) * f.x + (c.z - c.x) * f.y;
 }
 
 // Bits 0-3: the cell spills over its east, west, north, south face; bits 4-7: water spills onto it over that face.

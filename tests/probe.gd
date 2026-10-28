@@ -23,6 +23,9 @@ const GUARD_FRAMES_PER_SECOND := 240.0
 
 # river_cascade: steepest drawn surface edge along the flow within a brink's bend (45 degrees).
 const BRINK_FOLD_SLOPE := 1.0
+# river_wet_ground: share of the ground under visible water that the scenery still draws above it.
+const WET_GROUND_MISMATCH := 0.005
+const WET_GROUND_SHADER := "res://tests/river_wet_ground.gdshader"
 
 # fluid_foam
 const WARM_SIM := 2.0
@@ -7829,6 +7832,7 @@ func _run_river_cascade() -> void:
 		var bridged_faces := 0
 		var ramp_faces := 0
 		var unsplit := []
+		var bridges := []
 		var joined_edges := 0
 		var sealed_edges := 0
 		for y in range(1, grid.y - 1):
@@ -7843,12 +7847,17 @@ func _run_river_cascade() -> void:
 					var other_pair := Vector2(corners[other * 4 + face_corners[i][2]], corners[other * 4 + face_corners[i][3]])
 					if bits & (1 << i):
 						# One shared end is the water running round the end of a lip; both shared would hang a wall, unless
-						# the step is no taller than a slope the solver runs as flow (a lip the pool below nearly drowns).
+						# the step is no taller than a slope the solver runs as flow (a lip the pool below nearly drowns):
+						# what stands of it above the water below, as spills() measures drowning, not the drop in level.
 						var shared := (own_pair - other_pair).abs()
 						var stitched: bool = shared.x < 1.0e-4 and shared.y < 1.0e-4
-						var drop: float = bed[cell * 4] + surface[cell * 4 + 3] - bed[other * 4] - surface[other * 4 + 3]
-						bridged_faces += int(stitched and drop > step_m)
-						ramp_faces += int(stitched and drop <= step_m)
+						var standing: float = bed[cell * 4] - bed[other * 4] - surface[other * 4 + 3]
+						bridged_faces += int(stitched and standing > step_m)
+						ramp_faces += int(stitched and standing <= step_m)
+						if stitched and standing > step_m and bridges.size() < 8:
+							bridges.append("(%.2f,%.2f f%d standing=%.3f pair=%.3f,%.3f beds=%.3f/%.3f depths=%.3f/%.3f)" % [
+								river.swe.region_m.position.x + (x + 0.5) * river.swe.cell_m, river.swe.region_m.position.y + (y + 0.5) * river.swe.cell_m,
+								i, standing, own_pair.x, own_pair.y, bed[cell * 4], bed[other * 4], surface[cell * 4 + 3], surface[other * 4 + 3]])
 						var split := is_inf(other_pair.x) or minf(own_pair.x, own_pair.y) > maxf(other_pair.x, other_pair.y) + 0.01
 						split_faces += int(split)
 						if not split and unsplit.size() < 8:
@@ -7869,13 +7878,29 @@ func _run_river_cascade() -> void:
 		var fold_at := Vector2.ZERO
 		var fold_cell := 0
 		var folds := PackedFloat32Array()
+		var tent_max := 0.0
+		var tent_at := Vector2.ZERO
+		var tents := 0
 		for cell in grid.x * grid.y:
 			var depth: float = surface[cell * 4 + 3]
 			if depth <= SweSolver.WET_DEPTH_M:
 				continue
 			var brink: float = faces[cell * 4 + 2]
-			if int(faces[cell * 4] + 0.5) & 15 and (brink < bed[cell * 4] - 1.0e-4 or brink > bed[cell * 4] + depth + 1.0e-4):
+			if int(faces[cell * 4] + 0.5) & 15 and not (brink >= bed[cell * 4] - 1.0e-4 and brink <= bed[cell * 4] + depth + 1.0e-4):
 				brink_errors += 1
+			# How far a corner of a cell beside a lip, not spilling itself, stands above its own water: a lip's end tenting up.
+			if (int(faces[cell * 4] + 0.5) & 15) == 0 and cell % grid.x > 0 and cell % grid.x < grid.x - 1 and cell / grid.x > 0 \
+					and cell / grid.x < grid.y - 1:
+				var beside := false
+				for offset: int in [1, -1, grid.x, -grid.x, grid.x + 1, grid.x - 1, -grid.x + 1, -grid.x - 1]:
+					beside = beside or (int(faces[(cell + offset) * 4] + 0.5) & 15) != 0
+				if beside:
+					var top_corner := maxf(maxf(corners[cell * 4], corners[cell * 4 + 1]), maxf(corners[cell * 4 + 2], corners[cell * 4 + 3]))
+					var tent := top_corner - bed[cell * 4] - depth
+					tents += int(tent > 0.1)
+					if tent > tent_max:
+						tent_max = tent
+						tent_at = river.swe.region_m.position + (Vector2(cell % grid.x, cell / grid.x) + Vector2.ONE * 0.5) * river.swe.cell_m
 			if zone[cell * 4 + 1] < 0.0 or zone[cell * 4 + 1] > 0.85 * zone[cell * 4 + 2]:
 				continue
 			var c := Vector4(corners[cell * 4], corners[cell * 4 + 1], corners[cell * 4 + 2], corners[cell * 4 + 3])
@@ -7891,6 +7916,7 @@ func _run_river_cascade() -> void:
 		var fold_p95: float = folds[int(folds.size() * 0.95)] if not folds.is_empty() else 0.0
 		print("RIVER CASCADE preset=%s brink_errors=%d fold=%.2f at=(%.2f,%.2f) zone_cells=%d folded=%d p95=%.2f" % [preset, brink_errors,
 			fold, fold_at.x, fold_at.y, folds.size(), folded, fold_p95])
+		print("RIVER CASCADE TENT preset=%s max=%.3f at=(%.2f,%.2f) over_0.1=%d" % [preset, tent_max, tent_at.x, tent_at.y, tents])
 		if fold_p95 > BRINK_FOLD_SLOPE:
 			var around: Array[String] = []
 			for dy in range(-1, 2):
@@ -7909,6 +7935,8 @@ func _run_river_cascade() -> void:
 			wet_walls, walls, pool_before, pool_end, rock_spills, split_faces, spilling_faces, bridged_faces, ramp_faces, sealed_edges, joined_edges, landing_pulse])
 		if not unsplit.is_empty():
 			print("RIVER CASCADE unsplit=%s" % " ".join(unsplit))
+		if not bridges.is_empty():
+			print("RIVER CASCADE bridges=%s" % " ".join(bridges))
 		if stray > 0:
 			var spots := stray_spots.keys()
 			spots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return stray_spots[a] > stray_spots[b])
@@ -7922,6 +7950,116 @@ func _run_river_cascade() -> void:
 	_check(all_pass, "river_cascade: every lip must spill and only lips, never off a rock, from its surface with a sheet on every face, the drawn surface splitting there and sealed elsewhere, no water held on a wall, volume must balance, reaches must hold water within their banks, the pool must hold its level, speed and solver time must stay bounded")
 	scene.queue_free()
 	_finish("river_cascade")
+
+
+# Ground the scenery draws dry under water the mesh draws over it: rock and ground testing another level than the water
+# mesh (brown lines down a thin film). Each view renders three times from a frozen solver: with the water surface,
+# without it, and with the ground and rock coloured by their own under-water test (tests/river_wet_ground.gdshader).
+func _run_river_wet_ground() -> void:
+	await _boot_frames(2)
+	root.size = Vector2i(1280, 720)
+	var manager := root.get_node("GameManager")
+	var saved_tier: int = manager.get_setting("river_quality_profile")
+	manager.set_setting("river_quality_profile", 1)
+	var demo := (load("res://scenes/river_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var classify := load(WET_GROUND_SHADER) as Shader
+	var scenery_shaders := ["res://shaders/river/river_ground.gdshader", "res://shaders/river/river_rock.gdshader"]
+	var hidden := ["WaterfallSheets", "WaterfallFoam", "RiverSkirt", "WaterfallSpray*", "MistVolume", "RockSplashes"]
+	var all_pass := true
+	# Scene, waterfall angle, preset, views: the 50 degree ramp in Calm and Natural, the Cascades in Natural and High Water.
+	# A view is a capture view or an orbit (target, distance, pitch, yaw). Seen from low, a ray can pass through the open
+	# side of the water at a lip and reach ground beyond it, so the ramp is seen from above.
+	var ramp_top := [Vector3(0.0, 3.0, 1.5), 9.0, -80.0, 180.0]
+	for setup: Array in [[1, 50.0, 0, [ramp_top]], [1, 50.0, 1, [ramp_top]],
+			[2, 0.0, 1, ["lips_main", "pool"]], [2, 0.0, 3, ["lips_main", "pool"]]]:
+		demo.set_capture_scene(setup[0])
+		if setup[0] == 1:
+			demo.set_capture_params({"angle": setup[1]})
+		var deadline := Time.get_ticks_msec() + 60000
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		demo.apply_preset(setup[2])
+		while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+			await process_frame
+		_check(demo.capture_ready(), "river_wet_ground: the scene must boot")
+		demo.set_capture_ui(false)
+		demo.set_capture_fixed_delta(1.0 / 60.0)
+		demo.set_capture_params({"grass": 0.0})
+		await _boot_frames(1200)
+		var river: RiverSystem = demo.river
+		river.frozen = true
+		var shown: Array[Node3D] = []
+		for pattern: String in hidden:
+			for node in demo.find_children(pattern, "", true, false):
+				if node is Node3D and node.visible:
+					node.visible = false
+					shown.append(node)
+		var surface := demo.find_child("RiverSurface", true, false) as Node3D
+		for view: Variant in setup[3]:
+			if view is String:
+				demo.set_capture_view(view)
+			else:
+				demo.orbit.target = view[0]
+				demo.orbit.distance = view[1]
+				demo.orbit.pitch = view[2]
+				demo.orbit.yaw = view[3]
+				demo.orbit._update_transform()
+			var label := str(view) if view is String else "orbit%.0f" % view[2]
+			var with_water := await _wet_ground_frame()
+			surface.visible = false
+			var without_water := await _wet_ground_frame()
+			var swapped := {}
+			for material: ShaderMaterial in river.scenery_materials:
+				if material.shader.resource_path in scenery_shaders:
+					swapped[material] = material.shader
+					material.shader = classify
+			var classes := await _wet_ground_frame()
+			for material: ShaderMaterial in swapped:
+				material.shader = swapped[material]
+			surface.visible = true
+			var counts := _wet_ground_counts(with_water, without_water, classes)
+			var share := counts.x / maxf(counts.y, 1.0)
+			var passed := counts.y > 1000 and share <= WET_GROUND_MISMATCH
+			if not passed:
+				classes.save_png("res://tmp/river-wet-ground-%d-%d-%s.png" % [setup[0], setup[2], label])
+				with_water.save_png("res://tmp/river-wet-ground-%d-%d-%s-water.png" % [setup[0], setup[2], label])
+				without_water.save_png("res://tmp/river-wet-ground-%d-%d-%s-dry.png" % [setup[0], setup[2], label])
+			print("RIVER WET GROUND scene=%d preset=%d view=%s under_water=%d drawn_dry=%d share=%.4f%s" % [setup[0], setup[2],
+				label, counts.y, counts.x, share, "" if passed else " FAIL"])
+			all_pass = all_pass and passed
+		for node: Node3D in shown:
+			node.visible = true
+		river.frozen = false
+	_check(all_pass, "river_wet_ground: ground and rock under visible water must be drawn under it")
+	manager.set_setting("river_quality_profile", saved_tier)
+	demo.queue_free()
+	_finish("river_wet_ground")
+
+
+func _wet_ground_frame() -> Image:
+	await _boot_frames(4)
+	await RenderingServer.frame_post_draw
+	return root.get_texture().get_image()
+
+
+# x: pixels of scenery the water visibly covers but its own test draws above the water; y: all scenery the water covers.
+func _wet_ground_counts(with_water: Image, without_water: Image, classes: Image) -> Vector2i:
+	var counts := Vector2i.ZERO
+	for y in range(0, classes.get_height(), 2):
+		for x in range(0, classes.get_width(), 2):
+			var c := classes.get_pixel(x, y)
+			var above := c.g > c.r + 0.3 and c.b > c.r + 0.3
+			if not above and not (c.r > c.g + 0.3 and c.b > c.g + 0.3):
+				continue
+			var a := with_water.get_pixel(x, y)
+			var b := without_water.get_pixel(x, y)
+			if absf(a.r - b.r) + absf(a.g - b.g) + absf(a.b - b.b) < 0.1:
+				continue
+			counts.y += 1
+			if above:
+				counts.x += 1
+	return counts
 
 
 # "<river>.<lip>.<curtain>" of the nearest cascade lip within 2 m of an emission point (water landing on a spur flank spills again). "" when on none.

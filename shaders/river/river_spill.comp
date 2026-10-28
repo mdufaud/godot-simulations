@@ -25,8 +25,12 @@ layout(rgba32f, set = 0, binding = 8) uniform writeonly image2D motion;
 layout(rgba32f, set = 0, binding = 9) uniform readonly image2D spill_faces;
 // Spilling faces of wet cells the sheets draw, refilled every frame: cell index, face + 1 (0 = unused).
 layout(rgba32f, set = 0, binding = 10) uniform image2D lips;
-// Per cell while it spills: brink velocity x and z its particles leave at, then its nappe_share.
+// Per cell while it spills: brink velocity x and z its particles leave at, then its nappe_share, then how fast its
+// surface already falls as it leaves (leaving_speed), which the sheets drawing that surface start with. The particles
+// carry the stream's mass off the lip level; drawn from the bent surface, their spray would hang in front of the fall.
 layout(rgba32f, set = 0, binding = 11) uniform image2D lip_flow;
+// The drawn surface's corner heights (river_swe.comp corners_out).
+layout(rgba32f, set = 0, binding = 12) uniform readonly image2D corners;
 layout(push_constant, std430) uniform Params {
     vec4 domain;
     vec4 grid;
@@ -241,6 +245,23 @@ void draw(uint i) {
     imageStore(motion, texel, body.w > 0.0 ? vec4(particles.data[i * 3u + 1u].xyz, radius) : vec4(0.0));
 }
 
+// How fast a lip cell's surface already falls as it leaves: on along its slope down its last quad into each spilling face
+// (the drawn corners), averaged over its faces.
+float leaving_speed(ivec2 cell, int faces, vec2 velocity) {
+    vec4 c = imageLoad(corners, cell);
+    float sum = 0.0;
+    float count = 0.0;
+    for (int face = 0; face < 4; ++face) {
+        if ((faces & (1 << face)) == 0) continue;
+        vec2 normal = face < 2 ? vec2(float(1 - 2 * face), 0.0) : vec2(0.0, float(5 - 2 * face));
+        vec2 front = face == 0 ? c.yw : (face == 1 ? c.xz : (face == 2 ? c.zw : c.xy));
+        vec2 back = face == 0 ? c.xz : (face == 1 ? c.yw : (face == 2 ? c.xy : c.zw));
+        sum += max(dot(velocity, normal), 0.0) * max(0.5 * (back.x + back.y - front.x - front.y), 0.0) / params.domain.z;
+        count += 1.0;
+    }
+    return sum / max(count, 1.0);
+}
+
 // Share of its water leaving as a smooth nappe clear of the ground; a torrent or a jet along a slope leaves aerated.
 float nappe_share(uint index, ivec2 cell, int faces, vec2 velocity, vec4 source) {
     float depth = source.x;
@@ -287,7 +308,7 @@ void list_lips(uint index) {
     }
     vec4 sums = spill_outflow.outflow[index * 2u];
     vec2 velocity = sums.x > 0.0 ? sums.yz / sums.x : imageLoad(lip_flow, cell).xy;
-    imageStore(lip_flow, cell, vec4(velocity, nappe_share(index, cell, faces, velocity, source), 0.0));
+    imageStore(lip_flow, cell, vec4(velocity, nappe_share(index, cell, faces, velocity, source), leaving_speed(cell, faces, velocity)));
     ivec2 size = imageSize(lips);
     for (int face = 0; face < 4; ++face) {
         if ((faces & (1 << face)) == 0) continue;
