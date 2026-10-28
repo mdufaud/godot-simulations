@@ -75,7 +75,7 @@ func _test_rotated_half_volume() -> void:
 	var shapes := [
 		{faces = _cube_faces(), volume = BOX_PROFILE.volume_m3, name = "cube"},
 		{faces = _plate_faces(), volume = PLATE_PROFILE.volume_m3, name = "plate"},
-		{faces = controller._pool_faces_for(0), volume = SPHERE_PROFILE.volume_m3, name = "icosahedron"},
+		{faces = controller._pool_faces_for(0), volume = SPHERE_PROFILE.volume_m3, name = "icosphere"},
 	]
 	for shape: Dictionary in shapes:
 		for angle_degrees in [12.0, 37.0, 71.0]:
@@ -256,11 +256,24 @@ func _test_runtime_pool_and_scientific_paths() -> void:
 	root.add_child(demo)
 	await process_frame
 	_check(demo.bodies.size() == 4, "normal demo boot did not create the buoyancy mix")
-	var icosahedron_inertia: Vector3 = demo._inertia_for(0, 2.0)
-	_check(absf(icosahedron_inertia.x - 0.5788854382) < 1.0e-8
-		and absf(icosahedron_inertia.x - icosahedron_inertia.y) < 1.0e-12
-		and absf(icosahedron_inertia.y - icosahedron_inertia.z) < 1.0e-12,
-		"sphere showcase inertia does not match its solid icosahedron mesh")
+	# Polyhedral inertia (Sec. 5.2): exact for the solid unit icosahedron and
+	# the box, isotropic and near 2/5 m R^2 for the 320-face sphere.
+	var icosahedron := AmbientFluidShapes.icosphere_mesh(1.0, 0).get_faces()
+	var icosahedron_inertia := MATH.polyhedron_inertia_diagonal(icosahedron, 2.0)
+	# float32 vertices: agree to 1e-4 relative.
+	_check(absf(icosahedron_inertia.x - 0.5788854382) < 0.5788854382 * 1.0e-4
+		and absf(icosahedron_inertia.x - icosahedron_inertia.y) < 1.0e-6
+		and absf(icosahedron_inertia.y - icosahedron_inertia.z) < 1.0e-6,
+		"polyhedral inertia of the unit icosahedron is wrong: %s" % icosahedron_inertia)
+	var sphere_inertia: Vector3 = demo._inertia_for(0, 2.0)
+	_check(absf(sphere_inertia.x - 0.8) < 0.8 * 0.03
+		and absf(sphere_inertia.x - sphere_inertia.y) < 1.0e-6
+		and absf(sphere_inertia.y - sphere_inertia.z) < 1.0e-6,
+		"sphere showcase inertia does not match its solid icosphere: %s" % sphere_inertia)
+	var box_inertia: Vector3 = demo._inertia_for(1, 3.0)
+	_check(box_inertia.distance_to(Vector3(1.4 * 1.4 + 1.0, 1.8 * 1.8 + 1.0,
+		1.8 * 1.8 + 1.4 * 1.4) * (3.0 / 12.0)) < 1.0e-5,
+		"box showcase inertia is not the solid box's: %s" % box_inertia)
 	for body: AmbientFluidBody3D in demo.bodies:
 		_check(body.pool_buoyancy_enabled, "pool body boot omitted runtime buoyancy geometry")
 	demo._process(0.0)
@@ -434,7 +447,9 @@ func _test_runtime_honey_1100_body() -> void:
 		Vector3(0.0, -2.8, 0.0), Vector3.ZERO, Vector3.ZERO)
 	var initial_y := body.global_position.y
 	var maximum_upward_speed := 0.0
-	for _frame in 720:
+	# Underdamped in honey (Stokes damping ratio ~0.1 for the 4 m^3 sphere):
+	# the bob decays as exp(-0.25 t), so give it 18 s.
+	for _frame in 1080:
 		await physics_frame
 		maximum_upward_speed = maxf(maximum_upward_speed, body.linear_velocity.y)
 	print("AMBIENT HONEY 1100 start_y=%.3f end_y=%.3f max_up=%.3f final_up=%.3f immersion=%.4f friction_power=%.1f contacts=%d sleeping=%s" % [

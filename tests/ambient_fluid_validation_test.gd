@@ -65,8 +65,8 @@ func _test_geometry_correspondence() -> void:
 		_check(absf(rebuilt.volume_m3 - demo.SPHERE_PROFILE.volume_m3) < 1.0e-6,
 			"sphere render mesh and BEM profile volumes differ")
 	var collision: Shape3D = demo._collision_for(0)
-	_check(collision is ConvexPolygonShape3D and collision.points.size() == 12,
-		"sphere collision does not use canonical icosahedron")
+	_check(collision is ConvexPolygonShape3D and collision.points.size() == 162,
+		"sphere collision does not use the canonical icosphere")
 	demo.queue_free()
 	await process_frame
 

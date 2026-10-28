@@ -81,7 +81,8 @@ func _test_profile_and_tensor() -> void:
 	for index in [21, 28, 35]:
 		_check(absf(profile.added_mass_tensor[index] - expected_added_mass) < 1.0e-6,
 			"sphere translation added mass is anisotropic")
-	_check(profile.slip_matrix.is_empty(), "analytic profile unexpectedly has slip matrix")
+	_check(profile.face_vertices_m.size() == profile.face_centers_m.size() * 3,
+		"analytic profile does not carry its face triangles")
 
 
 func _test_acceleration_closed_form() -> void:
@@ -142,7 +143,8 @@ func _test_scene_body() -> void:
 	_check(body.collision_layer == 0 and body.collision_mask == 0,
 		"ambient fluid body has collision enabled")
 	_check(profile.format_version == AmbientFluidProfile3D.FORMAT_ANALYTIC
-		and profile.slip_matrix.is_empty(), "ambient fluid body is not using analytic profile")
+		and profile.format_version == AmbientFluidProfile3D.FORMAT_ANALYTIC,
+		"ambient fluid body is not using analytic profile")
 	_check(body.global_position.y < start_y, "scene body did not fall under gravity")
 	_check(body.combined_tensor()[21] > 0.0, "scene body tensor was not built")
 	body.queue_free()

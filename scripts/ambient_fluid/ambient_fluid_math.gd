@@ -34,6 +34,57 @@ static func diagonal_matrix(angular: Vector3, mass: float) -> PackedFloat64Array
 	return matrix
 
 
+## Inertia tensor (3x3, row-major) of a uniform solid polyhedron of `mass`
+## about its centre of volume, from its outward-wound triangles (Sec. 5.2:
+## the divergence theorem over the tetrahedra the faces span with the origin,
+## as in Kallay 2006). Accumulated in double precision.
+static func polyhedron_inertia(face_vertices: PackedVector3Array, mass: float) -> PackedFloat64Array:
+	var volume := 0.0
+	var first := PackedFloat64Array([0.0, 0.0, 0.0])
+	var second := PackedFloat64Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+	for base in range(0, face_vertices.size() - 2, 3):
+		var a := PackedFloat64Array([face_vertices[base].x, face_vertices[base].y,
+			face_vertices[base].z])
+		var b := PackedFloat64Array([face_vertices[base + 1].x, face_vertices[base + 1].y,
+			face_vertices[base + 1].z])
+		var c := PackedFloat64Array([face_vertices[base + 2].x, face_vertices[base + 2].y,
+			face_vertices[base + 2].z])
+		var tetra := (a[0] * (b[1] * c[2] - b[2] * c[1]) + a[1] * (b[2] * c[0] - b[0] * c[2])
+			+ a[2] * (b[0] * c[1] - b[1] * c[0])) / 6.0
+		volume += tetra
+		for row in 3:
+			var sum_row := a[row] + b[row] + c[row]
+			first[row] += tetra * sum_row / 4.0
+			for col in 3:
+				second[row * 3 + col] += tetra / 20.0 * (a[row] * a[col] + b[row] * b[col]
+					+ c[row] * c[col] + sum_row * (a[col] + b[col] + c[col]))
+	if not is_finite(volume) or absf(volume) <= 1.0e-12 or not is_finite(mass):
+		return PackedFloat64Array()
+	var inertia := PackedFloat64Array()
+	inertia.resize(9)
+	var covariance := PackedFloat64Array()
+	covariance.resize(9)
+	for row in 3:
+		for col in 3:
+			covariance[row * 3 + col] = second[row * 3 + col] \
+				- first[row] * first[col] / volume
+	var trace := covariance[0] + covariance[4] + covariance[8]
+	var density := mass / volume
+	for row in 3:
+		for col in 3:
+			inertia[row * 3 + col] = density * ((trace if row == col else 0.0)
+				- covariance[row * 3 + col])
+	return inertia
+
+
+static func polyhedron_inertia_diagonal(face_vertices: PackedVector3Array,
+		mass: float) -> Vector3:
+	var inertia := polyhedron_inertia(face_vertices, mass)
+	if inertia.size() != 9:
+		return Vector3.ZERO
+	return Vector3(inertia[0], inertia[4], inertia[8])
+
+
 static func matrix_add(a: PackedFloat64Array, b: PackedFloat64Array) -> PackedFloat64Array:
 	if a.size() != MATRIX_SCALARS or b.size() != MATRIX_SCALARS:
 		return PackedFloat64Array()

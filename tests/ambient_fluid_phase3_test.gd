@@ -46,7 +46,12 @@ func _test_pressure_separation() -> void:
 	var half := _surface(velocity, PI * 0.5, 0.0)
 	var wide := _surface(velocity, PI * 0.75, 0.0)
 	var attached := _surface(velocity, PI, 0.0)
-	_check(int(half.attached_faces) == 8, "PI/2 did not select the leading hemisphere")
+	var leading := 0
+	for normal in PROFILE.face_normals:
+		if normal.x > 1.0e-6:
+			leading += 1
+	_check(int(half.attached_faces) == leading,
+		"PI/2 attached %d faces, the leading hemisphere has %d" % [half.attached_faces, leading])
 	for face_index in PROFILE.face_centers_m.size():
 		if PROFILE.face_normals[face_index].x < -1.0e-6:
 			var lone := MATH.surface_wrench(

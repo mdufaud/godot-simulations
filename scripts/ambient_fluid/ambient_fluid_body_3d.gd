@@ -20,7 +20,7 @@ var _cached_mass := NAN
 var _cached_fluid_density := NAN
 var _cached_inertia := Vector3(NAN, NAN, NAN)
 var _cache_valid := false
-var _derived_spherical_inertia := false
+var _derived_inertia := false
 var _invalid_state_reported := false
 var _invalid_medium_reported := false
 var _last_pressure_wrench := PackedFloat64Array()
@@ -87,10 +87,8 @@ func _ready() -> void:
 	mass = config.body_density_kg_m3 * profile.volume_m3
 	if body_inertia_diagonal_kg_m2.x <= 0.0 or body_inertia_diagonal_kg_m2.y <= 0.0 \
 		or body_inertia_diagonal_kg_m2.z <= 0.0:
-		var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
-		var spherical_inertia := 0.4 * mass * radius * radius
-		body_inertia_diagonal_kg_m2 = Vector3.ONE * spherical_inertia
-		_derived_spherical_inertia = true
+		body_inertia_diagonal_kg_m2 = _profile_inertia()
+		_derived_inertia = true
 	if not _finite_vector(body_inertia_diagonal_kg_m2) \
 		or body_inertia_diagonal_kg_m2.x <= 0.0 \
 		or body_inertia_diagonal_kg_m2.y <= 0.0 \
@@ -397,9 +395,8 @@ func set_profile(value: AmbientFluidProfile3D) -> void:
 		return
 	profile = value
 	mass = config.body_density_kg_m3 * profile.volume_m3
-	if _derived_spherical_inertia:
-		var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
-		body_inertia_diagonal_kg_m2 = Vector3.ONE * (0.4 * mass * radius * radius)
+	if _derived_inertia:
+		body_inertia_diagonal_kg_m2 = _profile_inertia()
 		inertia = body_inertia_diagonal_kg_m2
 	sleeping = false
 	_rebuild_tensors()
@@ -442,9 +439,8 @@ func set_body_density_kg_m3(value: float) -> void:
 		return
 	config.body_density_kg_m3 = value
 	mass = value * profile.volume_m3
-	if _derived_spherical_inertia:
-		var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
-		body_inertia_diagonal_kg_m2 = Vector3.ONE * (0.4 * mass * radius * radius)
+	if _derived_inertia:
+		body_inertia_diagonal_kg_m2 = _profile_inertia()
 		inertia = body_inertia_diagonal_kg_m2
 	_rebuild_tensors()
 	sleeping = false
@@ -456,9 +452,8 @@ func set_body_mass_kg(value: float) -> void:
 		return
 	mass = value
 	config.body_density_kg_m3 = mass / profile.volume_m3
-	if _derived_spherical_inertia:
-		var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
-		body_inertia_diagonal_kg_m2 = Vector3.ONE * (0.4 * mass * radius * radius)
+	if _derived_inertia:
+		body_inertia_diagonal_kg_m2 = _profile_inertia()
 		inertia = body_inertia_diagonal_kg_m2
 	_rebuild_tensors()
 	sleeping = false
@@ -469,7 +464,7 @@ func set_body_inertia_diagonal_kg_m2(value: Vector3) -> void:
 		push_error("AmbientFluidBody3D: body inertia must be finite and positive")
 		return
 	body_inertia_diagonal_kg_m2 = value
-	_derived_spherical_inertia = false
+	_derived_inertia = false
 	inertia = value
 	_rebuild_tensors()
 	sleeping = false
@@ -656,10 +651,9 @@ func _rebuild_tensors(fluid_density_override := NAN) -> void:
 
 
 func _ensure_tensor_cache(fluid_density_override := NAN) -> void:
-	if _derived_spherical_inertia and not is_nan(_cached_mass) \
+	if _derived_inertia and not is_nan(_cached_mass) \
 		and not is_equal_approx(_cached_mass, mass):
-		var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
-		body_inertia_diagonal_kg_m2 = Vector3.ONE * (0.4 * mass * radius * radius)
+		body_inertia_diagonal_kg_m2 = _profile_inertia()
 	if inertia != body_inertia_diagonal_kg_m2:
 		inertia = body_inertia_diagonal_kg_m2
 	var fluid_density := fluid_density_override
@@ -671,6 +665,16 @@ func _ensure_tensor_cache(fluid_density_override := NAN) -> void:
 		or not is_equal_approx(_cached_fluid_density, fluid_density) \
 		or _cached_inertia != body_inertia_diagonal_kg_m2:
 		_rebuild_tensors(fluid_density)
+
+
+## Uniform-density inertia of the profile's own polyhedron (Sec. 5.2); the
+## equal-volume sphere's when a profile carries no triangles.
+func _profile_inertia() -> Vector3:
+	var polyhedral := MATH.polyhedron_inertia_diagonal(profile.face_vertices_m, mass)
+	if polyhedral.x > 0.0 and polyhedral.y > 0.0 and polyhedral.z > 0.0:
+		return polyhedral
+	var radius := pow(profile.volume_m3 * 3.0 / (4.0 * PI), 1.0 / 3.0)
+	return Vector3.ONE * (0.4 * mass * radius * radius)
 
 
 func _effective_fluid_density() -> float:

@@ -17,9 +17,10 @@ const MATH := preload("res://scripts/ambient_fluid/ambient_fluid_math.gd")
 @export var face_centers_m: PackedVector3Array = PackedVector3Array()
 @export var face_normals: PackedVector3Array = PackedVector3Array()
 @export var face_areas_m2: PackedFloat64Array = PackedFloat64Array()
+## Each face's triangle, three outward-wound vertices per face in face order:
+## the clipping input for partial immersion and the polyhedron for inertia.
+@export var face_vertices_m: PackedVector3Array = PackedVector3Array()
 @export var added_mass_tensor: PackedFloat64Array = PackedFloat64Array()
-@export var slip_matrix: PackedFloat64Array = PackedFloat64Array()
-@export var source_offset_m: float = 0.0
 @export var bem_psd_clamped: bool = false
 @export var bem_max_residual: float = 0.0
 
@@ -55,6 +56,7 @@ func ensure_analytic_geometry() -> void:
 	face_centers_m = PackedVector3Array()
 	face_normals = PackedVector3Array()
 	face_areas_m2 = PackedFloat64Array()
+	face_vertices_m = PackedVector3Array()
 	for face in faces:
 		var a: Vector3 = vertices[face[0]]
 		var b: Vector3 = vertices[face[1]]
@@ -63,6 +65,7 @@ func ensure_analytic_geometry() -> void:
 		face_centers_m.append((a + b + c) / 3.0)
 		face_normals.append(cross.normalized())
 		face_areas_m2.append(cross.length() * 0.5)
+		face_vertices_m.append_array(PackedVector3Array([a, b, c]))
 
 
 ## The paper's Reynolds length L = sqrt(total area) (Eq. 19); analytic profiles
@@ -103,19 +106,19 @@ func validate() -> String:
 			return "total_area_m2 must be finite and positive"
 		if not is_finite(characteristic_length_m) or characteristic_length_m <= 0.0:
 			return "characteristic_length_m must be finite and positive"
-		if not is_finite(source_offset_m) or source_offset_m <= 0.0:
-			return "source_offset_m must be finite and positive"
 		if not is_finite(bem_max_residual) or bem_max_residual < 0.0 \
 			or bem_max_residual > 1.0e-7:
 			return "BEM residual must be finite and at most 1e-7"
-		if slip_matrix.size() != face_centers_m.size() * 18:
-			return "BEM slip_matrix must contain 18 values per face"
-		for value in slip_matrix:
-			if not is_finite(value):
-				return "BEM slip_matrix must contain only finite values"
-	else:
-		if slip_matrix.size() != 0:
-			return "analytic profile slip_matrix must be empty"
+	if face_vertices_m.size() != face_centers_m.size() * 3:
+		return "face_vertices_m must hold three vertices per face"
+	for face_index in face_centers_m.size():
+		var a := face_vertices_m[face_index * 3]
+		var b := face_vertices_m[face_index * 3 + 1]
+		var c := face_vertices_m[face_index * 3 + 2]
+		if not _finite_vector(a) or not _finite_vector(b) or not _finite_vector(c) \
+			or ((a + b + c) / 3.0).distance_to(face_centers_m[face_index]) > 1.0e-5 \
+			or (b - a).cross(c - a).dot(face_normals[face_index]) <= 0.0:
+			return "face_vertices_m must match the face centers and wind outward"
 	if added_mass_tensor.size() != MATH.MATRIX_SCALARS:
 		return "added_mass_tensor must contain 36 values"
 	for center in face_centers_m:

@@ -1,5 +1,6 @@
 extends Node3D
 
+const MATH := preload("res://scripts/ambient_fluid/ambient_fluid_math.gd")
 const SPHERE_PROFILE := preload("res://resources/ambient_fluid/sphere_bem.tres")
 const PLATE_PROFILE := preload("res://resources/ambient_fluid/plate_bem.tres")
 const BOX_PROFILE := preload("res://resources/ambient_fluid/body_bem.tres")
@@ -631,88 +632,27 @@ func _profile_for(type_index: int) -> AmbientFluidProfile3D:
 
 
 func _pool_faces_for(type_index: int) -> PackedVector3Array:
-	var source_mesh := _mesh_for(type_index)
-	var arrays: Array
-	if source_mesh is BoxMesh:
-		arrays = (source_mesh as BoxMesh).get_mesh_arrays()
-	else:
-		arrays = (source_mesh as ArrayMesh).surface_get_arrays(0)
-	var positions: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
-	var unique_vertices := PackedVector3Array()
-	for position in positions:
-		var duplicate := false
-		for existing in unique_vertices:
-			if existing.distance_squared_to(position) <= 1.0e-10:
-				duplicate = true
-				break
-		if not duplicate:
-			unique_vertices.append(position)
-	var profile := _profile_for(type_index)
-	var ordered_faces := PackedVector3Array()
-	for face_index in profile.face_centers_m.size():
-		var center: Vector3 = profile.face_centers_m[face_index]
-		var normal: Vector3 = profile.face_normals[face_index]
-		var expected_area: float = profile.face_areas_m2[face_index]
-		var found := false
-		for a in unique_vertices.size():
-			if absf((unique_vertices[a] - center).dot(normal)) > 1.0e-4:
-				continue
-			for b in range(a + 1, unique_vertices.size()):
-				if absf((unique_vertices[b] - center).dot(normal)) > 1.0e-4:
-					continue
-				for c in range(b + 1, unique_vertices.size()):
-					if absf((unique_vertices[c] - center).dot(normal)) > 1.0e-4:
-						continue
-					var area := (unique_vertices[b] - unique_vertices[a]).cross(
-						unique_vertices[c] - unique_vertices[a]).length() * 0.5
-					if absf(area - expected_area) > maxf(1.0e-5, expected_area * 1.0e-5):
-						continue
-					var candidate_center := (unique_vertices[a] + unique_vertices[b] \
-						+ unique_vertices[c]) / 3.0
-					if candidate_center.distance_to(center) > 1.0e-4:
-						continue
-					ordered_faces.append(unique_vertices[a])
-					ordered_faces.append(unique_vertices[b])
-					ordered_faces.append(unique_vertices[c])
-					found = true
-					break
-				if found:
-					break
-			if found:
-				break
-		if not found:
-			push_error("Ambient fluid pool face %d has no matching canonical triangle" % face_index)
-			return PackedVector3Array()
-	return ordered_faces
+	return _profile_for(type_index).face_vertices_m
 
 
 func _mesh_for(type_index: int) -> Mesh:
-	match type_index:
-		0:
-			return _icosahedron_mesh()
-		1:
-			var box := BoxMesh.new()
-			box.size = Vector3(1.8, 1.4, 1.0)
-			return box
-		_:
-			var plate := BoxMesh.new()
-			plate.size = Vector3(2.4, 0.18, 1.2)
-			return plate
+	return AmbientFluidShapes.render_mesh(type_index)
 
 
 func _collision_for(type_index: int) -> Shape3D:
 	match type_index:
 		0:
 			var sphere := ConvexPolygonShape3D.new()
-			sphere.points = _icosahedron_vertices()
+			sphere.points = AmbientFluidShapes.icosphere_vertices(
+				AmbientFluidShapes.SPHERE_RADIUS, AmbientFluidShapes.SPHERE_SUBDIVISIONS)
 			return sphere
 		1:
 			var box := BoxShape3D.new()
-			box.size = Vector3(1.8, 1.4, 1.0)
+			box.size = AmbientFluidShapes.BOX_SIZE
 			return box
 		_:
 			var plate := BoxShape3D.new()
-			plate.size = Vector3(2.4, 0.18, 1.2)
+			plate.size = AmbientFluidShapes.PLATE_SIZE
 			return plate
 
 
@@ -737,55 +677,5 @@ func _density_color(density: float) -> Color:
 
 
 func _inertia_for(type_index: int, body_mass: float) -> Vector3:
-	var size := Vector3(2.0, 2.0, 2.0)
-	if type_index == 1:
-		size = Vector3(1.8, 1.4, 1.0)
-	elif type_index == 2:
-		size = Vector3(2.4, 0.18, 1.2)
-	if type_index == 0:
-		return Vector3.ONE * (0.289442719099992 * body_mass)
-	return Vector3(
-		body_mass * (size.y * size.y + size.z * size.z) / 12.0,
-		body_mass * (size.x * size.x + size.z * size.z) / 12.0,
-		body_mass * (size.x * size.x + size.y * size.y) / 12.0)
-
-
-func _icosahedron_vertices() -> PackedVector3Array:
-	var golden_ratio := (1.0 + sqrt(5.0)) * 0.5
-	var scale := 1.0 / sqrt(1.0 + golden_ratio * golden_ratio)
-	var vertices := PackedVector3Array([
-		Vector3(-1.0, golden_ratio, 0.0), Vector3(1.0, golden_ratio, 0.0),
-		Vector3(-1.0, -golden_ratio, 0.0), Vector3(1.0, -golden_ratio, 0.0),
-		Vector3(0.0, -1.0, golden_ratio), Vector3(0.0, 1.0, golden_ratio),
-		Vector3(0.0, -1.0, -golden_ratio), Vector3(0.0, 1.0, -golden_ratio),
-		Vector3(golden_ratio, 0.0, -1.0), Vector3(golden_ratio, 0.0, 1.0),
-		Vector3(-golden_ratio, 0.0, -1.0), Vector3(-golden_ratio, 0.0, 1.0),
-	])
-	for index in vertices.size():
-		vertices[index] *= scale
-	return vertices
-
-
-func _icosahedron_mesh() -> ArrayMesh:
-	var vertices := _icosahedron_vertices()
-	var normals := PackedVector3Array()
-	for vertex in vertices:
-		normals.append(vertex.normalized())
-	var indices := PackedInt32Array([
-		0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11,
-		1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
-		3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9,
-		4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1,
-	])
-	for triangle in range(0, indices.size(), 3):
-		var second := indices[triangle + 1]
-		indices[triangle + 1] = indices[triangle + 2]
-		indices[triangle + 2] = second
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	arrays[Mesh.ARRAY_NORMAL] = normals
-	arrays[Mesh.ARRAY_INDEX] = indices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return mesh
+	return MATH.polyhedron_inertia_diagonal(_profile_for(type_index).face_vertices_m,
+		body_mass)
