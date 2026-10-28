@@ -32,17 +32,17 @@ const CPU_GOLDENS := [
 	[0.281788051128, -0.209999993443],
 	[0.244730785489, 0.037602756172],
 	[0.331145524979, 0.015012499876],
-	[0.419651836157, -0.329145014286],
-	[0.454952865839, -0.026333246380],
+	[0.418813377619, -0.329502105713],
+	[0.454367011786, -0.026141650975],
 	[-0.397537738085, 0.154076203704],
 	[0.814242064953, -0.383117645979],
 	[0.696609914303, -0.057071477175],
 	[0.341940313578, -0.209272474051],
 	[0.480739802122, -0.156950622797],
 	[0.159733921289, -0.209999993443],
-	[0.321938484907, -0.224071413279],
-	[0.381899595261, -0.190166831017],
-	[0.337046623230, -0.369618535042],
+	[0.323050290346, -0.224748045206],
+	[0.381707012653, -0.190221786499],
+	[0.335513353348, -0.370333760977],
 ]
 
 
@@ -57,6 +57,7 @@ func _initialize() -> void:
 	_test_math_canvas_coordinate_mapping()
 	_test_oracle_line_fixtures()
 	_test_oracle_segment_fixtures()
+	_test_segment_mask_matches_reference()
 	_test_oracle_jacobian_grid_is_finite()
 	_test_gallery_names_and_counts()
 	_test_gallery_chained_tri_wave()
@@ -221,6 +222,22 @@ func _test_oracle_segment_fixtures() -> void:
 		_check(error <= 5.0e-4,
 			"rdSegment matches independent float64 fixture at (%f,%f): %.9f" \
 			% [point_value.x, point_value.y, error])
+
+
+# Mixwell.glsl rdSegment: mask = 1 - smoothstep(0.5 dMax, dMax, d), dMax = 10 r.
+# The full drift reaches 5 epsilon from the stroke; nothing reaches 10 epsilon.
+func _test_segment_mask_matches_reference() -> void:
+	var epsilon := 0.05
+	var segment := Vector4(-0.3, 0.0, 0.3, 0.0)
+	for case in [[0.0, 1.0], [4.99, 1.0], [7.5, 0.5], [10.0, 0.0], [12.0, 0.0]]:
+		var point := Vector2(0.1, case[0] * epsilon)
+		_check(absf(Diagnostics.segment_mask(point, segment, epsilon, 10.0) - case[1]) <= 1.0e-6,
+				"segment mask at %s epsilon is %s" % [str(case[0]), str(case[1])])
+	var beyond: Array[Dictionary] = [{"type": Gallery.SEGMENT, "segment": segment}]
+	var far := Vector2(0.1, 10.5 * epsilon)
+	_check(Diagnostics.cpu_advect(far, beyond, false, Vector2(2.0, 2.0), 0.05 * 180.0,
+			Vector2i(640, 360), -1, 180.0, 0.65, 10.0, 0, 0.1) == far,
+			"a segment moves nothing beyond its cutoff")
 
 
 func _test_oracle_jacobian_grid_is_finite() -> void:

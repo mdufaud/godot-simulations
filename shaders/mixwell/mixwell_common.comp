@@ -438,19 +438,25 @@ float operation_segment_sdf(vec2 point, vec2 start, vec2 end, vec2 period) {
 }
 
 
+// rdSegment's local mask (Mixwell.glsl): the segment's reverse drift is applied
+// in full out to half the cutoff (5 epsilon at the reference's 10) and blends
+// to zero at the cutoff, so a stroke ends without a seam yet keeps its whole
+// field where it is strong.
+float segment_mask(float distance_to_segment, float epsilon, float cutoff_gamma) {
+	float cutoff = max(epsilon * cutoff_gamma, epsilon);
+	return 1.0 - smoothstep(0.5 * cutoff, cutoff, distance_to_segment);
+}
+
+
 float operation_segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
 		float cutoff_gamma, vec2 period) {
-	float cutoff = max(epsilon * cutoff_gamma, epsilon);
-	float distance_to_segment = operation_segment_sdf(point, start, end, period);
-	return 1.0 - smoothstep(0.0, cutoff, distance_to_segment);
+	return segment_mask(operation_segment_sdf(point, start, end, period), epsilon, cutoff_gamma);
 }
 
 
 float segment_influence(vec2 point, vec2 start, vec2 end, float epsilon,
 		float cutoff_gamma) {
-	float cutoff = max(epsilon * cutoff_gamma, epsilon);
-	float distance_to_segment = segment_sdf(point, start, end);
-	return 1.0 - smoothstep(0.0, cutoff, distance_to_segment);
+	return segment_mask(segment_sdf(point, start, end), epsilon, cutoff_gamma);
 }
 
 

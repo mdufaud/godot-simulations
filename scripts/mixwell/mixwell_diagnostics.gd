@@ -70,10 +70,25 @@ static func cpu_advect(point: Vector2, operations: Array[Dictionary], periodic: 
 					Math.point(segment.x, segment.y), Math.point(segment.z, segment.w),
 					midpoint_alpha)
 			if drift.size() == 2:
-				value += Vector2(drift[0], drift[1])
+				value += Vector2(drift[0], drift[1]) * segment_mask(value, segment,
+						segment_epsilon, cutoff_gamma)
 		if periodic:
 			value = Periodicity.wrap_coordinate(value, period)
 	return Periodicity.wrap_coordinate(value, period) if periodic else value
+
+
+## rdSegment's local mask (Mixwell.glsl), as segment_mask in mixwell_common.comp:
+## full drift out to half the cutoff (5 epsilon at gamma 10), zero at the cutoff.
+static func segment_mask(point: Vector2, segment: Vector4, epsilon: float,
+		cutoff_gamma: float) -> float:
+	var start := Vector2(segment.x, segment.y)
+	var edge := Vector2(segment.z, segment.w) - start
+	var along := 0.0
+	if edge.length_squared() > 1.0e-30:
+		along = clampf((point - start).dot(edge) / edge.length_squared(), 0.0, 1.0)
+	var distance := point.distance_to(start + edge * along)
+	var cutoff := maxf(epsilon * cutoff_gamma, epsilon)
+	return 1.0 - _smoothstep(0.5 * cutoff, cutoff, distance)
 
 
 static func _periodic_segment_at(segment: Vector4, point: Vector2, period: Vector2) -> Vector4:
