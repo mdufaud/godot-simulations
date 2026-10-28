@@ -11,6 +11,18 @@ const SPILL_VOLUME_UNIT_M3 := 1.0e-9
 const SPILL_EMISSION_HZ := 60.0
 const SPILL_CAPACITY := 65536
 const SPILL_TEXTURE_WIDTH := 256
+# Spilling faces the sheets can draw at once, listed in a SPILL_TEXTURE_WIDTH-wide texture.
+const SPILL_LIP_CAPACITY := 4096
+# Down to this share of the mean discharge a stream is drawn whole; a thinner one shows as scattered drops.
+const SPILL_WHOLE_STREAM_SHARE := 0.25
+# A stream this many times thinner than the mean breaks up as soon as the thinnest ones do.
+const SPILL_MAX_THINNING := 64.0
+# Total drops over which a spill turns from a splash off a rock, merging with its pool, into a fall.
+const SPILL_SHORT_DROP_M := Vector2(0.4, 1.0)
+# Mean clearance over drop from a jet along a slope, which leaves aerated, to a smooth free fall, about 2/3 of its drop.
+const SPILL_FALL_CLEARANCE := Vector2(0.35, 0.5)
+# Froude numbers of the water reaching a lip over which it stops leaving as a smooth nappe: a torrent jets off aerated.
+const SPILL_NAPPE_FROUDE := Vector2(1.5, 2.5)
 const SPILL_FRICTION_HZ := 1.0
 const SPILL_MAX_AGE_S := 8.0
 const SPILL_ISSUANCE_JITTER := 0.02
@@ -22,10 +34,12 @@ const SPILL_ROCK_HIT_M_S := 2.5
 # A landing throws spray and foam in proportion to how far it fell, from nothing below x to fully past y.
 const SPILL_SPRAY_DROP_M := Vector2(0.5, 1.5)
 const SPILL_IMPACT_READ_S := 0.25
+# Falling water enters a pool at its level averaged over this time: the boil its own landings raise must not catch the
+# water still in the air, or every landing piles the next one into a pulse.
+const SPILL_LANDING_SETTLE_S := 0.5
 
 var region_m := Rect2()
 ## Radius the spill particles are drawn with: a fresh particle is drawn this much lower until it has dropped as far.
-var spill_draw_radius_m := 0.0
 ## A spill particle emitted with fewer volume units than this reference is a thinner stream that breaks up sooner: its
 ## drawn drop is scaled by the reference over its units to this exponent. Set by the host that measures the discharge.
 var spill_breakup_reference_units := 0.0
@@ -59,8 +73,11 @@ var _spill_deposits := RID()
 var _spill_outflow := RID()
 var _spill_state := RID()
 var _spill_out := RID()
+var _corners := RID()
 var _spill_positions := RID()
-var _spill_streaks := RID()
+var _spill_motion := RID()
+var _spill_lips := RID()
+var _spill_lip_flow := RID()
 var _spill_impacts := RID()
 var _spill_phase_s := 0.0
 var _impact_window_s := 0.0
@@ -162,7 +179,7 @@ func parameters(config: RiverConfig, time_s: float) -> PackedByteArray:
 		config.water_level_m, config.foam_amount, MAX_STEP_S, time_s,
 		_source_domain.position.x, _source_domain.position.y, _source_domain.size.x, _source_domain.size.y,
 		0.0, config.whitewater_strength, 0.0, 0.0,
-		config.current_guidance_hz, config.level_guidance_hz, 0.0, 0.0,
+		config.current_guidance_hz, config.level_guidance_hz, SPILL_LANDING_SETTLE_S, 0.0,
 	]).to_byte_array()
 
 
@@ -216,6 +233,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_spill_outflow = _rd.storage_buffer_create(cells * 32)
 	_spill_state = _rd.storage_buffer_create(SPILL_STATE_BYTES, _spill_header(SPILL_SLOPE if spilling else 0.0))
 	_spill_out = _texture_render(size if spilling else Vector2i.ONE)
+	_corners = _texture_render(size if spilling else Vector2i.ONE)
 	_spill_phase_s = 0.0
 	_impact_window_s = 0.0
 	for index in 2:
@@ -231,6 +249,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 		uniforms.append(_uniform(9, _spill_outflow, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER))
 		uniforms.append(_uniform(10, _spill_state, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER))
 		uniforms.append(_uniform(11, _spill_out, RenderingDevice.UNIFORM_TYPE_IMAGE))
+		uniforms.append(_uniform(12, _corners, RenderingDevice.UNIFORM_TYPE_IMAGE))
 		_sets.append(_rd.uniform_set_create(uniforms, _shader, 0))
 	if spilling:
 		_init_spill_render(size)
@@ -239,10 +258,12 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_rd.compute_list_end()
 	_mutex.lock()
 	_status = {"ready": true, "surface": _surface, "foam": _foam, "terrain": _terrain, "spill": _spill_out,
-		"state": _states[0], "gpu_ms": 0.0, "time_s": 0.0}
+		"corners": _corners, "state": _states[0], "gpu_ms": 0.0, "time_s": 0.0}
 	if spilling:
 		_status["spill_positions"] = _spill_positions
-		_status["spill_streaks"] = _spill_streaks
+		_status["spill_motion"] = _spill_motion
+		_status["spill_lips"] = _spill_lips
+		_status["spill_lip_flow"] = _spill_lip_flow
 	_mutex.unlock()
 
 
@@ -254,7 +275,9 @@ func _init_spill_render(size: Vector2i) -> void:
 	_spill_shader = _rd.shader_create_from_spirv(spirv)
 	_spill_pipeline = _rd.compute_pipeline_create(_spill_shader)
 	_spill_positions = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
-	_spill_streaks = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
+	_spill_motion = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_CAPACITY / SPILL_TEXTURE_WIDTH))
+	_spill_lips = _texture_render(Vector2i(SPILL_TEXTURE_WIDTH, SPILL_LIP_CAPACITY / SPILL_TEXTURE_WIDTH))
+	_spill_lip_flow = _texture_render(size)
 	_spill_impacts = _rd.storage_buffer_create(_impact_bytes(size))
 	for index in 2:
 		var uniforms: Array[RDUniform] = [
@@ -266,7 +289,10 @@ func _init_spill_render(size: Vector2i) -> void:
 			_uniform(5, _spill_state, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER),
 			_uniform(6, _spill_positions, RenderingDevice.UNIFORM_TYPE_IMAGE),
 			_uniform(7, _spill_impacts, RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER),
-			_uniform(8, _spill_streaks, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(8, _spill_motion, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(9, _spill_out, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(10, _spill_lips, RenderingDevice.UNIFORM_TYPE_IMAGE),
+			_uniform(11, _spill_lip_flow, RenderingDevice.UNIFORM_TYPE_IMAGE),
 		]
 		_spill_sets.append(_rd.uniform_set_create(uniforms, _spill_shader, 0))
 
@@ -301,6 +327,7 @@ func _reset_spill_render() -> void:
 	_rd.buffer_clear(_spill_deposits, 0, size.x * size.y * 16)
 	_rd.buffer_clear(_spill_outflow, 0, size.x * size.y * 32)
 	_rd.buffer_clear(_spill_impacts, 0, _impact_bytes(size))
+	_rd.texture_clear(_spill_lip_flow, Color(0.0, 0.0, 0.0, 0.0), 0, 1, 0, 1)
 	_rd.buffer_update(_spill_state, 0, SPILL_STATE_BYTES, _spill_header(SPILL_SLOPE))
 	_spill_phase_s = 0.0
 	_impact_window_s = 0.0
@@ -311,14 +338,16 @@ func _dispatch_spill(list: int, parameters_bytes: PackedByteArray, mode: float) 
 		parameters_bytes.decode_float(0), parameters_bytes.decode_float(4), parameters_bytes.decode_float(8), GRAVITY_M_S2,
 		parameters_bytes.decode_float(16), parameters_bytes.decode_float(20), parameters_bytes.decode_float(24), SPILL_CAPACITY,
 		SPILL_FRICTION_HZ, SPILL_MAX_AGE_S, mode, SPILL_ISSUANCE_JITTER,
-		SPILL_IMPACT_TILE_M, SPILL_ROCK_HIT_M_S, SPILL_IMPACT_WEIGHT_UNITS, spill_draw_radius_m,
+		SPILL_IMPACT_TILE_M, SPILL_ROCK_HIT_M_S, SPILL_IMPACT_WEIGHT_UNITS, 0.0,
 		SPILL_SPRAY_DROP_M.x, SPILL_SPRAY_DROP_M.y, spill_breakup_reference_units, spill_breakup_exponent,
-		spill_breakup_length_m, 0.0, 0.0, 0.0,
+		spill_breakup_length_m, SPILL_NAPPE_FROUDE.x, SPILL_NAPPE_FROUDE.y, 0.0,
+		0.0, 0.0, 0.0, SPILL_MAX_THINNING,
+		SPILL_FALL_CLEARANCE.x, SPILL_FALL_CLEARANCE.y, 0.0, 0.0,
 	]).to_byte_array()
 	_rd.compute_list_bind_compute_pipeline(list, _spill_pipeline)
 	_rd.compute_list_bind_uniform_set(list, _spill_sets[_index], 0)
 	_rd.compute_list_set_push_constant(list, bytes, bytes.size())
-	var count := int(parameters_bytes.decode_float(16) * parameters_bytes.decode_float(20)) if is_equal_approx(mode, 1.0) else SPILL_CAPACITY
+	var count := int(parameters_bytes.decode_float(16) * parameters_bytes.decode_float(20)) if is_equal_approx(mode, 1.0) or is_equal_approx(mode, 3.0) else SPILL_CAPACITY
 	_rd.compute_list_dispatch(list, ceili(count / 64.0), 1, 1)
 
 
@@ -399,6 +428,8 @@ func advance_render(delta_s: float, parameters_bytes: PackedByteArray, reset: bo
 	_dispatch_render(list, parameters_bytes, 2.0)
 	if spilling:
 		_dispatch_spill(list, parameters_bytes, 2.0)
+		_rd.compute_list_add_barrier(list)
+		_dispatch_spill(list, parameters_bytes, 3.0)
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("river_swe/end")
@@ -559,7 +590,7 @@ func _free_render() -> void:
 	_spill_outflow = RID()
 	_spill_state = RID()
 	_spill_impacts = RID()
-	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _spill_positions, _spill_streaks, _sampler, _query_points, _query_results]:
+	for texture in _states + [_terrain, _surface, _foam, _source, _spill_out, _corners, _spill_positions, _spill_motion, _spill_lips, _spill_lip_flow, _sampler, _query_points, _query_results]:
 		if texture.is_valid():
 			_rd.free_rid(texture)
 	_states.clear()
@@ -569,8 +600,11 @@ func _free_render() -> void:
 	_spill_pipeline = RID()
 	_spill_shader = RID()
 	_spill_out = RID()
+	_corners = RID()
 	_spill_positions = RID()
-	_spill_streaks = RID()
+	_spill_motion = RID()
+	_spill_lips = RID()
+	_spill_lip_flow = RID()
 	_terrain = RID()
 	_surface = RID()
 	_foam = RID()

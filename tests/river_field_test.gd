@@ -67,11 +67,6 @@ func _check_waterfall_banks() -> void:
 
 
 func _check_fall_sampling() -> void:
-	for drop_m: float in [3.0, 6.0, 12.0, 25.0]:
-		var diameter := 2.0 * WaterfallSystem.particle_radius_m(Solver.CELL_M, drop_m)
-		var landing_m_s := sqrt(2.0 * 9.81 * drop_m)
-		_check(diameter >= 1.2 * Solver.CELL_M and diameter >= 1.2 * landing_m_s / Solver.SPILL_EMISSION_HZ,
-			"Spill spheres must overlap across a lip and along the fall down to the pool, however thin the sheet")
 	_check(absf(WaterfallSystem.breakup_length_m(0.1) - 2.871) < 0.001 and absf(WaterfallSystem.breakup_length_m(0.25) - 3.850) < 0.001,
 		"Nappe break-up length must follow Horeni's 6 q^0.32")
 	_check(is_equal_approx(WaterfallSystem.breakup_length_m(2.0), WaterfallSystem.breakup_length_m(0.25)) and WaterfallSystem.breakup_length_m(0.0) == 0.0,

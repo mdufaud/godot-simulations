@@ -5,6 +5,7 @@ const Reflections := preload("res://scripts/river/river_reflections.gd")
 const SweSystem := preload("res://scripts/river/river_swe_system.gd")
 const WaterfallSystem := preload("res://scripts/river/river_waterfall_system.gd")
 const WaterShader := preload("res://shaders/river/river_water.gdshader")
+const SkirtShader := preload("res://shaders/river/river_water_skirt.gdshader")
 const FoamShader := preload("res://shaders/river/river_foam.gdshader")
 
 signal simulation_changed
@@ -53,7 +54,10 @@ var _reset_frames := 2
 var _started := false
 var _reflection_requested := true
 var _surface_mesh: PlaneMesh
+var _cell_mesh: ArrayMesh
 var _surface: MeshInstance3D
+var _skirt: MeshInstance3D
+var _skirt_material: ShaderMaterial
 var _reflections := Reflections.new()
 var _query_in_flight := false
 var _cpu_query_batch: Dictionary = {}
@@ -96,20 +100,22 @@ func start() -> void:
 	set_surface_cell_size_m(surface_cell_size_m)
 	_surface = MeshInstance3D.new()
 	_surface.name = "RiverSurface"
-	_surface.mesh = _surface_mesh
+	_surface.mesh = _cell_mesh if field.spills else _surface_mesh
 	_surface.material_override = water_material
 	_surface.layers = 2
 	_surface.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_surface.extra_cull_margin = 2.5
 	_surface.position = Vector3(field.origin_m.x, 0.0, field.origin_m.y)
 	add_child(_surface)
+	if field.spills:
+		_build_skirt()
 	_report_stage("Building foam and reflections")
 	_build_foam()
 	_build_reflection()
 	swe = SweSystem.new()
 	swe.config = config
 	swe.field = field
-	swe.materials.assign([water_material] + _foam_materials + scenery_materials)
+	swe.materials.assign([water_material] + _foam_materials + scenery_materials + ([_skirt_material] if _skirt_material != null else []))
 	swe.available = compute_available
 	swe.camera = camera
 	swe.window_m = swe_window_m
@@ -163,6 +169,9 @@ func apply_config(value: RiverConfig) -> void:
 	water_material.set_shader_parameter("deep_color", config.deep_color)
 	water_material.set_shader_parameter("whitewater_strength", config.whitewater_strength)
 	water_material.set_shader_parameter("foam_amount", config.foam_amount)
+	if _skirt_material != null:
+		_skirt_material.set_shader_parameter("deep_color", config.deep_color)
+		_skirt_material.set_shader_parameter("whitewater_strength", config.whitewater_strength)
 	if waterfall != null:
 		waterfall.apply_config(config)
 	set_reflection_enabled(_reflection_requested)
@@ -201,6 +210,8 @@ func _bake_field() -> void:
 	_field_texture = field.bake(config.water_level_m, Vector2i(384, 512), loading_stage)
 	_fit_surface_bounds()
 	_surface.visible = field.has_water
+	if _skirt != null:
+		_skirt.visible = field.has_water
 	water_material.set_shader_parameter("flow_map", _field_texture)
 	water_material.set_shader_parameter("bed_height_texture", field.bed_texture)
 	for material in _foam_materials:
@@ -218,6 +229,8 @@ func _fit_surface_bounds() -> void:
 	var low := field.height_range_m.x - 1.0
 	_surface.custom_aabb = AABB(Vector3(-field.domain_m.x * 0.5, low, -field.domain_m.y * 0.5),
 		Vector3(field.domain_m.x, field.height_range_m.y + 1.0 - low, field.domain_m.y))
+	if _skirt != null:
+		_skirt.custom_aabb = _surface.custom_aabb
 
 
 func set_reflection_enabled(enabled: bool) -> void:
@@ -261,12 +274,14 @@ func set_surface_cell_size_m(value: float) -> void:
 	surface_cell_size_m = value
 	if _surface_mesh != null:
 		if field.spills:
-			# One vertex per solver cell centre, so the step vertices of a spill face can meet on it.
-			var cells := Vector2i((field.domain_m / swe_cell_m).round())
-			_surface_mesh.size = field.domain_m - Vector2.ONE * swe_cell_m
-			_surface_mesh.subdivide_width = maxi(cells.x - 2, 0)
-			_surface_mesh.subdivide_depth = maxi(cells.y - 2, 0)
+			# The solver's own grid over the whole domain: spilling fields are never windowed.
+			var cells := SweSystem.grid_for(field.domain_m, swe_cell_m)
+			if _cell_mesh == null or water_material.get_shader_parameter("cell_grid") != cells:
+				_cell_mesh = _build_quad_mesh(cells.x * cells.y)
+				water_material.set_shader_parameter("cell_grid", cells)
+			water_material.set_shader_parameter("cell_size_m", swe_cell_m)
 		else:
+			water_material.set_shader_parameter("cell_grid", Vector2i.ZERO)
 			_surface_mesh.size = field.domain_m
 			_surface_mesh.subdivide_width = maxi(ceili(field.domain_m.x / value) - 1, 0)
 			_surface_mesh.subdivide_depth = maxi(ceili(field.domain_m.y / value) - 1, 0)
@@ -277,8 +292,52 @@ func set_surface_cell_size_m(value: float) -> void:
 func _sync_surface() -> void:
 	var region := field.domain_rect()
 	water_material.set_shader_parameter("geometry_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
-	_surface.mesh = _surface_mesh
+	_surface.mesh = _cell_mesh if field.spills else _surface_mesh
 	simulation_changed.emit()
+
+
+# Quads of four unshared vertices, placed by their shader from the vertex index: one per solver cell for the surface,
+# so a lip or a wall can split it along a cell edge, and two per cell for the sides where it splits.
+static func _build_quad_mesh(count: int) -> ArrayMesh:
+	var vertices := PackedVector3Array()
+	vertices.resize(count * 4)
+	var indices := PackedInt32Array()
+	indices.resize(count * 6)
+	for cell in count:
+		var v := cell * 4
+		var i := cell * 6
+		indices[i] = v
+		indices[i + 1] = v + 1
+		indices[i + 2] = v + 3
+		indices[i + 3] = v
+		indices[i + 4] = v + 3
+		indices[i + 5] = v + 2
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+
+func _build_skirt() -> void:
+	var cells := SweSystem.grid_for(field.domain_m, swe_cell_m)
+	_skirt_material = ShaderMaterial.new()
+	_skirt_material.shader = SkirtShader
+	_skirt_material.set_shader_parameter("cell_grid", cells)
+	_skirt_material.set_shader_parameter("cell_size_m", swe_cell_m)
+	_skirt_material.set_shader_parameter("domain_m", field.domain_m)
+	_skirt_material.set_shader_parameter("domain_origin_m", field.origin_m)
+	_skirt = MeshInstance3D.new()
+	_skirt.name = "RiverSkirt"
+	_skirt.mesh = _build_quad_mesh(cells.x * cells.y * 2)
+	_skirt.material_override = _skirt_material
+	_skirt.layers = _surface.layers
+	_skirt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_skirt.extra_cull_margin = _surface.extra_cull_margin
+	_skirt.position = _surface.position
+	add_child(_skirt)
 
 
 func set_waterfall_quality(tier: int) -> void:
@@ -508,7 +567,10 @@ func stop() -> void:
 	reflection_viewport = null
 	reflection_camera = null
 	_surface_mesh = null
+	_cell_mesh = null
 	_surface = null
+	_skirt = null
+	_skirt_material = null
 
 
 func _exit_tree() -> void:

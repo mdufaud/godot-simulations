@@ -1807,6 +1807,16 @@ func _run_river_waterfall() -> void:
 
 
 # Spill ledgers of a frozen solver: emitted = deposited + lost + overwritten + in flight, deposited = consumed + pending.
+func _spill_landed_units(snapshot: Dictionary) -> float:
+	var buffers := {}
+	RenderingServer.call_on_render_thread(func() -> void:
+		buffers.state = RenderingServer.get_rendering_device().buffer_get_data(snapshot.spill_state, 0, 24))
+	while not buffers.has("state"):
+		await process_frame
+	var state: PackedByteArray = buffers.state
+	return float(state.decode_u32(16)) + float(state.decode_u32(20)) * 4294967296.0
+
+
 func _spill_books(snapshot: Dictionary) -> Dictionary:
 	if not snapshot.has("spill_state"):
 		return {"balanced": false, "finite": false, "emitted": 0, "alive": 0, "particles": PackedFloat32Array(), "summary": "no spill buffers"}
@@ -7318,23 +7328,49 @@ func _run_river_cascade() -> void:
 		river.frozen = false
 		river.swe.profiling = true
 		var gpu_ms := 0.0
-		var frames := roundi(seconds * 60.0)
+		# High Water fills the pool hardest and takes a minute to settle: once settled, its pool must stay put.
+		var settles := preset == "high_water"
+		var frames := roundi((seconds + (60.0 if settles else 0.0)) * 60.0)
+		var pool_before := 0.0
 		for frame in frames:
 			await process_frame
 			if frame >= frames / 2:
 				gpu_ms += river.swe.gpu_ms() / float(frames - frames / 2)
+			if frame == frames - 600:
+				pool_before = await _cascade_pool_level(river)
+		# Falls land as steadily as they leave: water landing on the boil of earlier landings came down in pulses.
+		var landed := PackedFloat64Array()
+		var at_frame := PackedInt64Array()
+		for sample in 31:
+			landed.append(await _spill_landed_units(river.swe.solver.snapshot()))
+			at_frame.append(Engine.get_process_frames())
+			for i in 3:
+				await process_frame
+		var rates := PackedFloat64Array()
+		for i in landed.size() - 1:
+			rates.append((landed[i + 1] - landed[i]) / maxf(at_frame[i + 1] - at_frame[i], 1.0))
+		var sorted_rates := rates.duplicate()
+		sorted_rates.sort()
+		var landing_pulse := sorted_rates[sorted_rates.size() - 1] / maxf(sorted_rates[sorted_rates.size() / 2], 1.0)
 		river.frozen = true
 		await _boot_frames(3)
+		var pool_end := await _cascade_pool_level(river)
+		var pool_held := pool_end < config.water_level_m + 0.5 and (not settles or pool_end - pool_before < 0.03)
 		var snapshot: Dictionary = river.swe.solver.snapshot()
 		var books: Dictionary = await _spill_books(snapshot)
 		var particles: PackedFloat32Array = books.particles
 		var curtains := {}
 		var stray := 0
 		var stray_spots := {}
+		# Rocks splitting a lip stand clear of the flood: water running over one spills off all its sides.
+		var rock_spills := 0
 		for i in range(0, particles.size(), 12):
 			if particles[i + 3] <= 0.0:
 				continue
 			var origin := _spill_origin(river.swe, particles[i + 8])
+			for river_line in field.rivers:
+				var at: Vector4 = river_line.locate(origin)
+				rock_spills += int(river_line.rock(at.x, at.y) >= field.sample_bed(origin) - 0.05 and river_line.edge_m(at.x, at.y) < 0.0)
 			var curtain := _cascade_curtain(field, origin)
 			if curtain.is_empty():
 				stray += 1
@@ -7358,7 +7394,8 @@ func _run_river_cascade() -> void:
 			finite = finite and is_finite(surface[i]) and is_finite(surface[i + 1]) and is_finite(surface[i + 3])
 			if surface[i + 3] > 0.02:
 				fastest = maxf(fastest, Vector2(surface[i], surface[i + 1]).length())
-		var worst_level := 0.0
+		# A spilling field runs free, so each reach settles at the head its lip passes: it must hold water, within its banks.
+		var levels_held := true
 		var levels := ""
 		for river_line in field.rivers:
 			for reach in river_line.levels_m.size() - 1:
@@ -7367,7 +7404,8 @@ func _run_river_cascade() -> void:
 				var cell := Vector2i(((point - river.swe.region_m.position) / river.swe.cell_m).floor())
 				var index := (cell.y * grid.x + cell.x) * 4
 				var error: float = surface[index + 2] - river_line.levels_m[reach] - config.water_level_m
-				worst_level = maxf(worst_level, absf(error))
+				levels_held = levels_held and surface[index + 3] > 0.05 \
+					and surface[index + 2] < river_line.levels_m[reach] + CascadeField.BANK_HEIGHT_M - 0.1
 				levels += " %+.3f" % error
 		# A sheet leaves over its whole face, from the bed up to the surface: every spilling cell has water in the air,
 		# and its highest live emission reaches near its surface, so no wall shows between the pool and the sheet.
@@ -7390,24 +7428,99 @@ func _run_river_cascade() -> void:
 				reaching += int(highest[cell] - bed[cell * 4] >= 0.8 * surface[cell * 4 + 3])
 		var aired_share := aired / maxf(lip_cells, 1.0)
 		var reaching_share := reaching / maxf(aired, 1.0)
+		# Every spilling face of a wet cell gets a sheet: the list holds exactly those faces.
+		var listing: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.spill_lips, 0, SweSolver.SPILL_LIP_CAPACITY * 16)).to_float32_array()
+		var listed := 0
+		for i in range(1, listing.size(), 4):
+			listed += int(listing[i] > 0.5)
+		var spilling_faces := 0
+		for cell in grid.x * grid.y:
+			if surface[cell * 4 + 3] > 0.004:
+				var bits := int(faces[cell * 4] + 0.5) & 15
+				spilling_faces += (bits & 1) + ((bits >> 1) & 1) + ((bits >> 2) & 1) + ((bits >> 3) & 1)
+		# A cell that a wet neighbour spills onto and that falls on down is part of the wall: water held there is a
+		# terrace drawn halfway down the fall. A ledge with the water below just under it is drowned, not a fall.
+		var step_m: float = SweSolver.SPILL_SLOPE * river.swe.cell_m
+		var walls := 0
+		var wet_walls := 0
+		for y in range(1, grid.y - 1):
+			for x in range(1, grid.x - 1):
+				var cell := y * grid.x + x
+				var fed := false
+				var falls := false
+				for offset: int in [1, -1, grid.x, -grid.x]:
+					var other := cell + offset
+					fed = fed or (bed[other * 4] - bed[cell * 4] > step_m and surface[other * 4 + 3] > 0.004
+						and bed[other * 4] > bed[cell * 4] + surface[cell * 4 + 3])
+					falls = falls or (bed[cell * 4] - bed[other * 4] > step_m
+						and bed[cell * 4] > bed[other * 4] + surface[other * 4 + 3] + 0.05)
+				if fed and falls:
+					walls += 1
+					wet_walls += int(surface[cell * 4 + 3] > 0.02)
+		# The drawn surface splits at every spill face: the upper cell's edge stays above the cell below, which ends
+		# lower or draws nothing, so no wall of water hangs over the fall. Cells of one surface share their corners.
+		var corners: PackedFloat32Array = (await TextureReadback.new().read_layer(snapshot.corners, 0, grid.x * grid.y * 16)).to_float32_array()
+		# Per face (east, west, north, south): this cell's two corners on it, then the neighbour's two at the same points.
+		var face_corners := [[1, 3, 0, 2], [0, 2, 1, 3], [2, 3, 0, 1], [0, 1, 2, 3]]
+		var face_offsets := [1, -1, grid.x, -grid.x]
+		var split_faces := 0
+		var bridged_faces := 0
+		var ramp_faces := 0
+		var unsplit := []
+		var joined_edges := 0
+		var sealed_edges := 0
+		for y in range(1, grid.y - 1):
+			for x in range(1, grid.x - 1):
+				var cell := y * grid.x + x
+				if surface[cell * 4 + 3] <= 0.004:
+					continue
+				var bits := int(faces[cell * 4] + 0.5)
+				for i in 4:
+					var other: int = cell + face_offsets[i]
+					var own_pair := Vector2(corners[cell * 4 + face_corners[i][0]], corners[cell * 4 + face_corners[i][1]])
+					var other_pair := Vector2(corners[other * 4 + face_corners[i][2]], corners[other * 4 + face_corners[i][3]])
+					if bits & (1 << i):
+						# One shared end is the water running round the end of a lip; both shared would hang a wall, unless
+						# the step is no taller than a slope the solver runs as flow (a lip the pool below nearly drowns).
+						var shared := (own_pair - other_pair).abs()
+						var stitched: bool = shared.x < 1.0e-4 and shared.y < 1.0e-4
+						var drop: float = bed[cell * 4] + surface[cell * 4 + 3] - bed[other * 4] - surface[other * 4 + 3]
+						bridged_faces += int(stitched and drop > step_m)
+						ramp_faces += int(stitched and drop <= step_m)
+						var split := is_inf(other_pair.x) or minf(own_pair.x, own_pair.y) > maxf(other_pair.x, other_pair.y) + 0.01
+						split_faces += int(split)
+						if not split and unsplit.size() < 8:
+							unsplit.append("(%.2f,%.2f f%d own=%.3f,%.3f below=%.3f,%.3f levels=%.3f/%.3f)" % [
+								river.swe.region_m.position.x + (x + 0.5) * river.swe.cell_m, river.swe.region_m.position.y + (y + 0.5) * river.swe.cell_m,
+								i, own_pair.x, own_pair.y, other_pair.x, other_pair.y, bed[cell * 4] + surface[cell * 4 + 3],
+								bed[other * 4] + surface[other * 4 + 3] if surface[other * 4 + 3] > 0.004 else -INF])
+					elif i % 2 == 0 and surface[other * 4 + 3] > 0.004 and not (bits & (16 << i)) \
+							and absf(bed[cell * 4] + surface[cell * 4 + 3] - bed[other * 4] - surface[other * 4 + 3]) < 0.5 * step_m:
+						joined_edges += 1
+						sealed_edges += int((own_pair - other_pair).abs().length() < 1.0e-4)
 		var keys := curtains.keys()
 		keys.sort()
-		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d lip_cells=%d aired=%.3f reaching=%.3f" % [
+		print("RIVER CASCADE preset=%s %s lips=%d/%d curtains=%s stray=%d max_speed=%.2f level_errors=[%s] gpu_ms=%.2f cells=%d lip_cells=%d aired=%.3f reaching=%.3f sheets=%d/%d wet_walls=%d/%d pool=%.3f->%.3f rock_spills=%d split=%d/%d bridged=%d ramps=%d sealed=%d/%d landing_pulse=%.2f" % [
 			preset, books.summary, spilling.size(), lips, keys.map(func(key: String) -> String: return "%s:%d" % [key, curtains[key]]),
-			stray, fastest, levels.strip_edges(), gpu_ms, grid.x * grid.y, lip_cells, aired_share, reaching_share])
+			stray, fastest, levels.strip_edges(), gpu_ms, grid.x * grid.y, lip_cells, aired_share, reaching_share, listed, spilling_faces,
+			wet_walls, walls, pool_before, pool_end, rock_spills, split_faces, spilling_faces, bridged_faces, ramp_faces, sealed_edges, joined_edges, landing_pulse])
+		if not unsplit.is_empty():
+			print("RIVER CASCADE unsplit=%s" % " ".join(unsplit))
 		if stray > 0:
 			var spots := stray_spots.keys()
 			spots.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return stray_spots[a] > stray_spots[b])
 			print("RIVER CASCADE stray_spots=%s" % [spots.slice(0, 12).map(func(spot: Vector2i) -> String: return "%s:%d" % [spot, stray_spots[spot]])])
 		var passed: bool = books.balanced and books.finite and finite and spilling.size() == lips and stray == 0 \
-			and fastest <= 8.0 and worst_level <= 0.3 and gpu_ms <= 3.0 and reaching_share >= 0.85
+			and fastest <= 8.0 and levels_held and gpu_ms <= 3.0 and reaching_share >= 0.85 \
+			and listed == spilling_faces and spilling_faces <= SweSolver.SPILL_LIP_CAPACITY and wet_walls == 0 and pool_held \
+			and rock_spills == 0 and bridged_faces == 0 and sealed_edges == joined_edges and landing_pulse <= 1.2
 		all_pass = all_pass and passed
-	_check(all_pass, "river_cascade: every lip must spill and only lips, from the bed up to its surface, volume must balance, reaches must hold their level, speed and solver time must stay bounded")
+	_check(all_pass, "river_cascade: every lip must spill and only lips, never off a rock, from its surface with a sheet on every face, the drawn surface splitting there and sealed elsewhere, no water held on a wall, volume must balance, reaches must hold water within their banks, the pool must hold its level, speed and solver time must stay bounded")
 	scene.queue_free()
 	_finish("river_cascade")
 
 
-# "<river>.<lip>.<curtain>" for an emission point within 2 m of a cascade lip: water landing on a spur flank spills again. "" when on none.
+# "<river>.<lip>.<curtain>" of the nearest cascade lip within 2 m of an emission point (water landing on a spur flank spills again). "" when on none.
 # Centre of the cell a spill particle was emitted from (its emission cell index).
 func _spill_origin(swe: Node3D, cell_index: float) -> Vector2:
 	var columns: int = swe.solver.grid.x
@@ -7415,19 +7528,30 @@ func _spill_origin(swe: Node3D, cell_index: float) -> Vector2:
 	return swe.region_m.position + (cell + Vector2.ONE * 0.5) * swe.cell_m
 
 
+func _cascade_pool_level(river: RiverSystem) -> float:
+	var grid: Vector2i = river.swe.solver.grid
+	var surface: PackedFloat32Array = (await TextureReadback.new().read_layer(river.swe.solver.snapshot().surface, 0, grid.x * grid.y * 16)).to_float32_array()
+	var cell := Vector2i(((CascadeField.POOL_CENTER_M - river.swe.region_m.position) / river.swe.cell_m).floor())
+	return surface[(cell.y * grid.x + cell.x) * 4 + 2]
+
+
 func _cascade_curtain(field, origin: Vector2) -> String:
+	var best := ""
+	var nearest := 2.0
 	for r in field.rivers.size():
 		var river_line = field.rivers[r]
 		var at: Vector4 = river_line.locate(origin)
 		if absf(at.y) > river_line.half_width_m + 2.0:
 			continue
 		for k in river_line.lips_m.size():
-			if absf(at.x - river_line.lip_m(k, at.y)) < 2.0:
+			var distance := absf(at.x - river_line.lip_m(k, at.y))
+			if distance < nearest:
 				var curtain := 0
 				for spur: float in river_line.spurs_m[k]:
 					curtain += int(spur < at.y)
-				return "%d.%d.%d" % [r, k, curtain]
-	return ""
+				nearest = distance
+				best = "%d.%d.%d" % [r, k, curtain]
+	return best
 
 
 # Six rectangular plateaus on a ring, each turned to its own heading, from 0.5 to 6 m above the pool floor.

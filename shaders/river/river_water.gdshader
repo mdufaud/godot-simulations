@@ -25,6 +25,7 @@ uniform mat4 reflection_projection_2;
 uniform mat4 reflection_view_3;
 uniform mat4 reflection_projection_3;
 uniform int reflection_planes = 1;
+uniform vec4 reflection_plane = vec4(0.0, 1.0, 0.0, 0.0);
 uniform vec2 reflection_levels_m = vec2(0.0);
 uniform vec4 terrace_heights_m = vec4(0.0);
 uniform float surface_slope = 0.0;
@@ -54,16 +55,23 @@ uniform bool reflection_enabled = true;
 uniform bool foam_enabled = true;
 uniform bool foam_detail = true;
 uniform vec4 geometry_region_m = vec4(-6.0, -7.0, 16.0, 24.0);
+// Per solver cell, the surface height at its corners (river_swe.comp); infinite where no surface is drawn.
+uniform sampler2D swe_corners : filter_nearest, repeat_disable, hint_default_black;
+// Cells across the domain when the mesh is one quad of four vertices per solver cell, zero for a shared-vertex grid.
+uniform ivec2 cell_grid = ivec2(0);
+uniform float cell_size_m = 0.125;
 
 const vec2 RUN_UP_SLOPE = vec2(0.7, 1.2);
+const vec2 PLANE_REACH_M = vec2(0.6, 1.5);
 const float SPLASH_RADIUS_M = 0.35;
-// Spill step vertices move this close to their face, so the wall between two pools is a sliver.
-const float SPILL_FACE_GAP_M = 0.002;
 const float LANDING_FOAM_M_S = 0.3;
+// Corner heights of two cells this close are one surface: river_swe.comp gives every cell of a surface the same value.
+const float SHARED_CORNER_M = 1.0e-4;
+// A cell surface runs on into the rock it meets, which cuts it at the shore; it fades over this thickness of water.
+const float SHORE_SOFT_M = 0.02;
 
 varying vec3 world_position;
 varying vec3 surface_normal;
-varying float spill_step;
 
 vec2 domain_uv(vec2 point) {
 	return (point - domain_origin_m) / domain_m + 0.5;
@@ -160,30 +168,82 @@ vec4 planar_sample(int index, vec3 position) {
 	return vec4(color, valid);
 }
 
+// v[i] with a runtime i compiles to OpVectorExtractDynamic, which Godot's SPIR-V pass rejects at every compile.
+float component(vec4 v, int i) {
+	return i == 0 ? v.x : (i == 1 ? v.y : (i == 2 ? v.z : v.w));
+}
+
+// A quad corner of a cell surface: its height, its slope along x and z from the neighbours sharing that corner, and
+// whether all four cells around it share it (false on a lip, a front or a wall, where a side may hang from it).
+// False where the cell draws no surface.
+bool cell_corner(vec2 centre, int corner, out float level, out vec2 slope, out bool inner) {
+	ivec2 size = textureSize(swe_corners, 0);
+	ivec2 cell = clamp(ivec2(floor(river_swe_uv(centre) * vec2(size))), ivec2(0), size - 1);
+	vec4 own = texelFetch(swe_corners, cell, 0);
+	level = component(own, corner);
+	slope = vec2(0.0);
+	inner = false;
+	if (isinf(level)) { return false; }
+	ivec2 side = ivec2(corner & 1, corner >> 1) * 2 - 1;
+	ivec2 cell_x = clamp(cell + ivec2(side.x, 0), ivec2(0), size - 1);
+	ivec2 cell_z = clamp(cell + ivec2(0, side.y), ivec2(0), size - 1);
+	vec4 across_x = texelFetch(swe_corners, cell_x, 0);
+	vec4 across_z = texelFetch(swe_corners, cell_z, 0);
+	float across_d = component(texelFetch(swe_corners, clamp(cell + side, ivec2(0), size - 1), 0), corner ^ 3);
+	bool meets_x = abs(component(across_x, corner ^ 1) - level) < SHARED_CORNER_M;
+	bool meets_z = abs(component(across_z, corner ^ 2) - level) < SHARED_CORNER_M;
+	inner = meets_x && meets_z && abs(across_d - level) < SHARED_CORNER_M;
+	// Centred where a wet neighbour shares the corner; one-sided against another surface or a dry cell carrying this one.
+	bool shared_x = meets_x && texelFetch(swe_surface, cell_x, 0).w > 0.004;
+	bool shared_z = meets_z && texelFetch(swe_surface, cell_z, 0).w > 0.004;
+	float back_x = component(own, corner ^ 1);
+	float back_z = component(own, corner ^ 2);
+	float rise_x = shared_x ? (component(across_x, corner) - back_x) * 0.5 : level - back_x;
+	float rise_z = shared_z ? (component(across_z, corner) - back_z) * 0.5 : level - back_z;
+	slope = vec2(rise_x, rise_z) * vec2(side) * vec2(size) / swe_region_m.zw;
+	return true;
+}
+
 void vertex() {
 	vec2 point = VERTEX.xz;
+	vec2 centre = point;
+	int corner = 0;
+	if (cell_grid.x > 0) {
+		// Four vertices per cell, placed from their index: a lip or a wall splits the surface along a cell edge.
+		// A corner shared by several quads gets the same integer index and so the same position in each.
+		int quad = VERTEX_ID / 4;
+		corner = VERTEX_ID % 4;
+		ivec2 cell = ivec2(quad % cell_grid.x, quad / cell_grid.x);
+		vec2 origin = domain_origin_m - domain_m * 0.5;
+		point = origin + vec2(cell + ivec2(corner & 1, corner >> 1)) * cell_size_m;
+		centre = origin + (vec2(cell) + 0.5) * cell_size_m;
+	}
 	vec4 field = texture(flow_map, domain_uv(point));
 	float weight = live_share(point);
 	vec4 live = texture(swe_surface, river_swe_uv(point));
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), weight);
-	float h = basin_height(point)
-		+ ripple(point, field.rg, field.b) * field.a * mix(1.0, 0.25, weight);
-	// A vertex beside a spill face keeps its own pool's height but moves onto the face, so the pools meet there.
-	int spilled = river_spill_faces(point);
-	int faces = (spilled | (spilled >> 4)) & 15;
-	ivec2 toward = ivec2(int((faces & 1) != 0) - int((faces & 2) != 0), int((faces & 4) != 0) - int((faces & 8) != 0));
-	spill_step = float(faces != 0);
-	vec2 cell_m = swe_spill_enabled ? swe_region_m.zw / vec2(textureSize(swe_spill, 0)) : vec2(0.0);
-	VERTEX.xz = point + vec2(toward) * max(cell_m * 0.5 - SPILL_FACE_GAP_M, vec2(0.0));
-	VERTEX.y = h;
-	vec2 step_m = mix(vec2(0.08), vec2(-0.08), vec2(greaterThan(toward, ivec2(0))));
-	vec2 right = point + vec2(step_m.x, 0.0);
-	vec2 down = point + vec2(0.0, step_m.y);
-	float dx = (faces & 3) == 3 ? 0.0 : (basin_height(right)
-		+ ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(right)) - h) / step_m.x;
-	float dz = (faces & 12) == 12 ? 0.0 : (basin_height(down)
-		+ ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(down)) - h) / step_m.y;
-	surface_normal = normalize(vec3(-dx, 1.0, -dz));
+	float level = 0.0;
+	vec2 slope = vec2(0.0);
+	bool inner = true;
+	bool cell_live = cell_grid.x > 0 && cell_corner(centre, corner, level, slope, inner);
+	// The edge of a cell surface stays at its level, as the side hanging from it (river_water_skirt.gdshader) does.
+	float ripple_scale = cell_live && !inner ? 0.0 : 1.0;
+	if (cell_grid.x > 0 && !cell_live && live_share(centre) > 0.0) {
+		// No surface in this cell: its four vertices meet at its centre.
+		VERTEX = vec3(centre.x, 0.0, centre.y);
+		surface_normal = vec3(0.0, 1.0, 0.0);
+	} else {
+		vec2 right = point + vec2(0.08, 0.0);
+		vec2 down = point + vec2(0.0, 0.08);
+		float h = cell_live ? mix(texture(bed_height_texture, domain_uv(point)).g, level, weight) : basin_height(point);
+		float right_h = cell_live ? mix(texture(bed_height_texture, domain_uv(right)).g, level + slope.x * 0.08, live_share(right)) : basin_height(right);
+		float down_h = cell_live ? mix(texture(bed_height_texture, domain_uv(down)).g, level + slope.y * 0.08, live_share(down)) : basin_height(down);
+		h += ripple(point, field.rg, field.b) * field.a * mix(1.0, 0.25, weight) * ripple_scale;
+		VERTEX = vec3(point.x, h, point.y);
+		float dx = (right_h + ripple(right, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(right)) * ripple_scale - h) / 0.08;
+		float dz = (down_h + ripple(down, field.rg, field.b) * field.a * mix(1.0, 0.25, live_share(down)) * ripple_scale - h) / 0.08;
+		surface_normal = normalize(vec3(-dx, 1.0, -dz));
+	}
 	world_position = VERTEX;
 }
 
@@ -199,29 +259,20 @@ void fragment() {
 	if (shore_fade_depth_m > 0.0) {
 		wet_coverage = mix(1.0, smoothstep(0.0, shore_fade_depth_m, guided_bed.y - guided_bed.x), guided_bed.z);
 	}
-	if (swe_enabled) {
+	if (swe_enabled && cell_grid.x == 0) {
 		vec2 bed = guided_bed.xy;
 		bed.x = texture(bed_height_texture, domain_uv(world_position.xz)).r;
-		vec2 terrain_uv = spill_step > 0.0 ? river_swe_cell_uv(world_position.xz) : river_swe_uv(world_position.xz);
-		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, terrain_uv).r, 0.0));
+		float live_depth = min(live.w, max(world_position.y - texture(swe_terrain, river_swe_uv(world_position.xz)).r, 0.0));
 		float depth = mix(max(bed.y - bed.x, 0.0), live_depth, live_weight);
 		float edge_width = max(fwidth(depth), 0.002);
 		wet_coverage = mix(wet_coverage, smoothstep(0.015 - edge_width, 0.015 + edge_width, depth), live_weight);
 		// Past this triangle slope the heightfield climbs a rock or steps down a crest: what is behind shows instead.
-		// With spilling, water down a bed up to the spill slope stays drawn; past it a triangle climbs a rock, and at a
-		// spill face it is the wall between two pools.
 		vec3 facet = cross(dFdx(world_position), dFdy(world_position));
 		float slope = length(facet.xz) / max(abs(facet.y), 1.0e-6);
-		vec2 run_up = swe_spill_enabled && spill_step <= 0.0 ? vec2(1.0, 1.6) * swe_spill_slope : RUN_UP_SLOPE;
-		wet_coverage *= 1.0 - smoothstep(run_up.x, run_up.y, slope) * live_weight;
-		// Beside a spill face a pool ends where the cells at its level stop outweighing the others, between the cells.
-		if (spill_step > 0.0) {
-			vec2 spill_cell_m = swe_region_m.zw / vec2(textureSize(swe_spill, 0));
-			float level_share = river_swe_level_share(world_position.xz, world_position.y, swe_spill_slope * spill_cell_m.x * 0.5);
-			wet_coverage *= mix(1.0, smoothstep(0.35, 0.65, level_share), live_weight);
-		}
+		wet_coverage *= 1.0 - smoothstep(RUN_UP_SLOPE.x, RUN_UP_SLOPE.y, slope) * live_weight;
 	}
-	if (wet_coverage <= 0.0) { discard; }
+	bool cell_shore = swe_enabled && cell_grid.x > 0;
+	if (!cell_shore && wet_coverage <= 0.0) { discard; }
 	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);
 	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), live_weight);
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
@@ -261,6 +312,13 @@ void fragment() {
 	vec4 behind = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, texture(depth_texture, SCREEN_UV).r, 1.0);
 	behind.xyz /= behind.w;
 	float behind_m = max(-behind.z + VERTEX.z, 0.0);
+	if (cell_shore) {
+		// Solver depth stays positive across a lip, where both cells are wet: it only fades films and edges over dry cells.
+		float edge_width = max(fwidth(live.w), 0.002);
+		float film = smoothstep(0.015 - edge_width, 0.015 + edge_width, live.w);
+		wet_coverage = mix(wet_coverage, film * smoothstep(0.0, SHORE_SOFT_M, behind_m), live_weight);
+		if (wet_coverage <= 0.0) { discard; }
+	}
 	float thickness = max(behind_m, body_min_thickness_m * field.a);
 	// Seen from below, the straight ray climbs out of the water at once: the refracted one runs down to the bed.
 	vec3 view_ray = -normalize((INV_VIEW_MATRIX * vec4(VIEW, 0.0)).xyz);
@@ -295,6 +353,11 @@ void fragment() {
 	vec4 reflection = vec4(0.0);
 	if (reflection_enabled) {
 		reflection = planar_sample(0, reflected_point);
+		// One plane mirrors only water near it: a pool a fall away would show a wrong level and what lies under its water.
+		if (reflection_planes == 1 && swe_spill_enabled) {
+			float off_plane = abs(dot(world_position, reflection_plane.xyz) - reflection_plane.w);
+			reflection.a *= 1.0 - smoothstep(PLANE_REACH_M.x, PLANE_REACH_M.y, off_plane);
+		}
 		if (reflection_planes == 2) {
 			// A pool plane mirrors only for a viewer above it; seen from below, its water reflects the sky.
 			vec2 seen = step(reflection_levels_m, vec2(CAMERA_POSITION_WORLD.y));

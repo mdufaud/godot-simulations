@@ -16,7 +16,7 @@ void vertex() {
 void fragment() {
 	if (river_reflection_clipped(world_position, CAMERA_VISIBLE_LAYERS)) { discard; }
 	float height = world_position.y - river_surface_height(world_position);
-	float wet = river_cliff_wetness(world_position, 1.0 - smoothstep(0.03, 0.3, height));
+	float wet = river_cliff_wetness(world_position, 1.0 - smoothstep(0.03, max(river_wet_band(world_position), 0.04), height));
 	vec3 color = texture(albedo_texture, UV).rgb * albedo_tint.rgb;
 	float world_normal_y = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz).y;
 	float moss = smoothstep(0.35, 0.8, world_normal_y) * smoothstep(0.3, 0.75, height);

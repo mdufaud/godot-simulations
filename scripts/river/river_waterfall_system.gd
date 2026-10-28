@@ -1,9 +1,8 @@
 extends Node3D
 
 const Solver := preload("res://scripts/river/river_swe_solver.gd")
-const SAMPLE_OVERLAP := 0.75
-const PARTICLE_LAYER_SHIFT := 9
-const PARTICLE_COMPOSITE_LAYER := 2
+# Layer 2 like the river surface: the reflection cameras would draw the sheets as a ghost on the pool.
+const SHEET_LAYER := 2
 const IMPACT_MIN_M3_S := 0.002
 # Spray emitters pick their points at random: each impact gets points in proportion to its rate, the faint ones none.
 const SPRAY_POINTS := 64
@@ -23,6 +22,9 @@ const AERATION_CALM := 0.3
 const AERATION_DISCHARGE_M2_S := Vector2(0.2, 0.9)
 const AERATION_DISCHARGE_SHARE := 0.25
 const DISCHARGE_SMOOTHING := 0.3
+const SHEET_ROWS := 20
+# Foam streak radius against the solver cell, at the reference stream's volume.
+const FOAM_RADIUS_CELLS := 0.7
 
 var field: RiverField
 var water: RiverConfig
@@ -34,9 +36,14 @@ var unit_discharge_m2_s := 0.0
 var _sprays: Array[RiverWaterfallSpray] = []
 var _spray_centers := PackedVector3Array()
 var _spray_shares := PackedFloat32Array()
-var _particles: ScreenSpaceFluidRenderer
-var _material: ShaderMaterial
-var _particles_rid := RID()
+var _sheet_material: ShaderMaterial
+var _sheet_lips: Texture2DRD
+var _sheet_flow: Texture2DRD
+var _foam_material: ShaderMaterial
+var _foam_positions: Texture2DRD
+var _foam_motions: Texture2DRD
+var _foam: MultiMeshInstance3D
+var _lips_rid := RID()
 var _impact_serial := -1
 var _spill_words := PackedByteArray()
 var _rock_impacts := PackedVector4Array()
@@ -51,32 +58,103 @@ class Zone:
 func start() -> void:
 	assert(camera != null, "WaterfallSystem.camera must be set before start()")
 	_add_spray()
-	_particles = ScreenSpaceFluidRenderer.new()
-	_particles.name = "WaterfallParticles"
-	_particles.camera = camera
-	_particles.particle_count = Solver.SPILL_CAPACITY
-	_particles.radius = particle_radius_m(swe.cell_m, _drop_m())
-	swe.solver.spill_draw_radius_m = _particles.radius
 	swe.solver.spill_breakup_exponent = BREAKUP_EXPONENT
-	_particles.layer_shift = PARTICLE_LAYER_SHIFT
-	_particles.cull_attribute_max = 0.0
-	_particles.domain_aabb = _bounds()
-	add_child(_particles)
-	_particles.start()
-	_particles.set_texture_width(Solver.SPILL_TEXTURE_WIDTH)
-	# Layer 2 like the river surface: the reflection cameras would draw the screen-space composite as a ghost on the pool.
-	_particles.composite_mi.layers = PARTICLE_COMPOSITE_LAYER
-	_material = _particles.composite_material()
-	_material.shader = load("res://shaders/river/river_waterfall_particles.gdshader")
-	_material.set_shader_parameter("fluid_depth_tex", _particles.filtered_depth_texture())
-	_material.set_shader_parameter("thickness_tex", _particles.thick_filter_v_vp.get_texture())
-	_material.set_shader_parameter("sample_diameter_m", 2.0 * _particles.radius)
-	_material.render_priority = 1
-	_material.set_shader_parameter("turbulence_texture", turbulence_texture)
-	_material.set_shader_parameter("streak_texture", load("res://resources/river/waterfall_streaks.png"))
-	swe.materials.append(_material)
+	_add_sheets()
+	_add_foam()
+	_set_look("turbulence_texture", turbulence_texture)
+	_set_look("streak_texture", load("res://resources/river/waterfall_streaks.png"))
+	_set_look("short_spill_m", Solver.SPILL_SHORT_DROP_M)
+	swe.materials.append(_sheet_material)
 	set_quality(quality_tier)
 	apply_config(water)
+
+
+# Each fall from lip to pool: one sheet instance per face the solver lists, unused ones collapse.
+func _add_sheets() -> void:
+	_sheet_lips = Texture2DRD.new()
+	_sheet_flow = Texture2DRD.new()
+	_sheet_material = ShaderMaterial.new()
+	_sheet_material.shader = load("res://shaders/river/river_spill_sheet.gdshader")
+	_sheet_material.set_shader_parameter("lip_list", _sheet_lips)
+	_sheet_material.set_shader_parameter("lip_flow", _sheet_flow)
+	_sheet_material.set_shader_parameter("lip_list_width", Solver.SPILL_TEXTURE_WIDTH)
+	_sheet_material.set_shader_parameter("sheet_rows", SHEET_ROWS)
+	# After the pool's surface, which cuts its foot.
+	_sheet_material.render_priority = 1
+	_sheet_material.set_shader_parameter("handover", Vector4(0.0, 0.0, Solver.SPILL_WHOLE_STREAM_SHARE, Solver.SPILL_MAX_THINNING))
+	_sheet_material.set_shader_parameter("thinning_exponent", BREAKUP_EXPONENT)
+	var vertices := PackedVector3Array()
+	var uvs := PackedVector2Array()
+	var indices := PackedInt32Array()
+	var rows := SHEET_ROWS
+	for row in rows:
+		for column in 3:
+			vertices.append(Vector3.ZERO)
+			uvs.append(Vector2(column * 0.5, float(row) / float(rows - 1)))
+	for row in rows - 1:
+		for column in 2:
+			var i := row * 3 + column
+			indices.append_array(PackedInt32Array([i, i + 1, i + 3, i + 1, i + 4, i + 3]))
+	var arrays := []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	arrays[Mesh.ARRAY_INDEX] = indices
+	var strip := ArrayMesh.new()
+	strip.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = strip
+	multimesh.instance_count = Solver.SPILL_LIP_CAPACITY
+	var transforms := PackedFloat32Array()
+	for i in Solver.SPILL_LIP_CAPACITY:
+		transforms.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]))
+	multimesh.buffer = transforms
+	multimesh.custom_aabb = _bounds()
+	var sheets := MultiMeshInstance3D.new()
+	sheets.name = "WaterfallSheets"
+	sheets.multimesh = multimesh
+	sheets.material_override = _sheet_material
+	sheets.layers = SHEET_LAYER
+	sheets.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(sheets)
+
+
+func _set_look(parameter: String, value: Variant) -> void:
+	for material: ShaderMaterial in [_sheet_material, _foam_material]:
+		material.set_shader_parameter(parameter, value)
+
+
+# The broken-up part of each fall: one soft streak per spill particle, drawn where the sheet has torn.
+func _add_foam() -> void:
+	_foam_positions = Texture2DRD.new()
+	_foam_motions = Texture2DRD.new()
+	_foam_material = ShaderMaterial.new()
+	_foam_material.shader = load("res://shaders/river/river_spill_foam.gdshader")
+	_foam_material.set_shader_parameter("positions", _foam_positions)
+	_foam_material.set_shader_parameter("motions", _foam_motions)
+	_foam_material.set_shader_parameter("texture_width", Solver.SPILL_TEXTURE_WIDTH)
+	_foam_material.set_shader_parameter("radius_m", FOAM_RADIUS_CELLS * swe.cell_m)
+	_foam_material.render_priority = 2
+	var multimesh := MultiMesh.new()
+	multimesh.transform_format = MultiMesh.TRANSFORM_3D
+	multimesh.mesh = QuadMesh.new()
+	multimesh.instance_count = Solver.SPILL_CAPACITY
+	var transforms := PackedFloat32Array()
+	for i in Solver.SPILL_CAPACITY:
+		transforms.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]))
+	multimesh.buffer = transforms
+	multimesh.custom_aabb = _bounds()
+	var foam := MultiMeshInstance3D.new()
+	foam.name = "WaterfallFoam"
+	foam.multimesh = multimesh
+	foam.material_override = _foam_material
+	foam.layers = SHEET_LAYER
+	foam.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Hidden until the solver's particles are bound: a placeholder texture reads as live particles.
+	foam.visible = false
+	add_child(foam)
+	_foam = foam
 
 
 func _add_spray() -> RiverWaterfallSpray:
@@ -106,15 +184,15 @@ func _bounds() -> AABB:
 
 func apply_config(value: RiverConfig) -> void:
 	water = value
-	if _material == null:
+	if _sheet_material == null:
 		return
 	if unit_discharge_m2_s <= 0.0:
 		_set_discharge(0.1)
-	_material.set_shader_parameter("source_speed_m_s", water.speed_m_s)
-	_material.set_shader_parameter("aeration_strength", aeration_strength(unit_discharge_m2_s, water.whitewater_strength))
-	_material.set_shader_parameter("foam_amount", water.foam_amount)
-	_material.set_shader_parameter("deep_color", water.deep_color)
-	_material.set_shader_parameter("clarity", water.clarity)
+	_set_look("source_speed_m_s", water.speed_m_s)
+	_set_look("aeration_strength", aeration_strength(unit_discharge_m2_s, water.whitewater_strength))
+	_set_look("foam_amount", water.foam_amount)
+	_set_look("deep_color", water.deep_color)
+	_set_look("clarity", water.clarity)
 	for spray in _sprays:
 		spray.set_mist_density(water.mist_density)
 
@@ -123,21 +201,15 @@ func _set_discharge(value: float) -> void:
 	unit_discharge_m2_s = value
 	swe.solver.spill_breakup_reference_units = value * swe.cell_m / Solver.SPILL_EMISSION_HZ / Solver.SPILL_VOLUME_UNIT_M3
 	swe.solver.spill_breakup_length_m = breakup_length_m(value)
-	_material.set_shader_parameter("unit_discharge_m2_s", value)
-	_material.set_shader_parameter("breakup_length_m", breakup_length_m(value))
-	_material.set_shader_parameter("aeration_strength", aeration_strength(value, water.whitewater_strength))
+	_set_look("unit_discharge_m2_s", value)
+	_set_look("breakup_length_m", breakup_length_m(value))
+	_set_look("aeration_strength", aeration_strength(value, water.whitewater_strength))
 
 
 func set_quality(tier: int) -> void:
 	quality_tier = clampi(tier, 0, 3)
 	for spray in _sprays:
 		spray.set_quality(quality_tier)
-
-
-# Spheres overlap their neighbours across a lip and along the fall at the landing speed of the highest drop.
-static func particle_radius_m(cell_m: float, drop_m: float) -> float:
-	var landing_m_s := sqrt(2.0 * Solver.GRAVITY_M_S2 * drop_m)
-	return SAMPLE_OVERLAP * maxf(cell_m, landing_m_s / Solver.SPILL_EMISSION_HZ)
 
 
 # Beyond the measured range the issuance turbulence grows with q, so the length is held at its last measured value.
@@ -152,13 +224,15 @@ static func aeration_strength(discharge_m2_s: float, turbulence: float) -> float
 
 func tick(time_s: float, frozen: bool) -> void:
 	var status: Dictionary = swe.solver.snapshot() if swe.active else {}
-	var rid: RID = status.get("spill_positions", RID())
-	_material.set_shader_parameter("simulation_time_s", time_s)
-	if rid != _particles_rid:
-		_particles.rebind()
-		_particles.bind_particle_data(status.get("spill_streaks", RID()))
-		_particles_rid = rid
-	_particles.update(rid, _particles.particle_count if rid.is_valid() else 0)
+	var rid: RID = status.get("spill_lips", RID())
+	_set_look("simulation_time_s", time_s)
+	if rid != _lips_rid:
+		_lips_rid = rid
+		_sheet_lips.texture_rd_rid = rid
+		_sheet_flow.texture_rd_rid = status.get("spill_lip_flow", RID())
+		_foam_positions.texture_rd_rid = status.get("spill_positions", RID())
+		_foam_motions.texture_rd_rid = status.get("spill_motion", RID())
+		_foam.visible = _foam_positions.texture_rd_rid.is_valid() and _foam_motions.texture_rd_rid.is_valid()
 	if int(status.get("spill_impact_serial", -1)) != _impact_serial:
 		_impact_serial = int(status.spill_impact_serial)
 		_measure_discharge(status.get("spill_words", PackedByteArray()), float(status.spill_impact_window_s))
@@ -307,16 +381,23 @@ func reset() -> void:
 func stop() -> void:
 	for spray in _sprays:
 		spray.stop()
-	if _material != null:
-		swe.materials.erase(_material)
+	if _sheet_material != null:
+		swe.materials.erase(_sheet_material)
+	if _sheet_lips != null:
+		_sheet_lips.texture_rd_rid = RID()
+		_sheet_flow.texture_rd_rid = RID()
 	for child in get_children():
 		child.free()
 	_sprays.clear()
 	_spray_centers = PackedVector3Array()
 	_spray_shares = PackedFloat32Array()
-	_particles = null
-	_material = null
-	_particles_rid = RID()
+	_sheet_material = null
+	_sheet_lips = null
+	_sheet_flow = null
+	_foam_material = null
+	_foam_positions = null
+	_foam_motions = null
+	_lips_rid = RID()
 	_impact_serial = -1
 	_spill_words = PackedByteArray()
 

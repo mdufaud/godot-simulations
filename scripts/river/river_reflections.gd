@@ -28,6 +28,11 @@ func build(owner: Node3D, source_camera: Camera3D, world: World3D, material: Sha
 
 func set_plane_count(value: int) -> void:
 	var count := 4 if value >= 4 else (2 if value == 2 else 1)
+	# Pools take a plane each and terraces up to four; a field with neither has a single level to mirror.
+	if field != null and field.reflection_pools:
+		count = mini(count, 2)
+	elif field != null and field.terrace_heights_m == Vector4.ZERO:
+		count = 1
 	if count == plane_count and views.size() == count:
 		return
 	_clear_bindings()
@@ -73,6 +78,8 @@ func sync(render_size: Vector2i, level_m: float, anchor_z_m: float) -> void:
 		var plane := field.reflection_plane(level_m, anchor)
 		if index < 2:
 			levels[index] = plane.d
+		if index == 0 and _material != null:
+			_material.set_shader_parameter("reflection_plane", Vector4(plane.normal.x, plane.normal.y, plane.normal.z, plane.d))
 		var origin := _source_camera.global_position - 2.0 * plane.distance_to(_source_camera.global_position) * plane.normal
 		var forward := -_source_camera.global_basis.z
 		var up := _source_camera.global_basis.y

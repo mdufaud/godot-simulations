@@ -403,13 +403,14 @@ func _build_fall_rocks() -> void:
 	var cliff := profile.angle_degrees >= 70.0
 	var crest_point := Vector2(-1.7, crest + CREST_ROCK_SETBACK_M)
 	_add_rock(crest_point, 0.6, lip - 0.3, profile.HEIGHT_M + 0.42 - (lip - 0.3), BOULDER_PATHS)
-	# (x m, fraction of the drop below the lip, radius m, top above the face m)
-	var face_rocks := [] if cliff else [Vector4(1.1, 0.33, 0.6, 0.8), Vector4(-0.95, 0.62, 0.5, 0.5)]
+	# (x m, fraction of the drop below the lip, radius m, height above the face upstream: only water with v^2/2g past it climbs on)
+	var face_rocks := [] if cliff else [Vector4(1.1, 0.33, 0.6, 0.45), Vector4(-0.95, 0.62, 0.5, 0.4)]
 	for rock: Vector4 in face_rocks:
 		var face_y := lip - rock.y * profile.HEIGHT_M
 		var point := Vector2(rock.x, crest - rock.y * profile.run_m())
+		var top := face_y + rock.z * profile.HEIGHT_M / profile.run_m() + rock.w
 		var base := maxf(_footprint_floor(point, rock.z), face_y - rock.z * 1.2) - 0.15
-		_add_rock(point, rock.z, base, face_y + rock.w - base, BOULDER_PATHS)
+		_add_rock(point, rock.z, base, top - base, BOULDER_PATHS)
 	var impact := crest - (profile.run_m() if not cliff else 0.9)
 	for rock: Vector4 in [Vector4(2.0, impact - 0.7, 0.6, 0.45), Vector4(-2.25, impact - 2.1, 0.5, 0.32)]:
 		var point := Vector2(rock.x, rock.y)

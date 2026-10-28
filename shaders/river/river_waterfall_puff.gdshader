@@ -10,6 +10,8 @@ uniform float soft_fade_m = 0.8;
 uniform float wrap_light = 0.6;
 uniform float glow = 0.1;
 uniform float rainbow_strength = 0.0;
+// The water surface under the puffs: the depth buffer holds the bed under clear water, not the water itself.
+uniform float surface_m = -1.0e6;
 varying vec2 seed;
 
 void vertex() {
@@ -30,7 +32,8 @@ void fragment() {
 	float body = 1.0 - smoothstep(0.15, 1.0, length(p) + (churn - 0.5) * 0.7);
 	float scene_depth = texture(depth_texture, SCREEN_UV).r;
 	vec4 scene = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, scene_depth, 1.0);
-	float soft = clamp((VERTEX.z - scene.z / scene.w) / soft_fade_m, 0.0, 1.0) * smoothstep(0.5, 2.0, -VERTEX.z);
+	float soft = clamp((VERTEX.z - scene.z / scene.w) / soft_fade_m, 0.0, 1.0) * smoothstep(0.5, 2.0, -VERTEX.z)
+		* smoothstep(-0.05, 0.3, (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).y - surface_m);
 	NORMAL = normalize(vec3(p * 0.7, 1.0));
 	ALBEDO = tint * mix(0.88, 1.0, churn);
 	EMISSION = tint * glow;

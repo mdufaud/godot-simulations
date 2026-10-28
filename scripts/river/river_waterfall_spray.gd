@@ -179,8 +179,13 @@ func set_impacts(points: PackedVector3Array, downstream: Vector3, across: Vector
 	var bounds := AABB(points[0], Vector3.ZERO)
 	for point in points:
 		bounds = bounds.expand(point)
+	var surface := 0.0
+	for point in points:
+		surface += point.y / points.size()
 	for particles: GPUParticles3D in [_boil, _mist, _splash]:
 		particles.visibility_aabb = bounds.grow(VISIBILITY_MARGIN_M)
+	for particles: GPUParticles3D in [_boil, _mist]:
+		((particles.draw_pass_1 as QuadMesh).material as ShaderMaterial).set_shader_parameter("surface_m", surface)
 	_fog.transform = Transform3D(Basis(across, Vector3.UP, across.cross(Vector3.UP)),
 		bounds.get_center() + downstream * 1.5 + Vector3.UP * 1.5)
 	_fog.size = Vector3(width_m, 0.0, 0.0) + FOG_MARGIN_M

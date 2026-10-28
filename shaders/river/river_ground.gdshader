@@ -66,7 +66,7 @@ void fragment() {
 	}
 	vec3 gravel = texture(gravel_albedo, uv).rgb;
 	vec3 grass = texture(grass_albedo, uv * 0.9).rgb * vec3(0.50, 0.76, 0.35);
-	float wet = river_cliff_wetness(world_position, 1.0 - smoothstep(0.02, 0.35, height));
+	float wet = river_cliff_wetness(world_position, 1.0 - smoothstep(0.02, river_wet_band(world_position), height));
 	ALBEDO = mix(mix(gravel * vec3(0.94, 0.91, 0.81), grass, vegetation), rock_color, rock) * mix(1.0, 0.48, wet);
 	if (water_detail > 0.0 && height < 0.0) {
 		vec2 drift = vec2(0.015, 0.045) * flow_distance_m;

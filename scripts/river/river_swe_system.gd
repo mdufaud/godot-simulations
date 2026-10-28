@@ -33,6 +33,7 @@ var surface_texture := Texture2DRD.new()
 var foam_texture := Texture2DRD.new()
 var terrain_texture := Texture2DRD.new()
 var spill_texture := Texture2DRD.new()
+var corners_texture := Texture2DRD.new()
 var _spray: GPUParticles3D
 var _spray_material: ShaderMaterial
 var _reset := true
@@ -48,7 +49,7 @@ func start() -> void:
 		state_changed.emit()
 		return
 	solver.cell_m = cell_m
-	solver.grid = Vector2i(((window_m if _windowed() else field.domain_m) / cell_m).ceil())
+	solver.grid = grid_for(window_m if _windowed() else field.domain_m, cell_m)
 	region_m = _region()
 	solver.region_m = region_m
 	if not field.obstacles.is_empty():
@@ -61,6 +62,10 @@ func move_domain() -> void:
 		return
 	solver.move_source(field)
 	_probe_region = Rect2()
+
+
+static func grid_for(size_m: Vector2, cell_m: float) -> Vector2i:
+	return Vector2i((size_m / cell_m).ceil())
 
 
 func _windowed() -> bool:
@@ -157,6 +162,7 @@ func tick(step_s: float, frame_s: float, time_s: float) -> void:
 		foam_texture.texture_rd_rid = status.foam
 		terrain_texture.texture_rd_rid = status.terrain
 		spill_texture.texture_rd_rid = status.spill
+		corners_texture.texture_rd_rid = status.corners
 		_bind()
 		state_changed.emit()
 	if not initialized:
@@ -186,7 +192,7 @@ func stop() -> void:
 	for material in materials:
 		material.set_shader_parameter("swe_enabled", false)
 		material.set_shader_parameter("swe_spill_enabled", false)
-		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "swe_spill"]:
+		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "swe_spill", "swe_corners"]:
 			material.set_shader_parameter(parameter, null)
 	if _spray_material != null:
 		for parameter: String in ["swe_surface", "swe_foam", "swe_terrain", "swe_spill"]:
@@ -195,6 +201,7 @@ func stop() -> void:
 	foam_texture.texture_rd_rid = RID()
 	terrain_texture.texture_rd_rid = RID()
 	spill_texture.texture_rd_rid = RID()
+	corners_texture.texture_rd_rid = RID()
 	solver.stop()
 	for child in get_children():
 		child.free()
@@ -211,8 +218,8 @@ func _bind() -> void:
 		material.set_shader_parameter("swe_foam", foam_texture)
 		material.set_shader_parameter("swe_terrain", terrain_texture)
 		material.set_shader_parameter("swe_spill", spill_texture)
+		material.set_shader_parameter("swe_corners", corners_texture)
 		material.set_shader_parameter("swe_spill_enabled", field.spills and active)
-		material.set_shader_parameter("swe_spill_slope", Solver.SPILL_SLOPE)
 		material.set_shader_parameter("swe_region_m", Vector4(region.position.x, region.position.y, region.size.x, region.size.y))
 		if material != _spray_material:
 			material.set_shader_parameter("swe_enabled", active)
