@@ -8,20 +8,33 @@ A collection of 20 real-time simulation and rendering demos built in Godot 4.7
 
 - **Godot 4.7** — Forward+ renderer, so a Vulkan/D3D12-capable GPU is required.
   The Compatibility renderer will not work: it exposes no `RenderingDevice`.
-- **Python 3** — only to fetch the rock assets (standard library only, no pip install).
+- **Python 3** — only to fetch the Poly Haven assets (standard library only, no pip install).
+- **SCons and a C++ compiler** — only to build the optional native kernels.
 
 ## Setup
 
-The rock models are not stored in this repository (see [Assets](#assets)). Fetch
-them first, then open the project:
+Clone with the `godot-cpp` submodule, fetch the assets (see [Assets](#assets)),
+build the native kernels, then open the project:
 
 ```bash
+git clone --recursive <url> physics-test
+cd physics-test
 ./tools/fetch_assets.py
+native/build.sh
 godot project.godot
 ```
 
-Skipping the fetch leaves `ocean_demo` without its rocks. Every other demo runs
-without it.
+In an existing clone without the submodule, run
+`git submodule update --init native/godot-cpp` first.
+
+`native/build.sh` builds `addons/physics_native/bin/` (the first build compiles
+`godot-cpp` and takes a few minutes) and runs an import so Godot registers the
+extension. Without it, Godot logs `GDExtension dynamic library not found` and
+every demo falls back to its slower GDScript kernels; pass `template_release`
+before a release export.
+
+Skipping the fetch leaves `ocean_demo` without its rocks, and the river and
+smoke demos without their Poly Haven ground textures and sky.
 
 ## Demos
 
