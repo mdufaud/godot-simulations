@@ -34,6 +34,10 @@ fi
 
 # Outside the editor Godot loads only the extensions .godot/extension_list.cfg names,
 # and only an editor scan writes that file.
-if ! grep -qxF -- "${EXTENSION}" "${PROJECT_DIR}/.godot/extension_list.cfg" 2>/dev/null; then
+# A plain game launch never imports, so an asset without its .import has no loader.
+unimported="$(find "${PROJECT_DIR}/resources/rocks" "${PROJECT_DIR}/resources/river" \
+    "${PROJECT_DIR}/resources/materials" -type f \( -name '*.gltf' -o -name '*.hdr' -o -name '*.jpg' \) \
+    -exec sh -c '[ ! -f "$1.import" ]' _ {} \; -print -quit 2>/dev/null || true)"
+if [[ -n "${unimported}" ]] || ! grep -qxF -- "${EXTENSION}" "${PROJECT_DIR}/.godot/extension_list.cfg" 2>/dev/null; then
     "${PROJECT_DIR}/tools/import.sh"
 fi
