@@ -2,6 +2,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -199,6 +200,9 @@ def main() -> int:
     configured = configure_mobile_texture_imports()
     print(f"Configured {configured} mobile texture import profiles.")
 
+    # A plain game launch never imports: unimported .gltf files have no resource loader.
+    print("Importing assets...")
+    subprocess.run([str(PROJECT_DIR / "tools" / "import.sh")], check=True)
     return 0
 
 

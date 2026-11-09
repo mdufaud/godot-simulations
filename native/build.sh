@@ -27,6 +27,11 @@ if [[ ! -f "${LIBRARY}" ]] || [[ -n "$(find "${SCRIPT_DIR}/src" "${SCRIPT_DIR}/S
     touch "${LIBRARY}"
 fi
 
+# The sky is fetched last, so its absence means the asset fetch never completed.
+if [[ ! -f "${PROJECT_DIR}/resources/river/river_sky_4k.hdr" ]]; then
+    "${PROJECT_DIR}/tools/fetch_assets.py"
+fi
+
 # Outside the editor Godot loads only the extensions .godot/extension_list.cfg names,
 # and only an editor scan writes that file.
 if ! grep -qxF -- "${EXTENSION}" "${PROJECT_DIR}/.godot/extension_list.cfg" 2>/dev/null; then

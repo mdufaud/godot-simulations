@@ -13,13 +13,12 @@ A collection of 20 real-time simulation and rendering demos built in Godot 4.7
 
 ## Setup
 
-Clone with the `godot-cpp` submodule, fetch the assets (see [Assets](#assets)),
-build the native kernels, then open the project:
+Clone with the `godot-cpp` submodule, build (which also fetches the assets, see
+[Assets](#assets), and imports them), then open the project:
 
 ```bash
 git clone --recursive <url> physics-test
 cd physics-test
-./tools/fetch_assets.py
 native/build.sh
 godot project.godot
 ```
@@ -28,12 +27,13 @@ In an existing clone without the submodule, run
 `git submodule update --init native/godot-cpp` first.
 
 `native/build.sh` builds `addons/physics_native/bin/` (the first build compiles
-`godot-cpp` and takes a few minutes) and runs an import so Godot registers the
-extension. Without it, Godot logs `GDExtension dynamic library not found` and
+`godot-cpp` and takes a few minutes), runs `tools/fetch_assets.py` when the
+assets are missing, and imports so Godot registers the extension and the assets. Without it, Godot logs `GDExtension dynamic library not found` and
 every demo falls back to its slower GDScript kernels; pass `template_release`
 before a release export.
 
-Skipping the fetch leaves `ocean_demo` without its rocks, and the river and
+`tools/fetch_assets.py` alone re-fetches and imports. An unimported asset fails
+with `has no resource loaders`. Skipping the fetch leaves `ocean_demo` without its rocks, and the river and
 smoke demos without their Poly Haven ground textures and sky.
 
 ## Demos
