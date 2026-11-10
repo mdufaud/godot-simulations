@@ -66,6 +66,38 @@ void vertex() {
 	model_origin = MODEL_MATRIX[3].xyz;
 }
 
+// Noise advected by the local rotation and updraft, in two half-offset phases
+// that are reseeded and crossfaded (flow-map advection). A frozen noise field
+// turned rigidly reads as a periodic waveform sliding over the wall; integrating
+// the radius-dependent omega over TIME instead winds it into ever-tighter
+// spirals. Here each phase only lives FLOW_PERIOD_S, so the twist stays bounded
+// and the pattern keeps evolving. The blend is variance-preserving: a plain
+// crossfade loses contrast mid-fade and pulses at the phase rate.
+const float FLOW_PERIOD_S = 7.0;
+
+vec2 flow_noise(float ang, float r, float y, float omega, float t_sim) {
+	vec2 acc = vec2(0.0);
+	float weight_sq = 0.0;
+	for (int k = 0; k < 2; k++) {
+		float cycle = t_sim / FLOW_PERIOD_S + 0.5 * float(k);
+		float index = floor(cycle);
+		float phase = cycle - index;
+		float w = 1.0 - abs(2.0 * phase - 1.0);
+		// Age centred on the weight peak: distortion is smallest where the phase shows most.
+		float age = (phase - 0.5) * FLOW_PERIOD_S;
+		// atan(z,x) grows toward +Z while tw_wind turns swirl_sign*UP x r_dir, so the
+		// pattern angle must ADD omega*age to match the wind and the advected dust.
+		float a = ang + 0.35 * omega * age;
+		vec3 seed = fract(vec3(0.618034, 0.754878, 0.569840) * (2.0 * index + float(k)));
+		// Vertical stretch (x0.3) elongates the noise into the striations real funnels show.
+		vec3 np = vec3(cos(a) * r, (y - age * u_max * 0.25) * 0.3, sin(a) * r) * noise_scale + seed;
+		acc += w * (vec2(texture(noise_tex, np).r,
+			texture(noise_tex, np * 2.1 + vec3(0.37, 0.11, 0.73)).r) - 0.5);
+		weight_sq += w * w;
+	}
+	return clamp(0.5 + acc * inversesqrt(weight_sq), 0.0, 1.0);
+}
+
 // Funnel density at world position. Wall peak just inside the core radius,
 // hazy interior, ground dust skirt; FBM sheared by the model's own rotation profile.
 float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out) {
@@ -85,24 +117,25 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 	// Shear divisor clamped at 0.3: unbounded inner spin smears the noise into
 	// concentric rings near the axis (moire through both walls).
 	float omega = swirl_sign * swirl_vis * (u_max / max(rc, 1.0)) * tw_v_theta(max(r_bar, 0.05)) / max(r_bar, 0.3);
-	// Integrating the radius-dependent omega over TIME winds the noise into
-	// ever-tighter spirals — fingerprint moire on the wall that tightens for
-	// as long as the session runs. Rotate the pattern rigidly at the wall
-	// rate (0.85: the wall Gaussian's peak) and let only the DIFFERENTIAL
-	// shear breathe on a slow sine, so the twist stays bounded forever.
-	float omega_wall = swirl_sign * swirl_vis * (u_max / max(rc, 1.0)) * tw_v_theta(0.85) / 0.85;
-	float a = ang + 0.35 * (t_sim * omega_wall + (omega - omega_wall) * 6.0 * sin(t_sim * 0.09));
-	// Vertical stretch (x0.3) elongates the noise into the striations real funnels show.
-	vec3 np = vec3(cos(a) * r, (wp.y - t_sim * u_max * 0.25) * 0.3, sin(a) * r) * noise_scale;
-	float n = texture(noise_tex, np).r;
-	float n2 = texture(noise_tex, np * 2.1 + vec3(0.37, 0.11, 0.73)).r;
+	// Helical lead: streaks climb the wall along the flow instead of standing
+	// vertical, steep at the neck and flattening as the cone widens.
+	float helix = swirl_sign * 0.5 * wp.y / max(r_core0, 1.0);
+	vec2 flow = flow_noise(ang + helix, r, wp.y, omega, t_sim);
+	float n = flow.x;
+	float n2 = flow.y;
 	float turb = 0.4 + 1.1 * (n * 0.65 + n2 * 0.35);
 	turb_out = turb;
 
 	// Noise-wobbled wall radius: breaks the perfect cone silhouette. The n2
 	// contrast keeps the wall readable at long range, where a constant-density
 	// shell saturates to a flat black blob.
-	float rw = r_bar + 0.4 * (n - 0.5);
+	// Large slow lumps: one low-frequency sample turning with the vortex and
+	// drifting upward. It shapes the silhouette and the apron surges; the fine
+	// flow noise only frays the edge, so the outline heaves instead of rippling.
+	float big_a = ang + t_sim * 0.17 * swirl_sign * swirl_vis * u_max / max(r_core0, 1.0);
+	float big = texture(noise_tex, vec3(cos(big_a) * r, wp.y * 0.6 - t_sim * 4.0, sin(big_a) * r)
+		* 0.33 * noise_scale).r;
+	float rw = r_bar + 0.4 * (big - 0.5) + 0.12 * (n - 0.5);
 	float wall = exp(-pow((rw - 0.85) / 0.25, 2.0)) * (0.75 + 0.55 * n2);
 	// Dense low core: near the ground the funnel is a SOLID, dark column. The
 	// neck must stay darker than the sky behind it or the cone reads as
@@ -113,7 +146,8 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 	// a wide bottom fade leaves the funnel neck floating above the ground.
 	float body = (wall + fill) * smoothstep(0.0, 0.008, y01);
 	if (storm_type == 1) {
-		float helix_phase = 3.0 * ang - 0.055 * wp.y + 1.8 * t_sim * swirl_sign + 1.4 * (n - 0.5);
+		float helix_phase = 3.0 * ang - 0.055 * wp.y + 1.8 * t_sim * swirl_sign + 1.4 * (n - 0.5)
+			+ 7.0 * (big - 0.5);
 		body *= 0.55 + 0.45 * smoothstep(-0.65, 0.75, sin(helix_phase));
 	}
 	// Thin cap guard only: the body must run UP INTO the cloud deck. A wide
@@ -146,10 +180,10 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 	// erases the ground contact.
 	float skirt_base = smoothstep(outer, 0.4, rr0) * (0.4 + 0.6 * smoothstep(0.5, 1.8, rr0));
 	float churn = 0.25 + 1.35 * n;
-	// Angular surge lobes rolling around the base; the second faster octave
-	// breaks the 4-lobe symmetry so the bowl reads as chaotic churn.
-	float lobes = 1.0 + 0.5 * sin(ang * 4.0 + t_sim * 1.3 * swirl_sign + rr0 * 2.5)
-		+ 0.2 * sin(ang * 9.0 - t_sim * 2.1 * swirl_sign + rr0 * 4.0);
+	// Surge lobes rolling around the base, from the same slow lumps as the
+	// silhouette. Sine lobes pulse at a fixed rate from any fixed viewpoint and
+	// read as a signal, not as churn.
+	float lobes = max(1.0 + 2.5 * (big - 0.5), 0.2);
 	float sk = 0.0;
 	if (skirt_style == 1) {
 		// Satellite suction vortices: helical columns corkscrewing around the
@@ -159,8 +193,11 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 		float twist = swirl_sign * 0.010 * wp.y;
 		for (int v = 0; v < 5; v++) {
 			// Negative TIME term: satellites orbit with the wind (swirl_sign*UP x r_dir).
-			float ph = -t_sim * 0.55 * swirl_sign + float(v) * 1.2566371 + twist;
-			float orbit = r_core0 * (1.5 + 0.4 * sin(t_sim * 0.8 + float(v) * 2.1))
+			// Each satellite keeps its own orbit rate: five evenly spaced columns at
+			// one speed sweep past the camera like a metronome.
+			float ph = -t_sim * 0.55 * (0.78 + 0.11 * float(v)) * swirl_sign
+				+ float(v) * 1.2566371 + twist;
+			float orbit = r_core0 * (1.5 + 0.4 * sin(t_sim * (0.6 + 0.13 * float(v)) + float(v) * 2.1))
 				+ wp.y * 0.3 + r_core0 * 0.3 * (n - 0.5);
 			vec2 vc = c.xz + vec2(cos(ph), sin(ph)) * orbit;
 			float w = 0.28 * r_core0 * (1.0 + wp.y / max(0.14 * funnel_height, 1.0));

@@ -30,6 +30,8 @@ void vertex() {
 	VERTEX.y -= pow(d / 3800.0, 2.2) * 1000.0;
 }
 
+const float FLOW_PERIOD_S = 20.0;
+
 void fragment() {
 	vec3 c = tw_centerline(funnel_height);
 	vec2 rel = world_pos.xz - c.xz;
@@ -42,21 +44,31 @@ void fragment() {
 	// ang + TIME*spin: matches the wind direction (see tornado_funnel.gdshader).
 	float ang = atan(rel.y, rel.x);
 	float spin = swirl_sign * (u_max / max(rc_top, 1.0)) * 0.3;
-	// Bounded differential, same cure as the funnel wall: rotate rigidly at
-	// the mean collar rate and let the DIFFERENTIAL breathe on a slow sine.
-	// The old linear TIME wind accumulated radians forever, winding the
-	// near-axis noise into ever-tighter spaghetti arcs — the "broken sky"
-	// visible under the collar after a few minutes of play.
 	float decay = 1.0 / (1.0 + pow(r / max(2.0 * rc_top, 1.0), 1.6));
-	float omega_rigid = spin * 0.35;
-	float a = ang + TIME * omega_rigid + (spin * decay - omega_rigid) * 6.0 * sin(TIME * 0.09);
-	vec2 nuv_polar = vec2(cos(a), sin(a)) * r;
-	vec2 nuv_flat = rel + vec2(TIME * 4.0, TIME * 1.5);
 	float polar_w = exp(-r / (4.0 * rc_top));
-	vec2 nuv = mix(nuv_flat, nuv_polar, polar_w);
-
-	float n = texture(noise_tex, vec3(nuv * noise_scale, 0.21)).r;
-	float n2 = texture(noise_tex, vec3(nuv * noise_scale * 3.1 + 40.0, 0.67 + TIME * 0.004)).r;
+	vec2 nuv_flat = rel + vec2(TIME * 4.0, TIME * 1.5);
+	// Bounded differential, same cure as the funnel wall (flow_noise): two
+	// half-offset phases advected by the local spin, reseeded and crossfaded.
+	// Winding the angle linearly with TIME tightens the near-axis noise into
+	// spaghetti arcs; the seed and the variance-preserving gain fade out with
+	// polar_w so the far deck stays one steady drifting sample.
+	vec2 acc = vec2(0.0);
+	float weight_sq = 0.0;
+	for (int k = 0; k < 2; k++) {
+		float cycle = TIME / FLOW_PERIOD_S + 0.5 * float(k);
+		float index = floor(cycle);
+		float phase = cycle - index;
+		float w = 1.0 - abs(2.0 * phase - 1.0);
+		float a = ang + spin * decay * (phase - 0.5) * FLOW_PERIOD_S;
+		vec2 seed = fract(vec2(0.618034, 0.754878) * (2.0 * index + float(k))) * 0.3 * polar_w;
+		vec2 nuv = mix(nuv_flat, vec2(cos(a), sin(a)) * r, polar_w) * noise_scale + seed;
+		acc += w * (vec2(texture(noise_tex, vec3(nuv, 0.21)).r,
+			texture(noise_tex, vec3(nuv * 3.1 + 40.0, 0.67 + TIME * 0.004)).r) - 0.5);
+		weight_sq += w * w;
+	}
+	vec2 flow = clamp(0.5 + acc * mix(1.0, inversesqrt(weight_sq), polar_w), 0.0, 1.0);
+	float n = flow.x;
+	float n2 = flow.y;
 	float fbm = n * 0.65 + n2 * 0.35;
 
 	// Rotating collar (wall cloud) just above the funnel; ragged edge from noise.
