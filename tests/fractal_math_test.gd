@@ -9,6 +9,9 @@ func _initialize() -> void:
 	_test_zoom_anchor()
 	_test_pan()
 	_test_reset()
+	_test_deep_centre()
+	_test_precise_orbit()
+	_test_probe_boost()
 	_test_pois()
 	_test_orbit()
 	_finish("fractal_math")
@@ -57,13 +60,21 @@ func _test_iterations() -> void:
 	camera.manual_iterations = 555
 	_check(camera.iterations_full() == 555, "manual iterations win when auto is off")
 
-	camera.fractal_type = 0
-	_check(is_equal_approx(camera.max_log_zoom(), log(1.0e13)), "mandelbrot reaches 1e13")
-	camera.fractal_type = 1
-	_check(is_equal_approx(camera.max_log_zoom(), log(1.0e10)), "julia reaches 1e10")
-	camera.fractal_type = 2
-	_check(is_equal_approx(camera.max_log_zoom(), log(1.0e4)),
-		"the float32 fractals stop at 1e4")
+	camera.auto_iterations = true
+	camera.log_zoom = FractalCamera.LN10 * 3.0
+	camera.iteration_boost = 2.0
+	_check(camera.iterations_full() == 1836,
+		"the boost scales the zoom-based count: %d" % camera.iterations_full())
+	camera.iteration_boost = 1000.0
+	_check(camera.iterations_full() == FractalCamera.MAX_ITERATIONS,
+		"a boosted count stops at the shader bound")
+	camera.iteration_boost = 0.1
+	_check(camera.iterations_full() == 918, "the boost never cuts under the zoom-based count")
+
+	for fractal_type in 4:
+		camera.fractal_type = fractal_type
+		_check(is_equal_approx(camera.max_log_zoom(), log(1.0e25)),
+			"every fractal reaches 1e25 (type %d)" % fractal_type)
 
 
 func _test_zoom_anchor() -> void:
@@ -121,6 +132,109 @@ func _test_reset() -> void:
 	camera.fractal_type = 0
 	camera.reset_for_type()
 	_check(is_equal_approx(camera.center_x, -0.6), "mandelbrot resets onto its body")
+
+
+## Past 1e13 a float64 centre moves by more than a pixel per ulp: the low word
+## has to carry pans, anchored zooms and the offset to a reference point.
+func _test_deep_centre() -> void:
+	var camera := _new_camera()
+	camera.center_x = -0.743643887037151
+	camera.center_y = 0.131825904205330
+	camera.log_zoom = log(1.0e22)
+	camera.target_log_zoom = camera.log_zoom
+	var per_px := 2.0 * camera.view_half() / camera.viewport_size.y
+	_check(per_px < 1.0e-6 * absf(camera.center_x) * 1.1e-16,
+		"a pixel is far under an ulp of the centre at 1e22")
+
+	var start_x := camera.center_x
+	var start_x_lo := camera.center_x_lo
+	var start_y := camera.center_y
+	var start_y_lo := camera.center_y_lo
+	for i in 1000:
+		camera.pan_by(Vector2(-1.0, 2.0))
+	_check(absf(camera.center_delta_x(start_x, start_x_lo) / per_px - 1000.0) < 1.0e-6,
+		"1000 one-pixel pans add up to 1000 pixels in x: %f" % (
+			camera.center_delta_x(start_x, start_x_lo) / per_px))
+	_check(absf(camera.center_delta_y(start_y, start_y_lo) / per_px + 2000.0) < 1.0e-6,
+		"and to 2000 pixels in y")
+
+	# An anchored zoom keeps the point under the cursor to a fraction of a pixel.
+	var corner := Vector2(0.0, 0.0)
+	var anchor_x := FractalDD.add(camera.center_x, camera.center_x_lo,
+		-0.5 * camera.span_x(), 0.0)
+	camera.zoom_at(log(10.0), corner, true)
+	for i in 400:
+		camera.update_motion(0.05)
+	var corner_now := FractalDD.add(camera.center_x, camera.center_x_lo,
+		-0.5 * camera.span_x(), 0.0)
+	var drift := (corner_now[0] - anchor_x[0]) + (corner_now[1] - anchor_x[1])
+	var px_now := 2.0 * camera.view_half() / camera.viewport_size.y
+	_check(absf(drift) < 1.0e-3 * px_now,
+		"the anchored corner holds to 1/1000 pixel at 1e23: %s px" % (drift / px_now))
+
+	camera.center_x = 0.25
+	_check(camera.center_x_lo == 0.0, "writing the leading word drops the low word")
+
+
+## The double-double orbit must agree with float64 where float64 is exact
+## enough, and resolve two origins a float64 cannot tell apart.
+func _test_precise_orbit() -> void:
+	var z0 := PackedFloat64Array([0.0, 0.0, 0.0, 0.0])
+	for step: int in [FractalDD.Step.QUADRATIC, FractalDD.Step.BURNING_SHIP,
+			FractalDD.Step.TRICORN]:
+		var cx := -0.11 if step == FractalDD.Step.QUADRATIC else -0.3
+		var c := PackedFloat64Array([cx, 0.0, 0.2, 0.0])
+		var precise := FractalDD.orbit(step, z0, c, 60)
+		var plain := FractalOrbit._orbit_float64(step, 0.0, 0.0, cx, 0.2, 60)
+		_check(precise.size() == plain.size(), "step %d: both orbits run as long" % step)
+		var worst := 0.0
+		for i in mini(precise.size(), plain.size()):
+			worst = maxf(worst, absf(precise[i] - plain[i]))
+		_check(worst < 1.0e-5, "step %d: double-double follows float64: %s" % [step, worst])
+
+	# Two origins 1e-25 apart: float64 merges them, the low word must not. On a
+	# chaotic orbit the gap grows until it shows in float32.
+	var near := PackedFloat64Array([-1.9, 0.0, 0.0, 0.0])
+	var far := PackedFloat64Array([-1.9, 1.0e-25, 0.0, 0.0])
+	var orbit_near := FractalDD.orbit(FractalDD.Step.QUADRATIC, z0, near, 400)
+	var orbit_far := FractalDD.orbit(FractalDD.Step.QUADRATIC, z0, far, 400)
+	var split := false
+	for i in mini(orbit_near.size(), orbit_far.size()):
+		if absf(orbit_near[i] - orbit_far[i]) > 1.0e-3:
+			split = true
+	_check(split, "an origin offset of 1e-25 changes the orbit")
+
+	var camera := _new_camera()
+	camera.center_x = -0.5
+	camera.log_zoom = log(1.0e15)
+	var orbit := FractalOrbit.new()
+	orbit.ensure(camera, 0.0, 0.0, 200)
+	_check(orbit.length == 314, "the deep orbit runs as long as the shallow one")
+	camera.offset_center(3.0e-17, 0.0)
+	_check(absf(camera.center_delta_x(orbit.origin_x, orbit.origin_x_lo) - 3.0e-17) < 1.0e-24,
+		"the offset to the reference survives below an ulp")
+
+
+func _test_probe_boost() -> void:
+	# A probe of 1000 orbits at a count of 1000: `late` escape past the count,
+	# `near` in its last third, the rest early.
+	var make := func(late: int, near: int) -> PackedFloat32Array:
+		var mu := PackedFloat32Array()
+		for i in 800:
+			mu.append(1500.0 if i < late else (900.0 if i < late + near else 50.0))
+		return mu
+	_check(is_equal_approx(FractalView.probe_boost(make.call(50, 0), 1000, 1000, 1.0, 1000),
+		1.5), "5% of the screen escaping past the count raises it")
+	_check(is_equal_approx(FractalView.probe_boost(make.call(2, 0), 1000, 1000, 1.0, 1000),
+		1.0), "a couple of late orbits are the boundary, not a reason to raise")
+	_check(is_equal_approx(FractalView.probe_boost(make.call(0, 0), 1000, 1000, 3.0, 1000),
+		2.0), "nothing escaping late lowers a raised count")
+	_check(is_equal_approx(FractalView.probe_boost(make.call(0, 20), 1000, 1000, 3.0, 1000),
+		3.0), "orbits the lowered count would lose keep it up")
+	_check(is_equal_approx(FractalView.probe_boost(make.call(0, 0), 1000, 1000, 1.0, 1000),
+		1.0), "the count never goes under the zoom-based one")
+	_check(is_equal_approx(FractalView.probe_boost(make.call(50, 0), 1000, 1000, 1.2, 20000),
+		1.5), "the boost stops where the count reaches the shader bound")
 
 
 func _test_pois() -> void:

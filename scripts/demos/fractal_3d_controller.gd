@@ -19,6 +19,9 @@ const QUALITY_PROFILES := [
 	{"target_fps": 45.0, "start_scales": [0.75, 0.75, 0.45], "scale_floors": [0.5, 0.55, 0.4], "step_floors": [160, 120, 420], "iteration_floors": [9, 5, 18], "ao_samples": 2, "pixel_tolerance": 0.22},
 	{"target_fps": 60.0, "start_scales": [0.75, 0.75, 0.4], "scale_floors": [0.45, 0.45, 0.4], "step_floors": [120, 100, 380], "iteration_floors": [8, 5, 16], "ao_samples": 1, "pixel_tolerance": 0.28},
 ]
+## Iterations the shader may add past the preset count where their features
+## are larger than a pixel (its per-fractal loop bounds cap the total).
+const DETAIL_ITERATIONS := 64
 const QUALITY_WARMUP_FRAMES := 120
 const QUALITY_INTERVAL := 0.25
 const QUALITY_RECOVERY_DELAY := 1.5
@@ -28,6 +31,7 @@ const QUALITY_RECOVERY_DELAY := 1.5
 const BASE_PARAMS := {
 	"fractal_type": 0,
 	"iterations": 12,
+	"detail_iterations": DETAIL_ITERATIONS,
 	"max_steps": 480,
 	"max_dist": 60.0,
 	"epsilon": 0.0001,
@@ -62,6 +66,7 @@ const PRESETS := {
 }
 
 var _renderer := FractalRenderer.new()
+var _reference := FractalReference.new()
 var config: Fractal3DConfig = Fractal3DConfig.new()
 var _params: Dictionary = {}
 
@@ -104,6 +109,9 @@ func _ready() -> void:
 	_renderer.setup(_fractal_box, _post_process)
 	_camera.de_query = _evaluate_de
 	_camera.move_speed = config.flight_speed_per_s
+	_camera.min_flight_distance = config.min_flight_distance_m
+	# After the camera: the reference orbit has to be the one of this frame's pose.
+	process_priority = 1
 
 	# FSR remains available for manual/adaptive scaling; maximum quality uses
 	# native resolution. UI/post-process always stay at native resolution.
@@ -124,7 +132,7 @@ func _ready() -> void:
 
 func _add_hint_label() -> void:
 	var hint := Label.new()
-	hint.text = "Esc: release/capture mouse   •   WASD + Space/Shift: fly   •   Wheel: speed"
+	hint.text = "Esc: release/capture mouse   •   WASD + Space/Ctrl: fly   •   Shift: boost   •   Wheel: speed"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.modulate = Color(1, 1, 1, 0.55)
 	hint.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT, Control.PRESET_MODE_MINSIZE, 12)
@@ -153,6 +161,10 @@ func _process(delta: float) -> void:
 	# The raymarch box only gives the shader fragments to run: keep the camera
 	# inside it however far it flies.
 	_fractal_box.global_position = _camera.global_position
+	var eye := _camera.precise_position
+	_reference.update(eye[0], eye[1], eye[2], _params)
+	_renderer.push_reference(_reference,
+		config.orbit_precision * maxf(1.0, maxf(absf(eye[0]), maxf(absf(eye[1]), absf(eye[2])))))
 	if absf(_speed_slider.value - _camera.move_speed) > 0.01:
 		_speed_slider.value = _camera.move_speed
 	_update_packing_animation(delta)
@@ -170,8 +182,8 @@ func _process(delta: float) -> void:
 	_update_quality_label()
 
 
-func _evaluate_de(p: Vector3) -> float:
-	return FractalDE.evaluate(p, _params)
+func _evaluate_de(x: float, y: float, z: float) -> float:
+	return FractalDE.evaluate_at(x, y, z, _params)
 
 
 # --- UI ------------------------------------------------------------------------
@@ -189,6 +201,8 @@ func _setup_ui() -> void:
 	_sliders["color_offset"] = _menu.add_slider("Hue", 0.0, 1.0, _params["color_offset"], func(v: float) -> void: _set_param("color_offset", v))
 	_sliders["glow_strength"] = _menu.add_slider("Glow", 0.0, 3.0, _params["glow_strength"], func(v: float) -> void: _set_param("glow_strength", v))
 	_sliders["iterations"] = _menu.add_slider("Detail (iter.)", 2.0, 40.0, _params["iterations"], func(v: float) -> void: _set_param("iterations", int(round(v))))
+	_menu.add_toggle("Endless detail", true, func(on: bool) -> void:
+		_set_param("detail_iterations", DETAIL_ITERATIONS if on else 0))
 
 	_menu.add_section("Parameters")
 	_build_param_groups()
@@ -213,7 +227,9 @@ func _setup_ui() -> void:
 
 	# Free flight makes it easy to drift into empty space; Reset flies back to the preset pose.
 	_menu.add_action("↺", "Reset", _reset_view)
-	_menu.add_action("🎲", "Preset", _random_preset)
+	_menu.add_action("🔷", "Shape", func() -> void: _cycle_option(_fractal_option))
+	_menu.add_action("🎲", "Preset", func() -> void: _cycle_option(_preset_option))
+	_menu.add_action("🎨", "Colors", func() -> void: _cycle_option(_palette_option))
 
 	_menu.add_debug_toggle("⚡", "Adaptive quality", _adaptive,
 		_set_adaptive)
@@ -226,16 +242,11 @@ func _reset_view() -> void:
 	_apply_preset(list[clampi(_preset_option.selected, 0, list.size() - 1)])
 
 
-func _random_preset() -> void:
-	var list: Array = PRESETS[_params["fractal_type"]]
-	if list.size() < 2:
-		_reset_view()
-		return
-	var idx := randi() % list.size()
-	if idx == _preset_option.selected:
-		idx = (idx + 1) % list.size()
-	_preset_option.select(idx)
-	_preset_option.item_selected.emit(idx)
+## Selects the next item of a menu dropdown, as if picked by hand.
+func _cycle_option(option: OptionButton) -> void:
+	var index := (option.selected + 1) % option.item_count
+	option.select(index)
+	option.item_selected.emit(index)
 
 
 func _build_param_groups() -> void:

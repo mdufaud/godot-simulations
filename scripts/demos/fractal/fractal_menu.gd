@@ -10,6 +10,7 @@ var _on_reset: Callable
 var _zoom_label: Label
 var _iterations_label: Label
 var _state_label: Label
+var _morph_button: Button
 var _label_timer := 0.0
 
 
@@ -27,9 +28,13 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 
 	menu.add_separator()
 	menu.add_section("Fractal")
-	menu.add_option_button("Type", ["Mandelbrot", "Julia", "Burning Ship", "Tricorn"], 0,
+	var type_option: OptionButton = menu.add_option_button("Type",
+		["Mandelbrot", "Julia", "Burning Ship", "Tricorn"], 0,
 		func(index: int) -> void:
 			_camera.fractal_type = index
+			# A restored selection fires while the menu is still being built.
+			if _morph_button != null:
+				_morph_button.visible = index == 1
 			_autopilot.pick(0)
 			_on_reset.call()
 	)
@@ -47,6 +52,7 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 		func(value: float) -> void: _autopilot.speed = value)
 
 	menu.add_action("↺", "Reset", _on_reset)
+	menu.add_action("🔷", "Shape", func() -> void: _cycle_option(type_option))
 	menu.add_action_toggle("🎬", "Auto", _autopilot.enabled, func(on: bool) -> void:
 		_autopilot.enabled = on
 		if on:
@@ -54,12 +60,17 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 			_camera.clear_anchor()
 			_camera.target_log_zoom = _camera.log_zoom
 	)
-	menu.add_action_toggle("🌀", "Morph", _view.julia_morph, _view.set_julia_morph)
+	# Morphing only moves the Julia constant: the action shows for Julia alone.
+	_morph_button = menu.add_action_toggle("🌀", "Morph", _view.julia_morph,
+		_view.set_julia_morph)
+	_morph_button.visible = _camera.fractal_type == 1
 
 	menu.add_separator()
 	menu.add_section("Color")
-	menu.add_option_button("Mode", ["Cosmic", "Orbit Trap", "HSV Cycle", "Thermal"], 0,
+	var color_option: OptionButton = menu.add_option_button("Mode",
+		["Cosmic", "Orbit Trap", "HSV Cycle", "Thermal"], 0,
 		func(index: int) -> void: _view.set_display_parameter("color_mode", index))
+	menu.add_action("🎨", "Colors", func() -> void: _cycle_option(color_option))
 	menu.add_slider("Speed", 0.0, 5.0, 0.3,
 		func(value: float) -> void: _view.set_display_parameter("color_speed", value))
 	menu.add_slider("Offset", 0.0, 1.0, 0.0,
@@ -88,7 +99,8 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 	quality.attach_menu_option(menu)
 	menu.add_toggle("Auto Iterations", _camera.auto_iterations,
 		func(on: bool) -> void: _camera.auto_iterations = on)
-	menu.add_slider("Max Iterations", 100, 20000, float(_camera.manual_iterations),
+	menu.add_slider("Max Iterations", 100, FractalCamera.MAX_ITERATIONS,
+		float(_camera.manual_iterations),
 		func(value: float) -> void: _camera.manual_iterations = int(value))
 
 	menu.add_separator()
@@ -96,6 +108,13 @@ func build(menu: SimMenu, quality: SimQualityState) -> void:
 	_zoom_label = menu.add_label("Zoom: 1.00e+00")
 	_iterations_label = menu.add_label("Iterations: 0")
 	_state_label = menu.add_label("State: idle")
+
+
+## Selects the next item of a menu dropdown, as if picked by hand.
+func _cycle_option(option: OptionButton) -> void:
+	var index := (option.selected + 1) % option.item_count
+	option.select(index)
+	option.item_selected.emit(index)
 
 
 ## Refreshed ten times a second: the numbers move faster than they can be read.

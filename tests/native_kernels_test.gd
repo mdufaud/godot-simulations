@@ -28,6 +28,7 @@ func _initialize() -> void:
 		_test_clip()
 		_test_pressure()
 		_test_fractal()
+		_test_fractal_orbit()
 		_test_planet_unpack()
 		_test_smoke_voxelize()
 		print("native_kernels: %d cases compared, native=%s" % [_cases, Native.enabled])
@@ -125,12 +126,24 @@ func _test_fractal() -> void:
 			_check_identical(FRACTAL, &"evaluate", [_random_vector(2.0), {
 				fractal_type = fractal_type,
 				iterations = _rng.randi_range(1, 40),
+				detail_iterations = _rng.randi_range(0, 38),
 				apollonian_scale = _rng.randf_range(1.0, 1.8),
 				klein_r = _rng.randf_range(1.8, 2.0),
 				klein_i = _rng.randf_range(-0.05, 0.05),
 				klein_box_x = _rng.randf_range(0.8, 1.2),
 				klein_box_z = _rng.randf_range(0.8, 1.2),
 			}])
+
+
+func _test_fractal_orbit() -> void:
+	for step: int in [FractalDD.Step.QUADRATIC, FractalDD.Step.BURNING_SHIP,
+			FractalDD.Step.TRICORN]:
+		for _case in 40:
+			var c := PackedFloat64Array([_rng.randf_range(-1.8, 0.4),
+				_rng.randf_range(-1.0e-17, 1.0e-17), _rng.randf_range(-1.0, 1.0),
+				_rng.randf_range(-1.0e-17, 1.0e-17)])
+			_check_identical(FractalDD, &"orbit", [step,
+				PackedFloat64Array([0.0, 0.0, 0.0, 0.0]), c, 400])
 
 
 func _test_smoke_voxelize() -> void:

@@ -73,6 +73,8 @@ declare -a SUITES=(
 	"fire_atlas|cpu|-|-s res://tests/fire_atlas_test.gd"
 	"fractal_math|cpu|-|-s res://tests/fractal_math_test.gd"
 	"fractal_de|cpu|-|-s res://tests/fractal_de_test.gd"
+	"free_fly_camera|cpu|-|-s res://tests/free_fly_camera_test.gd"
+	"fractal_reference|cpu|-|-s res://tests/fractal_reference_test.gd"
 	"mixwell|cpu|-|-s res://tests/mixwell_test.gd"
 	"gpu_timing_store|cpu|-|-s res://tests/gpu_timing_store_test.gd"
 	"voronoi_fracture|cpu|-|-s res://tests/voronoi_fracture_test.gd"

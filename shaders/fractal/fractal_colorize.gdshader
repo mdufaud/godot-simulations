@@ -13,6 +13,8 @@ shader_type canvas_item;
 
 uniform sampler2D tex_accum : filter_linear, repeat_disable;
 uniform float mu_split = 16.0;
+// Iteration count the palette starts from: the lowest one in view when deep.
+uniform float mu_floor = 0.0;
 
 uniform int color_mode : hint_range(0, 3) = 0;
 uniform float color_speed : hint_range(0.0, 5.0) = 0.3;
@@ -61,7 +63,7 @@ float decode_mu(vec4 d, float fallback) {
 vec3 exterior_color(float mu, float trap) {
 	// Log-compressed iteration scale: keeps color progression perceptually
 	// uniform across zoom depths and kills chromatic noise near the set
-	float ms = log2(1.0 + mu);
+	float ms = log2(1.0 + max(mu - mu_floor, 0.0));
 	float dim = 0.22 + 0.78 * smoothstep(0.0, 5.0, ms);
 
 	if (color_mode == 1) {

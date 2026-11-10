@@ -4,12 +4,16 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 ## FPS flythrough camera for raymarched fractals (VR-ready, desktop-first).
 ## Look: captured mouse (free mouselook from relative motion). Esc releases the
 ## cursor for the UI; click in the viewport recaptures it. No camera roll.
-## Move: WASD + move_up/move_down, relative to the full look direction, with
-## acceleration/damping smoothing (anti-nausea, no jerk).
-## If de_query is set, flight is scaled to the free distance it returns:
-## move_speed is then the fraction of that distance covered per second, so the
-## camera eases into any surface at any scale, and no step ever exceeds half
-## the distance (sphere-tracing bound), so it never passes through.
+## Move: WASD + move_up/fly_down (Space/Ctrl), relative to the full look
+## direction, with acceleration/damping smoothing (anti-nausea, no jerk);
+## fly_boost (Shift) multiplies the speed while held.
+## If de_query is set, flight is scaled to the free distance in view (the
+## nearest surface a few rays through the frustum reach): move_speed is then
+## the fraction of that distance covered per second, so what is on screen
+## always streams by at the same rate, at any scale. No step ever exceeds half
+## the free length sphere-traced along it, so it never passes through.
+## The position is kept in float64 ([member precise_position]) and mirrored
+## onto the node: a Node3D position (float32) stops resolving moves under 1e-7.
 
 # --- Look ---
 @export var mouse_sensitivity := 0.15
@@ -23,20 +27,32 @@ const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 @export var acceleration := 12.0    # ramp toward target velocity
 @export var damping := 8.0          # ramp toward zero on release
 
-## Callable(Vector3) -> float distance estimator, injected by the controller.
+## Callable(x: float, y: float, z: float) -> float distance estimator, injected
+## by the controller.
 var de_query: Callable
+## Free distance below which the camera counts as touching a surface: only
+## moves that do not close in further get through.
+var min_flight_distance := 1e-4
+## The camera position, in float64 (x, y, z).
+var precise_position := PackedFloat64Array([0.0, 0.0, 0.0])
 
 var pitch := 0.0
 var yaw := 0.0
 var velocity := Vector3.ZERO
 var motion_intensity := 0.0
 
-## Free distance below which the camera counts as touching a surface: flight
-## keeps this floor speed so it can always back out.
-const MIN_FLIGHT_DISTANCE := 1e-4
-## Seconds the speed takes to follow a free distance that opens up; a closing
-## one is followed at once.
-const DISTANCE_RISE_S := 0.25
+## Seconds the speed takes to follow the free distance, in log space: a change
+## of scale eases in both ways, the step clamp alone guards against collisions.
+const DISTANCE_SMOOTH_S := 0.2
+## Speed factor while fly_boost is held.
+const BOOST_FACTOR := 4.0
+## Frustum directions (x, y at z = -1) probed for the free distance in view.
+const VIEW_RAYS: Array[Vector2] = [
+	Vector2(0.0, 0.0), Vector2(0.5, 0.3), Vector2(-0.5, 0.3), Vector2(0.5, -0.3),
+	Vector2(-0.5, -0.3),
+]
+const VIEW_RAY_STEPS := 16
+const STEP_TRACE_STEPS := 8
 var _flight_distance := -1.0
 
 var _captured := false
@@ -46,6 +62,7 @@ var _joystick: VirtualJoystickScript
 
 
 func _ready() -> void:
+	precise_position = PackedFloat64Array([position.x, position.y, position.z])
 	_camera = _find_camera()
 	if _camera:
 		_camera.fov = fov
@@ -147,26 +164,30 @@ func _process(delta: float) -> void:
 			input_dir.x += 1
 		if Input.is_action_pressed("move_up"):
 			input_dir.y += 1
-		if Input.is_action_pressed("move_down"):
+		if Input.is_action_pressed("fly_down"):
 			input_dir.y -= 1
 
 	if _joystick != null:
 		input_dir.x += _joystick.value.x
 		input_dir.z += _joystick.value.y
 
+	var basis := Basis.from_euler(Vector3(deg_to_rad(pitch), deg_to_rad(yaw), 0.0))
 	var speed := move_speed
+	if _captured and Input.is_action_pressed("fly_boost"):
+		speed *= BOOST_FACTOR
 	var dist := -1.0
 	if de_query.is_valid():
-		dist = maxf(de_query.call(position) as float, 0.0)
-		if _flight_distance < 0.0 or dist < _flight_distance:
-			_flight_distance = dist
+		dist = maxf(_distance_at(Vector3.ZERO), 0.0)
+		var open := maxf(_view_free_distance(basis, dist), min_flight_distance)
+		if _flight_distance <= 0.0:
+			_flight_distance = open
 		else:
-			_flight_distance = lerpf(dist, _flight_distance, exp(-delta / DISTANCE_RISE_S))
-		speed = move_speed * maxf(_flight_distance, MIN_FLIGHT_DISTANCE)
+			_flight_distance = exp(lerpf(log(open), log(_flight_distance),
+				exp(-delta / DISTANCE_SMOOTH_S)))
+		speed *= _flight_distance
 
 	var target := Vector3.ZERO
 	if input_dir != Vector3.ZERO:
-		var basis := Basis.from_euler(Vector3(deg_to_rad(pitch), deg_to_rad(yaw), 0.0))
 		target = (basis * input_dir.limit_length(1.0)) * speed
 
 	var rate := acceleration if target != Vector3.ZERO else damping
@@ -177,13 +198,52 @@ func _process(delta: float) -> void:
 		clampf(velocity.length() / maxf(speed, 1e-6), 0.0, 1.0))
 
 	var step := target * delta + (previous_velocity - target) * (1.0 - decay) / maxf(rate, 1e-6)
-	if dist >= MIN_FLIGHT_DISTANCE:
-		var max_len := dist * 0.5
-		if step.length() > max_len:
-			step = step.normalized() * max_len
+	var step_len := step.length()
+	if dist >= min_flight_distance and step_len > dist * 0.5:
+		var direction := step / step_len
+		var max_len := _trace(direction, dist, step_len * 2.0, STEP_TRACE_STEPS) * 0.5
+		if step_len > max_len:
+			step = direction * max_len
 			velocity = velocity.limit_length(max_len / maxf(delta, 1e-6))
-	position += step
+	elif dist >= 0.0 and dist < min_flight_distance and _distance_at(step) < dist:
+		# Touching: only moves that do not close in further, so it can back out.
+		step = Vector3.ZERO
+		velocity = Vector3.ZERO
+	precise_position[0] += step.x
+	precise_position[1] += step.y
+	precise_position[2] += step.z
+	position = Vector3(precise_position[0], precise_position[1], precise_position[2])
 	_update_transform()
+
+
+## Distance estimate at the camera plus [param offset].
+func _distance_at(offset: Vector3) -> float:
+	return de_query.call(precise_position[0] + offset.x, precise_position[1] + offset.y,
+		precise_position[2] + offset.z) as float
+
+
+## Free length along [param direction], sphere-traced from [param start] (the
+## camera's own free distance, already known to be clear) up to [param limit].
+func _trace(direction: Vector3, start: float, limit: float, steps: int) -> float:
+	var t := start
+	for i in steps:
+		if t >= limit:
+			return limit
+		var d := _distance_at(direction * t)
+		if d <= t * 1e-3:
+			break
+		t += d
+	return minf(t, limit)
+
+
+## Distance to the nearest surface the view rays reach, never under the
+## camera's own free distance.
+func _view_free_distance(basis: Basis, dist: float) -> float:
+	var best := INF
+	for ray in VIEW_RAYS:
+		var direction := (basis * Vector3(ray.x, ray.y, -1.0)).normalized()
+		best = _trace(direction, dist, best, VIEW_RAY_STEPS)
+	return best
 
 
 func _update_transform() -> void:
@@ -208,7 +268,12 @@ func set_fov(value: float) -> void:
 
 
 func set_pose(pos: Vector3, new_yaw: float, new_pitch: float) -> void:
-	position = pos
+	set_precise_pose(pos.x, pos.y, pos.z, new_yaw, new_pitch)
+
+
+func set_precise_pose(x: float, y: float, z: float, new_yaw: float, new_pitch: float) -> void:
+	precise_position = PackedFloat64Array([x, y, z])
+	position = Vector3(x, y, z)
 	yaw = new_yaw
 	pitch = clampf(new_pitch, min_pitch, max_pitch)
 	velocity = Vector3.ZERO

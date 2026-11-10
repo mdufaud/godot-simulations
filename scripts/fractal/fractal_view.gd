@@ -19,6 +19,12 @@ class_name FractalView extends RefCounted
 ## [member FractalConfig.sample_budget_ms]: a costly view is paid in refresh
 ## latency, never in resolution or iterations.
 ##
+## With [member FractalCamera.auto_iterations] the iteration count also follows
+## the picture: a coarse grid of the sample pass, run at twice the count, is
+## read back a few times a second, and while a visible share of it only escapes
+## past the count (pixels the screen wrongly shows as inside the set),
+## [member FractalCamera.iteration_boost] raises it.
+##
 ## The host assigns the fields below; [method start] builds the buffers under
 ## [member host]:
 ##
@@ -64,6 +70,25 @@ const STRIDE_SETTLE_FRAMES := 4
 ## per-frame re-encode of resampled pixels. A coarser step lets that rounding
 ## drift with pixel age, which the colorize emboss shows as stride-periodic stripes.
 const MU_SPLIT := 16.0
+## Grid of the iteration probe, and the seconds between two probes.
+const PROBE_SIZE := Vector2i(64, 36)
+const PROBE_INTERVAL_S := 0.25
+## The probe iterates this many times the current count.
+const PROBE_REACH := 2.0
+## Share of the probe escaping only past the count above which the count is
+## raised by [constant PROBE_BOOST_STEP]; it is lowered by the same step once
+## less than [constant PROBE_LOWER_SHARE] escapes past the lowered count.
+const PROBE_RAISE_SHARE := 0.004
+const PROBE_LOWER_SHARE := 0.001
+const PROBE_BOOST_STEP := 1.5
+## Zoom decades over which the palette switches from the absolute iteration
+## count to the count above the lowest one in view. Deep in, every pixel takes
+## thousands of iterations and differs from its neighbours by a few: on the
+## absolute (log) scale the whole screen is one colour.
+const FLOOR_FROM_DECADE := 12.0
+const FLOOR_FULL_DECADE := 15.0
+## Seconds the palette takes to follow the lowest count in view.
+const FLOOR_SMOOTH_S := 0.4
 ## R2 low-discrepancy sequence, the sub-pixel jitter of successive samples.
 const R2_A1 := 0.7548776662466927
 const R2_A2 := 0.5698402909980532
@@ -100,7 +125,9 @@ var _current := 0
 var _history_valid := false
 # View the history buffer was rendered for.
 var _hist_cx := 0.0
+var _hist_cx_lo := 0.0
 var _hist_cy := 0.0
+var _hist_cy_lo := 0.0
 var _hist_half := 1.0
 var _hist_log_zoom := 0.0
 ## Samples every history pixel holds, as a blend weight.
@@ -123,6 +150,14 @@ var _rendered := false
 # Names of the GPU timestamps the renderer captures around each sample viewport.
 var _sample_begin_names: Array[String] = []
 var _sample_end_names: Array[String] = []
+var _probe: SubViewport
+var _probe_material: ShaderMaterial
+var _probe_timer := 0.0
+var _probe_pending := false
+var _probe_iterations := 0
+var _probe_key := 0
+var _mu_floor := 0.0
+var _mu_floor_target := 0.0
 
 
 func start() -> void:
@@ -171,6 +206,17 @@ func start() -> void:
 	_material_display.set_shader_parameter("tex_accum", _accum[0].get_texture())
 	_set_stride(mini(_stride, config.max_sample_stride))
 
+	_probe = _make_viewport()
+	_probe.size = PROBE_SIZE
+	host.add_child(_probe)
+	_probe_material = ShaderMaterial.new()
+	_probe_material.shader = SAMPLE_SHADER
+	_probe_material.set_shader_parameter("mu_split", MU_SPLIT)
+	var probe_rect := ColorRect.new()
+	probe_rect.material = _probe_material
+	probe_rect.size = Vector2(PROBE_SIZE)
+	_probe.add_child(probe_rect)
+
 
 func resize(window_size: Vector2i) -> void:
 	_full_size = Vector2i(maxi(window_size.x, 8), maxi(window_size.y, 8))
@@ -209,6 +255,10 @@ func sample_stride() -> int:
 
 func update(delta: float) -> void:
 	_advance_morph(delta)
+	_update_probe(delta)
+	_mu_floor = lerpf(_mu_floor_target, _mu_floor, exp(-delta / FLOOR_SMOOTH_S))
+	_material_display.set_shader_parameter("mu_floor", _mu_floor * smoothstep(
+		FLOOR_FROM_DECADE, FLOOR_FULL_DECADE, camera.log_zoom / FractalCamera.LN10))
 
 	var hard := _hard_hash()
 	if hard != _hard_key:
@@ -257,6 +307,72 @@ func update(delta: float) -> void:
 		_history_weight += 1.0
 		if _passes_done >= aa_samples:
 			state = State.IDLE
+
+
+## Reads the probe rendered last frame, then renders the next one when the view
+## or the count has changed since.
+func _update_probe(delta: float) -> void:
+	if not camera.auto_iterations:
+		camera.iteration_boost = 1.0
+		_probe_pending = false
+		return
+	if _probe_pending:
+		_probe_pending = false
+		_apply_probe(_probe.get_texture().get_image())
+	_probe_timer += delta
+	if _probe_timer < PROBE_INTERVAL_S:
+		return
+	var key := hash([_view_hash(), _hard_hash(), julia_re, julia_im, camera.iterations_full()])
+	if key == _probe_key:
+		return
+	_probe_key = key
+	_probe_timer = 0.0
+	_probe_iterations = camera.iterations_full()
+	_apply_view_uniforms(_probe_material,
+		mini(int(float(_probe_iterations) * PROBE_REACH), FractalCamera.MAX_ITERATIONS))
+	_probe_material.set_shader_parameter("sample_stride", 1)
+	_probe_material.set_shader_parameter("sample_phase", 0)
+	_probe_material.set_shader_parameter("sample_jitter", Vector2.ZERO)
+	_probe_material.set_shader_parameter("full_size", Vector2(PROBE_SIZE))
+	_probe.render_target_update_mode = SubViewport.UPDATE_ONCE
+	_probe_pending = true
+
+
+func _apply_probe(image: Image) -> void:
+	if image == null or image.is_empty():
+		return
+	var escaped := PackedFloat32Array()
+	for y in image.get_height():
+		for x in image.get_width():
+			var texel := image.get_pixel(x, y)
+			if texel.a > 0.5:
+				escaped.append(texel.r * MU_SPLIT + texel.g)
+	if not escaped.is_empty():
+		var lowest := escaped[0]
+		for mu in escaped:
+			lowest = minf(lowest, mu)
+		_mu_floor_target = lowest
+	camera.iteration_boost = probe_boost(escaped, image.get_width() * image.get_height(),
+		_probe_iterations, camera.iteration_boost, camera.iterations_for_zoom())
+
+
+## Boost after a probe of [param total] orbits: [param escaped] holds the
+## smooth iteration count of those that escaped, [param iterations] is the
+## count on screen and [param base] the zoom-based count the boost multiplies.
+static func probe_boost(escaped: PackedFloat32Array, total: int, iterations: int,
+		boost: float, base: int) -> float:
+	var past_count := 0
+	var past_lowered := 0
+	for mu in escaped:
+		if mu > float(iterations):
+			past_count += 1
+		if mu > float(iterations) / PROBE_BOOST_STEP:
+			past_lowered += 1
+	if float(past_count) > PROBE_RAISE_SHARE * float(total):
+		return minf(boost * PROBE_BOOST_STEP, float(FractalCamera.MAX_ITERATIONS) / float(base))
+	if float(past_lowered) < PROBE_LOWER_SHARE * float(total):
+		return maxf(boost / PROBE_BOOST_STEP, 1.0)
+	return boost
 
 
 func _make_viewport() -> SubViewport:
@@ -368,11 +484,12 @@ func _hard_hash() -> int:
 ## Changes the history still roughly matches: dissolve it away.
 func _soft_hash() -> int:
 	return hash([julia_re, julia_im, trap_shape, trap_scale,
-		0 if camera.auto_iterations else camera.manual_iterations])
+		camera.iteration_boost if camera.auto_iterations else float(camera.manual_iterations)])
 
 
 func _view_hash() -> int:
-	return hash([camera.center_x, camera.center_y, camera.log_zoom])
+	return hash([camera.center_x, camera.center_x_lo, camera.center_y, camera.center_y_lo,
+		camera.log_zoom])
 
 
 func _render(phase: int, alpha: float, jitter: Vector2) -> void:
@@ -405,7 +522,9 @@ func _render(phase: int, alpha: float, jitter: Vector2) -> void:
 
 	_current = target
 	_hist_cx = camera.center_x
+	_hist_cx_lo = camera.center_x_lo
 	_hist_cy = camera.center_y
+	_hist_cy_lo = camera.center_y_lo
 	_hist_half = camera.view_half()
 	_hist_log_zoom = camera.log_zoom
 	_history_valid = true
@@ -413,22 +532,23 @@ func _render(phase: int, alpha: float, jitter: Vector2) -> void:
 	_rendered = true
 
 
-## Screen-UV transform from the current view into the history's. Computed in
-## float64 here — the deltas are tiny at deep zoom, far under float32
-## resolution — and only the small result goes to the shader as float32.
+## Screen-UV transform from the current view into the history's. Computed from
+## the double-double centres here — the deltas are tiny at deep zoom, far under
+## float32 resolution — and only the small result goes to the shader as float32.
 func _history_xform() -> Vector4:
 	var aspect := camera.aspect()
 	var s := camera.view_half() / _hist_half
 	return Vector4(
 		s, s,
-		0.5 + (camera.center_x - _hist_cx) / (2.0 * _hist_half * aspect) - 0.5 * s,
-		0.5 + (camera.center_y - _hist_cy) / (2.0 * _hist_half) - 0.5 * s
+		0.5 + camera.center_delta_x(_hist_cx, _hist_cx_lo) / (2.0 * _hist_half * aspect)
+			- 0.5 * s,
+		0.5 + camera.center_delta_y(_hist_cy, _hist_cy_lo) / (2.0 * _hist_half) - 0.5 * s
 	)
 
 
 func _apply_view_uniforms(material: ShaderMaterial, iterations: int) -> void:
 	var zoom := camera.zoom()
-	var perturbed := camera.fractal_type <= 1 and zoom > config.perturbation_zoom_threshold
+	var perturbed := zoom > config.perturbation_zoom_threshold
 	if perturbed:
 		_orbit.ensure(camera, julia_re, julia_im, iterations)
 	material.set_shader_parameter("fractal_type", camera.fractal_type)
@@ -439,7 +559,8 @@ func _apply_view_uniforms(material: ShaderMaterial, iterations: int) -> void:
 	material.set_shader_parameter("use_perturbation", perturbed)
 	if perturbed:
 		material.set_shader_parameter("dc_origin",
-			Vector2(camera.center_x - _orbit.origin_x, camera.center_y - _orbit.origin_y))
+			Vector2(camera.center_delta_x(_orbit.origin_x, _orbit.origin_x_lo),
+				camera.center_delta_y(_orbit.origin_y, _orbit.origin_y_lo)))
 		material.set_shader_parameter("ref_orbit", _orbit.texture)
 		material.set_shader_parameter("ref_len", _orbit.length)
 		if camera.fractal_type == 1 and _orbit.crit_texture != null:

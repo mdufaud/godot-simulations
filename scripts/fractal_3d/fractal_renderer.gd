@@ -18,6 +18,19 @@ func push_params(params: Dictionary) -> void:
 		material.set_shader_parameter(key, params[key])
 
 
+## Camera orbit rows of the relative raymarch, and the smallest feature that
+## orbit still places (world units).
+func push_reference(reference: FractalReference, lod_floor: float) -> void:
+	if material == null:
+		return
+	material.set_shader_parameter("ref_a", reference.a)
+	material.set_shader_parameter("ref_b", reference.b)
+	material.set_shader_parameter("ref_c", reference.c)
+	material.set_shader_parameter("ref_d", reference.d)
+	material.set_shader_parameter("ref_e", reference.e)
+	material.set_shader_parameter("lod_floor", lod_floor)
+
+
 func apply_quality(viewport: Viewport, viewport_guard: ViewportGuard, scale: float,
 		steps: int, iterations: int, profile: Dictionary, adaptive: bool, fov: float) -> void:
 	if material == null:

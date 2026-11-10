@@ -16,15 +16,15 @@ render_mode blend_disabled;
 //
 // Types: 0 Mandelbrot, 1 Julia, 2 Burning Ship, 3 Tricorn
 //
-// Deep zoom (types 0/1): perturbation theory. The reference
-// orbit is iterated on CPU in float64 and uploaded as an RGF32
-// texture; per-pixel deltas stay small enough for float32.
-// Mandelbrot uses Zhuoran rebasing to avoid glitches.
+// Deep zoom: perturbation theory. The reference orbit is
+// iterated on CPU (float64, double-double when deep) and
+// uploaded as an RGF32 texture; per-pixel deltas stay small
+// enough for float32. Zhuoran rebasing avoids glitches.
 // ============================================================
 
 uniform int fractal_type : hint_range(0, 3) = 0;
 uniform vec2 julia_c = vec2(-0.7269, 0.1889);
-uniform int max_iterations : hint_range(20, 20000) = 1000;
+uniform int max_iterations : hint_range(20, 30000) = 1000;
 
 // --- View (direct path) ---
 uniform vec2 view_center = vec2(-0.6, 0.0);
@@ -128,10 +128,18 @@ vec3 eval_direct(vec2 c) {
 	return vec3(mu, trap, escaped ? 1.0 : 0.0);
 }
 
-// Perturbation: z = Z_ref[i] + dz, iterate dz = (2·Z + dz)·dz (+ dc for Mandelbrot).
-// Rebase (dz = z, ri = 0) is exact only from an orbit whose Z_0 == 0: the
-// uploaded Mandelbrot orbit always qualifies; Julia qualifies only after
-// switching to the critical orbit, which the first glitch triggers.
+// |c + d| - |c| without cancelling the two when d is tiny against c.
+float diffabs(float c, float d) {
+	if (c >= 0.0) return c + d >= 0.0 ? d : -d - 2.0 * c;
+	return c + d > 0.0 ? d + 2.0 * c : -d;
+}
+
+// Perturbation: z = Z_ref[i] + dz, iterate dz = (2·Z + dz)·dz (+ dc unless Julia).
+// Burning Ship takes the same step on (|x|, |y|): the squares ignore the signs
+// and only the cross term needs diffabs; Tricorn conjugates Z and dz first.
+// Rebase (dz = z, ri = 0) is exact only from an orbit whose Z_0 == 0: every
+// uploaded orbit but Julia's qualifies; Julia qualifies only after switching
+// to the critical orbit, which the first glitch triggers.
 vec3 eval_pert(vec2 dc) {
 	vec2 dz = vec2(0.0);
 	if (fractal_type == 1) dz = dc;
@@ -149,8 +157,17 @@ vec3 eval_pert(vec2 dc) {
 
 	for (int i = 0; i < MAX_HARD; i++) {
 		if (i >= cap) break;
-		dz = cmul(2.0 * Zr + dz, dz);
-		if (fractal_type == 0) dz += dc;
+		if (fractal_type == 2) {
+			float re = 2.0 * (Zr.x * dz.x - Zr.y * dz.y) + dz.x * dz.x - dz.y * dz.y;
+			float cross = Zr.x * dz.y + dz.x * Zr.y + dz.x * dz.y;
+			dz = vec2(re, 2.0 * diffabs(Zr.x * Zr.y, cross)) + dc;
+		} else if (fractal_type == 3) {
+			vec2 dzc = vec2(dz.x, -dz.y);
+			dz = cmul(2.0 * vec2(Zr.x, -Zr.y) + dzc, dzc) + dc;
+		} else {
+			dz = cmul(2.0 * Zr + dz, dz);
+			if (fractal_type == 0) dz += dc;
+		}
 		ri++;
 		Zr = fetch_ref(ri, crit);
 		z = Zr + dz;
@@ -161,7 +178,7 @@ vec3 eval_pert(vec2 dc) {
 
 		int orbit_len = crit ? ref_len_crit : ref_len;
 		if (ri >= orbit_len - 1 || dot(z, z) < dot(dz, dz)) {
-			if (fractal_type == 0 || crit) {
+			if (fractal_type != 1 || crit) {
 				dz = z;
 				ri = 0;
 				Zr = fetch_ref(0, crit);
