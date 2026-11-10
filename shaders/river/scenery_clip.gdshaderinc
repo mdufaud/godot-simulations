@@ -44,7 +44,8 @@ float river_reference_height(vec3 position) {
 
 // The level of the water over a point, and whether that water shows. On a spilling field it is the surface the cell
 // mesh draws (river_water.gdshader), shown where thicker than the film it fades out under; over a cell drawing no
-// quad, the guided surface, which the mesh draws only outside the solver's blend.
+// quad, the guided surface, which the mesh draws only outside the solver's blend. Under a film too thin to show, the
+// level eases to that guided surface with the film's depth, so wet ground ends on the film's edge, not on a cell's.
 float river_water_level(vec3 position, out bool shown) {
 	float reference = river_reference_height(position);
 	float weight = river_swe_weight(position.xz);
@@ -56,8 +57,9 @@ float river_water_level(vec3 position, out bool shown) {
 		shown = river_swe_weight(centre) <= 0.0;
 		return reference;
 	}
-	shown = texture(swe_surface, river_swe_uv(position.xz)).w > RIVER_FILM_DEPTH_M;
-	return mix(reference, drawn, weight);
+	float depth = texture(swe_surface, river_swe_uv(position.xz)).w;
+	shown = depth > RIVER_FILM_DEPTH_M;
+	return mix(reference, drawn, weight * smoothstep(0.0, RIVER_FILM_DEPTH_M, depth));
 }
 
 // The level of the water showing over a point; where none shows, never above the point, so ground under a faded film
@@ -68,10 +70,10 @@ float river_surface_height(vec3 position) {
 	return shown ? level : min(level, position.y);
 }
 
-// Height above the water that ground grows by: on a spilling field never above the guided surface either, so a pocket
-// the live water leaves dry under it stays bare.
+// Height above the water that ground grows by: on a spilling field above the guided surface, whatever the live water
+// does. A pocket left dry under it stays bare, and a flood over a bank wets its grass instead of stripping it by the cell.
 float river_growth_height(vec3 position, float height) {
-	return swe_spill_enabled ? min(height, position.y - river_reference_height(position)) : height;
+	return swe_spill_enabled ? position.y - river_reference_height(position) : height;
 }
 
 bool river_reflection_clipped(vec3 position, uint camera_layers) {

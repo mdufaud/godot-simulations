@@ -54,6 +54,12 @@ const float SHORE_RISE_M = 0.02;
 const float SLOPE_DEPTH_M = 0.02;
 // A bend down to a brink never reaches farther from it.
 const int BRINK_SPREAD_CELLS = 24;
+// A bend draws the surface at most this share of its depth above the solver's, which drops at the mouth of a slot.
+const float BRINK_LIFT_SHARE = 0.5;
+// A bend lowers the surface at most this many of the cell's velocity heads below the arriving level: slack water stands.
+const float BRINK_HEAD_GAIN = 4.0;
+// A cell's landing rate eases over this time: falling water lands in bursts, a cell at a time.
+const float LANDING_SMOOTH_S = 0.3;
 // The four edges of a 2x2 block of cells numbered -x-z, +x-z, -x+z, +x+z.
 const int EDGE_FROM[4] = int[4](0, 2, 0, 1);
 const int EDGE_TO[4] = int[4](1, 3, 2, 3);
@@ -335,14 +341,18 @@ vec4 spread_brink(ivec2 p, bool spread) {
 
 // The level a wet cell draws: within its brink zone the surface bends from the level the water arrives at down to the
 // brink, as a free overfall does (hydrostatic, the solver squeezes that drawdown into a cell or two), and fades into
-// the solver's own level over the far end of the zone. A drawdown only ever lowers the water: down a chute, where the
-// water already falls faster than the bend, it keeps its own level.
-float drawn_level(ivec2 cell, float level, bool spread) {
+// the solver's own level over the far end of the zone. Where the solver already dropped the water, at the mouth of a
+// slot between rocks, the bend carries it on as one tongue, within a share of its depth: down a chute, a thin sheet
+// keeps its own level. Slack water, in front of a pillar, stands at the level it arrived with.
+float drawn_level(ivec2 cell, vec4 q, float bed, bool spread) {
+    float level = bed + q.x;
     vec4 zone = brink_zone_at(cell, spread);
     if (zone.y < 0.0) return level;
     float t = min(zone.y / zone.z, 1.0);
     float bend = zone.x + max(zone.w - zone.x, 0.0) * (1.0 - (1.0 - t) * (1.0 - t));
-    return mix(level, min(level, bend), 1.0 - smoothstep(0.7, 1.0, t));
+    vec2 speed = velocity(q);
+    float slack = min(level, zone.w - BRINK_HEAD_GAIN * dot(speed, speed) / (2.0 * params.domain.w));
+    return mix(level, clamp(bend, slack, level + BRINK_LIFT_SHARE * q.x), 1.0 - smoothstep(0.7, 1.0, t));
 }
 
 float surface_height(ivec2 p, vec4 q, vec4 bed) {
@@ -368,7 +378,8 @@ bool joined(vec4 qa, float za, vec4 qb, float zb) {
 // a fall leaves from, never above any of its cells' water, so the water running round the end of a lip and down beside it
 // does not tent up to the brink. Sums run in block order so every cell of a surface gets the same value: the surface stays
 // watertight while lips and walls split it. A dry cell takes the lowest surface around a corner that its bed stands
-// above, so the rock, not the mesh, ends the water at the shore.
+// above, so the rock, not the mesh, ends the water at the shore; its other corners keep that surface's height over the
+// ground, so down a slope it lies along the film beside it instead of as one flat step a cell.
 vec4 surface_corners(ivec2 p, bool spread) {
     float dry = uintBitsToFloat(0x7F800000u);
     float gap = LEVEL_GAP_STEPS * uintBitsToFloat(spill.words[12]) * params.domain.z;
@@ -380,15 +391,18 @@ vec4 surface_corners(ivec2 p, bool spread) {
         ivec2 cell = bound_cell(p + ivec2(n % 3, n / 3) - 1);
         q[n] = imageLoad(state_in, cell);
         bed[n] = imageLoad(terrain, cell).x;
-        level[n] = q[n].x > WET_DEPTH_M ? drawn_level(cell, bed[n] + q[n].x, spread) : dry;
+        level[n] = q[n].x > WET_DEPTH_M ? drawn_level(cell, q[n], bed[n], spread) : dry;
         wet = wet || q[n].x > WET_DEPTH_M;
     }
     vec4 corners = vec4(dry);
+    vec4 around = vec4(dry);
+    vec4 ground = vec4(0.0);
     if (!wet) return corners;
     for (int k = 0; k < 4; ++k) {
         int base = (k >> 1) * 3 + (k & 1);
         int cells[4] = int[4](base, base + 1, base + 3, base + 4);
         int labels[4] = int[4](0, 1, 2, 3);
+        ground[k] = 0.25 * (bed[base] + bed[base + 1] + bed[base + 3] + bed[base + 4]);
         for (int pass = 0; pass < 2; ++pass) {
             for (int e = 0; e < 4; ++e) {
                 int a = EDGE_FROM[e];
@@ -433,11 +447,15 @@ vec4 surface_corners(ivec2 p, bool spread) {
             float mean = spilling > 0.0 ? min(brinks / spilling, lowest) : sum / count;
             if (!isinf(level[4])) corners[k] = mean;
             else if (bed[4] >= mean - SHORE_RISE_M) corners[k] = min(corners[k], mean);
+            else around[k] = min(around[k], mean);
         }
     }
     if (!isinf(level[4])) return corners;
     // A dry cell between two surfaces carries only the lower one: bridging them would hang a wall of water in its rock.
     float lowest = min(min(corners.x, corners.y), min(corners.z, corners.w));
+    if (isinf(lowest)) return corners;
+    float foot = dot(ground, vec4(equal(corners, vec4(lowest)))) / dot(vec4(1.0), vec4(equal(corners, vec4(lowest))));
+    corners = mix(corners, min(around, lowest + ground - foot + SHORE_RISE_M), isinf(corners));
     return mix(corners, vec4(lowest), greaterThan(corners, vec4(lowest + gap)));
 }
 
@@ -541,8 +559,11 @@ void main() {
         imageStore(foam_out, p, vec4(clamp(q.w / max(q.x, WET_DEPTH_M), 0.0, 1.0),
             source / (1.0 + source), clamp(activity, 0.0, 1.0), q.x));
         if (spilling) {
-            float settled = mix(imageLoad(spill_out, p).w, bed.x + q.x, 1.0 - exp(-params.grid.z / params.relaxation.z));
-            imageStore(spill_out, p, vec4(spill_record(p, q, bed.x), settled));
+            vec4 last = imageLoad(spill_out, p);
+            float settled = mix(last.w, bed.x + q.x, 1.0 - exp(-params.grid.z / params.relaxation.z));
+            vec3 record = spill_record(p, q, bed.x);
+            record.y = mix(last.y, record.y, 1.0 - exp(-params.grid.z / LANDING_SMOOTH_S));
+            imageStore(spill_out, p, vec4(record, settled));
         }
         return;
     }
