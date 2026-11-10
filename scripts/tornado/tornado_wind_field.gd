@@ -54,6 +54,16 @@ const INFLOW_ONSET := 5.3
 ## Height (in core radii) of L's plateau: bounds the updraft at 2 a_bar UPDRAFT_DEPTH
 ## u_max on the axis for Burgers-Rott (twice that, downward, for Sullivan's eye).
 const UPDRAFT_DEPTH := 3.0
+## Seconds the funnel base trails the parent circulation aloft, for a core of
+## AXIS_LAG_RADIUS_M. Slender funnels trail longer: a rope stretches and kinks
+## behind its storm, a wedge stays upright.
+const AXIS_LAG_S := 12.0
+const AXIS_LAG_RADIUS_M := 45.0
+const AXIS_LAG_MIN_S := 2.0
+const AXIS_LAG_MAX_S := 30.0
+## Largest horizontal lead of any slice over the base, as a fraction of the
+## height: the axis is a function of y, so it cannot lie down.
+const AXIS_LEAD_LIMIT := 0.45
 ## psi closes to zero from this fraction of the funnel height to the top.
 const TOP_CLOSE_START := 0.6
 ## psi closes to zero between these radii (core radii); the field is 0 beyond.
@@ -224,7 +234,24 @@ func influence_radius(y: float) -> float:
 	return INFLUENCE_FACTOR * core_radius_at(y)
 
 
-func update_centerline(time: float, s_amount: float, noise: FastNoiseLite) -> void:
+## How long ago the storm stood where the axis is now at z01 = y / height: the
+## surface drags the base, so the lag is largest at the ground and concentrated
+## low, which bends the funnel into a trailing foot under a near-upright top.
+func axis_lag_s(z01: float) -> float:
+	var base_lag_s := clampf(AXIS_LAG_S * AXIS_LAG_RADIUS_M / r_core0, AXIS_LAG_MIN_S, AXIS_LAG_MAX_S)
+	return base_lag_s * (1.0 - z01) * (1.0 - z01)
+
+
+## lead: per-slice horizontal offset of a travelling storm over its base
+## (TornadoTrack.position_at(axis_lag_s(z01)) - base_pos), empty when it stands still.
+func update_centerline(time: float, s_amount: float, noise: FastNoiseLite,
+		lead := PackedVector2Array()) -> void:
+	var lead_scale := 0.0
+	if lead.size() == NUM_SLICES:
+		var longest := 0.0
+		for offset in lead:
+			longest = maxf(longest, offset.length())
+		lead_scale = minf(1.0, AXIS_LEAD_LIMIT * height / maxf(longest, 1e-3))
 	for i in NUM_SLICES:
 		var z01 := float(i) / (NUM_SLICES - 1)
 		var s := Vector2(sin(z01 * PI * 1.5), 0.35 * sin(z01 * PI * 0.9)) * 0.12 * height * s_amount
@@ -234,6 +261,8 @@ func update_centerline(time: float, s_amount: float, noise: FastNoiseLite) -> vo
 			noise.get_noise_2d(time * 12.0 + 137.0, z01 * 80.0)
 		) * amp
 		slice_offsets[i] = s + w
+		if lead_scale > 0.0:
+			slice_offsets[i] += lead[i] * lead_scale
 
 
 func get_shader_centerline() -> PackedVector3Array:

@@ -20,6 +20,8 @@ func _initialize() -> void:
 	_test_divergence_free()
 	_test_vertical_wind_bounded()
 	_test_published_core_structure()
+	_test_axis_lag_and_lead()
+	_test_track()
 	_finish("tornado_wind_field")
 
 
@@ -309,3 +311,56 @@ func _test_published_core_structure() -> void:
 	_check(field.cylindrical_wind(0.9, y).z > 0.0, "Sullivan: updraft ring around the eye")
 	_check(field.cylindrical_wind(0.2, y).x > 0.0 and field.cylindrical_wind(2.0, y).x < 0.0,
 		"Sullivan: outflow from the eye, inflow outside")
+
+
+func _test_axis_lag_and_lead() -> void:
+	var rope := _new_field()
+	var wedge := _new_field()
+	wedge.r_core0 = 160.0
+	_check(is_zero_approx(rope.axis_lag_s(1.0)), "the funnel top does not lag")
+	_check(rope.axis_lag_s(0.0) > rope.axis_lag_s(0.5) and rope.axis_lag_s(0.5) > 0.0,
+		"the lag grows toward the ground")
+	_check(rope.axis_lag_s(0.0) > wedge.axis_lag_s(0.0), "a slender core trails longer than a wedge")
+	var noise := FastNoiseLite.new()
+	var lead := PackedVector2Array()
+	lead.resize(TornadoWindField.NUM_SLICES)
+	for i in TornadoWindField.NUM_SLICES:
+		lead[i] = Vector2(3.0 * i, 0.0)
+	rope.update_centerline(0.0, 0.0, noise)
+	var still_top := rope.centerline_at(rope.height)
+	rope.update_centerline(0.0, 0.0, noise, lead)
+	_check(rope.centerline_at(0.0).is_equal_approx(rope.base_pos), "a travelling funnel keeps its base")
+	_check((rope.centerline_at(rope.height) - still_top).is_equal_approx(Vector3(21.0, 0.0, 0.0)),
+		"the top leads the base by the track offset")
+	for i in TornadoWindField.NUM_SLICES:
+		lead[i] = Vector2(1000.0 * i, 0.0)
+	rope.update_centerline(0.0, 0.0, noise, lead)
+	var capped := (rope.centerline_at(rope.height) - still_top).length()
+	_check(is_equal_approx(capped, TornadoWindField.AXIS_LEAD_LIMIT * rope.height),
+		"the lead is capped: %f" % capped)
+
+
+func _test_track() -> void:
+	var track := TornadoTrack.new()
+	track.noise.seed = 1337
+	var delta := 1.0 / 60.0
+	var start := track.position_at(0.0)
+	for i in 120:
+		track.advance(delta, 0.0)
+	_check(track.position_at(0.0).is_equal_approx(start), "a zero travel speed holds the storm")
+	_check(track.position_at(5.0).is_equal_approx(start), "a still storm has no lead")
+	for i in 300:
+		track.advance(delta, 10.0)
+	var travelled := 0.0
+	var previous := track.position_at(0.0)
+	var inside := true
+	for i in 1200:
+		track.advance(delta, 10.0)
+		var current := track.position_at(0.0)
+		travelled += current.distance_to(previous)
+		previous = current
+		inside = inside and absf(current.x) <= track.extent_m.x and absf(current.z) <= track.extent_m.y
+	var speed := travelled / (1200.0 * delta)
+	_check(absf(speed - 10.0) < 1.5, "the track is walked at the requested speed: %f" % speed)
+	_check(inside, "the track stays inside its extent")
+	_check(track.position_at(5.0).distance_to(previous) > 20.0, "a moving storm leads its past position")

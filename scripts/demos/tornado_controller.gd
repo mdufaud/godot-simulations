@@ -58,8 +58,7 @@ const STORM_TYPES := [
 var field := TornadoWindField.new()
 var config: TornadoConfig = TornadoConfig.new()
 var s_amount := 0.15
-var wander_speed := 0.3
-var wander_radius := 120.0
+var travel_speed := 6.0
 var lightning_enabled := true
 var dust_color := Color(0.46, 0.46, 0.48)
 var storm_color := Color(0.3, 0.31, 0.36)
@@ -68,6 +67,8 @@ var storm_type := 0
 var _time := 0.0
 var _frozen := false
 var _wander_noise := FastNoiseLite.new()
+var _track := TornadoTrack.new()
+var _lead := PackedVector2Array()
 var _debris_bar: ProgressBar
 var _funnel_mat: ShaderMaterial
 var _cloud_mat: ShaderMaterial
@@ -111,8 +112,10 @@ func _ready() -> void:
 	field.flare = config.flare
 	field.a_bar = config.radial_inflow
 	s_amount = config.centerline_s_curve
-	wander_speed = config.wander_speed_hz
-	wander_radius = config.wander_radius_m
+	travel_speed = config.travel_speed_mps
+	_track.extent_m = config.travel_extent_m
+	_track.noise.seed = 1337
+	_lead.resize(TornadoWindField.NUM_SLICES)
 	_wander_noise.seed = 1337
 	_rng.seed = 4242
 	debris_pool.field = field
@@ -182,13 +185,13 @@ func _process(delta: float) -> void:
 			pm.set_shader_parameter("camera_position", cam_pos)
 	if not _frozen:
 		_time += delta
-		var wt := _time * wander_speed * 0.02
-		field.base_pos = Vector3(
-			_wander_noise.get_noise_2d(wt * 100.0, 0.0),
-			0.0,
-			_wander_noise.get_noise_2d(wt * 100.0, 500.0)
-		) * wander_radius
-		field.update_centerline(_time * 0.05, s_amount, _wander_noise)
+		_track.advance(delta, travel_speed)
+		field.base_pos = _track.position_at(field.axis_lag_s(0.0))
+		for i in TornadoWindField.NUM_SLICES:
+			var z01 := float(i) / (TornadoWindField.NUM_SLICES - 1)
+			var ahead := _track.position_at(field.axis_lag_s(z01)) - field.base_pos
+			_lead[i] = Vector2(ahead.x, ahead.z)
+		field.update_centerline(_time * 0.05, s_amount, _wander_noise, _lead)
 		tornado_node.position = field.base_pos
 		_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
 	# Outside the Freeze gate: Freeze holds the vortex in place, but slider edits
@@ -213,8 +216,10 @@ func _process(delta: float) -> void:
 
 
 func _update_funnel_bounds() -> void:
-	# Worst-case centerline excursion: S bow (0.12 H) + wander noise (0.05 H).
-	var max_off: float = (0.12 * s_amount + 0.05) * field.height
+	# Worst-case centerline excursion: S bow (0.12 H) + wander noise (0.05 H)
+	# + the travelling top's lead over the base.
+	var max_off: float = (0.12 * s_amount + 0.05) * field.height + minf(
+		field.axis_lag_s(0.0) * travel_speed, TornadoWindField.AXIS_LEAD_LIMIT * field.height)
 	var half_xz: float = maxf(1.8 * field.r_core0 * (1.0 + field.flare),
 		(3.4 + 1.2 * _skirt_density) * field.r_core0) + max_off
 	var size := Vector3(2.0 * half_xz, field.height, 2.0 * half_xz)
@@ -380,6 +385,11 @@ func set_capture_time(value: float) -> void:
 	_funnel_mat.set_shader_parameter("time_offset", value)
 
 
+func set_capture_travel_speed(value: float) -> void:
+	travel_speed = value
+	_update_funnel_bounds()
+
+
 func set_quality_profile(tier: int) -> void:
 	quality.set_tier(tier)
 
@@ -473,8 +483,10 @@ func _setup_ui() -> void:
 		func(v: float) -> void:
 			s_amount = v
 			_update_funnel_bounds())
-	menu.add_slider("Wander", 0.0, 1.0, wander_speed,
-		func(v: float) -> void: wander_speed = v)
+	menu.add_slider("Travel speed (m/s)", 0.0, 30.0, travel_speed,
+		func(v: float) -> void:
+			travel_speed = v
+			_update_funnel_bounds())
 
 	menu.add_section("Look")
 	_look_btn = menu.add_option_button("Storm type", STORM_TYPES.map(func(t: Dictionary) -> String: return t.name),

@@ -50,6 +50,7 @@ var _wcomp := -1
 var _fuel := ""
 var _torch := false
 var _windx := 1e9
+var _travel_speed := -1.0
 var _smoketaps := -1
 var _cascade := -1
 var _scene := -1
@@ -137,6 +138,7 @@ func _initialize() -> void:
 			"fuel": _fuel = value
 			"torch": _torch = value == "1" or value.to_lower() == "true"
 			"windx": _windx = float(value)
+			"travel": _travel_speed = float(value)
 			"smoketaps": _smoketaps = int(value)
 			"cascade": _cascade = int(value)
 			"scene": _scene = int(value)
@@ -299,6 +301,8 @@ func _run() -> void:
 		_demo.set_capture_fuel(_fuel == "gas")
 	if _torch and _demo.has_method("set_flamethrower"):
 		_demo.set_flamethrower(true)
+	if _travel_speed >= 0.0 and _demo.has_method("set_capture_travel_speed"):
+		_demo.set_capture_travel_speed(_travel_speed)
 	if _windx < 1e8 and _demo.has_method("set_capture_wind_x"):
 		_demo.set_capture_wind_x(_windx)
 	if _smoketaps >= 0 and _demo.has_method("set_smoke_light_taps"):
