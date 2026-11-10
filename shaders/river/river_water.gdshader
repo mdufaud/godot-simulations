@@ -63,6 +63,8 @@ const vec2 RUN_UP_SLOPE = vec2(0.7, 1.2);
 const vec2 PLANE_REACH_M = vec2(0.6, 1.5);
 const float SPLASH_RADIUS_M = 0.35;
 const float LANDING_FOAM_M_S = 0.3;
+// Landing rate from which a boil is solid foam: around it, and under a calm fall, the foam stays open.
+const float LANDING_DENSE_M_S = 2.4;
 // Corner heights of two cells this close are one surface: river_swe.comp gives every cell of a surface the same value.
 const float SHARED_CORNER_M = 1.0e-4;
 // A cell surface runs on into the rock it meets, which cuts it at the shore; it fades over this thickness of water.
@@ -99,6 +101,22 @@ float spill_landing(vec2 point) {
 		total += texture(swe_spill, river_swe_uv(point + offset)).g;
 	}
 	return total / 5.0;
+}
+
+// Foam and ripple patterns ride the current averaged over a radius and slowed where it shears or spreads, by the
+// seconds a pattern takes to wind up: an eddy or the outflow under a fall stretches a texture into rings.
+const float PATTERN_FLOW_RADIUS_M = 0.5;
+const float PATTERN_SHEAR_S = 1.5;
+// Under a fall the water boils: its patterns churn in place at this speed instead of streaming out from the landing.
+const float BOIL_M_S = 0.8;
+
+vec2 pattern_flow(vec2 point, vec2 centre) {
+	vec2 east = texture(swe_surface, river_swe_uv(point + vec2(PATTERN_FLOW_RADIUS_M, 0.0))).xy;
+	vec2 west = texture(swe_surface, river_swe_uv(point - vec2(PATTERN_FLOW_RADIUS_M, 0.0))).xy;
+	vec2 north = texture(swe_surface, river_swe_uv(point + vec2(0.0, PATTERN_FLOW_RADIUS_M))).xy;
+	vec2 south = texture(swe_surface, river_swe_uv(point - vec2(0.0, PATTERN_FLOW_RADIUS_M))).xy;
+	float shear = max(length(east - west), length(north - south)) / (2.0 * PATTERN_FLOW_RADIUS_M);
+	return (centre * 2.0 + east + west + north + south) / (6.0 * (1.0 + shear * PATTERN_SHEAR_S));
 }
 
 vec2 flow_uv(vec2 position, vec2 flow, float phase) {
@@ -266,10 +284,18 @@ void fragment() {
 	}
 	bool cell_shore = swe_enabled && cell_grid.x > 0;
 	if (!cell_shore && wet_coverage <= 0.0) { discard; }
-	vec2 flow_velocity = mix(field.rg * speed_m_s, live.xy, live_weight);
-	field.rg = mix(field.rg, live.xy / max(speed_m_s, 0.1), live_weight);
+	float landing_m_s = swe_spill_enabled ? spill_landing(world_position.xz) : 0.0;
+	float fall_impact = smoothstep(0.0, LANDING_FOAM_M_S, landing_m_s) * live_weight;
+	vec2 drift = live.xy;
+	if (live_weight > 0.0) {
+		float boil_t = simulation_time_s * 0.45;
+		vec2 boil = vec2(texture(turbulence_texture, sample_point * 0.8 + vec2(boil_t, -boil_t * 0.6)).r,
+			texture(turbulence_texture, sample_point * 1.5 + vec2(0.37 - boil_t * 0.7, boil_t)).r) - 0.5;
+		drift = mix(pattern_flow(sample_point, live.xy), boil * 2.0 * BOIL_M_S, fall_impact);
+	}
+	vec2 flow_velocity = mix(field.rg * speed_m_s, drift, live_weight);
+	field.rg = mix(field.rg, drift / max(speed_m_s, 0.1), live_weight);
 	field.b = mix(field.b, texture(swe_foam, live_uv).b, live_weight);
-	float fall_impact = swe_spill_enabled ? smoothstep(0.0, LANDING_FOAM_M_S, spill_landing(world_position.xz)) * live_weight : 0.0;
 	field.b = max(field.b, fall_impact);
 	field.a = mix(field.a, smoothstep(swe_wet_depth_m, 0.04, live.w), live_weight);
 	float phase_offset = texture(turbulence_texture, world_position.xz * 0.009).r;
@@ -374,7 +400,7 @@ void fragment() {
 	reflected_color = mix(sky, reflected_color, reflection_weight);
 	vec2 foam_history = mix(texture(foam_map, field_uv).rg, texture(swe_foam, live_uv).rg, live_weight);
 	if (fall_impact > 0.0) {
-		float impact = fall_impact * foam_amount;
+		float impact = fall_impact * foam_amount * mix(0.55, 1.0, smoothstep(LANDING_FOAM_M_S, LANDING_DENSE_M_S, landing_m_s));
 		foam_history = max(foam_history, vec2(impact * 0.9, impact));
 	}
 	float coverage = foam_history.r;

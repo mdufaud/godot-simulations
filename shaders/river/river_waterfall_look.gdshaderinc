@@ -27,8 +27,12 @@ const float RIDE_RATE = 1.0;
 const float FAMILY_RIDE_RATE = 0.5;
 // Pattern level over which broken water is white: the thin threads of a calm sheet, most of an aerated body.
 const vec2 WHITE_LEVEL = vec2(0.36, 0.2);
-// Pattern levels a ribbon's edge spans: crisp threads, softer aerated streamers.
-const vec2 RIBBON_EDGE = vec2(0.06, 0.11);
+// Pattern levels a ribbon's edge spans: threads and aerated streamers thin out to clear water, never cut like bars.
+const vec2 RIBBON_EDGE = vec2(0.14, 0.14);
+// Pattern level the grain takes off a thread once gaps have opened: it falls on as strands and drops, not as one line.
+const float STRAND_BREAK = 0.3;
+// Whiteness of a thread against a streamer's: a thin strand of water is half clear.
+const float THREAD_WHITE = 0.75;
 // Fraction of the break-up length within which broken water has turned white.
 const float WHITEN_SHARE = 0.35;
 // Fractions of the break-up length fallen below the lip over which gaps open between the ribbons.
@@ -118,10 +122,10 @@ WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, f
 	float edge = mix(RIBBON_EDGE.x, RIBBON_EDGE.y, strong);
 	float side = smoothstep(0.0, 1.0, side_share);
 	// A free side frays down to its strongest strands.
-	float strand = pattern - side * 0.5;
 	float glass = 1.0 - smoothstep(0.0, BREAKUP_SHARE.x, breakup);
 	// However aerated it arrives, water is whole at its lip: gaps open with the height fallen, at a free side, in a trickle.
 	float open = max(max(smoothstep(GAP_SHARE.x, GAP_SHARE.y, breakup - lip_aeration), side), trickle);
+	float strand = pattern - side * 0.5 - (snow - 0.35) * STRAND_BREAK * open * (1.0 - strong);
 	WaterfallLook look;
 	look.coverage = mix(1.0, smoothstep(level - edge, level, strand), open);
 	// A calm sheet enters its pool with little foam, a torrent churns it white.
@@ -129,7 +133,8 @@ WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, f
 	// White ribbons grow out of the strongest streaks as the sheet tears and churns; the water between them stays clear.
 	float white_level = mix(1.0, level, tear) - impact * 0.15;
 	float dense = smoothstep(white_level, white_level + 3.0 * edge, strand);
-	float foam = smoothstep(white_level, white_level + 2.0 * edge, strand) * mix(0.7, 1.0, smoothstep(0.0, 0.5, foam_amount));
+	float foam = smoothstep(white_level, white_level + 2.0 * edge, strand) * mix(0.7, 1.0, smoothstep(0.0, 0.5, foam_amount))
+		* mix(THREAD_WHITE, 1.0, strong);
 
 	vec2 tilt = slope * RIBBON_TILT;
 	vec3 across = normalize(view_across - view_normal * dot(view_across, view_normal));
