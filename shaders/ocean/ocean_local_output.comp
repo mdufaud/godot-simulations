@@ -81,8 +81,12 @@ void main() {
     float slope_z = (total_height(world + vec2(0.0, cell), alpha)
         - total_height(world - vec2(0.0, cell), alpha)) / (2.0 * cell);
     float depth = bathymetry(world);
-    float depth_breaking = smoothstep(0.78, 1.0, 2.0 * abs(total_eta) / depth);
-    float steepness_breaking = smoothstep(0.7, 1.0, length(vec2(slope_x, slope_z)));
+    // Depth-limited breaking is a crest event on a steep front: troughs and
+    // flat water over the shoal stay dark instead of filling it with foam.
+    float slope = length(vec2(slope_x, slope_z));
+    float depth_breaking = smoothstep(0.78, 1.0, 2.0 * max(total_eta, 0.0) / depth)
+        * smoothstep(0.12, 0.4, slope);
+    float steepness_breaking = smoothstep(0.7, 1.0, slope);
     float breaking = max(depth_breaking, steepness_breaking)
         * (1.0 - smoothstep(20.0, 64.0, depth));
     imageStore(local_output, id, vec4(height, velocity_x, velocity_z, breaking));

@@ -137,6 +137,7 @@ func init_render(displacements: RID, derivatives: RID, foam_a: RID, foam_b: RID,
 	var depth_blend := shore_config.surface_depth_blend_m() if shore_config != null else Vector2.ZERO
 	var shader_source := "#version 450\n#define SHORE_BLEND_WIDTH_M %.6f\n#define SHORE_DEPTH_BLEND_M vec2(%.6f, %.6f)\n" % [
 		shore_config.surface_blend_width_m() if shore_config != null else 12.0, depth_blend.x, depth_blend.y] \
+		+ (shore_config.shoal_define() if shore_config != null else "#define SHORE_SHOAL vec2(1.0)\n") \
 		+ OceanLocalSolver.domain_defines() \
 		+ FileAccess.get_file_as_string(DEFORMATION_PATH) + "\n" + source_body
 	var spirv := ShaderCache.compile(_rd, "ocean_spray_update", shader_source)

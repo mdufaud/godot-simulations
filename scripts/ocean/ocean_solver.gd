@@ -115,6 +115,9 @@ var short_cascade_half_rate := false
 ## Production (FFT) wave model only: the tutorial keeps its own per-cascade
 ## ping-pong.
 var foam_near_enabled := true
+## Foam source of a fully breaking shoal wave, in the Jacobian-deficit units of
+## the spectral whitecaps (a strong whitecap is ~0.3): 1.0 buried the shoal.
+const LOCAL_BREAKING_SOURCE := 0.35
 var foam_near_size := 2048
 var foam_near_domain := 256.0
 ## Update the near feedback every Nth frame (Performance profile: 2).
@@ -441,7 +444,8 @@ func init_render() -> void:
 			free_render()
 			return
 
-	if not _compile_stage_render("foam_near", defines + deformation
+	if not _compile_stage_render("foam_near", defines
+			+ "#define LOCAL_BREAKING_SOURCE %.4f\n" % LOCAL_BREAKING_SOURCE + deformation
 			+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_foam_near.comp")):
 		return
 	_foam_mip_count = int(log(float(foam_near_size)) / log(2.0)) + 1
@@ -484,7 +488,7 @@ func init_render() -> void:
 
 	# GPU point queries: two tiny buffers plus one dispatch per submitted
 	# batch; results come back through buffer_get_data_async.
-	if not _compile_stage_render("query", defines + deformation
+	if not _compile_stage_render("query", defines + shore_solver.config.shoal_define() + deformation
 			+ FileAccess.get_file_as_string(SHADER_DIR + "ocean_query.comp")):
 		return
 	_buffers["query_in"] = _rd.storage_buffer_create(MAX_QUERY_POINTS * 8)

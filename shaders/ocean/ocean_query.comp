@@ -101,6 +101,16 @@ void sample_surface(vec2 world, out vec2 displacement, out float height,
         height = mix(height, shore.x, weight);
         deformation = vec4(jacobian[0].x - 1.0, jacobian[1].y - 1.0,
             jacobian[0].y, jacobian[1].x);
+    } else if (qp.shore.x > 0.5) {
+        vec2 position = world + displacement;
+        float weight = ocean_shore_weight(position, qp.shore.y,
+            qp.shore.z > 0.0 ? qp.shore.z : 12.0);
+        if (weight > 0.0) {
+            float still_depth = -ocean_local_sample(shore_derivative_map, vec2(0.0),
+                qp.shore.y, position).w;
+            height_gradient *= ocean_shoal_slope(height, still_depth, SHORE_SHOAL, weight);
+            height = ocean_shoal_height(height, still_depth, SHORE_SHOAL, weight);
+        }
     }
 }
 

@@ -60,6 +60,7 @@ uniform float shore_blend_width_m = 12.0;
 uniform vec2 shore_depth_blend_m = vec2(0.0);
 uniform float shore_domain = 160.0;
 uniform bool shore_visual_breakers_enabled = false;
+uniform vec2 shore_shoal = vec2(0.35, 0.5);
 // Camera-centred near-field foam coverage. Each layer has its own domain and
 // the layers are blended radially so the coverage remains world anchored.
 uniform sampler2DArray foam_near_a : filter_linear_mipmap_anisotropic, repeat_disable;
@@ -82,6 +83,8 @@ uniform sampler2D cloud_reflection : filter_linear, repeat_disable, hint_default
 uniform bool cloud_reflection_enabled = true;
 uniform vec3 sky_zenith : source_color = vec3(0.055, 0.18, 0.43);
 uniform vec3 sky_horizon : source_color = vec3(0.95, 0.43, 0.18);
+uniform vec3 sun_glow_color : source_color = vec3(1.0, 0.42, 0.14);
+uniform float sun_glow_strength = 0.0;
 // P0-C.3: exponential aerial convergence of the far water toward the sky
 // (per look; 6e-4 overcast, ~2.5e-4 tropical, 1/m).
 uniform float aerial_density = 0.00025;
@@ -112,11 +115,21 @@ varying float filtered_roughness;
 varying vec3 geometry_weights;
 varying vec3 spectral_displacement;
 varying float shore_roll_foam;
+varying float shoal_slope;
 uniform vec3 cascade_slope_variance = vec3(0.0);
 
 float cascade_wavelength(int index) {
 	return index == 0 ? cascade_wavelengths.x
 		: (index == 1 ? cascade_wavelengths.y : cascade_wavelengths.z);
+}
+
+// Low-sun afterglow: a warm band hugging the horizon on the sun's side.
+float sun_glow_weight(vec3 direction) {
+	vec2 flat_direction = normalize(direction.xz + vec2(1e-5, 0.0));
+	vec2 flat_sun = normalize(sun_direction.xz + vec2(1e-5, 0.0));
+	float toward = 0.5 + 0.5 * dot(flat_direction, flat_sun);
+	return pow(toward, 4.0) * exp(-max(direction.y, 0.0) * 4.5)
+		* sun_glow_strength * (1.0 - storm_mood);
 }
 
 void vertex() {
@@ -181,12 +194,22 @@ void vertex() {
 	}
 	spectral_displacement = displacement;
 	shore_roll_foam = 0.0;
+	shoal_slope = 1.0;
 	if (shore_enabled) {
 		displacement.xz *= shore_visual_breakers_enabled ? 1.0 : 1.0 - shore_vertex_weight;
 		vec2 position = world_uv + displacement.xz;
 		float weight = shore_visual_breakers_enabled
 			? ocean_shore_surface_weight(shore_field, position, shore_domain,
 				shore_blend_width_m, shore_depth_blend_m) : shore_vertex_weight;
+		float shoal_weight = shore_visual_breakers_enabled
+			? ocean_shore_weight(position, shore_domain, shore_blend_width_m) : 0.0;
+		if (shoal_weight > 0.0) {
+			vec4 shore = ocean_local_sample(shore_field, vec2(0.0), shore_domain, position);
+			shoal_slope = ocean_shoal_slope(displacement.y, shore.w - shore.x,
+				shore_shoal, shoal_weight);
+			displacement.y = ocean_shoal_height(displacement.y, shore.w - shore.x,
+				shore_shoal, shoal_weight);
+		}
 		if (shore_visual_breakers_enabled && weight > 0.0) {
 			vec4 roll = ocean_shore_roll(shore_breaker, position, shore_domain);
 			shore_roll_foam = roll.w * weight;
@@ -422,6 +445,7 @@ void fragment() {
 		breaking_mask = max(breaking_mask,
 			normal_sample.a * detail_filter);
 	}
+	height_gradient *= shoal_slope;
 	if (fft_surface) {
 		gradient = clamp(ocean_world_gradient(deformation, height_gradient, 0.08),
 			vec2(-4.0), vec2(4.0)) * normal_strength;
@@ -558,8 +582,13 @@ void fragment() {
 		if (inside > 0.0) {
 			float interaction = texture(interaction_foam, interaction_uv).r;
 			if (interaction > 0.0) {
-				interaction_foam_factor = interaction * mix(mix(0.65, 1.0, breakup),
-					smoothstep(0.25, 0.65, breakup), breakup_detail);
+				// Erode weak contact foam through the lace pattern: a faint
+				// value shows sparse bubbles instead of a grey haze.
+				float lace = textureGrad(foam_pattern, interaction_world_xz * 1.1,
+					contact_pattern_dx, contact_pattern_dy).b;
+				float threshold = 1.0 - clamp(interaction, 0.0, 1.0) * 0.85;
+				interaction_foam_factor = smoothstep(threshold, threshold + 0.3,
+					lace * 0.85 + 0.15) * smoothstep(0.0, 0.08, interaction);
 			}
 		}
 	}
@@ -717,6 +746,9 @@ void fragment() {
 		float sky_height = clamp(reflected_world.y * 1.8, 0.0, 1.0);
 		vec3 reflected_horizon = mix(sky_horizon, sky_zenith, 0.82);
 		vec3 reflected_sky = mix(reflected_horizon, sky_zenith, pow(sky_height, 0.45));
+		float reflected_glow = sun_glow_weight(reflected_world);
+		reflected_sky = mix(reflected_sky, sun_glow_color, clamp(reflected_glow, 0.0, 0.6))
+			+ sun_glow_color * reflected_glow * 0.5;
 		if (cloud_reflection_enabled && reflected_view.z < -0.02) {
 			vec4 cloud_clip = PROJECTION_MATRIX * vec4(reflected_view, 0.0);
 			vec2 cloud_uv = cloud_clip.xy / max(cloud_clip.w, 1e-4) * 0.5 + 0.5;
@@ -752,6 +784,8 @@ void fragment() {
 		// water and the sky (the "black trough" at the horizon).
 		float aerial = 1.0 - exp(-dist * aerial_density);
 		vec3 horizon_color = mix(sky_horizon, sky_zenith, 0.15);
+		horizon_color = mix(horizon_color, sun_glow_color, clamp(sun_glow_weight(
+			-(INV_VIEW_MATRIX * vec4(VIEW, 0.0)).xyz), 0.0, 0.85));
 		ALBEDO = mix(ALBEDO, horizon_color, aerial);
 		EMISSION = reflection_emission
 			+ shore_transmission * shore_transparency * (1.0 - fresnel) * (1.0 - foam_factor)

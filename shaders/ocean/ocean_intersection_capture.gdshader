@@ -111,8 +111,11 @@ void fragment() {
 			local_domains.x, target).x + ocean_local_sample(wake_field,
 			local_centers.zw, local_domains.y, target).x;
 	}
-	float intersection = 1.0 - smoothstep(0.12, intersection_width,
-		abs(world_position.y - water_height));
+	// Only geometry piercing the surface makes contact foam: a rock top that
+	// sits under the water has no waterline and must not paint a foam disc.
+	float clearance = world_position.y - water_height;
+	float intersection = (1.0 - smoothstep(0.12, intersection_width, abs(clearance)))
+		* smoothstep(-0.4, -0.1, clearance);
 	if (intersection < 0.002) {
 		discard;
 	}

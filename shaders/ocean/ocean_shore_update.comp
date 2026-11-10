@@ -156,7 +156,7 @@ void main() {
     if (impact > 0.01) {
         float contact_height = eta;
 #if SHORE_FFT_SURFACE
-        contact_height = spectral_height(world);
+        contact_height = shoal_height(spectral_height(world), world, bed[i]);
 #endif
         history.x = history.y > 0.01 ? max(history.x, contact_height) : contact_height;
         history.y = max(history.y, smoothstep(0.01, 0.2, impact));

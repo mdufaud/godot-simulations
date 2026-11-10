@@ -101,7 +101,7 @@ void main() {
     if (np.local.z > 0.5) {
         vec4 local = local_surface(material);
         drift += local.yz;
-        local_breaking = local.w;
+        local_breaking = local.w * LOCAL_BREAKING_SOURCE;
     }
     vec2 previous = foam_density(history_at(material, drift));
     previous.g = foam_density(history_at(material, drift - np.extra.zw + np.current)).g;

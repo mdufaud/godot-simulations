@@ -105,3 +105,16 @@ vec2 ocean_shore_world_gradient(mat2 jacobian, vec2 material_gradient) {
 	return vec2(jacobian[1].y * material_gradient.x - jacobian[0].y * material_gradient.y,
 		-jacobian[1].x * material_gradient.x + jacobian[0].x * material_gradient.y) / safe_determinant;
 }
+
+// Depth-limited wave height: a crest cannot stand taller than the water under
+// it, so heights saturate at shoal.x + shoal.y * still_depth near the shore.
+// weight blends back to the untouched open sea at the edge of the shore domain.
+float ocean_shoal_height(float height, float still_depth, vec2 shoal, float weight) {
+	float ratio = height / (shoal.x + shoal.y * max(still_depth, 0.0));
+	return mix(height, height * inversesqrt(1.0 + ratio * ratio), weight);
+}
+
+float ocean_shoal_slope(float height, float still_depth, vec2 shoal, float weight) {
+	float ratio = height / (shoal.x + shoal.y * max(still_depth, 0.0));
+	return mix(1.0, pow(1.0 + ratio * ratio, -1.5), weight);
+}

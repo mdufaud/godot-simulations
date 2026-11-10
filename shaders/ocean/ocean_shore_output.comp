@@ -51,7 +51,7 @@ void output_visual_history(ivec2 p, uint i) {
     vec4 past = visual_history[source + i * 2u + 1u];
     vec2 world = world_position(p);
     vec2 material = spectral_material(world);
-    float height = spectral_displacement(material).y;
+    float height = shoal_height(spectral_displacement(material).y, world, bed[i]);
     float depth = max(height - bed[i], 0.0);
     vec2 flow = spectral_velocity(material);
     vec2 bed_gradient = vec2(read_bed(p + ivec2(1, 0)) - read_bed(p - ivec2(1, 0)),

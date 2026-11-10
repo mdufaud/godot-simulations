@@ -172,13 +172,24 @@ func _check_fft_carrier() -> void:
 	_check(bytes.size() == 128 * 128 * 8, "FFT carrier readback failed")
 	if bytes.size() != 128 * 128 * 8:
 		return
+	# The carrier is the FFT crest, depth-limited over the shoaling bed and
+	# untouched at the edge of the shore domain.
+	var config: OceanCoastalConfig = _demo.solver.shore_solver.config
+	var bed: PackedFloat32Array = _demo.solver.shore_bathymetry
 	var maximum_error := 0.0
 	for offset in range(0, bytes.size(), 8):
-		maximum_error = maxf(maximum_error, absf(bytes.decode_half(offset + 2) - 4.0))
-		_check(bytes.decode_half(offset + 2) >= 3.99 and bytes.decode_half(offset + 2) <= 4.01,
-			"coastal water replaced the offshore crest with its independent water level")
+		var cell := offset / 8
+		var world := (Vector2(cell % 128, cell / 128) + Vector2(0.5, 0.5)) \
+			* (config.domain_m / 128.0) - Vector2.ONE * config.domain_m * 0.5
+		var weight := 1.0 - smoothstep(0.0, 1.0, (world.length() - config.domain_m * 0.5
+			+ config.surface_blend_width_m()) / config.surface_blend_width_m())
+		var ratio := 4.0 / (config.shoal_runup_m + config.shoal_depth_ratio * maxf(-bed[cell], 0.0))
+		var expected := lerpf(4.0, 4.0 / sqrt(1.0 + ratio * ratio), weight)
+		maximum_error = maxf(maximum_error, absf(bytes.decode_half(offset + 2) - expected))
+		_check(absf(bytes.decode_half(offset + 2) - expected) <= 0.02,
+			"coastal water replaced the depth-limited offshore crest with its independent water level")
 	_check(maximum_error < 0.01, "coastal carrier lost the FFT height")
-	var id: int = _demo.solver.submit_queries(PackedVector2Array([Vector2(0.0, 18.0)]))
+	var id: int = _demo.solver.submit_queries(PackedVector2Array([Vector2(0.0, 40.0)]))
 	RenderingServer.call_on_render_thread(_demo.solver.query_render)
 	var batch: OceanQueryBatch
 	for frame in 120:
@@ -188,8 +199,11 @@ func _check_fft_carrier() -> void:
 			break
 	_check(batch != null and batch.id == id, "visible FFT query was not returned")
 	if batch != null:
-		_check(batch.results[0].w > 0.5 and absf(batch.results[0].x - 4.0) < 0.0001,
-			"camera/buoyancy queries used the independent coastal water level")
+		var query_ratio := 4.0 / (config.shoal_runup_m + config.shoal_depth_ratio
+			* maxf(-_demo.island.sample_bed(Vector2(0.0, 40.0)), 0.0))
+		_check(batch.results[0].w > 0.5
+			and absf(batch.results[0].x - 4.0 / sqrt(1.0 + query_ratio * query_ratio)) < 0.02,
+			"camera/buoyancy queries left the depth-limited visible water level")
 	print("OCEAN ISLAND FFT-carrier height=4.000 maximum-error=%.7f" % maximum_error)
 
 
@@ -208,6 +222,14 @@ func _set_visual_fields(height: float, strain: float) -> void:
 
 func _check_sand_history() -> void:
 	var shore: OceanShoreSolver = _demo.solver.shore_solver
+	# These checks flood the sand with a flat raised sea, which the shoal limit
+	# would flatten: rebuild with the limit out of reach.
+	shore.config.shoal_runup_m = 1.0e4
+	_demo._rebuild_quality_resources(true)
+	_demo.set_process(true)
+	await process_frame
+	await _wait_ready()
+	_demo.set_process(false)
 	var threshold := shore.whitecap_threshold
 	shore.whitecap_threshold = 0.8
 	await _set_visual_fields(3.0, 0.0)

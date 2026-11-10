@@ -115,6 +115,11 @@ vec2 spectral_material(vec2 world) {
     return material;
 }
 
+float shoal_height(float height, vec2 world, float bed_height) {
+    return ocean_shoal_height(height, -bed_height, SHORE_SHOAL,
+        ocean_shore_weight(world, params.domain.x, SHORE_BLEND_WIDTH_M));
+}
+
 float spectral_height(vec2 world) {
     return spectral_displacement(spectral_material(world)).y;
 }

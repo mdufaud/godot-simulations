@@ -78,6 +78,13 @@ vec3 surface_displacement_at(vec2 material) {
     vec3 displacement = displacement_at(material);
     if (sp.cfg.z != 0 && (sp.cfg.z & 2) == 0) {
         displacement.xz *= 1.0 - shore_weight_at(material, displacement);
+    } else if ((sp.cfg.z & 2) != 0) {
+        vec2 position = material + displacement.xz;
+        float weight = ocean_shore_weight(position, SHORE_DOMAIN_M, SHORE_BLEND_WIDTH_M);
+        if (weight > 0.0) {
+            displacement.y = ocean_shoal_height(displacement.y, -ocean_local_sample(
+                shore_derivative, vec2(0.0), SHORE_DOMAIN_M, position).w, SHORE_SHOAL, weight);
+        }
     }
     return displacement;
 }

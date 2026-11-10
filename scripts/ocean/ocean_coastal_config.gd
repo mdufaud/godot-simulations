@@ -54,6 +54,10 @@ const BREAKER_MIN_PROFILE_CELLS := 3.0
 @export var visual_surface_depth_blend_m := Vector2(2.0, 8.0)
 @export var visual_foam_texture_sizes_px: Array[int] = [512, 512, 2048, 2048]
 @export var breaker_max_radius_m := 2.0
+## Visual breakers only: the FFT height saturates at
+## shoal_runup_m + shoal_depth_ratio * still depth inside the shore domain.
+@export var shoal_runup_m := 0.35
+@export var shoal_depth_ratio := 0.5
 
 
 func validate() -> String:
@@ -70,6 +74,9 @@ func validate() -> String:
 		return "visual_blend_width_m must be positive and no wider than half the domain"
 	if not is_finite(breaker_max_radius_m) or breaker_max_radius_m <= 0.0:
 		return "visual breaker dimensions must be finite and positive"
+	if not is_finite(shoal_runup_m) or shoal_runup_m <= 0.0 \
+			or not is_finite(shoal_depth_ratio) or shoal_depth_ratio <= 0.0:
+		return "shoal limit must be finite and positive"
 	if not is_finite(domain_m) or domain_m <= 0.0:
 		return "domain_m must be finite and positive"
 	if not is_finite(offshore_depth_m) or offshore_depth_m <= 0.0:
@@ -124,6 +131,14 @@ func validate() -> String:
 			or break_froude_end < 0.0:
 		return "break Froude thresholds must be finite, ordered start > end, and in [0, 1]"
 	return ""
+
+
+func shoal_limit() -> Vector2:
+	return Vector2(shoal_runup_m, shoal_depth_ratio)
+
+
+func shoal_define() -> String:
+	return "#define SHORE_SHOAL vec2(%.6f, %.6f)\n" % [shoal_runup_m, shoal_depth_ratio]
 
 
 func surface_blend_width_m() -> float:

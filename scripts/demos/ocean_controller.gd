@@ -17,6 +17,7 @@ const LOOKS := [
 	preload("res://resources/ocean/looks/golden_hour.tres"),
 	preload("res://resources/ocean/looks/tropical_day.tres"),
 	preload("res://resources/ocean/looks/storm_overcast.tres"),
+	preload("res://resources/ocean/looks/sunset.tres"),
 ]
 const FOAM_TEXTURES := [
 	{"name": "1 - Airy bubbles", "path": "res://resources/ocean/foam_variant_01_microbubbles.png"},
@@ -443,6 +444,9 @@ func apply_look(index: int) -> void:
 	surface_mat.set_shader_parameter("sky_reflection_strength", look.sky_reflection_strength)
 	surface_mat.set_shader_parameter("sky_zenith", look.sky_zenith)
 	surface_mat.set_shader_parameter("sky_horizon", look.sky_horizon)
+	for material: ShaderMaterial in [surface_mat, sky_material]:
+		material.set_shader_parameter("sun_glow_color", look.sun_glow_color)
+		material.set_shader_parameter("sun_glow_strength", look.sun_glow_strength)
 	surface_mat.set_shader_parameter("micro_normal_strength", look.micro_normal_strength)
 	surface_mat.set_shader_parameter("micro_normal_scales", look.micro_normal_scales)
 	surface_mat.set_shader_parameter("micro_normal_fade_start", look.micro_normal_fade_start)
@@ -952,6 +956,7 @@ func _bind_textures() -> void:
 	surface_mat.set_shader_parameter("shore_domain", solver.shore_solver.config.domain_m)
 	surface_mat.set_shader_parameter("shore_blend_width_m", solver.shore_solver.config.surface_blend_width_m())
 	surface_mat.set_shader_parameter("shore_depth_blend_m", solver.shore_solver.config.surface_depth_blend_m())
+	surface_mat.set_shader_parameter("shore_shoal", solver.shore_solver.config.shoal_limit())
 	surface_mat.set_shader_parameter("shore_visual_breakers_enabled", solver.shore_enabled
 		and solver.shore_solver.config.visual_breakers_enabled)
 	if island != null:

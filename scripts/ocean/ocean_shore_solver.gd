@@ -342,6 +342,9 @@ func _create_resources() -> bool:
 	defines += "#define SHORE_SAND_DRYING_S %.3f\n" % SAND_DRYING_S
 	defines += "#define SHORE_CONTACT_RETENTION_S %.6f\n" % config.contact_retention_s
 	defines += "#define SHORE_BREAKER_MIN_PROFILE_CELLS %.6f\n" % CoastalConfig.BREAKER_MIN_PROFILE_CELLS
+	defines += "#define SHORE_BLEND_WIDTH_M %.6f\n" % config.surface_blend_width_m()
+	defines += config.shoal_define()
+	defines += FileAccess.get_file_as_string(SHADER_DIR + "ocean_deformation.gdshaderinc") + "\n"
 	for stage: String in STAGES:
 		var file := "ocean_shore_" + stage + ".comp"
 		if stage in ["fft", "transpose", "butterfly"]:

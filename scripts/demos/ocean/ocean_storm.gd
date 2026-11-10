@@ -77,7 +77,7 @@ func build(host: Node3D) -> void:
 	var rain_multimesh := MultiMesh.new()
 	rain_multimesh.transform_format = MultiMesh.TRANSFORM_3D
 	rain_multimesh.mesh = rain_quad
-	rain_multimesh.instance_count = 192 * 80
+	rain_multimesh.instance_count = 32768
 	for i in rain_multimesh.instance_count:
 		rain_multimesh.set_instance_transform(i, Transform3D.IDENTITY)
 	_rain_material = ShaderMaterial.new()

@@ -15,6 +15,9 @@ class_name OceanLookPreset extends Resource
 @export var sun_disk_color := Color(1.0, 0.78, 0.42)
 @export var haze_color := Color(0.82, 0.3, 0.13)
 @export_range(0.0, 4.0, 0.05) var sky_energy := 1.35
+## Warm horizon band on the sun's side, in the sky and in its water reflection.
+@export var sun_glow_color := Color(1.0, 0.42, 0.14)
+@export_range(0.0, 2.0, 0.01) var sun_glow_strength := 0.0
 
 @export_group("Environment")
 @export_range(0.1, 4.0, 0.05) var exposure := 1.15
