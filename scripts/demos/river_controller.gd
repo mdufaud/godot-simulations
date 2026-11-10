@@ -27,9 +27,9 @@ const STEEP_VIEWS := {
 const CASCADE_VIEWS := {
 	"default": [Vector3(0.0, 2.0, 0.0), Vector3(30.0, -32.0, 160.0)],
 	"pool": [Vector3(0.0, 0.8, -6.0), Vector3(14.0, -18.0, 170.0)],
-	"lips_main": [Vector3(-4.0, 3.5, 11.0), Vector3(13.0, -20.0, 165.0)],
-	"lips_side": [Vector3(-4.0, 3.0, 10.0), Vector3(16.0, -14.0, 115.0)],
-	"tributary": [Vector3(9.0, 2.0, 2.0), Vector3(12.0, -22.0, 215.0)],
+	"lips_main": [Vector3(-4.0, 5.3, 12.0), Vector3(13.0, -20.0, 165.0)],
+	"lips_side": [Vector3(-4.0, 4.8, 11.0), Vector3(16.0, -14.0, 115.0)],
+	"tributary": [Vector3(9.0, 4.0, 2.0), Vector3(12.0, -22.0, 215.0)],
 	"top": [Vector3(0.0, 2.0, 0.0), Vector3(42.0, -80.0, 180.0)],
 	"low": [Vector3(-3.0, 1.0, -3.0), Vector3(7.0, 5.0, 175.0)],
 }
@@ -150,7 +150,9 @@ func apply_preset(index: int) -> void:
 	_scenery.set_water_level(config.water_level_m)
 	_scenery.set_water_clarity(config.clarity)
 	_menu_builder.sync(config, preset_index)
-	river.reset()
+	# A spilling field runs free from its inflow: the new discharge arrives as a flood, not as a reseeded river.
+	if not river.field.spills:
+		river.reset()
 
 
 func cycle_preset() -> void:
@@ -413,6 +415,8 @@ func set_frozen(value: bool) -> void:
 func reset_river() -> void:
 	interactions.clear()
 	apply_preset(preset_index)
+	if river.field.spills:
+		river.reset()
 	set_frozen(false)
 
 

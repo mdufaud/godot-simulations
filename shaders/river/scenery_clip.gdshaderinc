@@ -33,6 +33,11 @@ float river_cliff_wetness(vec3 position, float wet) {
 	return max(wet, 0.8 * (1.0 - smoothstep(pouring, pouring + 0.1, position.y)));
 }
 
+// Albedo factor of wet rock and ground: a light film at the waterline, darker with the depth under the surface (height < 0).
+float river_wet_darkening(float wet, float height) {
+	return mix(1.0, mix(0.8, 0.6, smoothstep(0.0, 1.5, -height)), wet);
+}
+
 float river_reference_height(vec3 position) {
 	return texture(river_height_texture, (position.xz - river_domain_origin_m) / river_domain_m + 0.5).g;
 }

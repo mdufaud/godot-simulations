@@ -203,17 +203,17 @@ func _init() -> void:
 	rivers = [
 		# A horseshoe, an oblique step round a boulder, a gorge slot over the tallest fall, a lip split by spurs into the pool.
 		River.new(PackedVector2Array([Vector2(-4.5, 25.0), Vector2(-4.5, 11.5), Vector2(-3.0, 7.5), Vector2(-3.0, -9.0), Vector2(-1.0, -25.0)]),
-			3.3, PackedFloat32Array([6.0, 4.8, 4.3, 1.5, 0.0]), PackedFloat32Array([9.0, 11.3, 21.0, 27.7]),
+			3.3, PackedFloat32Array([7.8, 6.3, 4.3, 1.5, 0.0]), PackedFloat32Array([7.0, 11.3, 21.0, 27.7]),
 			PackedVector3Array([Vector3(0.7, 0.0, 0.0), Vector3(0.0, 0.2, 0.0), Vector3.ZERO, Vector3(0.0, 0.0, 0.25)]),
 			[PackedFloat32Array(), PackedFloat32Array([1.4]), PackedFloat32Array([-3.2, 3.0]), PackedFloat32Array([-2.4, -0.8, 1.0, 2.5])],
 			[PackedVector4Array(), PackedVector4Array([Vector4(0.45, 0.45, 1.2, 0.4)]),
 				PackedVector4Array([Vector4(1.6, 1.8, 2.2, 0.0), Vector4(1.6, 1.6, 2.4, 0.0)]),
 				PackedVector4Array([Vector4(0.75, 0.32, 1.5, 0.0), Vector4(0.6, 0.45, 1.4, 0.3), Vector4(0.9, 0.28, 1.8, -0.2),
 					Vector4(0.7, 0.4, 1.6, 0.12)])],
-			PackedVector3Array([Vector3(4.0, 1.2, 1.3), Vector3(14.0, -1.5, 1.0)]), PackedVector3Array()),
+			PackedVector3Array([Vector3(3.0, 1.8, 0.9), Vector3(14.0, -1.5, 1.0)]), PackedVector3Array()),
 		# Two small steps, a narrow chute, then an oblique fall split by two spurs.
 		River.new(PackedVector2Array([Vector2(21.0, 7.5), Vector2(11.0, 7.5), Vector2(5.2, 0.0), Vector2(5.2, -6.5), Vector2(-1.0, -12.0)]),
-			2.0, PackedFloat32Array([3.5, 3.0, 2.5, 0.0]), PackedFloat32Array([6.0, 7.9, 23.5]),
+			2.0, PackedFloat32Array([6.5, 4.5, 2.5, 0.0]), PackedFloat32Array([4.0, 7.9, 23.5]),
 			PackedVector3Array([Vector3(-0.35, 0.0, 0.0), Vector3(0.0, -0.15, 0.0), Vector3(0.0, 0.1, 0.2)]),
 			[PackedFloat32Array(), PackedFloat32Array([-0.5]), PackedFloat32Array([-0.9, 0.7])],
 			[PackedVector4Array(), PackedVector4Array([Vector4(0.4, 0.3, 1.4, 0.5)]),

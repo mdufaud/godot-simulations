@@ -7752,7 +7752,7 @@ func _run_river_cascade() -> void:
 		var levels := ""
 		for river_line in field.rivers:
 			for reach in river_line.levels_m.size() - 1:
-				var start: float = river_line.lips_m[reach - 1] if reach > 0 else river_line.lips_m[0] - 6.0
+				var start: float = river_line.lips_m[reach - 1] if reach > 0 else maxf(river_line.lips_m[0] - 6.0, 0.0)
 				var point: Vector2 = river_line.line_point((start + river_line.lips_m[reach]) * 0.5, 0.0)
 				var cell := Vector2i(((point - river.swe.region_m.position) / river.swe.cell_m).floor())
 				var index := (cell.y * grid.x + cell.x) * 4

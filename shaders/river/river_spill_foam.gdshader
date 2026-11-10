@@ -16,7 +16,7 @@ uniform float drop_offset_m = 0.0;
 
 // Seconds of motion each streak spans, as a camera exposure would blur it.
 const float EXPOSURE_S = 0.04;
-const float OPACITY = 0.45;
+const float OPACITY = 0.15;
 // Streaks fade into whatever they pass through over this depth, rather than cutting along it.
 const float SOFT_DEPTH_M = 0.15;
 
@@ -63,7 +63,7 @@ void fragment() {
 	float scene_depth = texture(depth_texture, SCREEN_UV).r;
 	vec4 scene = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, scene_depth, 1.0);
 	float room = -scene.z / scene.w - (-VERTEX.z);
-	ALBEDO = vec3(0.86, 0.92, 0.94) * mix(0.85, 1.0, grain);
+	ALBEDO = FOAM_COLOR * mix(0.85, 1.0, grain);
 	ROUGHNESS = 1.0;
 	BACKLIGHT = vec3(0.6, 0.65, 0.65);
 	NORMAL = vec3(0.0, 0.0, 1.0);

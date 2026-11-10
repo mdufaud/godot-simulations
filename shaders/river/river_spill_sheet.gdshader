@@ -28,9 +28,11 @@ varying vec2 lip_point;
 // How much the lip runs along world x and along world z (river_waterfall_look).
 varying vec2 lip_weight;
 varying float fall_m;
-// Height the water has fallen from its lip: fall_m also counts the break-up it arrives with, so a short step in fast
-// water would read as a tall fall and never merge with its pool.
-varying float fallen_m;
+// Height of the whole fall: a tall one is drawn from its lip, a short step merges with its pool. fall_m also counts the
+// break-up the water arrives with, so a short step in fast water would read as a tall fall.
+varying float drop_m;
+// Share of the water already aerated as it reaches its lip: white from the top, though it has not fallen yet.
+varying float lip_aeration;
 varying float presence;
 // Seconds since the water left its lip.
 varying float flight_s;
@@ -125,6 +127,7 @@ float fall_time(float drop, float down_m_s) {
 void vertex() {
 	vec4 entry = texelFetch(lip_list, ivec2(INSTANCE_ID % lip_list_width, INSTANCE_ID / lip_list_width), 0);
 	presence = 0.0;
+	drop_m = 0.0;
 	if (entry.y < 0.5 || !swe_spill_enabled) {
 		POSITION = vec4(2.0, 2.0, 2.0, 1.0);
 	} else {
@@ -155,7 +158,8 @@ void vertex() {
 			drop = max(drop, column.top - landing(face_point + column.velocity * fall_time(max(drop, 0.01), down_m_s)));
 		}
 		// Rows past the landing estimate: the path stops where it meets its pool or ground.
-		drop = max(drop, 0.0) + 0.25;
+		drop_m = max(drop, 0.0);
+		drop = drop_m + 0.25;
 		int row = int(round(UV.y * float(sheet_rows - 1)));
 		float top = column.top;
 		vec3 point = vec3(face_point.x, top, face_point.y);
@@ -203,8 +207,8 @@ void vertex() {
 		float ratio = unit_discharge_m2_s > 0.0 ? column.depth * max(dot(column.velocity, facing), 0.0) / unit_discharge_m2_s : 1.0;
 		stream_share = clamp(ratio / handover.z, 0.0, 1.0);
 		float thinning = pow(clamp(1.0 / max(ratio, 0.0001), 1.0, handover.w), thinning_exponent);
-		fall_m = fallen * thinning + max(column.foam, 1.0 - column.nappe) * breakup_length_m;
-		fallen_m = fallen;
+		lip_aeration = max(column.foam, 1.0 - column.nappe);
+		fall_m = fallen * thinning + lip_aeration * breakup_length_m;
 		// A trickle far below whole-stream share is a film on the rock, not a fall.
 		presence = smoothstep(0.2 * handover.z, 0.6 * handover.z, ratio);
 		POSITION = PROJECTION_MATRIX * (VIEW_MATRIX * vec4(point, 1.0));
@@ -217,8 +221,8 @@ void fragment() {
 	if (dot(view_normal, VIEW) < 0.0) { view_normal = -view_normal; }
 	float above_pool_m = world_position.y - receiving(world_position.xz);
 	vec3 view_across = normalize((VIEW_MATRIX * vec4(lip_across, 0.0)).xyz);
-	WaterfallLook look = waterfall_look(view_normal, view_across, fall_m, flight_s, lip_point, lip_weight, stream_share, side_share,
-		above_pool_m, VIEW, SCREEN_UV);
+	WaterfallLook look = waterfall_look(view_normal, view_across, fall_m, flight_s, lip_point, lip_weight, lip_aeration, stream_share,
+		side_share, above_pool_m, VIEW, SCREEN_UV);
 	NORMAL = look.normal;
 	ALBEDO = look.albedo;
 	EMISSION = look.emission;
@@ -227,5 +231,5 @@ void fragment() {
 	BACKLIGHT = look.backlight;
 	// Clear water seen edge-on is a thin film, not a glossy ribbon; aerated water shows its body from any side.
 	float edge_on = mix(smoothstep(0.08, 0.35, abs(dot(view_normal, VIEW))), 1.0, look.foam);
-	ALPHA = presence * spill_apart(above_pool_m, fallen_m) * look.coverage * edge_on;
+	ALPHA = presence * spill_apart(above_pool_m, drop_m) * look.coverage * edge_on;
 }

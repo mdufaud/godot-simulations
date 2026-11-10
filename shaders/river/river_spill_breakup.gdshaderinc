@@ -8,6 +8,8 @@ uniform float breakup_length_m = 3.0;
 // Fractions of the break-up length: the sheet is clear past its lip and torn and white where its core is gone; the
 // streaks take over from it in between.
 const vec2 BREAKUP_SHARE = vec2(0.1, 1.0);
+// Dense foam in full sun stays under the tonemapper's white, so its shading survives.
+const vec3 FOAM_COLOR = vec3(0.56, 0.6, 0.61);
 
 // How far a fall of this aeration strength turns from threads to streamers and foam.
 float aerated(float strength) {

@@ -1,6 +1,7 @@
 shader_type spatial;
 render_mode world_vertex_coords, cull_disabled;
 #include "res://shaders/river/river_swe.gdshaderinc"
+#include "res://shaders/river/river_spill_breakup.gdshaderinc"
 
 // The side of the water where its cell surface ends above lower ground (river_water.gdshader draws only the top):
 // one quad per cell edge, from the higher surface down to its own bed or to the lower surface, flat where both meet.
@@ -11,8 +12,8 @@ uniform float cell_size_m = 0.125;
 uniform vec2 domain_m = vec2(1.0);
 uniform vec2 domain_origin_m = vec2(0.0);
 uniform vec3 deep_color : source_color = vec3(0.035, 0.19, 0.17);
+uniform float clarity = 0.82;
 
-const vec3 FOAM_COLOR = vec3(0.82, 0.87, 0.83);
 // Thinner sides than this are left out: the surfaces on both sides meet.
 const float MIN_SIDE_M = 0.002;
 // Streaks of foam carried down a side: their width across it, length and speed down it.
@@ -23,6 +24,7 @@ varying vec3 world_position;
 varying vec3 outward;
 varying float aeration;
 varying float top_m;
+varying float side_m;
 
 float value_noise(vec2 point) {
 	vec2 cell = floor(point);
@@ -72,6 +74,7 @@ void vertex() {
 	if (!swe_enabled || other == own || top - bottom < MIN_SIDE_M) { bottom = top; }
 	VERTEX = vec3(point.x, k >= 2 ? bottom : top, point.y);
 	top_m = top;
+	side_m = top - bottom;
 	world_position = VERTEX;
 }
 
@@ -83,6 +86,8 @@ void fragment() {
 	float depth = max(top_m - world_position.y, 0.0);
 	float white = aeration * mix(0.72, 1.0, streak) * mix(1.0, 0.8, smoothstep(0.2, 1.0, depth));
 	ALBEDO = mix(deep_color, FOAM_COLOR, white);
+	// As thick as it is tall: clear water shows the rock behind its side, as the surface above shows its bed.
+	ALPHA = 1.0 - exp(-river_water_absorption(clarity, 0.0) * side_m) * (1.0 - white);
 	NORMAL = normalize((VIEW_MATRIX * vec4(outward, 0.0)).xyz);
 	ROUGHNESS = mix(0.15, 0.7, aeration);
 	SPECULAR = mix(0.35, 0.12, aeration);

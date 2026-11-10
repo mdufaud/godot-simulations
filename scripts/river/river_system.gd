@@ -171,6 +171,7 @@ func apply_config(value: RiverConfig) -> void:
 	water_material.set_shader_parameter("foam_amount", config.foam_amount)
 	if _skirt_material != null:
 		_skirt_material.set_shader_parameter("deep_color", config.deep_color)
+		_skirt_material.set_shader_parameter("clarity", config.clarity)
 	if waterfall != null:
 		waterfall.apply_config(config)
 	set_reflection_enabled(_reflection_requested)
@@ -324,6 +325,7 @@ func _build_skirt() -> void:
 	var cells := SweSystem.grid_for(field.domain_m, swe_cell_m)
 	_skirt_material = ShaderMaterial.new()
 	_skirt_material.shader = SkirtShader
+	_skirt_material.render_priority = -1
 	_skirt_material.set_shader_parameter("cell_grid", cells)
 	_skirt_material.set_shader_parameter("cell_size_m", swe_cell_m)
 	_skirt_material.set_shader_parameter("domain_m", field.domain_m)

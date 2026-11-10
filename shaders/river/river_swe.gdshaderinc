@@ -33,6 +33,11 @@ float river_swe_height(vec2 point, float original) {
 	return mix(original, state.z, weight);
 }
 
+// Absorption per metre of water looked through, from RiverConfig.clarity; detail is the surface detail tier share.
+float river_water_absorption(float clarity, float detail) {
+	return mix(mix(3.8, 0.32, clarity), mix(3.8, 0.08, pow(clarity, 0.6)), detail);
+}
+
 ivec2 river_swe_cell(vec2 point) {
 	ivec2 size = textureSize(swe_spill, 0);
 	return clamp(ivec2(floor(river_swe_uv(point) * vec2(size))), ivec2(0), size - 1);

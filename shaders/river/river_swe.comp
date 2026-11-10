@@ -46,7 +46,7 @@ layout(push_constant, std430) uniform Params {
 #define WET_DEPTH_M params.relaxation.w
 
 const ivec2 FACES[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
-// Side by side wet cells farther apart in level than this many spill-slope steps are separate surfaces.
+// A dry cell between surfaces farther apart in level than this many spill-slope steps carries only the lower one.
 const float LEVEL_GAP_STEPS = 2.0;
 // A dry cell carries a neighbour's surface into its rock when its bed is at most this far below that surface.
 const float SHORE_RISE_M = 0.02;
@@ -357,10 +357,10 @@ float surface_height(ivec2 p, vec4 q, vec4 bed) {
     return lowest < 1.0e5 ? lowest : bed.y + params.water.x;
 }
 
-// Side by side cells share a surface: both wet, no spill face between them and levels close.
-bool joined(vec4 qa, float za, vec4 qb, float zb, float gap) {
-    return qa.x > WET_DEPTH_M && qb.x > WET_DEPTH_M && !spills(za, zb, qb.x) && !spills(zb, za, qa.x)
-        && abs(za + qa.x - zb - qb.x) < gap;
+// Side by side cells share a surface: both wet and no spill face between them. However far apart their levels, water the
+// solver passes from one to the other is one surface: a drowned lip, a bore or a run-up is a steep slope, not a tear.
+bool joined(vec4 qa, float za, vec4 qb, float zb) {
+    return qa.x > WET_DEPTH_M && qb.x > WET_DEPTH_M && !spills(za, zb, qb.x) && !spills(zb, za, qa.x);
 }
 
 // Each corner takes the mean drawn level (drawn_level) of the cells joined to this one around it, or, where the cells of
@@ -393,7 +393,7 @@ vec4 surface_corners(ivec2 p, bool spread) {
             for (int e = 0; e < 4; ++e) {
                 int a = EDGE_FROM[e];
                 int b = EDGE_TO[e];
-                if (joined(q[cells[a]], bed[cells[a]], q[cells[b]], bed[cells[b]], gap)) {
+                if (joined(q[cells[a]], bed[cells[a]], q[cells[b]], bed[cells[b]])) {
                     int label = min(labels[a], labels[b]);
                     labels[a] = label;
                     labels[b] = label;
@@ -598,7 +598,9 @@ void main() {
     vec4 next = q - dt / params.domain.z * flux;
     next.x = max(next.x, 0.0);
     // Spilled onto and spilling on, the cell is wall: whatever reaches it falls on down, none held or refilled by guidance.
-    if (any(spill_faces) && any(equal(spill_sides, ivec4(-1)))) {
+    // Not beside a stream: a lip cell that a film off a rock or a bank lands on is still that stream's brink.
+    bvec4 stream = greaterThan(vec4(qe.x, qw.x, qn.x, qs.x) * vec4(equal(spill_sides, ivec4(0))), vec4(SLOPE_DEPTH_M));
+    if (any(spill_faces) && any(equal(spill_sides, ivec4(-1))) && !any(stream)) {
         float volume = next.x * params.domain.z * params.domain.z;
         if (volume > 0.0) {
             vec4 shares = vec4(spill_faces) / dot(vec4(spill_faces), vec4(1.0));

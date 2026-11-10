@@ -20,7 +20,7 @@ void fragment() {
 	vec3 color = texture(albedo_texture, UV).rgb * albedo_tint.rgb;
 	float world_normal_y = normalize((INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz).y;
 	float moss = smoothstep(0.35, 0.8, world_normal_y) * smoothstep(0.3, 0.75, height);
-	ALBEDO = mix(color, color * vec3(0.57, 0.75, 0.38), moss * 0.3) * mix(1.0, 0.45, wet);
+	ALBEDO = mix(color, color * vec3(0.57, 0.75, 0.38), moss * 0.3) * river_wet_darkening(wet, height);
 	NORMAL_MAP = texture(normal_texture, UV).rgb;
 	NORMAL_MAP_DEPTH = 0.65;
 	vec4 rough = texture(roughness_texture, UV);

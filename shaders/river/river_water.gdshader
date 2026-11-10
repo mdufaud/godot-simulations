@@ -333,7 +333,7 @@ void fragment() {
 		thickness = bed_depth / max(abs(world_view.y), 0.2);
 		if (live_weight <= 0.0) { transmission = texture(riverbed_albedo, world_position.xz * 0.48).rgb * 0.7; }
 	}
-	float absorption = mix(mix(3.8, 0.32, clarity), mix(3.8, 0.08, pow(clarity, 0.6)), surface_detail);
+	float absorption = river_water_absorption(clarity, surface_detail);
 	vec3 transmittance = exp(-vec3(absorption * 1.25, absorption * 0.72, absorption * 0.63) * thickness);
 	vec3 body_tint = deep_tint_depth_m.y > deep_tint_depth_m.x
 		? mix(deep_color, deep_tint, smoothstep(deep_tint_depth_m.x, deep_tint_depth_m.y, max(guided_bed.y - guided_bed.x, 0.0)))

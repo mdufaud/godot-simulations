@@ -148,10 +148,6 @@ func _build_ground() -> void:
 		material.set_shader_parameter(prefix + "_albedo", _texture(asset, "diff"))
 		material.set_shader_parameter(prefix + "_normal", _texture(asset, "nor_gl"))
 		material.set_shader_parameter(prefix + "_roughness", _texture(asset, "rough"))
-	var rock := "res://resources/rocks/namaqualand_cliff_01/textures/namaqualand_cliff_01_%s_2k.jpg"
-	material.set_shader_parameter("rock_albedo", load(rock % "diff"))
-	material.set_shader_parameter("rock_normal", load(rock % "nor_gl"))
-	material.set_shader_parameter("rock_arm", load(rock % "arm"))
 	material.set_shader_parameter("caustics_texture", load("res://resources/ocean/foam_detail.png"))
 	material.set_shader_parameter("water_normal", load("res://resources/ocean/micro_normal.png"))
 	material.set_shader_parameter("water_detail", water_detail)
@@ -269,19 +265,23 @@ func _ground_mesh() -> ArrayMesh:
 		indices.append_array(row[0])
 		cliffs.append_array(row[1])
 	# A cliff triangle gets its own vertices, shared ones would shade the wall like the ground above it. It faces down
-	# the slope smoothed over CLIFF_SPAN_M, so a lip across the cell staircase does not shade as stripes.
+	# the slope smoothed over CLIFF_SPAN_M at the corner itself, so triangles sharing a corner share its normal and the
+	# wall shades as one surface, not as facets.
+	var corner_normals := {}
 	for c in range(0, cliffs.size(), 3):
-		var corners := [vertices[cliffs[c]], vertices[cliffs[c + 1]], vertices[cliffs[c + 2]]]
-		var centre: Vector3 = (corners[0] + corners[1] + corners[2]) / 3.0
-		var point := Vector2(centre.x, centre.z)
-		var facing := Vector2(_terrain(point - Vector2(CLIFF_SPAN_M, 0.0)) - _terrain(point + Vector2(CLIFF_SPAN_M, 0.0)),
-			_terrain(point - Vector2(0.0, CLIFF_SPAN_M)) - _terrain(point + Vector2(0.0, CLIFF_SPAN_M)))
-		var normal: Vector3 = Vector3(facing.x, 0.0, facing.y).normalized() if facing.length() > 0.01 \
-			else (corners[2] - corners[0]).cross(corners[1] - corners[0]).normalized()
-		for corner: Vector3 in corners:
+		var face := (vertices[cliffs[c + 2]] - vertices[cliffs[c]]).cross(vertices[cliffs[c + 1]] - vertices[cliffs[c]]).normalized()
+		for k in 3:
+			var source := cliffs[c + k]
+			var corner := vertices[source]
+			if not corner_normals.has(source):
+				var point := Vector2(corner.x, corner.z)
+				var facing := Vector2(_terrain(point - Vector2(CLIFF_SPAN_M, 0.0)) - _terrain(point + Vector2(CLIFF_SPAN_M, 0.0)),
+					_terrain(point - Vector2(0.0, CLIFF_SPAN_M)) - _terrain(point + Vector2(0.0, CLIFF_SPAN_M)))
+				corner_normals[source] = Vector3(facing.x, 0.0, facing.y).normalized() if facing.length() > 0.01 else Vector3.ZERO
+			var normal: Vector3 = corner_normals[source]
 			indices.append(vertices.size())
 			vertices.append(corner)
-			normals.append(normal)
+			normals.append(normal if normal != Vector3.ZERO else face)
 			uvs.append(Vector2(corner.x, corner.z))
 			tangents.append_array(PackedFloat32Array([1.0, 0.0, 0.0, 1.0]))
 	var arrays := []

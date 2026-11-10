@@ -3,7 +3,7 @@ render_mode blend_mix, depth_draw_never, cull_disabled;
 
 uniform sampler2D noise_texture : filter_linear_mipmap, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
-uniform vec3 tint : source_color = vec3(0.92, 0.95, 0.97);
+uniform vec3 tint : source_color = vec3(0.8, 0.83, 0.85);
 uniform float opacity = 0.6;
 uniform float churn_per_s = 0.08;
 uniform float soft_fade_m = 0.8;
