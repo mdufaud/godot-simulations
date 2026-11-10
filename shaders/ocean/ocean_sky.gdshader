@@ -20,7 +20,7 @@ uniform float sun_glow_strength = 0.0;
 float sun_glow_weight(vec3 direction) {
 	vec2 flat_direction = normalize(direction.xz + vec2(1e-5, 0.0));
 	vec2 flat_sun = normalize(sun_direction.xz + vec2(1e-5, 0.0));
-	float toward = 0.5 + 0.5 * dot(flat_direction, flat_sun);
+	float toward = max(0.5 + 0.5 * dot(flat_direction, flat_sun), 0.0);
 	return pow(toward, 4.0) * exp(-max(direction.y, 0.0) * 4.5)
 		* sun_glow_strength * (1.0 - storm_mood);
 }
