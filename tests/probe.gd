@@ -5011,11 +5011,13 @@ func _run_grass() -> void:
 			and demo.sun.shadow_enabled == profile.shadows \
 			and (seed_mode != 0 or is_equal_approx(demo.grass.density, profile.density)),
 		"GRA3: quality tier %d did not reach the player boot path" % tier)
-	var expected_base: Color = Color(0.22, 0.1, 0.29) if palette_seed == 3 else demo.BASE_COLOR
+	var expected_palette: int = 3 if palette_seed == 3 else demo.DEFAULT_PALETTE
+	var expected_base: Color = Color(0.22, 0.1, 0.29) if palette_seed == 3 \
+		else demo.COLOR_PALETTES[demo.DEFAULT_PALETTE].base
 	var expected_gradient := 0.4 if palette_seed == 3 else 0.0
 	_check(demo.grass.demo_stage == 3 \
-			and demo._palette_index == palette_seed \
-			and demo._palette_option.selected == palette_seed \
+			and demo._palette_index == expected_palette \
+			and demo._palette_option.selected == expected_palette \
 			and demo.grass.material.get_shader_parameter("base_color") == expected_base \
 			and is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), expected_gradient) \
 			and demo.ground_mesh.material_override.get_shader_parameter("clump_noise") != null,
@@ -5042,6 +5044,7 @@ func _run_grass() -> void:
 	_check(is_equal_approx(demo.grass.material.get_shader_parameter("chromatic_strength"), 0.7) \
 			and is_equal_approx(demo.ground_mesh.material_override.get_shader_parameter("chromatic_strength"), 0.7),
 		"GRA3: Prism shader colors did not reach grass and ground")
+	demo._palette_action.pressed.emit()
 	demo._palette_action.pressed.emit()
 	_check(demo._palette_index == 0 and palette_caption.text == "Pampas" \
 			and settings.get_sim_value("grass_demo", "🎨 Grass Palette/Palette", -1) == 0,
@@ -5201,7 +5204,9 @@ func _run_grass() -> void:
 	for profile_tier in range(4):
 		demo.set_quality_profile(profile_tier)
 		var tier_values: Dictionary = GrassQualityProfile.values(profile_tier)
+		first_tile = demo.grass._tiles[0][0]
 		var tier_matches: bool = is_equal_approx(demo.grass.density, tier_values.density) \
+				and is_equal_approx(demo.grass.config.map_radius_m, tier_values.map_radius_m) \
 				and demo.grass.near_detail == tier_values.near_detail \
 				and demo.grass.shadows_enabled == tier_values.shadows \
 				and demo.sun.shadow_enabled == tier_values.shadows \
@@ -5297,11 +5302,9 @@ void main() {
 	mat3 normal_rotation;
 	vec3 bent = bend_tuft_vertex(position, root, curve, vertex.w, pampas, head,
 		1.0, rest, part_bend.zw, normal_rotation);
-	float residue = wind_flutter(12.34, 2.5, 1.0, 4.7, 0.0, 1.0)
-		- wind_flutter(12.34, 2.5, 1.0, -1.0, 0.0, 0.0);
 	float distance = 9.0 + float(id) * 0.25;
 	vec2 peak = gust_envelope(distance, (distance + 60.0) / 200.0, 200.0);
-	results[id] = vec4(bent, abs(residue) + abs(peak.x - 1.0) + abs(peak.y));
+	results[id] = vec4(bent, abs(peak.x - 1.0) + abs(peak.y));
 }
 """
 	var spirv := rd.shader_compile_spirv_from_source(source)
@@ -5366,7 +5369,7 @@ void main() {
 		for index in vertices.size():
 			var offset := (int(sample[1]) + index) * 4
 			positions.append(Vector3(output[offset], output[offset + 1], output[offset + 2]))
-			_check(absf(output[offset + 3]) < 0.000001, "GRA3: gust envelope or flutter regression")
+			_check(absf(output[offset + 3]) < 0.000001, "GRA3: gust envelope regression")
 			var position := rest * vertices[index]
 			if uv[index].x >= 2.0 and uv[index].x <= 3.0:
 				var pivot := rest * Vector3(0.71 * 0.38, 1.1, 0.71 * 0.38)

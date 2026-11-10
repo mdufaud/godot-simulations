@@ -8,10 +8,15 @@ const SHADOW_DISTANCE_M := {
 	Tier.LOW: 20.0, Tier.MEDIUM: 30.0, Tier.HIGH: 40.0, Tier.ULTRA: 60.0,
 }
 
+const MAP_RADIUS_M := {
+	Tier.LOW: 60.0, Tier.MEDIUM: 80.0, Tier.HIGH: 100.0, Tier.ULTRA: 120.0,
+}
+
 static func values(tier: int) -> Dictionary:
 	return {
 		near_detail = NEAR_DETAIL[tier],
 		density = DENSITY[tier],
 		shadows = SHADOWS[tier],
 		shadow_distance_m = SHADOW_DISTANCE_M[tier],
+		map_radius_m = MAP_RADIUS_M[tier],
 	}

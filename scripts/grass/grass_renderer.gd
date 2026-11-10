@@ -18,6 +18,28 @@ const LOD_DISTANCES := [12.0, 40.0, 55.0, 70.0]
 # dark blobs from a top-down camera at low sun: each sample stretches a ~3 m
 # streak with gaps between, instead of merging into a canopy shadow.
 const SHADOW_DENSITY := 0.18
+# Blades per tuft, scattered over a disc about one planting cell wide.
+const SWARD_BLADES_NEAR := 14
+const SWARD_BLADES_FAR := 7
+const SWARD_SPREAD_M := 0.24
+const WIDEN_START_M := 16.0
+const RIM_FADE_M := 25.0
+
+# Wind model, after canopy-flow measurements (Py et al. 2006, Dupont et al.
+# 2010): gusts convect faster than the mean wind at canopy top, stems answer
+# near their own natural frequency, and the waving wavelength is Uc / f0.
+const WIND_10M_MPS_PER_UNIT := 2.0
+const CANOPY_WIND_RATIO := 0.4
+const GUST_TILE_M := Vector2(850.0, 300.0)
+const WAVE_TILE_M := Vector2(70.0, 160.0)
+const EDDY_TILE_M := 26.0
+const VEER_TILE_M := 1300.0
+const GUST_SPEED_RATIO := 0.7
+const WAVE_CONVECTION_RATIO := 1.7
+const EDDY_SPEED_RATIO := 0.5
+const VEER_SPEED_RATIO := 0.25
+const VEER_RAD := 0.7
+const SWAY_HZ := Vector2(1.25, 1.9)
 
 var config: GrassConfig = GrassConfig.new()
 var density := 1.0
@@ -37,8 +59,9 @@ var _gust_speed := 15.0
 var _gust_phase := 0.0
 var _gust_release_start := 0.0
 var _gust_duration := 0.0
-var _wind_time := 0.0
-var _wave_time := 0.0
+var _wind_phase := [0.0, 0.0, 0.0, 0.0]
+var _sway_phase := [0.0, 0.0]
+var _ground_material: ShaderMaterial
 var _layout_seed := 821
 var _lod_variants: Array[Array] = []
 var _rank_camera_position := Vector3.ZERO
@@ -55,14 +78,18 @@ func build() -> void:
 	material = GRASS_MAT.duplicate() as ShaderMaterial
 	material.set_shader_parameter("heightmap", HEIGHTMAP)
 	material.set_shader_parameter("heightmap_scale", config.heightmap_scale_m)
-	_tuft_mesh_high = GrassMultimeshBuilder.make_tuft_mesh(true)
-	_tuft_mesh_low = GrassMultimeshBuilder.make_tuft_mesh(false)
+	configure_wind(material)
+	_tuft_mesh_high = GrassMultimeshBuilder.make_tuft_mesh(true, true,
+		SWARD_BLADES_NEAR, SWARD_SPREAD_M)
+	_tuft_mesh_low = GrassMultimeshBuilder.make_tuft_mesh(false, true,
+		SWARD_BLADES_FAR, SWARD_SPREAD_M)
 	set_wind_speed(wind_speed)
 	set_wind_direction(wind_direction_degrees)
 	set_gustiness(gustiness)
 	set_demo_stage(demo_stage)
 	_build_tiles()
 	_apply_tile_shadows()
+	_apply_rim()
 	generate()
 
 
@@ -75,26 +102,70 @@ func ground_material() -> ShaderMaterial:
 	mat.set_shader_parameter("heightmap", HEIGHTMAP)
 	mat.set_shader_parameter("heightmap_scale", config.heightmap_scale_m)
 	mat.set_shader_parameter("clump_noise", material.get_shader_parameter("clump_noise"))
+	for parameter in ["wind_noise", "wind_gust_wave_tile_m", "wind_eddy_veer_tile_m",
+			"wind_veer_rad", "wind_speed", "wind_direction", "gustiness"]:
+		mat.set_shader_parameter(parameter, material.get_shader_parameter(parameter))
+	_ground_material = mat
+	_apply_rim()
 	return mat
+
+
+func _set_wind_parameter(parameter: String, value: Variant) -> void:
+	material.set_shader_parameter(parameter, value)
+	if _ground_material != null:
+		_ground_material.set_shader_parameter(parameter, value)
+
+
+## Pushes the wind layer geometry; every material including wind_field needs it.
+static func configure_wind(target: ShaderMaterial) -> void:
+	target.set_shader_parameter("wind_gust_wave_tile_m",
+		Vector4(GUST_TILE_M.x, GUST_TILE_M.y, WAVE_TILE_M.x, WAVE_TILE_M.y))
+	target.set_shader_parameter("wind_eddy_veer_tile_m", Vector2(EDDY_TILE_M, VEER_TILE_M))
+	target.set_shader_parameter("wind_veer_rad", VEER_RAD)
+
+
+## Noise tiles per second for the gust, wave, eddy and veer layers.
+static func wind_phase_rates(speed: float) -> Array[float]:
+	var wind_10m := speed * WIND_10M_MPS_PER_UNIT
+	return [wind_10m * GUST_SPEED_RATIO / GUST_TILE_M.x,
+		wind_10m * CANOPY_WIND_RATIO * WAVE_CONVECTION_RATIO / WAVE_TILE_M.x,
+		wind_10m * EDDY_SPEED_RATIO / EDDY_TILE_M, wind_10m * VEER_SPEED_RATIO / VEER_TILE_M]
+
+
+static func sway_wavenumber(speed: float) -> float:
+	return TAU * SWAY_HZ.x / maxf(
+		speed * WIND_10M_MPS_PER_UNIT * CANOPY_WIND_RATIO * WAVE_CONVECTION_RATIO, 1.0)
+
+
+## Drives a grass material from an absolute clock, for hosts whose wind speed
+## never changes (a varying speed needs the accumulated phases of tick()).
+static func apply_wind_clock(target: ShaderMaterial, time_s: float, speed: float) -> void:
+	var rates := wind_phase_rates(speed)
+	target.set_shader_parameter("wind_phase", Vector4(fposmod(time_s * rates[0], 1.0),
+		fposmod(time_s * rates[1], 1.0), fposmod(time_s * rates[2], 1.0),
+		fposmod(time_s * rates[3], 1.0)))
+	target.set_shader_parameter("sway_phase", Vector2(fposmod(time_s * TAU * SWAY_HZ.x, TAU),
+		fposmod(time_s * TAU * SWAY_HZ.y, TAU)))
+	target.set_shader_parameter("sway_wavenumber", sway_wavenumber(speed))
 
 
 func set_wind_speed(value: float) -> void:
 	wind_speed = clampf(value, 0.0, 5.0)
 	if material != null:
-		material.set_shader_parameter("wind_speed", wind_speed)
+		_set_wind_parameter("wind_speed", wind_speed)
 
 
 func set_wind_direction(value_degrees: float) -> void:
 	wind_direction_degrees = fposmod(value_degrees, 360.0)
 	var angle := deg_to_rad(wind_direction_degrees)
 	if material != null:
-		material.set_shader_parameter("wind_direction", Vector2(cos(angle), sin(angle)))
+		_set_wind_parameter("wind_direction", Vector2(cos(angle), sin(angle)))
 
 
 func set_gustiness(value: float) -> void:
 	gustiness = clampf(value, 0.0, 1.0)
 	if material != null:
-		material.set_shader_parameter("gustiness", gustiness)
+		_set_wind_parameter("gustiness", gustiness)
 
 
 func set_demo_stage(value: int) -> void:
@@ -154,14 +225,17 @@ func tick(delta: float, camera_target: Vector3, camera_position: Vector3) -> voi
 	if material == null:
 		return
 	# TIME grows without bound in the shader, so after hours its float32 steps
-	# get coarser than a frame and the wind scroll shimmers; accumulate the
-	# phase here in 64-bit instead. Both wrap periods land every noise octave
-	# (scroll factors 0.008/0.02/0.035 of 1000, wave a whole multiple of TAU)
-	# on whole tiles of the seamless noise, so the wraps are invisible.
-	_wind_time = fmod(_wind_time + delta * wind_speed, 1000.0)
-	_wave_time = fmod(_wave_time + delta * (0.5 + wind_speed * 0.35), TAU * 160.0)
-	material.set_shader_parameter("wind_time", _wind_time)
-	material.set_shader_parameter("wave_time", _wave_time)
+	# get coarser than a frame and the wind scroll shimmers; accumulate every
+	# phase here in 64-bit instead, each wrapped on its own period.
+	var rates := wind_phase_rates(wind_speed)
+	for layer in 4:
+		_wind_phase[layer] = fposmod(_wind_phase[layer] + delta * rates[layer], 1.0)
+	_sway_phase[0] = fposmod(_sway_phase[0] + delta * TAU * SWAY_HZ.x, TAU)
+	_sway_phase[1] = fposmod(_sway_phase[1] + delta * TAU * SWAY_HZ.y, TAU)
+	_set_wind_parameter("wind_phase",
+		Vector4(_wind_phase[0], _wind_phase[1], _wind_phase[2], _wind_phase[3]))
+	material.set_shader_parameter("sway_phase", Vector2(_sway_phase[0], _sway_phase[1]))
+	material.set_shader_parameter("sway_wavenumber", sway_wavenumber(wind_speed))
 	if _gust_age >= 0.0:
 		_gust_age += delta
 		var attack := smoothstep(0.0, 0.15, _gust_age)
@@ -193,6 +267,38 @@ func tick(delta: float, camera_target: Vector3, camera_position: Vector3) -> voi
 	_rank_tiles()
 	if tile_shifted:
 		_build_shadow_multimesh()
+
+
+## Rebuilds the tile grid; the far soil and the blade widening follow the rim.
+func set_map_radius(value_m: float) -> void:
+	if is_equal_approx(value_m, config.map_radius_m) and not _tiles.is_empty():
+		return
+	config.map_radius_m = value_m
+	if material == null:
+		return
+	for data in _tiles:
+		data[0].free()
+	_tiles.clear()
+	if _shadow_instance != null:
+		_shadow_instance.free()
+	_build_tiles()
+	_apply_tile_shadows()
+	var offset := Vector3(1, 0, 1) * config.tile_size_m * _previous_tile_id
+	for data in _tiles:
+		data[0].global_position = data[1] + offset
+	_shadow_instance.global_position = offset
+	_apply_rim()
+	if not _lod_variants.is_empty():
+		_rank_tiles()
+		_build_shadow_multimesh()
+
+
+func _apply_rim() -> void:
+	material.set_shader_parameter("widen_distance_m",
+		Vector2(WIDEN_START_M, config.map_radius_m - RIM_FADE_M * 0.2))
+	if _ground_material != null:
+		_ground_material.set_shader_parameter("grass_cover_m",
+			Vector2(config.map_radius_m - RIM_FADE_M, config.map_radius_m + RIM_FADE_M * 0.6))
 
 
 func set_density(value: float) -> void:
@@ -227,6 +333,14 @@ func set_sss_color(color: Color) -> void:
 
 func set_plume_color(color: Color) -> void:
 	material.set_shader_parameter("plume_color", color)
+
+
+func set_height_scale(value: float) -> void:
+	material.set_shader_parameter("height_scale", clampf(value, 0.2, 1.5))
+
+
+func set_plume_density(value: float) -> void:
+	material.set_shader_parameter("plume_density", clampf(value, 0.0, 1.0))
 
 
 func set_chromatic_strength(value: float) -> void:
@@ -287,7 +401,6 @@ func _build_tiles() -> void:
 	_shadow_instance.custom_aabb = AABB(Vector3(-extent, -3.5, -extent),
 		Vector3(extent * 2.0, 9.0, extent * 2.0))
 	add_child(_shadow_instance)
-	_previous_tile_id = Vector3.ZERO
 
 
 func _apply_tile_shadows() -> void:

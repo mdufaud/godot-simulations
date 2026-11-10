@@ -1,6 +1,8 @@
 shader_type spatial;
 render_mode cull_disabled, depth_prepass_alpha, ensure_correct_normals;
 
+#include "res://shaders/grass/wind_field.gdshaderinc"
+
 uniform sampler2D cloud_shadow_texture : hint_default_white, filter_linear, repeat_disable;
 uniform vec2 cloud_shadow_center = vec2(0.0);
 uniform float cloud_shadow_extent = 256.0;
@@ -13,21 +15,23 @@ group_uniforms GrassProperties;
 uniform int demo_stage : hint_range(0, 3) = 3;
 uniform float clumping_factor : hint_range(0.0, 1.0) = 0.55;
 uniform sampler2D clump_noise : filter_linear, repeat_enable;
-uniform sampler2D wind_noise : filter_linear, repeat_enable;
 uniform sampler2D plume_mask : source_color, filter_linear, repeat_disable;
-uniform float wind_speed : hint_range(0.0, 5.0) = 1.0;
-uniform vec2 wind_direction = vec2(0.819, 0.574);
-uniform float gustiness : hint_range(0.0, 1.0) = 0.65;
+uniform float height_scale : hint_range(0.2, 1.5) = 1.0;
+uniform float plume_density : hint_range(0.0, 1.0) = 0.75;
 uniform float gust_pulse : hint_range(0.0, 1.0) = 0.0;
 uniform float gust_age = -1.0;
 uniform vec2 gust_origin = vec2(0.0);
 uniform vec2 gust_direction = vec2(0.819, 0.574);
 uniform float gust_speed = 15.0;
 uniform float gust_phase = 0.0;
-// Wind phase pre-accumulated on the CPU and wrapped there: float32 TIME keeps
-// fine-graining after hours of play, which shimmers the scroll. See tick().
-uniform float wind_time = 0.0;
-uniform float wave_time = 0.0;
+// Phases of the two sway modes around the stems' natural frequency, wrapped
+// to TAU on the CPU: float32 TIME coarsens after hours of play. See tick().
+uniform vec2 sway_phase = vec2(0.0);
+// Radians of travelling sway phase per metre downwind (k = f0 / Uc).
+uniform float sway_wavenumber = 1.6;
+// Blades widen past x metres to keep the canopy closed as far tiles thin out.
+uniform vec2 widen_distance_m = vec2(16.0, 75.0);
+uniform float widen_gain = 1.3;
 
 group_uniforms GrassColor;
 uniform vec3 base_color : source_color = vec3(0.14, 0.23, 0.1);
@@ -43,6 +47,11 @@ varying float cloud_transmittance;
 // Per-tuft constants taken once in vertex(): every vertex of a tuft shares its
 // root, so these are flat across it and the fragment stage need not refetch them.
 varying float grass_clump;
+varying float grass_wind;
+varying float grass_distance;
+varying float grass_height_factor;
+varying float grass_sheen;
+varying float grass_pasture;
 
 mat3 rotate_y(float angle) {
 	float s = sin(angle);
@@ -120,19 +129,14 @@ vec2 gust_envelope(float distance, float age, float speed) {
 		* step(0.0, distance);
 }
 
-float wind_flutter(float time, float speed, float phase, float age, float pulse, float band) {
-	float amount = clamp(speed / 5.0, 0.0, 1.0);
-	return sin(time * (2.5 + speed * 1.5) + phase) * 0.045 * amount
-		+ sin(age * 7.0 + phase) * 0.036 * amount * pulse * band;
-}
-
 void vertex() {
 	vec3 blade_root = MODEL_MATRIX[3].xyz;
 	float pampas_part = step(1.5, UV.x);
 	float plume_head = pampas_part * (1.0 - step(3.5, UV.x));
 	// INSTANCE_CUSTOM.a is also the color variation; the 0.25 gate keeps ~25%
 	// of the tufts plume-less so the stage-3 field is not uniformly plumed.
-	float pampas_presence = step(0.25, INSTANCE_CUSTOM.a) * step(1.5, float(demo_stage));
+	float pampas_presence = step(1.0 - plume_density, INSTANCE_CUSTOM.a)
+		* step(1.5, float(demo_stage));
 	float blade_id = INSTANCE_CUSTOM.b;
 	float feature_mix = smoothstep(0.5, 1.0, float(demo_stage));
 
@@ -142,7 +146,10 @@ void vertex() {
 	float fine_clump = texture(clump_noise, blade_root.xz * 0.018).r;
 	float height_clump = mix(1.0, mix(0.82, 1.18, broad_clump),
 		clumping_factor * feature_mix);
-	height_variation *= height_clump;
+	height_variation *= height_clump * height_scale;
+	grass_distance = distance(blade_root, CAMERA_POSITION_WORLD);
+	width_variation *= 1.0 + widen_gain
+		* smoothstep(widen_distance_m.x, widen_distance_m.y, grass_distance);
 
 	float random_angle = INSTANCE_CUSTOM.b * TAU * feature_mix;
 	float clump_angle = (fine_clump - 0.5) * 0.9;
@@ -160,25 +167,10 @@ void vertex() {
 			+ rotate_y(plume_roll) * head_offset * mix(1.0, plume_size, feature_mix);
 	}
 
-	vec2 direction = normalize(wind_direction);
-	vec2 crosswind = vec2(-direction.y, direction.x);
+	vec4 wind = wind_field(blade_root.xz);
 	float wind_amount = clamp(wind_speed / 5.0, 0.0, 1.0);
-	float along_wind = dot(blade_root.xz, direction);
-	// Three decorrelated octaves of scrolling wind (the large offsets re-seed
-	// the seamless noise): broad bends the wave phase, band breathes its
-	// amplitude so gust lanes appear and dissolve, fine drives the shiver.
-	vec2 scroll = direction * wind_time;
-	float broad_noise = texture(wind_noise, blade_root.xz * 0.004 - scroll * 0.008).r;
-	float band_noise = texture(wind_noise, blade_root.xz * 0.013 - scroll * 0.02
-		+ vec2(0.41, 0.23)).r;
-	float fine_wind = texture(wind_noise, blade_root.xz * 0.035 - scroll * 0.035
-		+ vec2(blade_id * 0.13)).r;
-	float wave_phase = along_wind * 0.23 - wave_time
-		+ (broad_noise - 0.5) * 2.2;
-	float wave_front = (0.5 + 0.5 * sin(wave_phase))
-		* (0.4 + 0.6 * smoothstep(0.3, 0.7, band_noise));
-	float turbulence = (fine_wind - 0.5) * 0.16 * wind_amount;
-	float local_wind = mix(wave_front, fine_wind, 0.6);
+	vec2 direction = wind.z > 0.0001 ? wind.xy / wind.z : normalize(wind_direction);
+	vec2 crosswind = vec2(-direction.y, direction.x);
 
 	// The burst: a ragged wavefront sweeping downwind. Noise breaks the strip
 	// into clumps, the trailing dip over-swings the blades back, and the extra
@@ -189,16 +181,28 @@ void vertex() {
 			+ vec2(gust_phase, gust_phase * 1.7)).r);
 	float gust_recoil = gust.y;
 	float compliance = mix(0.78, 1.22, INSTANCE_CUSTOM.g);
-	float bend_angle = wind_amount * (0.16 + local_wind * gustiness * 1.5)
-		+ turbulence * 0.45;
+	// Drag grows with the square of the wind, and a blade already lying
+	// downwind catches less of it, so the lean saturates.
+	float drive = wind.z * (0.35 + 0.65 * wind.z);
+	float bend_angle = 1.15 * (1.0 - exp(-1.5 * drive)) * compliance
+		+ wind.w * 0.3 * wind_amount;
 	bend_angle = clamp(bend_angle, -0.18, 1.05);
-	bend_angle += gust_pulse * compliance
-		* (gust_band * (0.65 + wave_front * 0.35) - gust_recoil * 0.16
-			+ (fine_wind - 0.5) * 0.08 * gust_band);
-	bend_angle = clamp(bend_angle, -0.18, 1.4);
-	float flutter_phase = blade_id * TAU + along_wind * 0.15;
-	float flutter = wind_flutter(TIME, wind_speed, flutter_phase, gust_age, gust_pulse, gust_band);
-	vec2 bend = direction * bend_angle + crosswind * flutter;
+	float burst = gust_pulse * compliance
+		* (gust_band * (0.65 + wind.z * 0.35) - gust_recoil * 0.16
+			+ wind.w * 0.08 * gust_band);
+	// Stems ring near their natural frequency whatever the wind speed; the
+	// phase travels downwind and each tuft sits between two nearby modes.
+	float travel = dot(blade_root.xz, normalize(wind_direction)) * sway_wavenumber;
+	float sway_seed = blade_id * TAU;
+	float sway_mix = INSTANCE_CUSTOM.r;
+	float sway = mix(sin(sway_phase.x - travel + sway_seed),
+		sin(sway_phase.y - travel * 1.3 + sway_seed * 1.7), sway_mix);
+	float flutter = sin(sway_phase.x + sway_phase.y + sway_seed * 2.9 - travel * 0.7);
+	float sway_amount = wind_amount * (0.03 + 0.2 * wind.z * wind.z) + 0.05 * gust_pulse * gust_band;
+	bend_angle += sway * sway_amount;
+	vec2 bend = direction * bend_angle + normalize(gust_direction) * burst
+		+ crosswind * flutter * sway_amount * 0.6;
+	grass_wind = clamp(length(bend), 0.0, 1.4);
 	float station = pampas_part < 0.5 ? UV.y : UV.y / 0.75;
 	mat3 normal_rotation;
 	blade_position = bend_tuft_vertex(blade_position, CUSTOM0, CUSTOM1, station,
@@ -214,11 +218,15 @@ void vertex() {
 		bent_normal = rotate_y(plume_roll) * bent_normal;
 	}
 	bent_normal = normal_rotation * bent_normal;
-	NORMAL = normalize(mix(bent_normal, vec3(0.0, 1.0, 0.0), 0.12));
+	// Far blades shade as one soft canopy: their own normals only add noise.
+	NORMAL = normalize(mix(bent_normal, vec3(0.0, 1.0, 0.0),
+		mix(0.12, 0.7, smoothstep(10.0, 70.0, grass_distance))));
 	grass_world_root = blade_root;
 	grass_color_variation = INSTANCE_CUSTOM.a;
 	grass_part = floor(UV.x * 0.5);
 	grass_clump = broad_clump;
+	grass_pasture = texture(clump_noise, blade_root.xz * 0.0011).r;
+	grass_height_factor = clamp(UV.y, 0.0, 1.0);
 	cloud_transmittance = texture(cloud_shadow_texture,
 		(blade_root.xz - cloud_shadow_center) / cloud_shadow_extent + 0.5).r;
 }
@@ -235,6 +243,8 @@ void fragment() {
 	float tip_blend = smoothstep(0.12, 0.95, height_factor);
 	ALBEDO = mix(stage_base, stage_tip, tip_blend) * color_variation;
 	ALBEDO *= mix(1.0, mix(0.9, 1.08, grass_clump), feature_mix * clumping_factor);
+	// Pasture-scale drift between lush and sun-dried stands, shared with the far ground.
+	ALBEDO *= mix(1.0, mix(0.78, 1.1, grass_pasture), color_mix);
 	float head_part = step(0.5, grass_part) * (1.0 - step(1.5, grass_part));
 	// Only plume heads read the mask; elsewhere head_part zeroes both its uses.
 	// plume_mask has no mips, so the branch needs no derivatives.
@@ -249,17 +259,30 @@ void fragment() {
 	ALBEDO = mix(ALBEDO, chromatic * mix(0.3, 0.8, height_factor), chromatic_strength * color_mix);
 	ALPHA = mix(1.0, plume.a, head_part);
 	ALPHA_SCISSOR_THRESHOLD = 0.18;
-	AO = mix(0.55, 1.0, smoothstep(0.0, 0.7, height_factor));
-	ROUGHNESS = 0.94;
+	// Leaning blades turn their faces to the sky: gusts read as pale, glossy
+	// patches racing over the field.
+	float sheen = smoothstep(0.12, 0.8, grass_wind) * smoothstep(0.1, 0.7, height_factor)
+		* (1.0 - head_part);
+	ALBEDO = mix(ALBEDO, stage_tip * 1.5 + 0.05, 0.55 * sheen);
+	AO = mix(0.4, 1.0, smoothstep(0.0, 0.7, height_factor));
+	ROUGHNESS = mix(0.94, 0.62, sheen);
+	grass_sheen = sheen;
 }
 
 void light() {
 	float ndotl = dot(NORMAL, LIGHT);
 	float wrapped_diffuse = clamp((ndotl + 0.65) / 1.65, 0.0, 1.0);
-	float backlight = max(-ndotl, 0.0) * 0.35;
+	// Thin blades glow when the sun sits behind them, strongest at the tips
+	// and when looking toward the light.
+	float toward_sun = pow(max(dot(VIEW, -LIGHT), 0.0), 3.0);
+	float backlight = (max(-ndotl, 0.0) * 0.35 + toward_sun * 0.9)
+		* mix(0.35, 1.0, grass_height_factor);
 	DIFFUSE_LIGHT += (wrapped_diffuse + backlight * subsurface_scattering_color)
 		* ATTENUATION * LIGHT_COLOR * cloud_transmittance / PI;
 	vec3 halfway = normalize(LIGHT + VIEW);
-	float sun_glint = pow(max(dot(NORMAL, halfway), 0.0), 24.0) * max(ndotl, 0.0);
-	SPECULAR_LIGHT += LIGHT_COLOR * ATTENUATION * cloud_transmittance * sun_glint * 0.025;
+	float glint_fade = 1.0 - smoothstep(25.0, 80.0, grass_distance);
+	float sun_glint = pow(max(dot(NORMAL, halfway), 0.0), mix(24.0, 48.0, grass_sheen))
+		* max(ndotl, 0.0);
+	SPECULAR_LIGHT += LIGHT_COLOR * ATTENUATION * cloud_transmittance * sun_glint
+		* mix(0.025, 0.16, grass_sheen) * glint_fade;
 }

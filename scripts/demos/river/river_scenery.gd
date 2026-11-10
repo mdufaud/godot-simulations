@@ -111,8 +111,8 @@ func set_water_clarity(value: float) -> void:
 
 
 func tick(time_s: float, flow_distance_m: float) -> void:
-	grass_material.set_shader_parameter("wind_time", fposmod(time_s, 1000.0))
-	grass_material.set_shader_parameter("wave_time", fposmod(time_s * 0.8, TAU * 160.0))
+	GrassRenderer.apply_wind_clock(grass_material, time_s,
+		float(grass_material.get_shader_parameter("wind_speed")))
 	materials[0].set_shader_parameter("flow_distance_m", flow_distance_m)
 
 
@@ -634,6 +634,7 @@ func _build_grass() -> void:
 	grass_material.set_shader_parameter("tip_color", Color(0.4, 0.49, 0.13))
 	grass_material.set_shader_parameter("wind_speed", 0.6)
 	grass_material.set_shader_parameter("gustiness", 0.35)
+	GrassRenderer.configure_wind(grass_material)
 	_grass_meshes.assign([Tufts.make_tuft_mesh(false, false), Tufts.make_tuft_mesh(true, false)])
 	for tile_z in range(-8, 9):
 		for tile_x in range(-3, 4):

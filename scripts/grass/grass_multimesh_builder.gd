@@ -1,16 +1,30 @@
 extends RefCounted
 
-const LOD_DENSITY := [0.9, 0.9, 0.9, 0.8, 0.8]
+# Far rings thin out; the blade shader widens what is left to keep the canopy closed.
+const LOD_DENSITY := [0.9, 0.9, 0.78, 0.64, 0.52]
 
 
-static func make_tuft_mesh(high_detail: bool, include_plumes: bool = true) -> ArrayMesh:
+## [param spread_m] > 0 scatters [param blade_count] thinner blades over a disc
+## of that radius instead of one rosette, so neighbouring tufts knit into a sward.
+static func make_tuft_mesh(high_detail: bool, include_plumes: bool = true,
+		blade_count: int = 6, spread_m: float = 0.0) -> ArrayMesh:
 	var surface := SurfaceTool.new()
 	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
 	surface.set_custom_format(0, SurfaceTool.CUSTOM_RGBA_FLOAT)
 	surface.set_custom_format(1, SurfaceTool.CUSTOM_RGBA_FLOAT)
-	var blade_count := 6
 	var blade_segments := 4 if high_detail else 2
 	for blade in blade_count:
+		if spread_m > 0.0:
+			var placement := float(blade) * 2.39996
+			var facing := placement + 1.1 * sin(float(blade) * 12.9898)
+			var lean_direction := Vector3(cos(facing), 0.0, sin(facing))
+			_append_ribbon(surface,
+				Vector3(cos(placement), 0.0, sin(placement))
+					* spread_m * sqrt((float(blade) + 0.5) / float(blade_count)),
+				lean_direction, 0.5 + 0.5 * fposmod(float(blade) * 0.618034, 1.0),
+				0.14 + 0.32 * fposmod(float(blade) * 0.754878, 1.0),
+				0.026 if high_detail else 0.034, blade_segments, 0)
+			continue
 		var angle := TAU * float(blade) / float(blade_count) + 0.18 * float(blade % 2)
 		var direction := Vector3(cos(angle), 0.0, sin(angle))
 		var height := 0.76 + 0.24 * float((blade * 3 + 1) % 7) / 6.0

@@ -3,6 +3,7 @@ extends Node3D
 const HEIGHTMAP := preload("res://resources/grass/grass_heightmap.tres")
 const GOLDEN_HOUR := preload("res://resources/ocean/looks/golden_hour.tres")
 const POST_FX_SHADER := preload("res://shaders/grass/post_fx.gdshader")
+const GrassScenery := preload("res://scripts/demos/grass/grass_scenery.gd")
 const FILTER_NAMES := ["Off", "Obra Dinn", "Contrast", "Sepia", "Thermal", "Phosphor"]
 const BASE_COLOR := Color(0.09, 0.22, 0.09)
 const TIP_COLOR := Color(0.46, 0.52, 0.24)
@@ -24,7 +25,13 @@ const COLOR_PALETTES := [
 		"tip": Color(0.1, 0.75, 0.78), "backlight": Color(0.9, 0.3, 0.85),
 		"plume": Color(0.84, 0.36, 0.92), "moss": Color(0.06, 0.05, 0.18),
 		"straw": Color(0.14, 0.12, 0.3), "chromatic": 0.7},
+	{"name": "Steppe", "base": Color(0.1, 0.17, 0.06),
+		"tip": Color(0.5, 0.5, 0.22), "backlight": Color(0.95, 0.85, 0.45),
+		"plume": Color(0.83, 0.8, 0.7), "moss": Color(0.06, 0.09, 0.04),
+		"straw": Color(0.2, 0.19, 0.09), "chromatic": 0.0,
+		"height": 0.62, "plumes": 0.1},
 ]
+const DEFAULT_PALETTE := 4
 const WIND_PRESETS := [
 	{"name": "Calm", "speed": 0.0, "direction": 35.0, "gustiness": 0.0},
 	{"name": "Breeze", "speed": 1.0, "direction": 35.0, "gustiness": 0.65},
@@ -113,7 +120,7 @@ func _ready() -> void:
 			_wind_preset_index = index
 			break
 	demo_stage = clampi(int(menu.stored_value("🧭 Learning Steps", "Step", 3)), 0, 3)
-	_palette_index = clampi(int(menu.stored_value("🎨 Grass Palette", "Palette", 0)),
+	_palette_index = clampi(int(menu.stored_value("🎨 Grass Palette", "Palette", DEFAULT_PALETTE)),
 		0, COLOR_PALETTES.size() - 1)
 	var palette: Dictionary = COLOR_PALETTES[_palette_index]
 	_palette_colors = {
@@ -141,6 +148,9 @@ func _ready() -> void:
 	add_child(grass)
 	grass.build()
 	ground_mesh.material_override = grass.ground_material()
+	$Ground.add_child(GrassScenery.build_far_ground(ground_mesh.material_override as ShaderMaterial))
+	main_camera.far = GrassScenery.CAMERA_FAR_M
+	_apply_palette_shape()
 	for color_key in _palette_colors:
 		_set_palette_color(color_key, _palette_colors[color_key])
 	_set_chromatic_strength(_chromatic_strength)
@@ -219,6 +229,7 @@ func _setup_ui() -> void:
 			density_modifier = value
 			grass.set_density(value))
 	quality.bind("near_detail", null, grass.set_near_detail)
+	quality.bind("map_radius_m", null, grass.set_map_radius)
 	menu.add_slider("Clumping", 0.0, 1.0, 0.55, grass.set_clumping)
 	_wind_speed_slider = menu.add_slider("Wind Speed", 0.0, 5.0, wind_speed,
 		func(value: float) -> void:
@@ -239,7 +250,8 @@ func _setup_ui() -> void:
 			_mark_custom_wind())
 	menu.add_separator()
 	menu.add_section("🎨 Grass Palette")
-	_palette_option = menu.add_option_button("Palette", ["Pampas", "Meadow", "Ember", "Prism"],
+	_palette_option = menu.add_option_button("Palette",
+		COLOR_PALETTES.map(func(palette: Dictionary) -> String: return palette.name),
 		_palette_index, _on_palette_selected)
 	_palette_pickers["base"] = menu.add_color_picker("Base Color", _palette_colors.base,
 		func(color: Color) -> void: _set_palette_color("base", color))
@@ -339,7 +351,16 @@ func _on_palette_selected(index: int) -> void:
 		picker.color_changed.emit(palette[color_key])
 	_chromatic_slider.value = palette.chromatic
 	_set_chromatic_strength(float(palette.chromatic))
+	_apply_palette_shape()
 	_refresh_palette_action()
+
+
+## Canopy height and plume share ride on the palette: a steppe is short and
+## sparse-plumed where the pampas looks stand tall.
+func _apply_palette_shape() -> void:
+	var palette: Dictionary = COLOR_PALETTES[_palette_index]
+	grass.set_height_scale(float(palette.get("height", 1.0)))
+	grass.set_plume_density(float(palette.get("plumes", 0.75)))
 
 
 func _set_palette_color(color_key: String, color: Color) -> void:
@@ -396,7 +417,7 @@ func _setup_environment() -> void:
 	environment.glow_hdr_threshold = look.glow_hdr_threshold
 	environment.fog_enabled = true
 	environment.fog_light_color = Color(0.61, 0.69, 0.77)
-	environment.fog_density = 0.0025
+	environment.fog_density = GrassScenery.FOG_DENSITY
 	environment.fog_aerial_perspective = look.fog_aerial_perspective
 
 	sky_material.shader = load("res://shaders/ocean/ocean_sky.gdshader")
@@ -509,6 +530,18 @@ func set_capture_params(params: Dictionary) -> void:
 		grass.set_gustiness(gustiness)
 	if params.has("gust") and float(params["gust"]) > 0.0:
 		grass.add_gust(float(params["gust"]), orbit_cam.target)
+	if params.has("palette"):
+		apply_look(int(params["palette"]))
+	if params.has("sun_elevation"):
+		set_sun_elevation(float(params["sun_elevation"]))
+	if params.has("sun_azimuth"):
+		set_sun_azimuth(float(params["sun_azimuth"]))
+	if params.has("yaw"):
+		orbit_cam.yaw = float(params["yaw"])
+	if params.has("distance"):
+		orbit_cam.distance = float(params["distance"])
+	if params.has("pitch"):
+		orbit_cam.pitch = float(params["pitch"])
 	if params.has("filter"):
 		var index := clampi(int(params["filter"]), 0, FILTER_NAMES.size() - 1)
 		if _filter_option != null:
@@ -574,6 +607,7 @@ func _set_shadows(enabled: bool) -> void:
 func _apply_quality(values: Dictionary) -> void:
 	if not _grass_ready:
 		grass.near_detail = values.near_detail
+		config.map_radius_m = values.map_radius_m
 		grass.shadows_enabled = values.shadows
 		shadow_distance_m = values.shadow_distance_m
 		return
