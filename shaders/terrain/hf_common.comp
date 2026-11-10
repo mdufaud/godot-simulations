@@ -19,7 +19,13 @@ layout(push_constant, std430) uniform Params {
 
 layout(set = 0, binding = 4, std140) uniform HydroParams {
 	vec4 hydro;
+	vec4 hydro2; // retained film m, edge sill m (negative: free fall, huge: wall), meltwater per snow, bed friction m/s
 } weather;
+
+// Head a boundary cell sees past the domain edge: the rim it spills over, or its own bed where there is none.
+float edge_head(vec4 cell) {
+	return max(weather.hydro2.y, cell.r + cell.b);
+}
 
 const ivec2 RIVER_OFFSETS[4] = ivec2[4](
 	ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1)

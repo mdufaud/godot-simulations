@@ -1040,6 +1040,8 @@ func _run_terrain_hydro() -> void:
 	demo.set_erosion(1.2)
 	demo.set_erosion_running(false)
 	demo.set_rain_enabled(true)
+	# The budgets below are those of a closed domain: no run-off over the edge.
+	demo.solver.edge_sill_m = INF
 	var rain_start := await _terrain_hydro_field(demo)
 	var rain_start_sums := _terrain_hydro_sums(rain_start)
 	await _terrain_hydro_steps(demo, fixed_steps, fixed_dt)
@@ -1153,7 +1155,7 @@ func _run_terrain_hydro() -> void:
 		return
 	var thaw_start := await _terrain_hydro_field(demo)
 	var thaw_start_sums := _terrain_hydro_sums(thaw_start)
-	_check(demo.solver.snow_enabled and absf(demo.solver.melt_rate_m_s - 0.06) < 1e-6
+	_check(demo.solver.snow_enabled and absf(demo.solver.melt_rate_m_s - 0.02) < 1e-6
 		and demo.solver.snowfall_rate_m_s == 0.0 and demo.solver.freeze_rate_m_s == 0.0
 		and thaw_start_sums.z > 0.0 and demo.view.water.visible,
 		"terrain_hydro: Thaw did not restore snow, melt, or legacy water-surface state")
@@ -1184,11 +1186,9 @@ func _run_terrain_hydro() -> void:
 		if is_nan(value) or is_inf(value) or value < -1e-6:
 			thaw_finite = false
 			break
-	_check(absf(thaw_water_gain - expected_melt) < expected_melt * 1e-3
-		and absf(snow_loss - expected_melt) < expected_melt * 1e-3
-		and absf((thaw_after_sums.y + thaw_after_sums.z)
-			- (thaw_before_sums.y + thaw_before_sums.z)) < expected_melt * 1e-4,
-		"terrain_hydro: Thaw melt did not conserve its expected G+B budget")
+	_check(snow_loss > expected_melt * (1.0 - 1e-3)
+		and absf(thaw_water_gain - snow_loss * demo.solver.meltwater_ratio) < expected_melt * 1e-3,
+		"terrain_hydro: Thaw melt did not turn its snow into water at the meltwater ratio")
 	_check(thaw_finite, "terrain_hydro: Thaw produced invalid or negative channels")
 	demo.apply_preset(7)
 	if not await _terrain_hydro_ready(demo):
@@ -1197,7 +1197,7 @@ func _run_terrain_hydro() -> void:
 		await process_frame
 		_finish("terrain_hydro")
 		return
-	_check(absf(demo.solver.melt_rate_m_s - 0.06) < 1e-6
+	_check(absf(demo.solver.melt_rate_m_s - 0.02) < 1e-6
 		and absf(demo.solver.evap_rate_m_s - 0.005) < 1e-6
 		and demo.solver.water_flow_rate > 0.0
 		and demo.view.water.visible
@@ -1213,11 +1213,11 @@ func _run_terrain_hydro() -> void:
 	print("TERRAIN HYDRO thaw water_mean=%.6f snow_mean=%.6f wet_cells=%.0f level_spread=%.6f"
 		% [thaw_water_sums.y / float(demo.solver.grid_n * demo.solver.grid_n),
 			thaw_water_sums.z / float(demo.solver.grid_n * demo.solver.grid_n), wet_level.x, wet_level.y])
-	_check(thaw_water_sums.y > float(demo.solver.grid_n * demo.solver.grid_n) * 0.01
-		and thaw_water_sums.z < float(demo.solver.grid_n * demo.solver.grid_n) * 0.001
-		and wet_level.x > float(demo.solver.grid_n * demo.solver.grid_n) * 0.5
-		and wet_level.y < 0.01,
-		"terrain_hydro: normal Thaw did not produce a broad, mostly level physical water surface")
+	_check(thaw_water_sums.y > 0.0
+		and thaw_water_sums.y < float(demo.solver.grid_n * demo.solver.grid_n) * 0.03
+		and thaw_water_sums.z < thaw_start_sums.z * 0.1
+		and wet_level.x < float(demo.solver.grid_n * demo.solver.grid_n) * 0.5,
+		"terrain_hydro: normal Thaw kept its snow or left a sheet of water over the field")
 	demo.apply_preset(4)
 	if not await _terrain_hydro_ready(demo):
 		_check(false, "terrain_hydro: River & delta preset failed after Thaw")

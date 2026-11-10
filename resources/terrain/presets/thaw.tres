@@ -4,7 +4,7 @@
 
 [resource]
 script = ExtResource("1_preset")
-hint = "Spring melt: the snowpack decays into meltwater networks. Raise Evaporation to dry the field."
+hint = "Spring melt: the snowpack decays into meltwater networks. The water runs off the low edge."
 display_name = "Spring thaw"
 default_tool = 0
 walls_visible = false
@@ -17,7 +17,7 @@ slope_direction_deg = 0.0
 snow_depth_m = 0.35
 camera_target_m = Vector3(0, 0.3, 0)
 camera_distance_m = 6.0
-melt_rate_m_s = 0.06
+melt_rate_m_s = 0.02
 evap_rate_m_s = 0.005
 sun_elevation_deg = 28.0
 sun_azimuth_deg = 140.0

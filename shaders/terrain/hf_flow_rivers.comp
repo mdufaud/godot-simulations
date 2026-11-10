@@ -23,6 +23,7 @@ void main() {
 	for (int k = 0; k < 4; k++) {
 		ivec2 nb = id + RIVER_OFFSETS[k];
 		if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, ivec2(n)))) {
+			sediment_delta -= depth_scale * river_component(outflow, k) * concentration;
 			continue;
 		}
 		vec4 neighbour = imageLoad(field_src, nb);

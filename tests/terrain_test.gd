@@ -23,6 +23,7 @@ func _run() -> void:
 	root.add_child(demo)
 	await process_frame
 	demo.apply_preset(1)  # Dunes: dry sand, no auto pours.
+	demo.solver.edge_sill_m = INF
 	await _wait_init(demo)
 	_check(demo.solver.initialized and demo.texture_bound, "terrain did not initialize")
 	if not demo.solver.initialized or not demo.texture_bound:
@@ -132,6 +133,7 @@ func _step(demo: Node, steps: int, dt: float = DT) -> void:
 ## in-place pass reduces to the (conserving) dry-sediment deposition branch.
 func _check_conservation(demo: Node) -> void:
 	demo.apply_preset(1)  # reseed through the demo path, then override
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	await _reseed(demo, _bump(0.3, 0.2, 40.0), _flat(0.005), _flat(0.08))
@@ -155,6 +157,7 @@ func _check_conservation(demo: Node) -> void:
 ## its fixpoint, then the steepest neighbour slope must sit at tan(repose).
 func _check_dry_repose(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.15
 	demo.solver.repose_deg = 33.0
@@ -196,6 +199,7 @@ func _check_dry_repose(demo: Node) -> void:
 ## transfers still; only the wet-cohesion gain changes between the two runs.
 func _check_wet_repose(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.repose_deg = 33.0
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
@@ -258,6 +262,7 @@ func _max_sand_slope(field: PackedFloat32Array, n: int, cell: float) -> float:
 ## metastable by design — the flux is curvature-driven (crests erode).
 func _check_snow_cohesion(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	demo.solver.snow_repose_deg = 50.0
@@ -308,6 +313,7 @@ func _check_snow_cohesion(demo: Node) -> void:
 ## disc, part returns as water (pressure melt), and the surface settles.
 func _check_pack(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	var snow := _flat(0.12)
@@ -349,9 +355,10 @@ func _disk_sums(field: PackedFloat32Array, n: int, centre: Vector2, radius: floa
 	return sums
 
 
-## Melt moves snow into water 1:1 with no other losses (evap off).
+## Melt moves snow into water at the meltwater ratio with no other losses (evap off).
 func _check_melt_balance(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.05
 	demo.solver.evap_rate_m_s = 0.0
 	demo.solver.set_seed_channels(_flat(0.3), _flat(0.0), _flat(0.1))
@@ -364,15 +371,16 @@ func _check_melt_balance(demo: Node) -> void:
 	var snow_loss: float = before.z - after.z
 	var water_gain: float = after.y - before.y
 	_check(snow_loss > 0.0, "melt consumed no snow")
-	_check(absf(snow_loss - water_gain) < 0.01 * before.z,
+	_check(absf(snow_loss * demo.solver.meltwater_ratio - water_gain) < 0.01 * before.z,
 		"melt balance off: snow lost %.4f, water gained %.4f" % [snow_loss, water_gain])
 	_check(after.z < before.z * 0.5, "snow survived 2 s of 0.05 m/s melt")
 
 
 ## Freeze converts standing water into snow inside each cell: G drops, B
-## rises by the same amount, total unchanged.
+## rises by that amount over the meltwater ratio, water equivalent unchanged.
 func _check_freeze_balance(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	demo.solver.snowfall_rate_m_s = 0.0
@@ -381,13 +389,14 @@ func _check_freeze_balance(demo: Node) -> void:
 	var before := _channel_sums(await _field(demo))
 	await _step(demo, 120)  # 2 s at 0.01 m/s freezes 0.02 m of the 0.05 m
 	var after := _channel_sums(await _field(demo))
-	var frozen: float = after.z - before.z
+	var ratio: float = demo.solver.meltwater_ratio
+	var frozen: float = (after.z - before.z) * ratio
 	var dried: float = before.y - after.y
 	_check(frozen > 0.005 * float(_n * _n), "freeze moved no water (%.1f)" % frozen)
 	_check(absf(frozen - dried) < 0.01 * dried,
 		"freeze balance off: snow +%.1f vs water -%.1f" % [frozen, dried])
-	var total_before: float = before.x + before.y + before.z + before.w
-	var total_after: float = after.x + after.y + after.z + after.w
+	var total_before: float = before.x + before.y + before.z * ratio + before.w
+	var total_after: float = after.x + after.y + after.z * ratio + after.w
 	_check(absf(total_after - total_before) < 1e-4 * total_before,
 		"freeze changed total mass")
 	demo.solver.freeze_rate_m_s = 0.0
@@ -396,6 +405,7 @@ func _check_freeze_balance(demo: Node) -> void:
 ## Snowfall is the sky's source term: exactly rate·dt·cells lands per step.
 func _check_snowfall_source(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	demo.solver.freeze_rate_m_s = 0.0
@@ -416,6 +426,7 @@ func _check_hydrology(demo: Node) -> void:
 	_n = 64
 	demo.solver.grid_n = _n
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	await _wait_init(demo, false)
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
@@ -440,6 +451,7 @@ func _check_hydrology(demo: Node) -> void:
 	_n = suite_n
 	demo.solver.grid_n = suite_n
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	await _wait_init(demo, false)
 
 
@@ -858,7 +870,7 @@ func _seed_hydro_flux(rid: RID, bytes: PackedByteArray) -> void:
 ## (or any dragged slider) across. The slab then avalanches (cohesion 13° is
 ## below the 24° tilt) but conserves snow up to the accounted snowfall.
 func _check_scene_reset(demo: Node) -> void:
-	demo.apply_preset(7)  # thaw: melt 0.06, evap 0.005
+	demo.apply_preset(7)  # thaw: melt 0.02, evap 0.005
 	await _frames(4)
 	demo.apply_preset(6)  # avalanche: melt/evap fall back to config defaults
 	# The demo's _process is disabled here, so texture_bound never rebinds;
@@ -866,7 +878,7 @@ func _check_scene_reset(demo: Node) -> void:
 	await _wait_init(demo, false)
 	_check(demo.solver.melt_rate_m_s == 0.0,
 		"avalanche inherited melt %.4f from thaw" % demo.solver.melt_rate_m_s)
-	_check(demo.solver.evap_rate_m_s == 0.02,
+	_check(is_equal_approx(demo.solver.evap_rate_m_s, 0.0005),
 		"avalanche inherited evaporation %.4f" % demo.solver.evap_rate_m_s)
 	_check(absf(demo.solver.snow_repose_deg - 22.0) < 0.01,
 		"avalanche cohesion override not applied (%.1f — reset or override lost)"
@@ -914,6 +926,7 @@ func _check_scene_reset(demo: Node) -> void:
 	demo.set_drying(true)
 	demo.set_drying_rate(0.4)
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	await _wait_init(demo, false)
 	_check(demo.preset_idx == 1 and demo.solver.world_size == 4.0,
 		"legacy preset did not restore its 4 m domain after Mountain")
@@ -934,6 +947,7 @@ func _check_scene_reset(demo: Node) -> void:
 		and _snow_mass(avalanche) > 0.0,
 		"legacy avalanche did not restore its snow source and material")
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	await _wait_init(demo, false)
 
 
@@ -948,6 +962,7 @@ func _snow_mass(field: PackedFloat32Array) -> float:
 ## are pure functions of both endpoint cells and the pair-hash is symmetric.
 func _check_determinism(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.005
 	demo.solver.stochasticity = 0.25
@@ -994,6 +1009,7 @@ func _check_determinism(demo: Node) -> void:
 ## Physics sync: GPU point queries vs the same bilinear on the CPU readback.
 func _check_query_sync(demo: Node) -> void:
 	demo.apply_preset(1)
+	demo.solver.edge_sill_m = INF
 	demo.solver.melt_rate_m_s = 0.0
 	demo.solver.evap_rate_m_s = 0.0
 	var n := _n

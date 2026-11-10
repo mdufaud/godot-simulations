@@ -6,6 +6,8 @@ extends Node3D
 ## automatic sand/water pours and applies the preset ambience.
 
 const WORLD := 4.0
+# The slider strength is a column of sand per second; that much water is a fire hose.
+const WATER_BRUSH_GAIN := 0.3
 const MICRO_NORMAL := preload("res://resources/ocean/micro_normal.png")
 const TextureReadback := preload("res://scripts/core/texture_readback.gd")
 const BALL_COLORS := [
@@ -199,7 +201,7 @@ func _process(delta: float) -> void:
 	if _dragging and (preset_idx != 9 or _aim_valid):
 		solver.brush.mode = tool_choice
 		solver.brush.pos_m = _aim
-		solver.brush.strength = _strength
+		solver.brush.strength = _strength * (WATER_BRUSH_GAIN if tool_choice == TerrainBrush.WATER else 1.0)
 	elif watering:
 		# A water source orbits the field: rivers cut, deltas build, snow melts.
 		var angle := _time * _preset.auto_water_rate_rad_s
@@ -301,6 +303,7 @@ func restart() -> void:
 	# Config defaults first, then the preset's negative-means-keep overrides;
 	# the solver object outlives presets, so both paths run every restart.
 	solver.reset_to_config()
+	solver.edge_sill_m = TerrainScenery.WALL_HEIGHT_M if _preset.walls_visible else -1.0
 	drying_enabled = solver.infiltration_rate_m_s > 0.0
 	solver.repose_deg = _preset.repose_angle_deg if _preset.repose_angle_deg >= 0.0 else solver.repose_deg
 	solver.erosion_rate = _preset.erosion_rate if _preset.erosion_rate >= 0.0 else solver.erosion_rate
@@ -342,6 +345,7 @@ func restart() -> void:
 	view.sand_mat.set_shader_parameter("snow_enabled", solver.snow_enabled)
 	view.water_mat.set_shader_parameter("snow_enabled", solver.snow_enabled)
 	view.water_mat.set_shader_parameter("landscape_water", _preset.landscape_materials)
+	view.water_mat.set_shader_parameter("water_film_m", solver.water_retention_m)
 	view.water.visible = true
 	_seed_max_height = 0.0
 	for i in state.sand.size():

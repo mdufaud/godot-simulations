@@ -50,9 +50,11 @@ void main() {
 	cell.r += weather.hydro.z * dt * uplift_profile(id, n);
 
 	if (springs.source[0].z > 0.5) {
-		float melt = min(params.climate.x * dt, cell.b);
+		// Running water rots the pack under it, so melt opens channels instead of thinning evenly.
+		float wet = clamp(cell.g / max(params.climate.w, 1e-5), 0.0, 1.0);
+		float melt = min(params.climate.x * dt * (1.0 + 3.0 * wet), cell.b);
 		cell.b -= melt;
-		cell.g += melt;
+		cell.g += melt * weather.hydro2.z;
 	}
 
 	float evap = min(params.climate.y * dt, cell.g);
@@ -68,7 +70,7 @@ void main() {
 		}
 		float frozen = min(params.misc2.y * dt, cell.g);
 		cell.g -= frozen;
-		cell.b += frozen;
+		cell.b += frozen / weather.hydro2.z;
 	}
 
 	// No water left to carry the load: it settles where it is.

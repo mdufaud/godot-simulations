@@ -323,7 +323,7 @@ func sync_mountain(active: bool, water_on: bool) -> void:
 	_tool_hint.text = "Right-click drag sculpts" if active else "Right-click drag sculpts · Pack compacts snow"
 	for mode in _tool_buttons:
 		_tool_buttons[mode].visible = mode in [TerrainBrush.MOUNTAIN, TerrainBrush.DIG,
-			TerrainBrush.SMOOTH] if active else mode != TerrainBrush.MOUNTAIN
+			TerrainBrush.SMOOTH, TerrainBrush.WATER] if active else mode != TerrainBrush.MOUNTAIN
 	_balls_toggle.visible = not active
 	for button in _auto_buttons:
 		button.visible = not active

@@ -15,6 +15,10 @@ enum UpliftMode { NONE, DOME, NOISE }
 ## Fraction of the exchange rate jittered per pair per frame; 0 gives straight
 ## channels, higher values meander.
 @export_range(0.0, 0.5, 0.01) var stochasticity: float = 0.15
+## Depth of the film that clings to the ground instead of running.
+@export_range(0.0, 0.1, 0.0001) var water_retention_m: float = 0.002
+## Bed drag on the flow: the shallower the sheet, the faster it loses its momentum.
+@export_range(0.0, 1.0, 0.001) var water_friction_m_s: float = 0.02
 
 @export_group("Snow")
 @export var snow_enabled := true
@@ -30,7 +34,9 @@ enum UpliftMode { NONE, DOME, NOISE }
 @export_range(0.001, 1.0, 0.001) var uplift_radius_fraction: float = 0.3
 @export_range(-1.0, 10.0, 0.01) var snowline_m: float = -1.0
 @export_range(0.0, 1.0, 0.0001) var melt_rate_m_s: float = 0.0
-@export_range(0.0, 1.0, 0.0001) var evap_rate_m_s: float = 0.02
+## Water depth a metre of snow melts into (and freezes back from).
+@export_range(0.05, 1.0, 0.01) var meltwater_ratio: float = 0.3
+@export_range(0.0, 1.0, 0.0001) var evap_rate_m_s: float = 0.0005
 @export_range(0.0, 2.0, 0.001) var infiltration_rate_m_s: float = 0.0
 ## Uniform snow deposition per second (a weather source; adds mass).
 @export_range(0.0, 1.0, 0.0001) var snowfall_rate_m_s: float = 0.0
@@ -52,8 +58,11 @@ func validate() -> String:
 	if flow_rate <= 0.0 or flow_iterations <= 0 or water_flow_rate <= 0.0 \
 			or snow_flow_rate <= 0.0 or snow_pass_iterations <= 0:
 		return "flow_rate, flow_iterations, water_flow_rate, snow_flow_rate and snow_pass_iterations must be positive"
-	if erosion_rate < 0.0 or sediment_capacity < 0.0 or stochasticity < 0.0:
-		return "erosion_rate, sediment_capacity and stochasticity cannot be negative"
+	if erosion_rate < 0.0 or sediment_capacity < 0.0 or stochasticity < 0.0 \
+			or water_retention_m < 0.0 or water_friction_m_s < 0.0:
+		return "erosion_rate, sediment_capacity, stochasticity, water_retention_m and water_friction_m_s cannot be negative"
+	if meltwater_ratio <= 0.0 or meltwater_ratio > 1.0:
+		return "meltwater_ratio must be in (0, 1]"
 	if melt_rate_m_s < 0.0 or evap_rate_m_s < 0.0 or snowfall_rate_m_s < 0.0 \
 			or freeze_rate_m_s < 0.0 or wet_gain < 0.0 or water_sat_m <= 0.0:
 		return "climate rates cannot be negative and water_sat_m must be positive"

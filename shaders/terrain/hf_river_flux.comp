@@ -10,22 +10,26 @@ void main() {
 	vec4 cell = imageLoad(field_src, id);
 	float dt = params.flow.w;
 	vec4 flux = vec4(0.0);
-	if (cell.g > RIVER_DRY_M && dt > 0.0) {
+	// A film this thin clings to the grains: only the water above it runs.
+	float mobile = cell.g - weather.hydro2.x;
+	if (mobile > RIVER_DRY_M && dt > 0.0) {
 		float cell_size = params.flow.z;
 		float area = cell_size * cell_size;
 		float head = cell.r + cell.b + cell.g;
 		vec4 old_flux = imageLoad(flux_src, id);
 		for (int k = 0; k < 4; k++) {
 			ivec2 nb = id + RIVER_OFFSETS[k];
+			float difference;
 			if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, ivec2(n)))) {
-				continue;
+				difference = head - edge_head(cell);
+			} else {
+				vec4 neighbour = imageLoad(field_src, nb);
+				difference = head - (neighbour.r + neighbour.b + neighbour.g);
 			}
-			vec4 neighbour = imageLoad(field_src, nb);
-			float difference = head - (neighbour.r + neighbour.b + neighbour.g);
 			float jitter = mix(1.0 - params.waterflow.w, 1.0 + params.waterflow.w,
 				pair_hash(id, nb, params.misc.w));
 			float acceleration = params.waterflow.x * area * 9.81 * difference / cell_size;
-			float discharge = max(0.0, river_component(old_flux, k) * exp(-0.5 * dt)
+			float discharge = max(0.0, river_component(old_flux, k) * exp(-(0.5 + weather.hydro2.w / mobile) * dt)
 				+ dt * acceleration * jitter);
 			if (k == 0) { flux.x = discharge; }
 			else if (k == 1) { flux.y = discharge; }
@@ -34,7 +38,7 @@ void main() {
 		}
 		float sum_flux = dot(flux, vec4(1.0));
 		if (sum_flux > 0.0) {
-			flux *= min(1.0, 0.5 * cell.g * area / (dt * sum_flux));
+			flux *= min(1.0, 0.5 * mobile * area / (dt * sum_flux));
 		}
 	}
 	imageStore(flux_dst, id, flux);

@@ -4,6 +4,8 @@ class_name TerrainScenery extends RefCounted
 ## puff and the ambience helpers (preset sun/sky/fog, snowfall). Built once
 ## from the domain size, then only written through.
 
+const WALL_HEIGHT_M := 0.5
+
 var sand_mat: ShaderMaterial
 var terrain: MeshInstance3D
 var water_mat: ShaderMaterial
@@ -179,7 +181,7 @@ func _build_terrain_mesh(n: int) -> ArrayMesh:
 # Low sandbox rim on the domain boundary the flow already treats as a wall.
 func _build_box_walls() -> void:
 	var thickness := 0.1
-	var height := 0.5
+	var height := WALL_HEIGHT_M
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.42, 0.32, 0.22)
 	mat.roughness = 0.95

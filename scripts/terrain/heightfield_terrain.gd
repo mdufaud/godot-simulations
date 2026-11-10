@@ -36,6 +36,11 @@ var water_flow_rate := 0.55
 var erosion_rate := 0.15
 var sediment_capacity := 0.8
 var stochasticity := 0.15
+var water_retention_m := 0.002
+var water_friction_m_s := 0.02
+## Height of the rim water must top to leave the domain; negative lets it fall
+## off the edge freely, INF keeps the boundary a wall.
+var edge_sill_m := INF
 var rain_rate_m_s := 0.0
 var deposition_gain := 0.6
 var uplift_rate_m_s := 0.0
@@ -56,7 +61,8 @@ var snow_iterations := 2
 ## deposits new snow above the snowline, freeze turns standing water into snow; wet
 ## sand holds up to wet_gain times steeper, saturating at water_sat_m of water.
 var melt_rate_m_s := 0.0
-var evap_rate_m_s := 0.02
+var meltwater_ratio := 0.3
+var evap_rate_m_s := 0.0005
 var infiltration_rate_m_s := 0.0
 var snowfall_rate_m_s := 0.0
 var freeze_rate_m_s := 0.0
@@ -124,6 +130,10 @@ func reset_to_config() -> void:
 	erosion_rate = _defaults.erosion_rate
 	sediment_capacity = _defaults.sediment_capacity
 	stochasticity = _defaults.stochasticity
+	water_retention_m = _defaults.water_retention_m
+	water_friction_m_s = _defaults.water_friction_m_s
+	edge_sill_m = INF
+	meltwater_ratio = _defaults.meltwater_ratio
 	rain_rate_m_s = _defaults.rain_rate_m_s
 	deposition_gain = _defaults.deposition_gain
 	uplift_rate_m_s = _defaults.uplift_rate_m_s
@@ -218,6 +228,9 @@ func init_render() -> void:
 	config.erosion_rate = erosion_rate
 	config.sediment_capacity = sediment_capacity
 	config.stochasticity = stochasticity
+	config.water_retention_m = water_retention_m
+	config.water_friction_m_s = water_friction_m_s
+	config.meltwater_ratio = meltwater_ratio
 	config.rain_rate_m_s = rain_rate_m_s
 	config.deposition_gain = deposition_gain
 	config.uplift_rate_m_s = uplift_rate_m_s
@@ -279,7 +292,7 @@ func init_render() -> void:
 	fmt.format = RenderingDevice.DATA_FORMAT_R32G32_SFLOAT
 	zero_bytes.resize(grid_n * grid_n * 8)
 	_velocity = _rd.texture_create(fmt, RDTextureView.new(), [zero_bytes])
-	_hydro_params = _rd.uniform_buffer_create(16, _pack_hydro_params())
+	_hydro_params = _rd.uniform_buffer_create(32, _pack_hydro_params())
 	_summit_buffer = _rd.storage_buffer_create(16 * (MAX_SUMMIT_SOURCES + 1), _pack_summit_sources())
 
 	# Parity 0 reads tex 0 and writes tex 1; parity 1 the reverse. Every
@@ -500,11 +513,15 @@ func _pack_push_constant(dt: float) -> PackedByteArray:
 
 func _pack_hydro_params() -> PackedByteArray:
 	var data := PackedByteArray()
-	data.resize(16)
+	data.resize(32)
 	data.encode_float(0, rain_rate_m_s)
 	data.encode_float(4, deposition_gain)
 	data.encode_float(8, uplift_rate_m_s)
 	data.encode_float(12, float(uplift_mode))
+	data.encode_float(16, water_retention_m)
+	data.encode_float(20, minf(edge_sill_m, 1e9))
+	data.encode_float(24, meltwater_ratio)
+	data.encode_float(28, water_friction_m_s)
 	return data
 
 
