@@ -349,18 +349,40 @@ func _test_track() -> void:
 		track.advance(delta, 0.0)
 	_check(track.position_at(0.0).is_equal_approx(start), "a zero travel speed holds the storm")
 	_check(track.position_at(5.0).is_equal_approx(start), "a still storm has no lead")
-	for i in 300:
+	var lag_s := TornadoWindField.AXIS_LAG_S
+	for i in int(2.0 * lag_s / delta):
 		track.advance(delta, 10.0)
-	var travelled := 0.0
+	# Twenty minutes of travel: the storm aloft and the lagging foot walk the
+	# same path, so neither may stall, sprint or leave the map.
 	var previous := track.position_at(0.0)
+	var foot_previous := track.position_at(lag_s)
+	var slowest := INF
+	var fastest := 0.0
+	var sharpest_turn_rad := 0.0
+	var heading := Vector3.ZERO
 	var inside := true
-	for i in 1200:
+	for i in 72000:
 		track.advance(delta, 10.0)
 		var current := track.position_at(0.0)
-		travelled += current.distance_to(previous)
+		var foot := track.position_at(lag_s)
+		for step_m: float in [current.distance_to(previous), foot.distance_to(foot_previous)]:
+			slowest = minf(slowest, step_m / delta)
+			fastest = maxf(fastest, step_m / delta)
+		var direction := (current - previous).normalized()
+		if heading != Vector3.ZERO:
+			sharpest_turn_rad = maxf(sharpest_turn_rad, heading.angle_to(direction))
+		heading = direction
 		previous = current
+		foot_previous = foot
 		inside = inside and absf(current.x) <= track.extent_m.x and absf(current.z) <= track.extent_m.y
-	var speed := travelled / (1200.0 * delta)
-	_check(absf(speed - 10.0) < 1.5, "the track is walked at the requested speed: %f" % speed)
+	_check(slowest > 9.5 and fastest < 10.5,
+		"top and foot walk at the requested speed: %f..%f" % [slowest, fastest])
+	# 10 m/s on a 60 m turn radius is 1/6 rad/s.
+	_check(sharpest_turn_rad / delta < 1.0 / 6.0,
+		"the track never turns tighter than 60 m: %f rad/s" % (sharpest_turn_rad / delta))
 	_check(inside, "the track stays inside its extent")
 	_check(track.position_at(5.0).distance_to(previous) > 20.0, "a moving storm leads its past position")
+	var before_slider := track.position_at(lag_s)
+	track.advance(delta, 30.0)
+	_check(track.position_at(lag_s).distance_to(before_slider) < 10.5 * delta,
+		"a speed change does not move the foot's past")

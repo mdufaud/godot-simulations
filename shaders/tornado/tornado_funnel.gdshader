@@ -4,6 +4,7 @@ shader_type spatial;
 render_mode unshaded, blend_mix, cull_front, depth_draw_never, depth_test_disabled, fog_disabled;
 
 #include "res://shaders/tornado/tornado_wind.gdshaderinc"
+#include "res://shaders/tornado/tornado_deck.gdshaderinc"
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform sampler2D depth_texture : hint_depth_texture, filter_nearest;
@@ -23,6 +24,10 @@ uniform float noise_scale : hint_range(0.001, 0.05) = 0.008;
 uniform float absorption : hint_range(0.5, 8.0) = 6.0;
 uniform int storm_type = 0; // 0 normal, 1 fire, 2 water, 3 ice, 4 plasma
 uniform int skirt_style = 0; // 0 debris storm, 1 multi-vortex, 2 shockwaves
+// The scene's Environment fog, pushed by the host: the engine's own fog would
+// fog the whole volume at the depth of the box's back face.
+uniform vec3 fog_color : source_color = vec3(0.3, 0.32, 0.37);
+uniform float fog_density = 0.0004;
 uniform float glow_amount : hint_range(0.0, 1.0) = 0.0;
 uniform float flash_intensity = 0.0;
 uniform vec3 flash_pos = vec3(0.0, 200.0, 0.0);
@@ -74,6 +79,7 @@ void vertex() {
 // and the pattern keeps evolving. The blend is variance-preserving: a plain
 // crossfade loses contrast mid-fade and pulses at the phase rate.
 const float FLOW_PERIOD_S = 7.0;
+const float STEP_OPTICAL_DEPTH = 0.2;
 
 vec2 flow_noise(float ang, float r, float y, float omega, float t_sim) {
 	vec2 acc = vec2(0.0);
@@ -278,6 +284,8 @@ void fragment() {
 	float trans = 1.0;
 	float t_sim = TIME + time_offset;
 	vec3 sun_xz = normalize(vec3(sun_dir.x, 0.0, sun_dir.z));
+	// Extinction (1/m) at the previous sample, 0 through empty space.
+	float prev_sigma = 0.0;
 
 	for (int i = 0; i < steps; i++) {
 		vec3 probe_wp = cam_obj + ray_dir * t + model_origin;
@@ -285,7 +293,14 @@ void fragment() {
 		float probe_rc = tw_core_radius(probe_wp.y);
 		float probe_r = length(probe_wp.xz - probe_cs.xz);
 		float shell_clearance = max(abs(probe_r - 0.85 * probe_rc) - 0.38 * probe_rc, 0.0);
-		float step_size = clamp(0.45 * shell_clearance, min_step, max_step);
+		// Inside the wall the step holds the optical depth per segment near
+		// STEP_OPTICAL_DEPTH: fine where the medium is dense, so the visible
+		// surface averages several samples, and up to the wall's own scale
+		// (which grows with the flare) in its thin fringes. A fixed metric step
+		// spends the whole budget creeping through the haze of the upper cone.
+		float fine_step = clamp(STEP_OPTICAL_DEPTH / max(prev_sigma, 1e-4),
+			min_step, max(min_step, 0.06 * probe_rc));
+		float step_size = clamp(0.45 * shell_clearance, fine_step, max_step);
 		if (probe_wp.y < 0.28 * funnel_height
 				&& probe_r < (3.2 + 1.2 * skirt_density) * r_core0) {
 			step_size = min(step_size, step_cap);
@@ -303,7 +318,12 @@ void fragment() {
 		// segment never covered.
 		float step_dither = texture(noise_tex,
 			vec3(FRAGCOORD.x * 0.05, FRAGCOORD.y * 0.02, float(i) * 0.618034)).r;
-		float t_next = min(t + step_size * (0.75 + 0.5 * step_dither), t1);
+		float t_next = t + step_size * (0.75 + 0.5 * step_dither);
+		// Budget guarantee: the steps left, at their longest, must still reach
+		// the far end of the chord. A march that runs out mid-volume never
+		// samples what lies behind, and the funnel turns transparent wherever
+		// its front is thin. It only binds once the fine steps overspent.
+		t_next = min(max(t_next, t1 - float(steps - i - 1) * max_step), t1);
 		float segment_ds = t_next - t;
 		if (segment_ds <= 0.0) {
 			break;
@@ -320,6 +340,7 @@ void fragment() {
 				|| (!above_skirt && rr > (3.2 + 1.2 * skirt_density) * r_core0)
 				|| wp_mid.y > funnel_height) {
 			t = t_next;
+			prev_sigma = 0.0;
 			continue;
 		}
 
@@ -327,6 +348,7 @@ void fragment() {
 		float turb;
 		vec3 wp = wp_mid;
 		float dens = funnel_density(wp, t_sim, skirt_w, turb);
+		prev_sigma = 0.0;
 		if (dens > 0.003) {
 			// Specials read lighter/denser: water and plasma are translucent media.
 			float sigma_mul = storm_type == 1 ? 0.85 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
@@ -335,6 +357,7 @@ void fragment() {
 			float sk_pre = clamp(skirt_w / max(dens, 1e-3), 0.0, 1.0);
 			sigma_mul *= mix(1.0, 0.35, sk_pre);
 			float sigma = dens * absorption * 0.02 * sigma_mul;
+			prev_sigma = sigma;
 			// Sun-side brightness + vertical darkening toward the cloud base.
 			vec2 rd2 = normalize(wp.xz - cs.xz);
 				// 0.55 floor: a 0.45 floor splits thick storms into a white flank
@@ -379,7 +402,9 @@ void fragment() {
 				scat += ftint * fil * 2.6;
 				scat += vec3(1.0) * sparkle_spin(wp, cs, rcs) * 3.0;
 			} else {
-				scat = alb * sun_face * vert;
+				// Striations: the wall is opaque, so its churn must show in the
+				// shading — density contrast alone only frays the silhouette.
+				scat = alb * sun_face * vert * (0.55 + 0.6 * smoothstep(0.55, 1.35, turb));
 			}
 			// Unlit ambient floor: deep sight-lines saturate to the first-layer
 			// color, which reads as pure black on thick storms. A small constant
@@ -390,22 +415,13 @@ void fragment() {
 			// the column, so directional shading is what keeps the churn
 			// readable — lit curtains pop, shadowed ones recede.
 			scat *= mix(1.0, 0.45 + 0.55 * sun_face, sk_pre);
-			if (storm_type == 0) {
-				// Storm type 0 only: grade the top of the column toward the
-				// deck's underside tone (deck_color, same value the deck
-				// shades with) so the column MELTS into the sky — dark gray,
-				// not silver. The old light-gray * sun_face target turned the
-				// whole upper cone into a bright white bell against a darker
-				// deck; keep only a faint sun bias here.
-				scat = mix(scat, deck_color * (0.55 + 0.25 * sun_face),
+			if (storm_type == 0 || storm_type == 2 || storm_type == 3) {
+				// Grade the top of the column toward the tone the deck actually
+				// has above it — its dark collar — so the column MELTS into the
+				// cloud base. Any lighter target leaves a pale bell under a
+				// darker deck; none at all leaves a cut-out head.
+				scat = mix(scat, tornado_collar_tone(deck_color, dust_color) * (0.8 + 0.4 * sun_face),
 					smoothstep(0.55, 0.97, y01));
-			} else if (storm_type == 2 || storm_type == 3) {
-				// Waterspout / ice: grade the top toward their own deck
-				// underside (deck_color, set per look by the controller). Ice
-				// otherwise matches the sky brightness and dissolves without
-				// a silhouette; water kept its bright spray tone into what
-				// should read as a dark cloud base.
-				scat = mix(scat, deck_color * sun_face, smoothstep(0.55, 0.98, y01) * 0.65);
 			}
 			// User glow slider: extra self-emission, turbulence-modulated.
 			scat += funnel_color * glow_amount * 1.8 * (1.0 - 0.7 * y01) * heat;
@@ -413,6 +429,8 @@ void fragment() {
 			// Interior lightning glow.
 			vec3 dfl = wp - flash_pos;
 			scat += flash_color * flash_intensity * exp(-dot(dfl, dfl) / (flash_radius * flash_radius));
+			// Same exponential fog the deck, ground and range receive at this distance.
+			scat = mix(scat, fog_color, 1.0 - exp(-0.5 * (t + t_next) * fog_density));
 
 			float absorb = exp(-sigma * segment_ds);
 			col += trans * scat * (1.0 - absorb);

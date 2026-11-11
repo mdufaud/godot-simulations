@@ -6,6 +6,7 @@ shader_type spatial;
 render_mode unshaded, blend_mix, cull_disabled, depth_draw_never;
 
 #include "res://shaders/tornado/tornado_wind.gdshaderinc"
+#include "res://shaders/tornado/tornado_deck.gdshaderinc"
 
 uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform vec3 cloud_color : source_color = vec3(0.36, 0.38, 0.44);
@@ -96,7 +97,7 @@ void fragment() {
 	// brightness step — the user wants the head to melt, not silhouette.
 	float darkzone = 1.0 - 0.62 * exp(-r / (8.0 * rc_top));
 	vec3 col = cloud_color * (0.35 + 0.4 * fbm) * sun_face * darkzone;
-	col = mix(col, cloud_color * 0.2 + dust_color * 0.1, collar * (0.6 + 0.3 * fbm));
+	col = mix(col, tornado_collar_tone(cloud_color, dust_color), collar * (0.6 + 0.3 * fbm));
 
 	if (storm_type == 1) {
 		// Fire underglow on the collar, flickering with the noise.

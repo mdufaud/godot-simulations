@@ -52,6 +52,28 @@ float fbm(vec2 p) {
 	return v;
 }
 
+// fbm drifting toward the vortex at speed (noise units/s): two half-offset
+// phases, each carried FLOW_PERIOD_S then reseeded, in a variance-preserving
+// crossfade. A drift of to_v * TIME grows without bound: it winds the pattern
+// into radial streaks and slides the whole ground whenever the vortex moves.
+const float FLOW_PERIOD_S = 6.0;
+const float FBM_MEAN = 0.46875;
+
+float inflow_fbm(vec2 p, vec2 to_v, float speed) {
+	float acc = 0.0;
+	float weight_sq = 0.0;
+	for (int k = 0; k < 2; k++) {
+		float cycle = TIME / FLOW_PERIOD_S + 0.5 * float(k);
+		float index = floor(cycle);
+		float phase = cycle - index;
+		float w = 1.0 - abs(2.0 * phase - 1.0);
+		vec2 seed = 37.0 * fract(vec2(0.618034, 0.754878) * (2.0 * index + float(k)));
+		acc += w * (fbm(p - to_v * speed * (phase - 0.5) * FLOW_PERIOD_S + seed) - FBM_MEAN);
+		weight_sq += w * w;
+	}
+	return FBM_MEAN + acc * inversesqrt(weight_sq);
+}
+
 // Distance (m) from q to the vortex's damage path.
 float trail_distance(vec2 q) {
 	float nearest = 1e9;
@@ -92,17 +114,17 @@ void fragment() {
 		// Churned sea: swells drift toward the vortex, foam collar at the
 		// foot, low roughness so the sun lays a glint on the water.
 		vec2 to_v = (vortex_pos.xz - q) / rf;
-		float swell = fbm((q * 0.03 - to_v * TIME * 0.35) * 2.0);
+		float swell = inflow_fbm(q * 0.06, to_v, 0.7);
 		albedo = mix(ground_a, ground_b, smoothstep(0.3, 0.8, swell));
-		float foam = smoothstep(0.55, 0.8, fbm(q * 0.14 - to_v * TIME * 0.9)) * ring;
+		float foam = smoothstep(0.55, 0.8, inflow_fbm(q * 0.14, to_v, 0.9)) * ring;
 		albedo = mix(albedo, ground_accent, foam * 0.85);
 		emission = ground_accent * foam * ground_glow * 0.4;
 		rough = 0.12;
 		if (detail > 0.01) {
 			// Ripple normals from the swell gradient, faded with detail.
 			float e = 1.2;
-			float hx = fbm(((q + vec2(e, 0.0)) * 0.03 - to_v * TIME * 0.35) * 2.0);
-			float hz = fbm(((q + vec2(0.0, e)) * 0.03 - to_v * TIME * 0.35) * 2.0);
+			float hx = inflow_fbm((q + vec2(e, 0.0)) * 0.06, to_v, 0.7);
+			float hz = inflow_fbm((q + vec2(0.0, e)) * 0.06, to_v, 0.7);
 			vec3 nw = normalize(vec3((swell - hx) / e * 0.6, 1.0, (swell - hz) / e * 0.6));
 			NORMAL = normalize((VIEW_MATRIX * vec4(nw, 0.0)).xyz);
 		}
@@ -132,7 +154,7 @@ void fragment() {
 		float tufts = fbm(q * 0.19);
 		albedo = mix(ground_b, ground_a, smoothstep(0.3, 0.72, patch));
 		albedo *= 0.82 + 0.36 * tufts;
-		float gust = smoothstep(0.5, 0.78, fbm(q * 0.016 - to_v * TIME * 0.45));
+		float gust = smoothstep(0.5, 0.78, inflow_fbm(q * 0.016, to_v, 0.45));
 		albedo *= 1.0 + 0.45 * gust * (0.35 + 0.65 * ring);
 		float scar = 1.0 - smoothstep(0.7, 1.5,
 			trail_distance(q) / r0 + 0.5 * (fbm(q * 0.05) - 0.5));

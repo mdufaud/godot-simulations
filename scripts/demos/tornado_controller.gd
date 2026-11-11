@@ -109,6 +109,10 @@ var _pool_built := false
 ## Steps live on the funnel shader, which restore() reaches before the
 ## materials are captured in _ready — the var carries the value across.
 var _raymarch_steps := 48
+## Capture harness state: the named pose follows the travelling foot, and a
+## fixed step replays minutes of travel in a few frames.
+var _capture_view := ""
+var _capture_delta := 0.0
 
 
 func _ready() -> void:
@@ -199,6 +203,8 @@ func _process(delta: float) -> void:
 		for pm: ShaderMaterial in [dust_particles.process_material, skirt_particles.process_material]:
 			pm.set_shader_parameter("camera_position", cam_pos)
 	if not _frozen:
+		if _capture_delta > 0.0:
+			delta = _capture_delta
 		_time += delta
 		_track.advance(delta, travel_speed)
 		field.base_pos = _track.position_at(field.axis_lag_s(0.0))
@@ -210,6 +216,8 @@ func _process(delta: float) -> void:
 		tornado_node.position = field.base_pos
 		_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
 		_record_trail()
+		if _capture_view != "":
+			_apply_capture_view()
 	# Outside the Freeze gate: Freeze holds the vortex in place, but slider edits
 	# must still reach the grid the debris sample and the shaders' uniforms. Both
 	# calls are no-ops unless a wind parameter changed (or, for the centerline
@@ -358,26 +366,43 @@ func cycle_genre() -> void:
 	apply_preset((_preset_btn.selected + 1) % PRESETS.size())
 
 
-## Named poses for tools/capture.sh (view=near|high|far): controlled angles for
-## visual checks. Anything else keeps the spawn framing untouched.
+## Named poses for tools/capture.sh (view=spawn|near|macro|merge|high|far|top|
+## ground): controlled angles for visual checks, relative to the vortex foot and
+## following it. Anything else keeps the spawn framing untouched.
 func set_capture_view(view: String) -> void:
-	match view:
+	_capture_view = view
+	_apply_capture_view()
+
+
+func _apply_capture_view() -> void:
+	var foot := field.base_pos
+	match _capture_view:
+		"spawn":
+			cam_rig.set_pose(foot + Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
 		"near":
-			cam_rig.set_pose(Vector3(0.0, 6.0, 240.0), 0.0, 8.0)
+			cam_rig.set_pose(foot + Vector3(0.0, 6.0, 240.0), 0.0, 8.0)
 		"macro":
-			cam_rig.set_pose(Vector3(0.0, 210.0, 200.0), 0.0, 0.0)
+			cam_rig.set_pose(foot + Vector3(0.0, 210.0, 200.0), 0.0, 0.0)
 		"merge":
 			# Frames the funnel-top-to-deck junction AND the foot in one shot:
 			# the region the default/near/far poses each cut out of frame.
-			cam_rig.set_pose(Vector3(0.0, field.height * 0.28,
+			cam_rig.set_pose(foot + Vector3(0.0, field.height * 0.28,
 				maxf(3.5 * field.r_core0, 320.0)), 0.0, 25.0)
 		"high":
-			cam_rig.set_pose(Vector3(0.0, field.height * 0.55,
+			cam_rig.set_pose(foot + Vector3(0.0, field.height * 0.55,
 				maxf(5.0 * field.r_core0, 420.0)), 0.0, -6.0)
 		"far":
-			cam_rig.set_pose(Vector3(0.0, 60.0, 1600.0), 0.0, 6.0)
+			cam_rig.set_pose(foot + Vector3(0.0, 60.0, 1600.0), 0.0, 6.0)
+		"top":
+			cam_rig.set_pose(foot + Vector3(0.0, 30.0, 420.0), 0.0, 48.0)
+		"ground":
+			cam_rig.set_pose(foot + Vector3(0.0, 300.0, 380.0), 0.0, -42.0)
 		_:
-			pass
+			_capture_view = ""
+
+
+func set_capture_fixed_delta(value: float) -> void:
+	_capture_delta = value
 
 
 func set_capture_ui(visible: bool) -> void:
@@ -449,6 +474,8 @@ func _apply_storm_type(idx: int) -> void:
 			1.0 if idx == 3 else 0.0)
 		env.fog_light_color = (t.sky as Color).darkened(0.08)
 		env.ambient_light_color = t.ambient
+	_funnel_mat.set_shader_parameter("fog_color", env.fog_light_color)
+	_funnel_mat.set_shader_parameter("fog_density", env.fog_density)
 	_lightning.set_color(_flash_tint)
 	lightning_light.light_color = _flash_tint
 	_funnel_mat.set_shader_parameter("flash_color", _flash_tint)
