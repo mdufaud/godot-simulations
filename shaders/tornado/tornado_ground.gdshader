@@ -14,6 +14,9 @@ uniform vec3 ground_accent : source_color = vec3(0.14, 0.135, 0.13); // collar /
 uniform float ground_glow : hint_range(0.0, 1.0) = 0.0;
 uniform vec3 vortex_pos = vec3(0.0);
 uniform float vortex_radius = 45.0;
+// Recent ground positions of the vortex, oldest first: the damage path.
+uniform vec2 trail[24];
+uniform int trail_count = 0;
 
 varying vec3 v_world;
 
@@ -47,6 +50,18 @@ float fbm(vec2 p) {
 		amp *= 0.5;
 	}
 	return v;
+}
+
+// Distance (m) from q to the vortex's damage path.
+float trail_distance(vec2 q) {
+	float nearest = 1e9;
+	for (int i = 0; i + 1 < trail_count; i++) {
+		vec2 along = trail[i + 1] - trail[i];
+		vec2 rel = q - trail[i];
+		float t = clamp(dot(rel, along) / max(dot(along, along), 1e-3), 0.0, 1.0);
+		nearest = min(nearest, length(rel - along * t));
+	}
+	return nearest;
 }
 
 void fragment() {
@@ -109,13 +124,19 @@ void fragment() {
 			* (0.75 + 0.25 * sin(TIME * 1.7 + rock * 9.0));
 		rough = 0.9;
 	} else {
-		// Storm-muted prairie: two-tone dirt with clods and a debris collar
-		// darkening toward the core.
-		float patch = fbm(q * 0.035);
-		float clods = fbm(q * 0.21);
-		albedo = mix(ground_b, ground_a, smoothstep(0.25, 0.8, patch));
-		albedo *= 0.9 + 0.2 * clods;
-		albedo = mix(albedo, ground_accent, ring * 0.5);
+		// Storm-lit prairie: dry and green grass in broad patches, gusts racing
+		// toward the vortex as pale sheen, and the scoured damage path where
+		// the funnel has been, ragged at its edges.
+		vec2 to_v = (vortex_pos.xz - q) / rf;
+		float patch = fbm(q * 0.012);
+		float tufts = fbm(q * 0.19);
+		albedo = mix(ground_b, ground_a, smoothstep(0.3, 0.72, patch));
+		albedo *= 0.82 + 0.36 * tufts;
+		float gust = smoothstep(0.5, 0.78, fbm(q * 0.016 - to_v * TIME * 0.45));
+		albedo *= 1.0 + 0.45 * gust * (0.35 + 0.65 * ring);
+		float scar = 1.0 - smoothstep(0.7, 1.5,
+			trail_distance(q) / r0 + 0.5 * (fbm(q * 0.05) - 0.5));
+		albedo = mix(albedo, ground_accent * (0.75 + 0.5 * tufts), max(scar * 0.85, foot * 0.7));
 	}
 
 	albedo = mix((ground_a + ground_b) * 0.5, albedo, detail);

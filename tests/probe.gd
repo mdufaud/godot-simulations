@@ -6993,13 +6993,13 @@ func _check_boot_look() -> void:
 	_check(_param_color(dust_mat, "particle_color", dust_color)
 		and _param_color(skirt_mat, "particle_color", dust_color),
 		"boot kept the shader-default particle color on the dust/skirt particles")
-	_check(_param_color(ground_mat as ShaderMaterial, "ground_a", Color(0.27, 0.235, 0.19))
-		and _param_color(ground_mat as ShaderMaterial, "ground_b", Color(0.185, 0.17, 0.15))
-		and _param_color(ground_mat as ShaderMaterial, "ground_accent", Color(0.14, 0.135, 0.13))
+	_check(_param_color(ground_mat as ShaderMaterial, "ground_a", Color(0.33, 0.31, 0.17))
+		and _param_color(ground_mat as ShaderMaterial, "ground_b", Color(0.15, 0.2, 0.1))
+		and _param_color(ground_mat as ShaderMaterial, "ground_accent", Color(0.17, 0.14, 0.11))
 		and _paramf(ground_mat as ShaderMaterial, "ground_glow", 0.0),
 		"boot did not apply the Normal ground palette")
 	var env: Environment = _demo.get_node("WorldEnvironment").environment
-	_check(_color_near(env.background_color, Color(0.45, 0.47, 0.52))
+	_check(env.background_mode == Environment.BG_SKY
 		and _color_near(env.fog_light_color, Color(0.3, 0.32, 0.37))
 		and _color_near(env.ambient_light_color, Color(0.5, 0.52, 0.57)),
 		"boot did not apply the Normal environment palette")

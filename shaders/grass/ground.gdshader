@@ -1,6 +1,7 @@
 shader_type spatial;
 
 #include "res://shaders/grass/wind_field.gdshaderinc"
+#include "res://shaders/scenery/far_mountains.gdshaderinc"
 
 uniform sampler2D cloud_shadow_texture : hint_default_white, filter_linear, repeat_disable;
 uniform vec2 cloud_shadow_center = vec2(0.0);
@@ -30,10 +31,6 @@ uniform vec3 snow_color : source_color = vec3(0.9, 0.93, 0.97);
 
 varying vec3 ground_world;
 
-float ridge(vec2 uv) {
-	return 1.0 - abs(2.0 * textureLod(heightmap, uv, 0.0).r - 1.0);
-}
-
 float terrain_height(vec2 world_xz) {
 	vec2 tex_size = vec2(textureSize(heightmap, 0));
 	float radius = length(world_xz);
@@ -42,16 +39,7 @@ float terrain_height(vec2 world_xz) {
 		* mix(1.0, 0.3, smoothstep(160.0, 700.0, radius) * step(0.001, plain_swell_m));
 	height += (textureLod(heightmap, world_xz / 3300.0 + vec2(0.31, 0.74), 0.0).r - 0.5)
 		* plain_swell_m * smoothstep(140.0, 900.0, radius);
-	float rise = smoothstep(mountain_range_m.x, mountain_range_m.y, radius);
-	if (rise > 0.0 && mountain_height_m > 0.0) {
-		float massif = textureLod(heightmap, world_xz / 90000.0 + vec2(0.37, 0.12), 0.0).r;
-		float ridges = ridge(world_xz / 52000.0) * 0.6
-			+ ridge(world_xz / 21000.0 + vec2(0.21, 0.67)) * 0.26
-			+ ridge(world_xz / 8300.0 + vec2(0.63, 0.05)) * 0.1
-			+ ridge(world_xz / 3100.0 + vec2(0.9, 0.44)) * 0.04;
-		height += rise * mountain_height_m * ridges * ridges
-			* (0.25 + 0.75 * smoothstep(0.36, 0.6, massif));
-	}
+	height += far_mountain_height(heightmap, world_xz, mountain_range_m, mountain_height_m);
 	return height;
 }
 

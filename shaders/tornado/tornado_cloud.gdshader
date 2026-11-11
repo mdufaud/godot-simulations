@@ -20,14 +20,20 @@ uniform vec3 flash_pos = vec3(0.0, 200.0, 0.0);
 uniform float flash_radius = 140.0;
 uniform vec3 flash_color : source_color = vec3(0.8, 0.85, 1.0);
 
+uniform vec3 horizon_color : source_color = vec3(0.82, 0.83, 0.74);
+
+const float DISH_RADIUS_M = 4200.0;
+const float DISH_DROP_M = 60.0;
+
 varying vec3 world_pos;
 
 void vertex() {
 	world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	// Perspective dish: the deck bends down and under the horizon far away,
-	// so no sky band survives below the cloud rim.
+	// Shallow dish: the deck sags toward its rim but stops above the horizon,
+	// leaving the clear slot (tornado_sky.gdshader's bright band) and the feet
+	// of the range visible under it.
 	float d = length(VERTEX.xz);
-	VERTEX.y -= pow(d / 3800.0, 2.2) * 1000.0;
+	VERTEX.y -= DISH_DROP_M * pow(d / DISH_RADIUS_M, 3.0);
 }
 
 const float FLOW_PERIOD_S = 20.0;
@@ -75,7 +81,8 @@ void fragment() {
 	float collar = exp(-pow(r / (3.0 * rc_top), 2.0));
 	// Stay opaque almost to the rim — the dish already hides the far edge
 	// below the horizon; the fade only matters when the coverage slider shrinks.
-	float deck = 1.0 - smoothstep(0.88, 1.0, (r + 300.0 * (n - 0.5)) / deck_radius);
+	float deck = 1.0 - smoothstep(0.8, 1.0,
+		(r + 900.0 * (n - 0.5) + 150.0 * (n2 - 0.5)) / deck_radius);
 	float dens = deck * (0.85 + 0.4 * fbm) + collar * 0.5;
 
 	vec2 rd2 = r > 1e-3 ? rel / r : vec2(0.0);
@@ -103,7 +110,11 @@ void fragment() {
 		col += vec3(0.45, 0.2, 0.8) * collar * (0.12 + 0.3 * veins);
 	}
 
-	// Intra-cloud lightning glow.
+	// The slot's light rakes the underside near the rim.
+	col = mix(col, horizon_color * (0.35 + 0.3 * fbm), 0.4 * smoothstep(0.5, 1.0, r / deck_radius));
+
+	// Intra-cloud lightning glow, over a faint sheet across the whole deck.
+	col += flash_color * flash_intensity * 0.06;
 	vec3 dfl = world_pos - flash_pos;
 	col += flash_color * flash_intensity * 0.4
 		* exp(-dot(dfl.xz, dfl.xz) / (4.0 * flash_radius * flash_radius));

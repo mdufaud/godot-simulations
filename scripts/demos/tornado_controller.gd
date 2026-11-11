@@ -2,6 +2,7 @@ extends Node3D
 
 const VirtualJoystickScript = preload("res://scripts/ui/virtual_joystick.gd")
 const TornadoWindField = preload("res://scripts/tornado/tornado_wind_field.gd")
+const TornadoBackdrop = preload("res://scripts/demos/tornado/tornado_backdrop.gd")
 
 const PRESETS := [
 	{name = "Classic EF4", model = TornadoWindField.Model.BURGERS_ROTT, r0 = 45.0, u = 85.0,
@@ -13,6 +14,15 @@ const PRESETS := [
 	{name = "S-curve rope", model = TornadoWindField.Model.BURGERS_ROTT, r0 = 22.0, u = 75.0,
 		h = 600.0, flare = 3.5, a = 0.12, s = 0.85, dust = 0.7, dark = 0.45},
 ]
+
+## Light of the clear slot under the anvil, Normal look.
+const SLOT_COLOR := Color(0.82, 0.83, 0.74)
+## Length of the damage path (matches trail[] in tornado_ground.gdshader).
+const TRAIL_POINTS := 24
+## Ambient boost at a strike's peak.
+const FLASH_AMBIENT_GAIN := 1.6
+## Range of the strikes that fall across the plain, from the camera.
+const FAR_STRIKE_M := Vector2(700.0, 3200.0)
 
 const STORM_TYPES := [
 	{name = "Normal"},
@@ -49,7 +59,6 @@ const STORM_TYPES := [
 @onready var dust_particles: GPUParticles3D = $Tornado/DustParticles
 @onready var skirt_particles: GPUParticles3D = $Tornado/SkirtParticles
 @onready var lightning_light: OmniLight3D = $Tornado/LightningLight
-@onready var flash_rect: ColorRect = $UI/FlashRect
 @onready var menu = $UI/SimMenu
 @onready var debris_pool: TornadoDebrisPool = $DebrisPool
 @onready var ground_mesh: MeshInstance3D = $Ground/MeshInstance3D
@@ -81,12 +90,14 @@ var _look_btn: OptionButton
 var _rng := RandomNumberGenerator.new()
 
 var _lightning_timer := 3.0
-var _flash_energy := 0.0
 var _flash_pos := Vector3.ZERO
 var _flash_tint := Color(0.8, 0.85, 1.0)
-var _bolt: MeshInstance3D
-var _bolt_mesh: ImmediateMesh
-var _bolt_mat: StandardMaterial3D
+var _lightning := TornadoLightning.new()
+var _backdrop := TornadoBackdrop.new()
+var _trail := PackedVector2Array()
+var _trail_count := 0
+var _environment: Environment
+var _ambient_energy := 1.0
 
 var _pending_cap := -1
 var _cap_debounce := 0.0
@@ -116,6 +127,7 @@ func _ready() -> void:
 	_track.extent_m = config.travel_extent_m
 	_track.noise.seed = 1337
 	_lead.resize(TornadoWindField.NUM_SLICES)
+	_trail.resize(TRAIL_POINTS)
 	_wander_noise.seed = 1337
 	_rng.seed = 4242
 	debris_pool.field = field
@@ -143,7 +155,10 @@ func _ready() -> void:
 	_cloud_mat.set_shader_parameter("sun_dir", sun)
 	_ground_mat.set_shader_parameter("sun_dir", sun)
 	_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
-	_make_bolt()
+	_environment = ($WorldEnvironment as WorldEnvironment).environment
+	_ambient_energy = _environment.ambient_light_energy
+	add_child(_lightning)
+	_backdrop.setup(_environment, $Ground, cam_rig.get_camera(), sun)
 	_update_funnel_bounds()
 	cam_rig.set_pose(Vector3(0.0, 1.8, _camera_distance(380.0)), 0.0, 12.0)
 	_setup_ui()
@@ -194,6 +209,7 @@ func _process(delta: float) -> void:
 		field.update_centerline(_time * 0.05, s_amount, _wander_noise, _lead)
 		tornado_node.position = field.base_pos
 		_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
+		_record_trail()
 	# Outside the Freeze gate: Freeze holds the vortex in place, but slider edits
 	# must still reach the grid the debris sample and the shaders' uniforms. Both
 	# calls are no-ops unless a wind parameter changed (or, for the centerline
@@ -215,6 +231,24 @@ func _process(delta: float) -> void:
 			_pending_cap = -1
 
 
+## The damage path the ground shader scours: one point every half core radius,
+## the newest always at the vortex foot.
+func _record_trail() -> void:
+	var foot := Vector2(field.base_pos.x, field.base_pos.z)
+	if _trail_count < 2:
+		_trail[0] = foot
+		_trail_count = 2
+	elif _trail[_trail_count - 2].distance_to(foot) > maxf(0.5 * field.r_core0, 15.0):
+		if _trail_count == TRAIL_POINTS:
+			for i in TRAIL_POINTS - 1:
+				_trail[i] = _trail[i + 1]
+		else:
+			_trail_count += 1
+	_trail[_trail_count - 1] = foot
+	_ground_mat.set_shader_parameter("trail", _trail)
+	_ground_mat.set_shader_parameter("trail_count", _trail_count)
+
+
 func _update_funnel_bounds() -> void:
 	# Worst-case centerline excursion: S bow (0.12 H) + wander noise (0.05 H)
 	# + the travelling top's lead over the base.
@@ -233,84 +267,55 @@ func _update_funnel_bounds() -> void:
 
 # ── Lightning ────────────────────────────────────────────────────────────────
 
-func _make_bolt() -> void:
-	_bolt_mesh = ImmediateMesh.new()
-	_bolt = MeshInstance3D.new()
-	_bolt.mesh = _bolt_mesh
-	_bolt.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	mat.emission_enabled = true
-	mat.emission = Color(0.85, 0.9, 1.0)
-	mat.emission_energy_multiplier = 8.0
-	mat.albedo_color = Color(1.0, 1.0, 1.0)
-	_bolt_mat = mat
-	_bolt.material_override = mat
-	_bolt.visible = false
-	add_child(_bolt)
-
-
 func _update_lightning(delta: float) -> void:
 	if lightning_enabled:
 		_lightning_timer -= delta
 		if _lightning_timer <= 0.0:
 			_trigger_lightning()
 			_lightning_timer = _rng.randf_range(0.6, 4.0) / maxf(field.u_max / 85.0, 0.3)
-	_flash_energy = maxf(_flash_energy - delta * 6.0, 0.0)
-	if _flash_energy > 0.0 and _rng.randf() < 0.2:
-		_flash_energy = minf(_flash_energy + _rng.randf() * 0.4, 1.0)
-	lightning_light.light_energy = _flash_energy * 25.0
-	# x3 peak: at x6 the in-scatter saturates the whole column to white and
+	_lightning.tick(delta)
+	var flash := _lightning.flash()
+	lightning_light.light_energy = flash * 25.0
+	# The whole sky lights the ground and the far relief, not only the strike's foot.
+	_environment.ambient_light_energy = _ambient_energy * (1.0 + FLASH_AMBIENT_GAIN * flash)
+	# x2 peak: past it the in-scatter saturates the whole column to white and
 	# the storm disappears for the flash duration.
-	_funnel_mat.set_shader_parameter("flash_intensity", _flash_energy * 3.0)
+	_funnel_mat.set_shader_parameter("flash_intensity", flash * 2.0)
 	_funnel_mat.set_shader_parameter("flash_pos", _flash_pos)
-	_cloud_mat.set_shader_parameter("flash_intensity", _flash_energy * 3.0)
+	_cloud_mat.set_shader_parameter("flash_intensity", flash * 1.5)
 	_cloud_mat.set_shader_parameter("flash_pos", _flash_pos)
-	var c := Color(_flash_tint, _flash_energy * _flash_energy * 0.3)
-	flash_rect.color = c
-	_bolt.visible = _flash_energy > 0.55
 
 
-func _trigger_lightning() -> void:
-	# Strike outside the condensation wall (cloud-to-ground beside the funnel)
-	# so the bolt silhouettes against the sky instead of drowning in the volume.
-	var y := _rng.randf_range(0.5, 0.9) * field.height
-	var c: Vector3 = field.centerline_at(y)
-	var rc: float = field.core_radius_at(y)
-	var ang := _rng.randf_range(0.0, TAU)
-	var rad := _rng.randf_range(1.3, 2.4) * rc
-	_flash_pos = c + Vector3(cos(ang) * rad, 0.0, sin(ang) * rad)
-	_flash_pos.y = y
-	_flash_energy = 1.0
-	lightning_light.omni_range = 4.0 * field.r_core0
-	lightning_light.global_position = Vector3(_flash_pos.x, minf(_flash_pos.y, 120.0), _flash_pos.z)
-	_build_bolt_mesh()
-
-
-func _build_bolt_mesh() -> void:
-	var bottom := Vector3(
-		_flash_pos.x + _rng.randf_range(-20.0, 20.0),
-		0.0,
-		_flash_pos.z + _rng.randf_range(-20.0, 20.0)
-	)
-	var cam := cam_rig.get_camera()
-	var view: Vector3 = (cam.global_position - _flash_pos).normalized()
-	var axis: Vector3 = (bottom - _flash_pos)
-	var side: Vector3 = axis.cross(view).normalized() * 2.5
-	var segs := 11
-	_bolt_mesh.clear_surfaces()
-	_bolt_mesh.surface_begin(Mesh.PRIMITIVE_TRIANGLE_STRIP)
-	for i in segs + 1:
-		var t := float(i) / segs
-		var p: Vector3 = _flash_pos + axis * t
-		if i > 0 and i < segs:
-			p += side.normalized() * _rng.randf_range(-14.0, 14.0)
-			p += view.cross(side).normalized() * _rng.randf_range(-6.0, 6.0)
-		var w: Vector3 = side * (1.0 - 0.5 * t)
-		_bolt_mesh.surface_add_vertex(p - w)
-		_bolt_mesh.surface_add_vertex(p + w)
-	_bolt_mesh.surface_end()
+## Half of the strikes land beside the funnel (cloud-to-ground outside the
+## condensation wall, so the channel silhouettes against the sky instead of
+## drowning in the volume); the rest fall across the plain in front of the
+## camera, down to a flicker on the horizon.
+func _trigger_lightning(beside_funnel := _rng.randf() < 0.5) -> void:
+	var top: Vector3
+	var ground: Vector3
+	var amplitude := 1.0
+	if beside_funnel:
+		var ang := _rng.randf_range(0.0, TAU)
+		var rad := _rng.randf_range(1.3, 2.6) * field.core_radius_at(field.height)
+		top = field.centerline_at(field.height) + Vector3(cos(ang), 0.0, sin(ang)) * rad
+		ground = top + Vector3(_rng.randf_range(-0.5, 0.5), 0.0, _rng.randf_range(-0.5, 0.5)) * rad
+	else:
+		var cam := cam_rig.get_camera()
+		var forward := -cam.global_basis.z
+		var yaw := atan2(forward.x, forward.z) + _rng.randf_range(-1.1, 1.1)
+		var distance := _rng.randf_range(FAR_STRIKE_M.x, FAR_STRIKE_M.y)
+		ground = cam.global_position + Vector3(sin(yaw), 0.0, cos(yaw)) * distance
+		top = ground + Vector3(_rng.randf_range(-150.0, 150.0), 0.0, _rng.randf_range(-150.0, 150.0))
+		amplitude = clampf(FAR_STRIKE_M.x / distance, 0.2, 0.8)
+	# Start inside the deck, which dishes down away from the vortex
+	# (tornado_cloud.gdshader vertex()), and end under the ground.
+	var from_vortex := Vector2(top.x - field.base_pos.x, top.z - field.base_pos.z).length()
+	top.y = field.height - 200.0 * pow(from_vortex / 4200.0, 3.0) + 40.0
+	ground.y = -20.0
+	_flash_pos = Vector3(top.x, 0.75 * field.height, top.z)
+	lightning_light.omni_range = maxf(6.0 * field.r_core0, 300.0)
+	lightning_light.global_position = Vector3(ground.x, 80.0, ground.z)
+	_lightning.strike(top, ground, amplitude)
 
 
 # ── UI ───────────────────────────────────────────────────────────────────────
@@ -410,19 +415,21 @@ func _apply_storm_type(idx: int) -> void:
 	_funnel_mat.set_shader_parameter("storm_type", idx)
 	_cloud_mat.set_shader_parameter("storm_type", idx)
 	_ground_mat.set_shader_parameter("storm_type", idx)
-	var env: Environment = ($WorldEnvironment as WorldEnvironment).environment
+	var env := _environment
 	if idx == 0:
 		_set_storm_color(storm_color)
 		# Storm-gray dust: the user reads the warm default as "brown mud" at
 		# the foot; the apron must read as gray storm debris.
 		_set_dust_color(Color(0.46, 0.46, 0.48))
-		# Storm-muted prairie earth: the environment is cool, so warm albedo
-		# lands as gray-brown instead of the pasted-slab orange.
-		_set_ground_colors(Color(0.27, 0.235, 0.19), Color(0.185, 0.17, 0.15),
-			Color(0.14, 0.135, 0.13), 0.0)
+		# Storm-lit prairie: dry grass, green grass, and the scoured earth of
+		# the damage path. Muted: the environment is cool and overcast.
+		_set_ground_colors(Color(0.33, 0.31, 0.17), Color(0.15, 0.2, 0.1),
+			Color(0.17, 0.14, 0.11), 0.0)
 		_sliders["glow"].value = 0.0
 		_flash_tint = Color(0.8, 0.85, 1.0)
-		env.background_color = Color(0.45, 0.47, 0.52)
+		_backdrop.set_sky(Color(0.2, 0.215, 0.26), SLOT_COLOR)
+		_cloud_mat.set_shader_parameter("horizon_color", SLOT_COLOR)
+		_backdrop.set_relief(Color(0.24, 0.255, 0.135), Color(0.2, 0.19, 0.19), 0.6)
 		env.fog_light_color = Color(0.3, 0.32, 0.37)
 		env.ambient_light_color = Color(0.5, 0.52, 0.57)
 	else:
@@ -436,10 +443,13 @@ func _apply_storm_type(idx: int) -> void:
 			pm.set_shader_parameter("particle_color", t.particles)
 		_sliders["glow"].value = t.glow
 		_flash_tint = t.bolt
-		env.background_color = t.sky
+		_backdrop.set_sky((t.sky as Color).darkened(0.35), t.dust)
+		_cloud_mat.set_shader_parameter("horizon_color", t.dust)
+		_backdrop.set_relief((t.ground_a as Color).lerp(t.ground_b, 0.5), t.ground_b,
+			1.0 if idx == 3 else 0.0)
 		env.fog_light_color = (t.sky as Color).darkened(0.08)
 		env.ambient_light_color = t.ambient
-	_bolt_mat.emission = _flash_tint
+	_lightning.set_color(_flash_tint)
 	lightning_light.light_color = _flash_tint
 	_funnel_mat.set_shader_parameter("flash_color", _flash_tint)
 	_cloud_mat.set_shader_parameter("flash_color", _flash_tint)
@@ -524,7 +534,7 @@ func _setup_ui() -> void:
 	throw_action.tooltip_text = ("Throw object" if VirtualJoystickScript.is_touch_ui()
 		else "Throw object (LMB)")
 	menu.add_action("🌾", "Scatter", func() -> void: debris_pool.scatter_props())
-	menu.add_action("⚡", "Strike", _trigger_lightning)
+	menu.add_action("⚡", "Strike", _trigger_lightning.bind(true))
 	menu.add_action_toggle("🌩", "Storm", lightning_enabled,
 		func(on: bool) -> void: lightning_enabled = on)
 	# Freezes the funnel's drift and centerline so a shot can be framed; debris keeps flying.

@@ -72,13 +72,13 @@ glow_blend_mode = 1
 fog_enabled = true
 fog_light_color = Color(0.3, 0.32, 0.37, 1.0)
 fog_density = 0.0004
-fog_sky_affect = 0.45
+fog_sky_affect = 0.15
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_ground"]
 shader = ExtResource("8_ground_shader")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_ground"]
-size = Vector2(9000, 9000)
+size = Vector2(6000, 6000)
 
 [sub_resource type="BoxShape3D" id="BoxShape3D_ground"]
 size = Vector3(2000, 1, 2000)
@@ -165,11 +165,3 @@ script = ExtResource("4_debris_pool")
 [node name="SimMenu" parent="UI" instance=ExtResource("3_sim_menu")]
 title = "🌪️ Tornado Simulation"
 
-[node name="FlashRect" type="ColorRect" parent="UI"]
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-color = Color(0.9, 0.93, 1.0, 0.0)
-mouse_filter = 2
