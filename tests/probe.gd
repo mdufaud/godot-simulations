@@ -3953,7 +3953,7 @@ func _run_fluid_pool() -> void:
 	demo._cycle_material()
 	_check(demo.fluid.mode == FluidSystem.FluidKind.LAVA and
 		demo.fluid.scenario == FluidSystem.Scenario.POOL and
-		str(demo.material_action.find_child("ActionCaption", true, false).text) == "Lava",
+		str(demo.material_action.find_child("ActionCaption", true, false).text) == "Viscous\nLava",
 		"fluid_pool: the single liquid action failed to cycle in Pool")
 	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.BASIN)
 	_check(not demo.pool_add_action.visible,
@@ -4005,6 +4005,8 @@ func _run_fluid_materials() -> void:
 	demo.configure_fluid(FluidSystem.FluidKind.WATER, FluidSystem.Scenario.BASIN)
 	await _wait_sim(demo, 0.5)
 	demo.apply_look(4)
+	# Fast enough to pour the whole particle budget inside the 18 s window.
+	demo.set_capture_flow(8.0)
 	await _wait_sim(demo, 0.5)
 	var pouring := await _sample_fluid_phases(demo.fluid.sph_solver)
 	await _wait_sim(demo, 18.0)
@@ -4057,8 +4059,7 @@ func _run_fluid_honey_fall() -> void:
 	# Honey is extruded as a rope: it leaves at the speed that carries the
 	# emitted volume at rest density, whatever the particle tier.
 	var pour_solver: SphFluidSolver = demo.fluid.sph_solver
-	var extrusion: float = float(pour_solver.particle_count) * demo.fluid.flow_rate \
-		/ pour_solver.emission_cycle_seconds * pour_solver.spacing \
+	var extrusion: float = pour_solver.emission_per_second * pour_solver.spacing \
 		/ float(pour_solver.emitter_width * pour_solver.emitter_width)
 	demo.configure_fluid(FluidSystem.FluidKind.HONEY, FluidSystem.Scenario.POOL)
 	deadline = Time.get_ticks_msec() + 30000
@@ -4094,7 +4095,7 @@ func _run_fluid_honey_fall() -> void:
 	demo.flow_slider.value = demo.flow_slider.max_value
 	await _wait_sim(demo, 8.0)
 	var high_stream := await _sample_honey_stream(solver)
-	_check(is_equal_approx(demo.flow_slider.max_value, FluidSystem.HONEY_CASCADE_FLOW_MAX)
+	_check(is_equal_approx(demo.flow_slider.max_value, demo.fluid_config.flow_max)
 		and is_equal_approx(demo.fluid.flow_rate, demo.flow_slider.value),
 		"fluid_honey_fall: Flow slider and honey emitter disagree")
 	print("FLUHONEY stream_normal=%d/%d stream_high=%d/%d" % [

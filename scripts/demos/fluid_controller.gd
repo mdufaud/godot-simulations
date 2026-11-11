@@ -176,9 +176,6 @@ func _sync_scene_ui() -> void:
 	flow_group.visible = scene != FluidSystem.Scenario.POOL
 	yield_group.visible = FluidMaterial.for_kind(fluid.mode).yield_stress > 0.0
 	if flow_slider != null:
-		var honey_cascade := scene == FluidSystem.Scenario.CASCADE and \
-			fluid.mode == FluidSystem.FluidKind.HONEY
-		flow_slider.max_value = FluidSystem.HONEY_CASCADE_FLOW_MAX if honey_cascade else fluid_config.flow_max
 		menu.set_slider_value(flow_slider, fluid.flow_rate)
 	pool_add_action.visible = scene == FluidSystem.Scenario.POOL
 	_sync_material_action()
@@ -262,6 +259,16 @@ func _sync_pool_add_action() -> void:
 func set_capture_scene(value: int) -> void:
 	if value >= FluidSystem.Scenario.POOL and value <= FluidSystem.Scenario.BASIN:
 		configure_fluid(int(fluid.mode), value)
+
+
+func set_quality_profile(tier: int) -> void:
+	quality.set_tier(tier)
+	quality.refresh_option(quality._option)
+
+
+func set_capture_view(view: String) -> void:
+	if view == "close":
+		($CameraPivot as OrbitCamera).distance *= 0.45
 
 
 func set_capture_flow(value: float) -> void:

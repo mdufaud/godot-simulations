@@ -115,7 +115,26 @@ func attach_menu_option(menu: SimMenu) -> OptionButton:
 			refresh_option(_option), false)
 	menu.settings_reset.connect(reset_to_default)
 	refresh_option(_option)
+	# Deferred past SimMenu's own deferred restore and the bind() calls that
+	# may follow this one.
+	_sync_global_tier.call_deferred(menu)
 	return _option
+
+
+## A tier picked for every demo from the main menu outranks what this demo's
+## tier-bound widgets had stored: forget those values and push the tier through.
+func _sync_global_tier(menu: SimMenu) -> void:
+	var manager := _manager()
+	if manager == null or not is_instance_valid(menu):
+		return
+	var epoch := int(manager.get_setting("quality_epoch", 0))
+	if int(menu.stored_value("Performance", "__quality_epoch", 0)) == epoch:
+		return
+	for key in _controls:
+		if _controls[key].node != null:
+			menu.forget_value(_controls[key].node)
+	_apply_tier(false)
+	menu.store_value("Performance", "__quality_epoch", epoch)
 
 
 ## Keeps the selector honest: a degraded pick (e.g. Ultra on a GPU below the

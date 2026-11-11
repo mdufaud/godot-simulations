@@ -52,7 +52,14 @@ var settings: Dictionary = {
 	"wildfire_quality_profile": 1,
 	"smoke_quality_profile": 1,
 	"softbody_quality_profile": 1,
+	# Bumped by set_global_quality: a demo whose stored epoch differs drops the
+	# values its tier-bound widgets had saved and takes the tier as is.
+	"quality_epoch": 0,
 }
+
+const QUALITY_KEY_SUFFIX := "_quality_profile"
+## The fire demo keeps its own preset ladder: FireQuality.Preset per tier.
+const FIRE_PRESET_FOR_TIER := [4, 2, 1, 6]
 
 const MAIN_MENU_SCENE := "res://scenes/main_menu.tscn"
 
@@ -331,6 +338,32 @@ func set_setting(key: String, value) -> void:
 	settings[key] = value
 	if key == "fps_limit":
 		apply_fps_limit()
+	settings_changed.emit()
+
+
+## Tier every demo runs at, or -1 when they differ.
+func global_quality() -> int:
+	var tier := -1
+	for key: String in settings:
+		if not key.ends_with(QUALITY_KEY_SUFFIX):
+			continue
+		if tier >= 0 and int(settings[key]) != tier:
+			return -1
+		tier = int(settings[key])
+	return tier
+
+
+## Puts every demo on one tier (0 Low .. 3 Ultra).
+func set_global_quality(tier: int) -> void:
+	tier = clampi(tier, 0, FIRE_PRESET_FOR_TIER.size() - 1)
+	for key: String in settings:
+		if key.ends_with(QUALITY_KEY_SUFFIX):
+			settings[key] = tier
+	settings["quality_epoch"] = int(settings["quality_epoch"]) + 1
+	var user_settings := get_node_or_null(^"/root/UserSettings")
+	if user_settings != null:
+		user_settings.set_sim_value("fire_demo", "Quality/Performance preset",
+			FIRE_PRESET_FOR_TIER[tier])
 	settings_changed.emit()
 
 

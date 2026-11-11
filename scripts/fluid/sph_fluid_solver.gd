@@ -154,8 +154,7 @@ var planet_normal_offset := 0.5
 
 var emitter_enabled := false
 var recycle_emission := true
-var emission_rate := 1.0
-var emission_cycle_seconds := 240.0
+var emission_per_second := 0.0
 var emitter_width := 6
 var emitter_origin := Vector3(-5.0, 13.6, 0.0)
 var emitter_velocity := Vector3(0.0, -2.0, 0.0)
@@ -518,11 +517,8 @@ func step_render(dt: float) -> void:
 	var emit_count := 0
 	var emit_start := _emit_cursor
 	if emitter_enabled:
-		var cycle := maxf(emission_cycle_seconds / maxf(emission_rate, 0.01), 0.1)
-		_emit_fraction += float(particle_count) * dt / cycle
+		_emit_fraction += emission_per_second * dt
 		emit_count = mini(int(_emit_fraction), particle_count)
-		if emitter_width < 6:
-			emit_count = mini(emit_count, emitter_width * emitter_width)
 		_emit_fraction = minf(_emit_fraction - float(emit_count), 1.0)
 		if active_count >= 0 and active_count < particle_count:
 			emit_start = active_count

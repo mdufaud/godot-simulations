@@ -25,7 +25,8 @@ var yield_stress := 0.0
 var drift_relaxation_s := 0.0
 var density_kg_m3 := 1000.0
 var radius := 0.16
-var emission_cycle_seconds := 24.0
+## Share of the flow slider's exit speed this liquid leaves the nozzle at.
+var nozzle_speed_scale := 1.0
 
 # Derived kernel constants. The shaders read these back out of the
 # SceneParams block (or the scaled push-constant field) instead of
@@ -65,7 +66,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.collision_damping = 0.08
 			spec.density_kg_m3 = 13534.0
 			spec.radius = 0.23
-			spec.emission_cycle_seconds = 60.0
+			spec.nozzle_speed_scale = 0.6
 			spec.stiffness_scale = sqrt(sqrt(13534.0 / 1000.0))
 			spec.cohesion_kernel_scale = 4.0
 			spec.collision_inflation = 0.20
@@ -75,7 +76,7 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.collision_damping = 0.02
 			spec.extension_strength = 24.0
 			spec.radius = 0.24
-			spec.emission_cycle_seconds = 60.0
+			spec.nozzle_speed_scale = 0.6
 		FluidSystem.FluidKind.WATER_OIL:
 			spec.viscosity = 0.14
 			spec.cohesion = 250.0
@@ -93,21 +94,21 @@ static func for_kind(kind: int) -> FluidMaterial:
 			spec.collision_damping = 0.28
 			spec.extension_strength = 3600.0
 			spec.radius = 0.22
-			spec.emission_cycle_seconds = 60.0
+			spec.nozzle_speed_scale = 0.6
 		FluidSystem.FluidKind.PRISMATIC_SLIME:
 			spec.viscosity = 2.6
 			spec.yield_stress = 120.0
 			spec.cohesion = 1800.0
 			spec.collision_damping = 0.06
 			spec.radius = 0.22
-			spec.emission_cycle_seconds = 48.0
+			spec.nozzle_speed_scale = 0.6
 		FluidSystem.FluidKind.LIGHT_PASTE:
 			spec.viscosity = 0.45
 			spec.yield_stress = 300.0
 			spec.cohesion = 2200.0
 			spec.collision_damping = 0.03
 			spec.radius = 0.23
-			spec.emission_cycle_seconds = 72.0
+			spec.nozzle_speed_scale = 0.5
 		FluidSystem.FluidKind.LIQUID_NITROGEN:
 			spec.viscosity = 0.05
 			spec.cohesion = 300.0

@@ -12,8 +12,8 @@ render_mode unshaded, cull_disabled, blend_add, depth_draw_never;
 // Liquid nitrogen vapour: faint puffs that add up into a cloud. Puffs keep one
 // world size and fade in and out with the particle's swell (NITROGEN_FOG_SCALE
 // when fully grown), so the cloud never reads as dots.
-const float DENSITY = 0.035;
-const float FOG_SPRITE = 0.7;
+const float DENSITY = 0.045;
+const float FOG_SPRITE = 0.45;
 const float FOG_FULL_SWELL = 8.0;
 #else
 const float DENSITY = 0.3;

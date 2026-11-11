@@ -13,7 +13,8 @@ const PLANET_MAX_POUR_FRACTION := 0.5
 const POOL_START_MULTIPLIER := 1
 const POOL_CAPACITY_MULTIPLIER := 3
 const POOL_ADD_BATCH_DIVISOR := 4
-const HONEY_CASCADE_FLOW_MAX := 1.3
+## Nozzle exit speed per unit of flow, before the material's own scale.
+const FLOW_SPEED_M_S := 1.0
 
 # --- Public configuration (set before start(); use the setters afterwards). ---
 @export var config: FluidConfig = FluidConfig.new()
@@ -139,26 +140,19 @@ func set_configuration(next_mode: FluidKind, next_scenario: Scenario) -> void:
 
 
 func set_flow(value: float) -> void:
-	flow_rate = clampf(value, config.flow_min,
-		HONEY_CASCADE_FLOW_MAX if mode == FluidKind.HONEY and scenario == Scenario.CASCADE
-		else config.flow_max)
-	sph_solver.emission_rate = flow_rate
-	sph_solver.emitter_velocity = Vector3(0.0, -_launch_speed(), 0.0)
+	flow_rate = clampf(value, config.flow_min, config.flow_max)
+	var speed := _launch_speed()
+	sph_solver.emitter_velocity = Vector3(0.0, -speed, 0.0)
+	# The nozzle emits exactly the volume its exit speed carries at rest density:
+	# more would pack layers into each other and burst, less leaves a dotted rope.
+	sph_solver.emission_per_second = speed / sph_solver.spacing \
+		* float(sph_solver.emitter_width * sph_solver.emitter_width)
 
 
-## A slow flux (thick liquids, low particle tiers) is extruded rather than
-## sprayed: the nozzle slows down to the speed the volume flux allows, so the
-## rope leaves at rest density instead of as a dotted line of half-filled layers.
+## Flow is the nozzle exit speed, independent of the particle tier: more
+## particles mean more liquid in the scene before the oldest is recycled.
 func _launch_speed() -> float:
-	var speed := 6.0 if scenario == Scenario.BASIN else 2.0
-	var per_second := float(sph_solver.particle_count) * flow_rate / sph_solver.emission_cycle_seconds
-	var extrusion := per_second * sph_solver.spacing / float(sph_solver.emitter_width * sph_solver.emitter_width)
-	# Honey is a rope: it leaves at exactly the speed that carries the flux at rest
-	# density. Capping it below that packed successive layers closer than the rest
-	# spacing, and the rope burst sideways under its own pressure at high flow.
-	if mode == FluidKind.HONEY:
-		return extrusion
-	return minf(speed, extrusion)
+	return flow_rate * FLOW_SPEED_M_S * FluidMaterial.for_kind(mode).nozzle_speed_scale
 
 
 func set_particle_count(n: int) -> void:
@@ -489,7 +483,6 @@ func _configure_solver() -> void:
 	sph_solver.emitter_enabled = scenario != Scenario.POOL and not planet_mode()
 	sph_solver.emitter_width = 4 if basin_pour else 6
 	sph_solver.recycle_emission = not (basin_pour and mode == FluidKind.WATER_OIL)
-	sph_solver.emission_cycle_seconds = spec.emission_cycle_seconds
 	set_flow(flow_rate)
 	sph_solver.emitter_origin = emitter_origin_for_scene(scenario)
 	sph_solver.set_scene_obstacles(obstacles_for_scene(scenario))

@@ -226,6 +226,16 @@ func store_value(section: String, label: String, value: Variant) -> void:
 	_persist("%s/%s" % [section, label], value)
 
 
+## Drops the persisted value of the widget [param node]: the next launch starts
+## it from what the scene sets.
+func forget_value(node: Control) -> void:
+	if _settings == null or persist_id.is_empty():
+		return
+	for key in _entries:
+		if _entries[key].node == node:
+			_settings.erase_sim_value(persist_id, key)
+
+
 ## Push a value into a widget, re-emitting so the callback runs (mirrors the kinds).
 func _apply_value(entry: Dictionary, value: Variant) -> void:
 	var node: Control = entry.node

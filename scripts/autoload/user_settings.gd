@@ -62,6 +62,12 @@ func set_sim_value(demo: String, key: String, value: Variant) -> void:
 	_queue_save()
 
 
+func erase_sim_value(demo: String, key: String) -> void:
+	if has_sim_value(demo, key):
+		_config.erase_section_key("sim." + demo, key)
+		_queue_save()
+
+
 func clear_sim(demo: String) -> void:
 	var section := "sim." + demo
 	if _config.has_section(section):
