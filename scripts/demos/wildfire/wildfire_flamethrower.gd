@@ -57,10 +57,8 @@ func setup(grid: CellPropagation, muzzle: Node3D, system: WildfireSystem) -> voi
 
 	var quad := QuadMesh.new()
 	quad.size = Vector2.ONE * 1.4
-	quad.material = system.sprite_material(WildfireSystem.FLAME_CELLS,
-		Color(1.3, 1.2, 1.1), Color(1.0, 0.45, 0.2), 2.5, 0.5, 0.6, 0.08, 1)
-	# Visible right out of the nozzle, so the jet reads as one rope of fire.
-	(quad.material as ShaderMaterial).set_shader_parameter("fade_in", 0.02)
+	quad.material = system.flame_material(1.0)
+	(quad.material as ShaderMaterial).set_shader_parameter("emission_energy", 0.75)
 	_stream = GPUParticles3D.new()
 	_stream.process_material = _stream_process
 	_stream.draw_pass_1 = quad

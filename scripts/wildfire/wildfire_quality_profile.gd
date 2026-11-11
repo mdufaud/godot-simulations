@@ -1,9 +1,9 @@
 class_name WildfireQualityProfile
 extends SimQualityProfile
 ## Quality tiers for the wildfire demo. Medium is the shipped look. Higher
-## tiers add lighting rather than particle counts: smoke lit by the fires'
-## own lights, firelight scattering in a volumetric cloud around each fire,
-## and shadows from more fire lights. Low drops the heat haze and every fire
+## tiers add lighting rather than particle counts: firelight scattering in a
+## volumetric cloud around each fire and shadows from more fire lights. Low
+## drops the heat haze, the smoke lit by the fires' own lights and every fire
 ## shadow.
 
 const FLAME_DENSITY := {
@@ -30,7 +30,7 @@ const HEAT_HAZE := {
 
 const LIT_SMOKE := {
 	Tier.LOW: false,
-	Tier.MEDIUM: false,
+	Tier.MEDIUM: true,
 	Tier.HIGH: true,
 	Tier.ULTRA: true,
 }

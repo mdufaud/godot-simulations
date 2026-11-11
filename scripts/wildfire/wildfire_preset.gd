@@ -27,6 +27,14 @@ class_name WildfirePreset extends Resource
 ## (1 = first to get shadows); 0 never casts.
 @export_range(0, 3, 1) var shadow_rank := 0
 @export_range(0.5, 8.0, 0.1) var haze_radius_m := 2.0
+## Low unshadowed light warming the ground at the foot of the fire; 0 = none.
+@export_range(0.0, 8.0, 0.1) var ground_light_energy := 0.0
+
+@export_group("Ember bed")
+## Disc of glowing coals on the ground under the fire; 0 = none.
+@export_range(0.0, 4.0, 0.05) var ember_bed_radius_m := 0.0
+## How far below the fire position the ground lies.
+@export_range(0.0, 2.0, 0.01) var ember_bed_drop_m := 0.0
 
 
 func validate() -> String:
