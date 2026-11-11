@@ -35,3 +35,9 @@ func push_wind(field: TornadoWindField) -> void:
 			material.set_shader_parameter("sullivan_curve", field.get_sullivan_texture())
 		material.set_shader_parameter("centerline", centerline)
 	_pushed_revision = field.revision
+
+
+## Rotation angle the deck's spiral bands and the dust bowl's curtains turn with.
+func push_spin(phase_rad: float) -> void:
+	funnel.set_shader_parameter("spin_phase", phase_rad)
+	cloud.set_shader_parameter("spin_phase", phase_rad)

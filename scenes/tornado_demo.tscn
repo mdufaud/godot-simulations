@@ -45,8 +45,8 @@ shader_parameter/noise_tex = SubResource("NoiseTexture3D_funnel")
 
 [sub_resource type="PlaneMesh" id="PlaneMesh_cloud"]
 size = Vector2(10000, 10000)
-subdivide_width = 48
-subdivide_depth = 48
+subdivide_width = 200
+subdivide_depth = 200
 
 [sub_resource type="ShaderMaterial" id="StandardMaterial3D_dust_draw"]
 shader = ExtResource("9_dust_draw")

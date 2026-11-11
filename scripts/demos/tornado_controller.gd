@@ -74,6 +74,8 @@ var storm_color := Color(0.3, 0.31, 0.36)
 var storm_type := 0
 
 var _time := 0.0
+## Unwrapped rotation of the vortex at its base radius of maximum wind (rad).
+var _spin_phase := 0.0
 var _frozen := false
 var _wander_noise := FastNoiseLite.new()
 var _track := TornadoTrack.new()
@@ -158,6 +160,7 @@ func _ready() -> void:
 	_funnel_mat.set_shader_parameter("sun_dir", sun)
 	_cloud_mat.set_shader_parameter("sun_dir", sun)
 	_ground_mat.set_shader_parameter("sun_dir", sun)
+	_ground_mat.set_shader_parameter("swirl_sign", field.swirl_sign)
 	_ground_mat.set_shader_parameter("vortex_pos", tornado_node.position)
 	_environment = ($WorldEnvironment as WorldEnvironment).environment
 	_ambient_energy = _environment.ambient_light_energy
@@ -197,6 +200,9 @@ func _throw_from_camera() -> void:
 
 
 func _process(delta: float) -> void:
+	_spin_phase += field.u_max / field.r_core0 * delta
+	_renderer.push_spin(_spin_phase)
+	_ground_mat.set_shader_parameter("spin_phase", _spin_phase)
 	var cam := cam_rig.get_camera()
 	if cam != null:
 		var cam_pos := cam.global_position

@@ -18,6 +18,10 @@ uniform float vortex_radius = 45.0;
 uniform vec2 trail[24];
 uniform int trail_count = 0;
 
+#include "res://shaders/tornado/tornado_deck.gdshaderinc"
+
+uniform float swirl_sign = 1.0;
+
 varying vec3 v_world;
 
 void vertex() {
@@ -98,6 +102,11 @@ void fragment() {
 	float r0 = max(vortex_radius, 10.0);
 	float foot = exp(-rf / (2.2 * r0));
 	float ring = exp(-rf / (7.0 * r0));
+	// Spiral inflow marks wound around the foot, turning with the dust bowl
+	// above them.
+	vec2 from_v = q - vortex_pos.xz;
+	float spiral = tornado_spiral_bands(atan(from_v.y, from_v.x), rf / r0, 6.0, 9.0, 0.1,
+		swirl_sign, 3.0 * (fbm(q * 0.03) - FBM_MEAN));
 
 	vec3 albedo = ground_a;
 	float rough = 1.0;
@@ -156,10 +165,17 @@ void fragment() {
 		albedo *= 0.82 + 0.36 * tufts;
 		float gust = smoothstep(0.5, 0.78, inflow_fbm(q * 0.016, to_v, 0.45));
 		albedo *= 1.0 + 0.45 * gust * (0.35 + 0.65 * ring);
+		// Grass laid flat along the inflow spirals shows its pale underside.
+		albedo *= mix(1.0, 0.7 + 1.0 * spiral, ring * smoothstep(0.8, 2.0, rf / r0));
 		float scar = 1.0 - smoothstep(0.7, 1.5,
 			trail_distance(q) / r0 + 0.5 * (fbm(q * 0.05) - 0.5));
-		albedo = mix(albedo, ground_accent * (0.75 + 0.5 * tufts), max(scar * 0.85, foot * 0.7));
+		albedo = mix(albedo, ground_accent * (0.75 + 0.5 * tufts), max(scar * 0.85, foot * (0.3 + 0.55 * spiral)));
 	}
+
+	// The marks take the look's accent: scour, embers, foam, snow or veins.
+	float arms = spiral * exp(-rf / (2.0 * r0)) * smoothstep(0.6, 1.6, rf / r0);
+	albedo = mix(albedo, ground_accent, 0.45 * arms);
+	emission += ground_accent * ground_glow * 0.25 * arms;
 
 	albedo = mix((ground_a + ground_b) * 0.5, albedo, detail);
 	// Depth cue on top of fog: the far plane darkens toward the horizon so

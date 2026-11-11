@@ -21,7 +21,7 @@ enum Variant { CRATE, ROCK, PLANK, TREE }
 
 var field: TornadoWindField
 var debris_cap := 200
-var spawn_rate := 1.5
+var spawn_rate := 1.0
 var throw_speed := 45.0
 var active_count := 0
 

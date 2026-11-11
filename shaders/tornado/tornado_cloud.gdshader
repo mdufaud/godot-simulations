@@ -35,6 +35,11 @@ void vertex() {
 	// of the range visible under it.
 	float d = length(VERTEX.xz);
 	VERTEX.y -= DISH_DROP_M * pow(d / DISH_RADIUS_M, 3.0);
+	// Wall cloud: the deck sags around the funnel top, lumpy underneath. The
+	// lumps only add to the drop, so the funnel always reaches the cloud.
+	float lumps = textureLod(noise_tex, vec3(world_pos.xz * 0.0013, 0.4), 0.0).r;
+	VERTEX.y -= tornado_wall_cloud_drop(length(world_pos.xz - centerline[7].xz),
+		tw_core_radius(funnel_height), funnel_height) * (1.0 + 0.5 * lumps);
 }
 
 const float FLOW_PERIOD_S = 20.0;
@@ -110,6 +115,17 @@ void fragment() {
 		float veins = smoothstep(0.7, 0.78, n2);
 		col += vec3(0.45, 0.2, 0.8) * collar * (0.12 + 0.3 * veins);
 	}
+
+	// Mesocyclone: spiral inflow bands wound into the collar and turning with
+	// it, dark grooves between lit crests, fading out a dozen radii away.
+	float rn = r / max(rc_top, 1.0);
+	float bands = tornado_spiral_bands(ang, rn, 3.0, 6.0, 0.04, swirl_sign,
+		3.5 * (n - 0.5) + 1.5 * (n2 - 0.5));
+	col *= mix(1.0, 0.55 + 0.65 * bands, exp(-rn / 6.0));
+	// The wall cloud's flank faces the clear slot and catches its light.
+	float flank = smoothstep(WALL_CLOUD_INNER, 0.5 * (WALL_CLOUD_INNER + WALL_CLOUD_OUTER), rn)
+		* (1.0 - smoothstep(0.5 * (WALL_CLOUD_INNER + WALL_CLOUD_OUTER), WALL_CLOUD_OUTER, rn));
+	col += horizon_color * 0.02 * flank * (0.4 + 0.6 * bands);
 
 	// The slot's light rakes the underside near the rim.
 	col = mix(col, horizon_color * (0.35 + 0.3 * fbm), 0.4 * smoothstep(0.5, 1.0, r / deck_radius));

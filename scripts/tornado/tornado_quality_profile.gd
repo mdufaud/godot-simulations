@@ -24,10 +24,10 @@ const DUST_AMOUNT := {
 }
 
 const DEBRIS_CAP := {
-	Tier.LOW: 80,
-	Tier.MEDIUM: 150,
-	Tier.HIGH: 250,
-	Tier.ULTRA: 400,
+	Tier.LOW: 50,
+	Tier.MEDIUM: 80,
+	Tier.HIGH: 120,
+	Tier.ULTRA: 200,
 }
 
 

@@ -106,7 +106,8 @@ vec2 flow_noise(float ang, float r, float y, float omega, float t_sim) {
 
 // Funnel density at world position. Wall peak just inside the core radius,
 // hazy interior, ground dust skirt; FBM sheared by the model's own rotation profile.
-float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out) {
+// deck_y01 is the height fraction measured to the wall cloud's underside above wp.
+float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out, out float deck_y01) {
 	float y01 = wp.y / funnel_height;
 	vec3 c = tw_centerline(wp.y);
 	float rc = tw_core_radius(wp.y);
@@ -156,20 +157,23 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 			+ 7.0 * (big - 0.5);
 		body *= 0.55 + 0.45 * smoothstep(-0.65, 0.75, sin(helix_phase));
 	}
-	// Thin cap guard only: the body must run UP INTO the cloud deck. A wide
-	// density dissolve here (0.7->1.0) erases the upper cone and reads as a
-	// floating balloon from afar; the deck-tone color blend below does the
-	// visual blending instead.
-	body *= 1.0 - smoothstep(0.95, 1.0, y01);
-	// Cloud-base shroud: a low-density, slightly wider Gaussian just under the
-	// deck so the column loses its edge into the cloud base — the bare cap ends
-	// the wall mid-air whenever the deck is out of frame (portrait default
-	// view). Density-only and amplitude-limited: it cannot balloon the
-	// silhouette, the deck-tone grade below carries the actual blend. Width
-	// 0.45 / gain 0.3: a wider or stronger veil flares the cone into a
-	// trumpet-bell mouth visible from far views.
-	body += smoothstep(0.70, 0.97, y01) * (1.0 - smoothstep(0.97, 1.0, y01))
-		* exp(-pow((rw - 0.85) / 0.45, 2.0)) * (0.35 + 0.5 * n2) * 0.3;
+	// The column ends where it enters the wall cloud hanging under the deck
+	// (tornado_cloud.gdshader sags the deck by the same drop).
+	float r_top = length(wp.xz - centerline[7].xz);
+	deck_y01 = y01 / (1.0 - tornado_wall_cloud_drop(r_top, tw_core_radius(funnel_height),
+		funnel_height) / funnel_height);
+	// Thin cap guard only: the body must run UP INTO the cloud. A wide density
+	// dissolve here (0.7->1.0) erases the upper cone and reads as a floating
+	// balloon from afar; the deck-tone color blend below does the visual
+	// blending instead.
+	body *= 1.0 - smoothstep(0.95, 1.0, deck_y01);
+	// Cloud-base shroud: a low-density Gaussian under the wall cloud, widening
+	// as it reaches it, so the column fillets into the cloud base instead of
+	// ending as a cut cylinder. Density-only and amplitude-limited: it cannot
+	// balloon the silhouette, the deck-tone grade below carries the blend.
+	float shroud_width = mix(0.45, 0.6, smoothstep(0.85, 1.0, deck_y01));
+	body += smoothstep(0.70, 0.97, deck_y01) * (1.0 - smoothstep(0.97, 1.0, deck_y01))
+		* exp(-pow((rw - 0.85) / shroud_width, 2.0)) * (0.35 + 0.5 * n2) * 0.35;
 
 	// ── Ground skirt: dust churned FROM the ground — dense at y=0, exponential
 	// falloff upward. The density slider SPREADS the apron outward (low and wide,
@@ -220,7 +224,14 @@ float funnel_density(vec3 wp, float t_sim, out float skirt_w, out float turb_out
 			sk += ring_hug * exp(-dr_ring * dr_ring) * (1.0 - phase * phase) * (0.7 + 0.7 * n) * 2.0;
 		}
 	} else {
-		sk = ground_hug * skirt_base * churn * lobes;
+		// Debris cloud: spiral dust curtains turning around the foot, and a
+		// bowl of dust lofted up the neck, widest at the ground.
+		float arms = tornado_spiral_bands(ang, rr0, 3.0, 3.5, 0.1, swirl_sign,
+			3.0 * (n - 0.5) + 2.0 * (big - 0.5));
+		float bowl_radius = 1.0 + 0.8 * exp(-wp.y / max(0.06 * funnel_height, 1.0));
+		float bowl = exp(-pow((rr0 - bowl_radius) / 0.7, 2.0))
+			* exp(-wp.y / max(0.17 * funnel_height, 1.0));
+		sk = (ground_hug * skirt_base * lobes * (0.35 + 1.3 * arms) + 1.3 * bowl * (0.5 + arms)) * churn;
 	}
 	// Second-octave break: the vertically-stretched noise forms long curtain
 	// streaks on the apron; n2 breaks them into clumpy churned dust.
@@ -346,12 +357,13 @@ void fragment() {
 
 		float skirt_w;
 		float turb;
+		float deck_y01;
 		vec3 wp = wp_mid;
-		float dens = funnel_density(wp, t_sim, skirt_w, turb);
+		float dens = funnel_density(wp, t_sim, skirt_w, turb, deck_y01);
 		prev_sigma = 0.0;
 		if (dens > 0.003) {
 			// Specials read lighter/denser: water and plasma are translucent media.
-			float sigma_mul = storm_type == 1 ? 0.85 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
+			float sigma_mul = storm_type == 1 ? 1.0 : (storm_type == 2 ? 0.75 : (storm_type == 3 ? 0.8 : (storm_type == 4 ? 0.65 : 1.0)));
 			// Skirt medium is thinner than the wall: flying debris must silhouette
 			// through it, and distant aprons must not turn into opaque walls.
 			float sk_pre = clamp(skirt_w / max(dens, 1e-3), 0.0, 1.0);
@@ -370,12 +382,15 @@ void fragment() {
 			float heat = clamp(turb - 0.4, 0.0, 1.2);
 			vec3 scat;
 			if (storm_type == 1) {
-				// Fire whirl: blackbody by "heat" = turbulence, hotter at the base;
-				// the skirt is a burning ground pool.
-				float fheat = clamp(heat + skirt_ratio * 0.06, 0.0, 0.72);
-				float t_k = 600.0 + 1250.0 * (1.0 - 0.7 * y01) * fheat;
-				scat = fire_ramp(t_k) * (0.025 + 0.38 * heat * heat * (1.0 - 0.5 * y01) + 0.035 * skirt_ratio)
-					+ alb * sun_face * vert * 0.12;
+				// Fire whirl: tongues of flame where the turbulence peaks, yellow-hot
+				// at the base and cooling to red aloft, between sheets of black
+				// soot. The tongues are HDR so the scene's glow blooms them; the
+				// skirt is a burning ground pool.
+				float flame = smoothstep(0.35, 0.95, heat) * mix(1.0, 0.6, skirt_ratio);
+				float low = 1.0 - 0.75 * y01;
+				float t_k = 650.0 + 900.0 * flame * low + 100.0 * skirt_ratio;
+				scat = fire_ramp(t_k) * (0.04 + 1.5 * flame * flame * low)
+					+ alb * sun_face * vert * 0.05;
 			} else if (storm_type == 2) {
 				// Waterspout: dark sea core, turbulent streaks whipped into foam;
 				// the skirt is a churning foam wall.
@@ -421,7 +436,7 @@ void fragment() {
 				// cloud base. Any lighter target leaves a pale bell under a
 				// darker deck; none at all leaves a cut-out head.
 				scat = mix(scat, tornado_collar_tone(deck_color, dust_color) * (0.8 + 0.4 * sun_face),
-					smoothstep(0.55, 0.97, y01));
+					smoothstep(0.55, 0.97, deck_y01));
 			}
 			// User glow slider: extra self-emission, turbulence-modulated.
 			scat += funnel_color * glow_amount * 1.8 * (1.0 - 0.7 * y01) * heat;
