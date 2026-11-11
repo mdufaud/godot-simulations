@@ -31,5 +31,6 @@ col_ambient = Color(0.32, 0.28, 0.26, 1)
 height_bands = 6.0
 height_min_m = 18.0
 height_max_m = 26.0
+bump_strength = 0.9
 wavelengths_nm = Vector3(700, 550, 480)
 scattering_strength = 3.0

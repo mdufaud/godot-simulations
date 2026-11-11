@@ -1,5 +1,6 @@
 vec4 volcano_sample(vec3 direction, vec4 volcano, float size, float height,
-		float radial, float floor_fraction, float crater_bottom, float crater_top) {
+		float radial, float floor_fraction, float crater_bottom, float crater_top, out float channel) {
+	channel = 0.0;
 	vec3 axis = normalize(volcano.xyz);
 	if (dot(direction, axis) <= 0.0) {
 		return vec4(volcano.w, 2.0, volcano.w + height * floor_fraction, 1.0);
@@ -25,7 +26,8 @@ vec4 volcano_sample(vec3 direction, vec4 volcano, float size, float height,
 	float u = distance * outline;
 	float flow = 0.5 + 0.5 * sin(angle * (8.0 + floor(mod(abs(phase), 4.0))) + phase
 			+ u * 1.4 + snoise(vec3(point * 2.0, phase + 8.0)) * 0.9);
-	float ravines = pow(flow, 8.0) * 0.23 * flank * (1.0 - smoothstep(0.78, 1.0, u));
+	channel = pow(flow, 8.0) * flank;
+	float ravines = channel * 0.23 * (1.0 - smoothstep(0.78, 1.0, u));
 	float summit = pow(max(1.0 - u, 0.0), 1.45)
 			* (1.0 - ravines + snoise(vec3(point * 4.0, phase)) * 0.06 * flank);
 	// Gaussians squared by hand: pow() is undefined in GLSL for a negative base,

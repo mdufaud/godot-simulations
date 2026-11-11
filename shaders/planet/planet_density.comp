@@ -33,6 +33,23 @@ layout(push_constant, std430) uniform Params {
 	uint pad2;
 } pc;
 
+// Impact bowls with a raised rim, scattered from the seed offset. Returns a height
+// in units of the body radius.
+float crater_height(vec3 direction, vec3 seed) {
+	float height = 0.0;
+	for (int i = 0; i < 36; i++) {
+		vec3 hash = fract(sin(vec3(float(i) + 1.0) * vec3(12.9898, 78.233, 37.719) + seed) * 43758.5453);
+		vec3 centre = normalize(hash * 2.0 - 1.0 + vec3(1e-4));
+		float size = mix(0.07, 0.38, hash.x * hash.x);
+		float d = length(direction - centre) / size;
+		if (d > 1.6) { continue; }
+		float bowl = min(d * d - 1.0, 0.0);
+		float rim_t = (d - 1.0) / 0.22;
+		height += size * (0.7 * bowl + 0.16 * exp(-rim_t * rim_t));
+	}
+	return height;
+}
+
 float base_density(vec3 pos) {
 	float reference_radius = shape.values[0].x;
 	float radius_scale = pc.radius / reference_radius;
@@ -74,8 +91,10 @@ float base_density(vec3 pos) {
 			pc.noise_scale, noise_pos);
 	float relief = amplitude_sum * tanh((ridges * ridge_mask - macro * 0.35) / amplitude_sum);
 	float continent = snoise(noise_pos / reference_radius * 2.4) * continent_strength * reference_radius * 0.16;
-	float density_ref = length(reference_pos) - reference_radius
+	float density_ref = length(reference_pos * vec3(0.9, 1.25, 1.05)) - reference_radius
 		+ (relief - pc.noise_offset) * mountain_strength * pc.noise_strength + continent;
+	density_ref -= crater_height(reference_pos / max(length(reference_pos), 1e-6),
+			pc.noise_pos_offset * 0.013) * reference_radius;
 	return density_ref * radius_scale;
 }
 
@@ -85,21 +104,31 @@ float fragmented_density(vec3 pos) {
 		return base_density(pos);
 	}
 	int count = int(shape.values[1].w + 0.5);
-	float inner_radius = mix(shape.values[1].y + 0.08, shape.values[1].z - 0.10, 0.75) * pc.radius * strength;
+	float inner_radius = mix(shape.values[1].y + 0.08, shape.values[1].z - 0.10, 0.3) * pc.radius * strength;
 	float separation = shape.values[27].z * pc.radius * strength;
 	float density = pc.world_size.x;
 	for (int i = 0; i < count; i++) {
 		vec3 axis = normalize(shape.values[2 + i * 2].xyz);
-		vec3 local_pos = pos - axis * separation;
+		// Each chunk is thrown out by its own distance and left tumbling.
+		vec3 chunk_hash = fract(sin(axis * vec3(127.1, 311.7, 74.7) + float(i)) * 43758.5453);
+		vec3 pivot = axis * pc.radius * 0.8;
+		vec3 spin = normalize(chunk_hash * 2.0 - 1.0 + vec3(1e-4));
+		float tumble = (chunk_hash.y - 0.5) * 0.5 * strength;
+		vec3 arm = pos - axis * separation * (i == 0 ? 2.6 : mix(1.1, 2.3, chunk_hash.x)) - pivot;
+		vec3 local_pos = pivot + arm * cos(tumble) + cross(spin, arm) * sin(tumble)
+				+ spin * dot(spin, arm) * (1.0 - cos(tumble));
 		float piece = max(base_density(local_pos), inner_radius - length(local_pos));
+		if (i == 0) {
+			// The chunk facing the default view is a smaller cap, so the core shows around it.
+			piece = max(piece, (0.8 - dot(normalize(local_pos), axis)) * pc.radius * strength);
+		}
+		float jag = (snoise(local_pos / pc.radius * 2.6 + axis * 7.0) * 0.032
+				+ snoise(local_pos / pc.radius * 7.0 + axis * 3.0) * 0.012) * pc.radius * strength;
 		for (int j = 0; j < count; j++) {
 			if (i == j) { continue; }
 			vec3 other = normalize(shape.values[2 + j * 2].xyz);
 			vec3 plane = normalize(axis - other);
-			piece = max(piece, pc.radius * 0.025 * strength - dot(local_pos, plane));
-		}
-		if (i == 0) {
-			piece = max(piece, pc.radius * mix(-1.2, 1.8, strength) - dot(local_pos, axis));
+			piece = max(piece, pc.radius * 0.06 * strength + jag - dot(local_pos, plane));
 		}
 		density = min(density, piece);
 	}
@@ -108,6 +137,12 @@ float fragmented_density(vec3 pos) {
 	float belt_warp = snoise(direction * 2.4 + pc.noise_pos_offset / shape.values[0].x) * pc.radius * 0.045 * strength;
 	float belt = abs(dot(pos, belt_axis) - belt_warp) - pc.radius * 0.11 * strength;
 	density = max(density, -belt);
+	// Rubble drifting in the gaps and around the core.
+	float shell = length(pos) / pc.radius;
+	float band = min(shell - (shape.values[1].y + 0.2), 1.15 - shell) * pc.radius;
+	float rubble = (0.7 - snoise(pos / pc.radius * 4.2 + pc.noise_pos_offset * 0.01 + vec3(31.7))) * pc.radius * 0.06;
+	rubble = max(max(rubble, -band), pc.radius * 0.05 * strength - density);
+	density = min(density, mix(density, rubble, step(0.5, strength)));
 	return min(density, length(pos) - pc.radius * shape.values[1].y);
 }
 
@@ -205,8 +240,9 @@ void main() {
 			if (volcano.w <= 0.0) {
 				continue;
 			}
+			float channel;
 			vec4 mountain = volcano_sample(radial_direction, volcano, volcano_size, volcano_height,
-					radial, shape.values[18].w, shape.values[27].w, shape.values[28].x);
+					radial, shape.values[18].w, shape.values[27].w, shape.values[28].x, channel);
 			if (mountain.y < 1.15) {
 				float mountain_sdf = max(radial - mountain.x,
 						(mountain.y - 1.0) * volcano_size) * pc.radius - pc.iso_level;

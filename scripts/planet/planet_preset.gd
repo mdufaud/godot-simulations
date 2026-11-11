@@ -73,6 +73,18 @@ class_name PlanetPreset extends Resource
 @export var height_min_m := 16.2
 @export var height_max_m := 28.3
 
+@export_range(0.0, 2.0, 0.01) var bump_strength := 0.0
+@export_range(0.0, 1.0, 0.01) var biome_variation := 0.0
+@export var col_biome := Color(0.6, 0.52, 0.24)
+## Fraction of the height gradient above which snow settles; above 1 disables it.
+@export_range(0.0, 2.0, 0.01) var snow_height := 2.0
+## Sine of the latitude where the polar caps start; above 1 disables them.
+@export_range(0.0, 2.0, 0.01) var polar_cap := 2.0
+@export var col_snow := Color(0.93, 0.95, 0.97)
+@export_range(0.0, 1.0, 0.01) var crack_strength := 0.0
+@export var col_crack := Color(0.1, 0.28, 0.5)
+@export_range(0.0, 2.0, 0.01) var specular_strength := 0.0
+
 @export_group("Atmosphere")
 ## Rayleigh scattering is wavelength dependent, so the air colour is set by these
 ## three, not by a colour picker.
@@ -161,3 +173,12 @@ func apply_palette_to(material: ShaderMaterial) -> void:
 	material.set_shader_parameter("col_mantle", col_mantle)
 	material.set_shader_parameter("col_core", col_core)
 	material.set_shader_parameter("core_emission", core_emission)
+	material.set_shader_parameter("bump_strength", bump_strength)
+	material.set_shader_parameter("biome_variation", biome_variation)
+	material.set_shader_parameter("col_biome", col_biome)
+	material.set_shader_parameter("snow_height", snow_height)
+	material.set_shader_parameter("polar_cap", polar_cap)
+	material.set_shader_parameter("col_snow", col_snow)
+	material.set_shader_parameter("crack_strength", crack_strength)
+	material.set_shader_parameter("col_crack", col_crack)
+	material.set_shader_parameter("specular_strength", specular_strength)

@@ -435,7 +435,9 @@ func max_surface_radius() -> float:
 	if config.volcano_count > 0:
 		surface_radius += radius * (config.volcano_height_ratio + 0.02)
 	if config.opening_style == PlanetConfig.OpeningStyle.SHATTERED_SHELL:
-		surface_radius += radius * config.fragment_separation_ratio * config.opening_strength
+		surface_radius += radius * (config.fragment_separation_ratio * 2.6 + 0.1) * config.opening_strength
+	if config.terrain_style == PlanetConfig.TerrainStyle.ASTEROID:
+		surface_radius += radius * 0.12
 	return surface_radius
 
 
