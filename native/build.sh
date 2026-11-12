@@ -38,6 +38,14 @@ fi
 unimported="$(find "${PROJECT_DIR}/resources/rocks" "${PROJECT_DIR}/resources/river" \
     "${PROJECT_DIR}/resources/materials" -type f \( -name '*.gltf' -o -name '*.hdr' -o -name '*.jpg' \) \
     -exec sh -c '[ ! -f "$1.import" ]' _ {} \; -print -quit 2>/dev/null || true)"
-if [[ -n "${unimported}" ]] || ! grep -qxF -- "${EXTENSION}" "${PROJECT_DIR}/.godot/extension_list.cfg" 2>/dev/null; then
+# A class_name is only resolvable once an import scan has written it to the class cache.
+cache="${PROJECT_DIR}/.godot/global_script_class_cache.cfg"
+declared="$(cd "${PROJECT_DIR}" && rg --no-ignore -g '*.gd' -g '!native/**' -or '$1' '^class_name\s+(\w+)' . \
+    | sed -E 's#^\./([^:]*):(.*)$#\2 res://\1#' | sort || true)"
+cached="$(awk -F'"' '/^"class": &/{c=$4} /^"path": /{print c, $4}' "${cache}" 2>/dev/null | sort || true)"
+missing_uid="$(cd "${PROJECT_DIR}" && fd -H -I -e gd -e gdshader -e gdshaderinc -E .godot -E native -E .git . \
+    -x sh -c '[ -f "$1.uid" ] || printf "%s\n" "$1"' _ {} | head -n 1 || true)"
+if [[ -n "${unimported}" || "${declared}" != "${cached}" || -n "${missing_uid}" ]] \
+        || ! grep -qxF -- "${EXTENSION}" "${PROJECT_DIR}/.godot/extension_list.cfg" 2>/dev/null; then
     "${PROJECT_DIR}/tools/import.sh"
 fi
