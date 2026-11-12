@@ -103,7 +103,8 @@ physics_test_display_start() {
 	# take down kwin and its XWayland children together. The socket is an
 	# absolute path: a session XDG_RUNTIME_DIR leaking through setsid would
 	# otherwise resolve the bare name outside the watched runtime dir.
-	XDG_RUNTIME_DIR="$runtime_dir" setsid "$kwin_bin" \
+	# No session bus: on the user's, kwin re-registers their Alt+Tab and layout shortcuts and leaves them dead on exit.
+	XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=/nonexistent/bus" setsid "$kwin_bin" \
 		--virtual \
 		--socket "$runtime_dir/$socket_name" \
 		--width "$width" \
