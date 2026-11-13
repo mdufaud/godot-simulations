@@ -1,10 +1,10 @@
 extends "res://tests/test_case.gd"
 
 const Field := preload("res://scripts/demos/river/river_landscape.gd")
-const Config := preload("res://scripts/river/river_config.gd")
+const Config := preload("res://addons/river_swe/river_config.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
-const WaterfallSystem := preload("res://scripts/river/river_waterfall_system.gd")
-const Solver := preload("res://scripts/river/river_swe_solver.gd")
+const WaterfallSystem := preload("res://addons/river_swe/river_waterfall_system.gd")
+const Solver := preload("res://addons/river_swe/river_swe_solver.gd")
 
 
 func _initialize() -> void:

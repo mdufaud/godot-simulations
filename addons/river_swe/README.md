@@ -2,7 +2,7 @@
 
 Godot 4.6, Forward+ or Mobile with RenderingDevice compute. Guided flow also works without compute. Units are meters and seconds; all samples use world X/Z coordinates. This is an authored visual shallow-water model, not a hydraulic engineering solver.
 
-Copy `scripts/river/` (except the playground-specific `river_quality_profile.gd`), `shaders/river/`, and the three self-contained GPU helpers `scripts/core/shader_cache.gd`, `scripts/core/gpu_preflight.gd` and `scripts/core/gpu_timings.gd`, preserving their `res://` paths. There are no autoloads, UI scripts, ocean assets, or demo terrain scripts in the core. Supply your own normal, foam and bed textures; with a single foam texture, assign it to `foam_filaments` and leave `foam_bubbles` null.
+Copy `addons/river_swe/` and `addons/gpu_compute/` (the self-contained GPU helpers `ShaderCache`, `GpuPreflight` and `GpuTimings`) to the same paths in your project, nothing else; scripts and shaders locate their siblings from their own folder. There is no editor plugin to enable. There are no autoloads, UI scripts, ocean assets, or demo terrain scripts in the core. Supply your own normal, foam and bed textures; with a single foam texture, assign it to `foam_filaments` and leave `foam_bubbles` null.
 
 ```gdscript
 var river := RiverSystem.new()
@@ -23,6 +23,8 @@ river.start()
 ```
 
 `loading_stage` is optional: during `start()` and blocking bakes it is called with a stage name, and with an empty string while waiting, so a loading screen can redraw.
+
+Host hooks, all optional and set before `start()`: `water_shader` (default `RiverSystem.WaterShader`) takes a variant of the water shader, and `waterfall_streaks` (default `textures/waterfall_streaks.png`) the streak texture of the falls. A variant whose code defines `RIVER_RAIN_RIPPLES` right after `shader_type`, with `const float RAIN_RING_GLINT` and `vec3 rain_ripples(vec2 p, float t, float view_m)` returning `(slope_x, slope_z, glint)`, has its normal tilted by the slopes and the glint added to the reflected light, e.g. `shader.code = RiverSystem.WaterShader.code.replace("shader_type spatial;", "shader_type spatial;\n#define RIVER_RAIN_RIPPLES\n#include \"res://my_rain.gdshaderinc\"")`.
 
 ## Field
 

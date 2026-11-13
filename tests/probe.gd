@@ -15,7 +15,7 @@ const OceanBreakerProbe := preload("res://tests/ocean_breaker_probe.gd")
 const WaterfallField := preload("res://scripts/demos/river/river_waterfall_landscape.gd")
 const SlopeLandscape := preload("res://scripts/demos/river/river_slope_landscape.gd")
 const CascadeField := preload("res://scripts/demos/river/river_cascade_landscape.gd")
-const SweSolver := preload("res://scripts/river/river_swe_solver.gd")
+const SweSolver := preload("res://addons/river_swe/river_swe_solver.gd")
 
 # fluid_foam / fluid_tier frame guards: sim normally advances 60 steps per
 # wall second; allow a 4x slowdown before the guard cuts the wait.
@@ -2111,7 +2111,7 @@ func _run_river_waterfall() -> void:
 			await process_frame
 		if demo.capture_ready():
 			field = demo.river.field as WaterfallField
-			var Body := preload("res://scripts/river/river_buoyant_body.gd")
+			var Body := preload("res://addons/river_swe/river_buoyant_body.gd")
 			var crate: RigidBody3D = Body.new()
 			demo.interactions.add_child(crate)
 			demo.interactions.crates.append(crate)
@@ -2524,7 +2524,7 @@ func _check_river_foam_render() -> void:
 	camera.size = 1.0 / 0.28
 	camera.make_current()
 	var shader := Shader.new()
-	shader.code = FileAccess.get_file_as_string("res://shaders/river/river_water.gdshader") \
+	shader.code = FileAccess.get_file_as_string("res://addons/river_swe/shaders/river_water.gdshader") \
 		.replace("depth_draw_always;", "depth_draw_always, unshaded;") \
 		.replace("ALPHA = wet_coverage;", "ALBEDO = vec3(foam); EMISSION = vec3(0.0); RADIANCE = vec4(0.0); ALPHA = wet_coverage;")
 	var material := ShaderMaterial.new()
@@ -2745,7 +2745,7 @@ func _check_river_foam_render() -> void:
 		_check(edge_error < 0.01, "river_foam_render: foam transitions must remain continuous after accounting for physical transport")
 		print("RIVER FOAM crossing_time=%.6f aligned_change=%.6f" % [float(edge[0]), edge_error])
 	var normals_shader := Shader.new()
-	normals_shader.code = FileAccess.get_file_as_string("res://shaders/river/river_water.gdshader") \
+	normals_shader.code = FileAccess.get_file_as_string("res://addons/river_swe/shaders/river_water.gdshader") \
 		.replace("depth_draw_always;", "depth_draw_always, unshaded;") \
 		.replace("ALPHA = wet_coverage;", "ALBEDO = NORMAL * 0.5 + 0.5; EMISSION = vec3(0.0); RADIANCE = vec4(0.0); ALPHA = wet_coverage;")
 	material.shader = normals_shader
@@ -7956,7 +7956,7 @@ func _run_river_wet_ground() -> void:
 	var demo := (load("res://scenes/river_demo.tscn") as PackedScene).instantiate()
 	root.add_child(demo)
 	var classify := load(WET_GROUND_SHADER) as Shader
-	var scenery_shaders := ["res://shaders/river/river_ground.gdshader", "res://shaders/river/river_rock.gdshader"]
+	var scenery_shaders := ["res://addons/river_swe/shaders/river_ground.gdshader", "res://addons/river_swe/shaders/river_rock.gdshader"]
 	var hidden := ["WaterfallSheets", "WaterfallFoam", "RiverSkirt", "WaterfallSpray*", "MistVolume", "RockSplashes"]
 	var all_pass := true
 	# Scene, waterfall angle, preset, views: the 50 degree ramp in Calm and Natural, the Cascades in Natural and High Water.

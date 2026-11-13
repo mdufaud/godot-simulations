@@ -1,4 +1,4 @@
-#include "res://shaders/river/river_swe.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_swe.gdshaderinc"
 uniform vec4 river_plane = vec4(0.0, 1.0, 0.0, 0.0);
 uniform uint river_reflection_layer = uint(0);
 uniform sampler2D river_height_texture : filter_linear, repeat_disable;

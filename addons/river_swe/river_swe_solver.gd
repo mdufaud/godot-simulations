@@ -220,7 +220,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 	_rd = GpuPreflight.device("RiverSWE")
 	if _rd == null:
 		return
-	var source := FileAccess.get_file_as_string("res://shaders/river/river_swe.comp")
+	var source := FileAccess.get_file_as_string((get_script() as Script).resource_path.get_base_dir().path_join("shaders/river_swe.comp"))
 	var spirv := ShaderCache.compile(_rd, "river_swe", source)
 	if not spirv.compile_error_compute.is_empty():
 		push_error("River SWE compile error: " + spirv.compile_error_compute)
@@ -299,7 +299,7 @@ func _init_render(terrain_bytes: PackedByteArray, source_size: Vector2i, paramet
 
 
 func _init_spill_render(size: Vector2i) -> void:
-	var spirv := ShaderCache.compile(_rd, "river_spill", FileAccess.get_file_as_string("res://shaders/river/river_spill.comp"))
+	var spirv := ShaderCache.compile(_rd, "river_spill", FileAccess.get_file_as_string((get_script() as Script).resource_path.get_base_dir().path_join("shaders/river_spill.comp")))
 	if not spirv.compile_error_compute.is_empty():
 		push_error("River spill compile error: " + spirv.compile_error_compute)
 		return

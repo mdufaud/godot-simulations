@@ -1,6 +1,6 @@
 extends Node3D
 
-const Solver := preload("res://scripts/river/river_swe_solver.gd")
+const Solver := preload("river_swe_solver.gd")
 # Layer 2 like the river surface: the reflection cameras would draw the sheets as a ghost on the pool.
 const SHEET_LAYER := 2
 const IMPACT_MIN_M3_S := 0.002
@@ -31,6 +31,7 @@ var water: RiverConfig
 var swe: Node3D
 var camera: Camera3D
 var turbulence_texture: Texture2D
+var streak_texture: Texture2D
 var quality_tier := 1
 var unit_discharge_m2_s := 0.0
 var _sprays: Array[RiverWaterfallSpray] = []
@@ -62,7 +63,7 @@ func start() -> void:
 	_add_sheets()
 	_add_foam()
 	_set_look("turbulence_texture", turbulence_texture)
-	_set_look("streak_texture", load("res://resources/river/waterfall_streaks.png"))
+	_set_look("streak_texture", streak_texture)
 	_set_look("short_spill_m", Solver.SPILL_SHORT_DROP_M)
 	_set_look("gravity_m_s2", Solver.GRAVITY_M_S2)
 	_foam_material.set_shader_parameter("drop_offset_m", Solver.SPILL_DROP_OFFSET_M)
@@ -76,7 +77,7 @@ func _add_sheets() -> void:
 	_sheet_lips = Texture2DRD.new()
 	_sheet_flow = Texture2DRD.new()
 	_sheet_material = ShaderMaterial.new()
-	_sheet_material.shader = load("res://shaders/river/river_spill_sheet.gdshader")
+	_sheet_material.shader = preload("shaders/river_spill_sheet.gdshader")
 	_sheet_material.set_shader_parameter("lip_list", _sheet_lips)
 	_sheet_material.set_shader_parameter("lip_flow", _sheet_flow)
 	_sheet_material.set_shader_parameter("lip_list_width", Solver.SPILL_TEXTURE_WIDTH)
@@ -132,7 +133,7 @@ func _add_foam() -> void:
 	_foam_positions = Texture2DRD.new()
 	_foam_motions = Texture2DRD.new()
 	_foam_material = ShaderMaterial.new()
-	_foam_material.shader = load("res://shaders/river/river_spill_foam.gdshader")
+	_foam_material.shader = preload("shaders/river_spill_foam.gdshader")
 	_foam_material.set_shader_parameter("positions", _foam_positions)
 	_foam_material.set_shader_parameter("motions", _foam_motions)
 	_foam_material.set_shader_parameter("texture_width", Solver.SPILL_TEXTURE_WIDTH)

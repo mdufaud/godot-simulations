@@ -1,6 +1,6 @@
 extends Node3D
 
-const Body := preload("res://scripts/river/river_buoyant_body.gd")
+const Body := preload("res://addons/river_swe/river_buoyant_body.gd")
 const MAX_CRATES := 8
 
 var river: RiverSystem

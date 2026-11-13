@@ -1,7 +1,7 @@
 shader_type spatial;
 render_mode world_vertex_coords, cull_disabled;
-#include "res://shaders/river/river_swe.gdshaderinc"
-#include "res://shaders/river/river_spill_breakup.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_swe.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_spill_breakup.gdshaderinc"
 
 // The side of the water where its cell surface ends above lower ground (river_water.gdshader draws only the top):
 // one quad per cell edge, from the higher surface down to its own bed or to the lower surface, flat where both meet.

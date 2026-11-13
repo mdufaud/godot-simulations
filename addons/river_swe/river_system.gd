@@ -1,12 +1,12 @@
 class_name RiverSystem extends Node3D
 
 const REFLECTION_LAYER := 1 << 17
-const Reflections := preload("res://scripts/river/river_reflections.gd")
-const SweSystem := preload("res://scripts/river/river_swe_system.gd")
-const WaterfallSystem := preload("res://scripts/river/river_waterfall_system.gd")
-const WaterShader := preload("res://shaders/river/river_water.gdshader")
-const SkirtShader := preload("res://shaders/river/river_water_skirt.gdshader")
-const FoamShader := preload("res://shaders/river/river_foam.gdshader")
+const Reflections := preload("river_reflections.gd")
+const SweSystem := preload("river_swe_system.gd")
+const WaterfallSystem := preload("river_waterfall_system.gd")
+const WaterShader := preload("shaders/river_water.gdshader")
+const SkirtShader := preload("shaders/river_water_skirt.gdshader")
+const FoamShader := preload("shaders/river_foam.gdshader")
 
 signal simulation_changed
 
@@ -37,10 +37,13 @@ var swe_range_m := 0.0
 var swe_cell_m := SweSystem.Solver.CELL_M
 var simulation_time_s := 0.0
 var flow_distance_m := 0.0
+## A host may assign a variant of WaterShader, e.g. one defining RIVER_RAIN_RIPPLES.
+var water_shader: Shader = WaterShader
 var water_material: ShaderMaterial
 var micro_normal: Texture2D
 var foam_filaments: Texture2D
 var foam_bubbles: Texture2D
+var waterfall_streaks: Texture2D = preload("textures/waterfall_streaks.png")
 var riverbed_albedo: Texture2D
 var reflection_viewport: SubViewport
 var reflection_camera: Camera3D
@@ -75,7 +78,7 @@ func start() -> void:
 		return
 	_report_stage("Creating water surface")
 	water_material = ShaderMaterial.new()
-	water_material.shader = WaterShader
+	water_material.shader = water_shader
 	water_material.set_shader_parameter("domain_m", field.domain_m)
 	water_material.set_shader_parameter("domain_origin_m", field.origin_m)
 	water_material.set_shader_parameter("micro_normal", micro_normal)
@@ -140,6 +143,7 @@ func start() -> void:
 		waterfall.swe = swe
 		waterfall.camera = camera
 		waterfall.turbulence_texture = _turbulence_texture
+		waterfall.streak_texture = waterfall_streaks
 		waterfall.quality_tier = waterfall_quality
 		add_child(waterfall)
 		_report_stage("Starting waterfall")

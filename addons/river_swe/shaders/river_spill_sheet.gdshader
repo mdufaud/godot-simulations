@@ -1,7 +1,7 @@
 shader_type spatial;
 render_mode world_vertex_coords, cull_disabled, depth_draw_never, fog_disabled;
-#include "res://shaders/river/river_swe.gdshaderinc"
-#include "res://shaders/river/river_waterfall_look.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_swe.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_waterfall_look.gdshaderinc"
 
 // Coherent spilled water: a sheet per listed face on its particles' ballistic path (Chow 1959).
 

@@ -2,7 +2,7 @@ shader_type spatial;
 render_mode skip_vertex_transform, cull_disabled, depth_draw_never, shadows_disabled, specular_disabled, diffuse_lambert_wrap, fog_disabled;
 
 // Broken-up spilled water: each spill particle drawn as a soft white streak along its velocity.
-#include "res://shaders/river/river_spill_breakup.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_spill_breakup.gdshaderinc"
 
 uniform sampler2D positions : filter_nearest;
 uniform sampler2D motions : filter_nearest;

@@ -1,6 +1,7 @@
 shader_type spatial;
 render_mode world_vertex_coords, cull_disabled, depth_draw_always;
-#include "res://shaders/river/river_swe.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_swe.gdshaderinc"
+// A host defining RIVER_RAIN_RIPPLES supplies RAIN_RING_GLINT and rain_ripples(p, t, view_m) -> (slope_x, slope_z, glint).
 
 uniform sampler2D flow_map : filter_linear, repeat_disable;
 uniform sampler2D bed_height_texture : filter_linear, repeat_disable;
@@ -327,6 +328,10 @@ void fragment() {
 			texture(turbulence_texture, p * 1.5 + vec2(0.37 - churn_t * 0.7, churn_t)).r) - 0.5;
 		normal_world = normalize(normal_world + vec3(churn.x, 0.0, churn.y) * fall_impact * 1.4);
 	}
+#ifdef RIVER_RAIN_RIPPLES
+	vec3 rain_rings = rain_ripples(p, simulation_time_s, -VERTEX.z);
+	normal_world = normalize(normal_world - vec3(rain_rings.x, 0.0, rain_rings.y));
+#endif
 	NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
 	vec4 behind = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, texture(depth_texture, SCREEN_UV).r, 1.0);
 	behind.xyz /= behind.w;
@@ -433,7 +438,9 @@ void fragment() {
 		foam = min(mix(mask1, mask2, second_weight) * smoothstep(0.025, 0.22, density), 0.9);
 		if (surface_detail > 0.0) {
 			vec3 froth_normal = normalize(mix(foam_normal(pattern1), foam_normal(pattern2), second_weight));
-			normal_world = normalize(mix(normal_world, froth_normal, foam * surface_detail * 0.65));
+			if (dot(froth_normal, froth_normal) < 2.0) {
+				normal_world = normalize(mix(normal_world, froth_normal, foam * surface_detail * 0.65));
+			}
 			NORMAL = normalize((VIEW_MATRIX * vec4(normal_world, 0.0)).xyz);
 		}
 	}
@@ -445,6 +452,9 @@ void fragment() {
 		ALBEDO = mix(body_tint * (vec3(1.0) - transmittance), vec3(0.82, 0.87, 0.83), foam);
 		EMISSION = transmission * transmittance * (1.0 - fresnel) * (1.0 - foam);
 	}
+#ifdef RIVER_RAIN_RIPPLES
+	EMISSION += reflected_color * rain_rings.z * RAIN_RING_GLINT * (1.0 - foam);
+#endif
 	RADIANCE = vec4(reflection.rgb, reflection_weight * surface_detail * (1.0 - foam));
 	vec3 nx = dFdx(normal_world);
 	vec3 ny = dFdy(normal_world);

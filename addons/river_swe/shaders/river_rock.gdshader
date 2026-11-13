@@ -1,5 +1,5 @@
 shader_type spatial;
-#include "res://shaders/river/scenery_clip.gdshaderinc"
+#include "res://addons/river_swe/shaders/scenery_clip.gdshaderinc"
 
 uniform sampler2D albedo_texture : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D normal_texture : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;

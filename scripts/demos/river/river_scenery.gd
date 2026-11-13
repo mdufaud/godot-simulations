@@ -142,7 +142,7 @@ func _texture(asset: String, kind: String) -> Texture2D:
 func _build_ground() -> void:
 	LoadingPump.stage("Loading terrain textures")
 	var material := ShaderMaterial.new()
-	material.shader = load("res://shaders/river/river_ground.gdshader")
+	material.shader = load("res://addons/river_swe/shaders/river_ground.gdshader")
 	for prefix: String in ["gravel", "grass"]:
 		var asset := "clean_pebbles" if prefix == "gravel" else "leafy_grass"
 		material.set_shader_parameter(prefix + "_albedo", _texture(asset, "diff"))
@@ -584,7 +584,7 @@ func _make_rock(radius: float, height: float, paths: Array, tilt_rad: float) -> 
 		for surface in mesh.mesh.get_surface_count():
 			var original := mesh.get_active_material(surface) as StandardMaterial3D
 			var material := ShaderMaterial.new()
-			material.shader = load("res://shaders/river/river_rock.gdshader")
+			material.shader = load("res://addons/river_swe/shaders/river_rock.gdshader")
 			if original != null:
 				material.set_shader_parameter("albedo_texture", original.albedo_texture)
 				material.set_shader_parameter("normal_texture", original.normal_texture)

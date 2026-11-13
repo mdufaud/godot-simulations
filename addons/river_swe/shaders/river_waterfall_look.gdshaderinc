@@ -1,5 +1,5 @@
 // Shading of spilled water: a clear sheet at the lip that tears and whitens as its core breaks up over the fall.
-#include "res://shaders/river/river_spill_breakup.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_spill_breakup.gdshaderinc"
 
 uniform sampler2D screen_texture : hint_screen_texture, filter_linear_mipmap;
 uniform sampler2D turbulence_texture : filter_linear_mipmap, repeat_enable;

@@ -1,6 +1,6 @@
 shader_type spatial;
 render_mode unshaded, fog_disabled;
-#include "res://shaders/river/scenery_clip.gdshaderinc"
+#include "res://addons/river_swe/shaders/scenery_clip.gdshaderinc"
 
 // river_wet_ground probe: scenery coloured by the under-water test river_ground and river_rock run, magenta under the
 // water, cyan above it.

@@ -14,7 +14,7 @@ extends Node3D
 ##   spray.set_rock_impacts(rock_hits, downstream)           # Vector4(x, y, z, rate)
 ##   spray.tick(intensity, false)                    # every frame, intensity in [0, 1]
 
-const Solver := preload("res://scripts/river/river_swe_solver.gd")
+const Solver := preload("river_swe_solver.gd")
 const BOIL_COUNT := [36, 60, 96, 144]
 const MIST_COUNT := [10, 16, 24, 32]
 const SPLASH_COUNT := [48, 128, 192, 288]
@@ -80,7 +80,7 @@ func start() -> void:
 	mist.scale_curve = _curve([Vector2(0.0, 0.6), Vector2(0.5, 1.0), Vector2(1.0, 1.4)])
 	mist.color_ramp = _fade([Vector2(0.25, 0.8), Vector2(0.6, 0.6)])
 	var droplet := ShaderMaterial.new()
-	droplet.shader = load("res://shaders/river/river_waterfall_droplet.gdshader")
+	droplet.shader = preload("shaders/river_waterfall_droplet.gdshader")
 	droplet.render_priority = 2
 	droplet.set_shader_parameter("noise_texture", noise_texture)
 	_splash = _particles("Splash", SPLASH_LIFETIME_S, droplet, SPLASH_STREAK_M)
@@ -124,7 +124,7 @@ func start() -> void:
 	volume.seamless = true
 	volume.noise = noise
 	_fog_material = ShaderMaterial.new()
-	_fog_material.shader = load("res://shaders/river/river_waterfall_mist.gdshader")
+	_fog_material.shader = preload("shaders/river_waterfall_mist.gdshader")
 	_fog_material.set_shader_parameter("density_texture", volume)
 	_fog = FogVolume.new()
 	_fog.name = "MistVolume"
@@ -233,7 +233,7 @@ func restart() -> void:
 
 func _puff_material(opacity: float, churn_per_s: float, rainbow_strength: float) -> ShaderMaterial:
 	var material := ShaderMaterial.new()
-	material.shader = load("res://shaders/river/river_waterfall_puff.gdshader")
+	material.shader = preload("shaders/river_waterfall_puff.gdshader")
 	material.render_priority = 2
 	material.set_shader_parameter("noise_texture", noise_texture)
 	material.set_shader_parameter("opacity", opacity)

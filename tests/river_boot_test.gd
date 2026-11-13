@@ -308,11 +308,11 @@ func _check_reflection_crop() -> void:
 	camera.position = Vector3(0.0, 5.0, 10.0)
 	camera.look_at(Vector3.ZERO)
 	var field := RiverField.new()
-	var reflections := preload("res://scripts/river/river_reflections.gd").new()
+	var reflections := preload("res://addons/river_swe/river_reflections.gd").new()
 	reflections.field = field
 	reflections.plane_count = 4
 	var material := ShaderMaterial.new()
-	material.shader = load("res://shaders/river/river_water.gdshader")
+	material.shader = load("res://addons/river_swe/shaders/river_water.gdshader")
 	reflections.build(host, camera, camera.get_world_3d(), material)
 	for aspect: int in [Camera3D.KEEP_HEIGHT, Camera3D.KEEP_WIDTH]:
 		camera.keep_aspect = aspect

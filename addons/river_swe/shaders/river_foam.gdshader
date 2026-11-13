@@ -1,6 +1,6 @@
 shader_type canvas_item;
 render_mode blend_disabled;
-#include "res://shaders/river/river_swe.gdshaderinc"
+#include "res://addons/river_swe/shaders/river_swe.gdshaderinc"
 
 uniform sampler2D previous_foam : filter_linear, repeat_disable, hint_default_black;
 uniform sampler2D flow_map : filter_linear, repeat_disable;

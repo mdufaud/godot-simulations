@@ -1,6 +1,6 @@
 extends Node3D
 
-const Solver := preload("res://scripts/river/river_swe_solver.gd")
+const Solver := preload("river_swe_solver.gd")
 const WINDOW_SNAP_M := 4.0
 const BLEND_RATE_HZ := 1.0
 const WARMUP_S := 0.5
@@ -237,7 +237,7 @@ func _build_spray() -> void:
 		if emitters.size() < 13:
 			emitters.append(Vector4(point.x, point.y, rock.z * 0.25, 0.0))
 	_spray_material = ShaderMaterial.new()
-	_spray_material.shader = load("res://shaders/river/river_splash.gdshader")
+	_spray_material.shader = preload("shaders/river_splash.gdshader")
 	_spray_material.set_shader_parameter("emitters", emitters)
 	_spray_material.set_shader_parameter("emitter_count", emitters.size())
 	_spray_material.set_shader_parameter("gravity_m_s2", Solver.GRAVITY_M_S2)
