@@ -249,8 +249,9 @@ vec3 spill_record(ivec2 p, vec4 q, float bed) {
     return vec3(float(faces), landed / max(params.grid.z, 1.0e-4), brink);
 }
 
-// The level water arrives at a lip with: the highest level up its flow within reach_m, short of any fall.
-float approach_level(ivec2 lip, float reach_m) {
+// The level water arrives at a lip with: the highest level up its flow within reach_m, short of any fall; and the Froude
+// number of the water that far up.
+vec2 approach_level(ivec2 lip, float reach_m) {
     float highest = imageLoad(terrain, lip).x + read_state(lip).x;
     vec2 position = vec2(lip) + 0.5;
     ivec2 last = lip;
@@ -269,7 +270,8 @@ float approach_level(ivec2 lip, float reach_m) {
         highest = max(highest, bed + next.x);
         last = cell;
     }
-    return highest;
+    vec4 arriving = read_state(last);
+    return vec2(highest, length(velocity(arriving)) / sqrt(params.domain.w * max(arriving.x, WET_DEPTH_M)));
 }
 
 vec4 brink_zone_at(ivec2 cell, bool spread) {
@@ -319,11 +321,11 @@ vec4 spread_brink(ivec2 p, bool spread) {
     float bed = imageLoad(terrain, p).x;
     vec4 spilled = imageLoad(spill_out, p);
     if ((int(spilled.x + 0.5) & 15) != 0) {
-        float froude = length(velocity(q)) / sqrt(params.domain.w * q.x);
-        float length_m = min(params.brink.y * (spilled.z - bed) / params.brink.x, float(BRINK_SPREAD_CELLS) * params.domain.z)
-            * (1.0 - smoothstep(params.brink.z, params.brink.w, froude));
+        float reach_m = min(params.brink.y * (spilled.z - bed) / params.brink.x, float(BRINK_SPREAD_CELLS) * params.domain.z);
+        // Judged where the water comes from: at the brink itself, water bending down to it is always past critical.
+        float length_m = reach_m * (1.0 - smoothstep(params.brink.z, params.brink.w, approach_level(p, reach_m).y));
         float distance = 0.5 * params.domain.z;
-        return distance < length_m ? vec4(spilled.z, distance, length_m, approach_level(p, length_m)) : none;
+        return distance < length_m ? vec4(spilled.z, distance, length_m, approach_level(p, length_m).x) : none;
     }
     vec4 zone;
     float nearest = 1.0e9;

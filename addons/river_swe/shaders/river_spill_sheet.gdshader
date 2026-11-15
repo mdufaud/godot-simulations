@@ -58,23 +58,25 @@ struct Column {
 };
 
 // Height of the water or ground under a point, smoothed for shading.
+// Bed plus depth: a film's drawn level (river_swe.comp surface_height) is the pool beside it, far above it down a wall.
 float receiving(vec2 point) {
 	vec2 uv = river_swe_uv(point);
 	vec4 water = texture(swe_surface, uv);
-	return water.w > swe_wet_depth_m ? water.z : texture(swe_terrain, uv).r;
+	return texture(swe_terrain, uv).r + (water.w > swe_wet_depth_m ? water.w : 0.0);
 }
 
 // The same in the cell under the point, where a falling sheet stops: smoothed, a narrow gap would take in its walls.
 float landing(vec2 point) {
 	ivec2 cell = river_swe_cell(point);
-	vec4 water = texelFetch(swe_surface, cell, 0);
-	return water.w > swe_wet_depth_m ? water.z : texelFetch(swe_terrain, cell, 0).r;
+	float depth = texelFetch(swe_surface, cell, 0).w;
+	return texelFetch(swe_terrain, cell, 0).r + (depth > swe_wet_depth_m ? depth : 0.0);
 }
 
 // Surface of the water in the cell under the point, far below when it is dry.
 float water_level(vec2 point) {
-	vec4 water = texelFetch(swe_surface, river_swe_cell(point), 0);
-	return water.w > swe_wet_depth_m ? water.z : -1.0e6;
+	ivec2 cell = river_swe_cell(point);
+	float depth = texelFetch(swe_surface, cell, 0).w;
+	return depth > swe_wet_depth_m ? texelFetch(swe_terrain, cell, 0).r + depth : -1.0e6;
 }
 
 // Rock as the ground mesh draws it: one vertex per solver cell, linear between.

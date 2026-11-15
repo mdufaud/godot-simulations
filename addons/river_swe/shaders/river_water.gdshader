@@ -421,6 +421,10 @@ void fragment() {
 		float foam_phase2 = fract(foam_phase + 0.5);
 		vec2 foam_position = p - foam_reference_flow * flow_distance_m;
 		vec2 foam_relative_velocity = flow_velocity - foam_reference_flow * speed_m_s;
+		// A warp stretches the pattern by its velocity gradient times the phase: shearing flow tears it apart, as pattern_flow.
+		float warp_shear = (length(dFdx(foam_relative_velocity)) + length(dFdy(foam_relative_velocity)))
+			/ max(length(dFdx(p)) + length(dFdy(p)), 1.0e-4);
+		foam_relative_velocity /= 1.0 + warp_shear * PATTERN_SHEAR_S;
 		float foam_offset = 0.5 * (1.0 - live_weight);
 		vec2 foam_uv1 = (foam_position - foam_relative_velocity * (foam_phase - foam_offset) * 1.5) * vec2(0.28, 0.2);
 		vec2 foam_uv2 = (foam_position - foam_relative_velocity * (foam_phase2 - foam_offset) * 1.5) * vec2(0.28, 0.2);
