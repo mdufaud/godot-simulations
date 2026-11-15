@@ -25,6 +25,9 @@ const DISCHARGE_SMOOTHING := 0.3
 const SHEET_ROWS := 20
 # Foam streak radius against the solver cell, at the reference stream's volume.
 const FOAM_RADIUS_CELLS := 0.7
+const FoamShader := preload("shaders/river_spill_foam.gdshader")
+
+static var _shadowed_foam: Shader
 
 var field: RiverField
 var water: RiverConfig
@@ -54,6 +57,8 @@ class Zone:
 	var points := PackedVector4Array()
 	var flow := Vector3.ZERO
 	var rate := 0.0
+	# Mean height its landings fell from, weighted by their rate.
+	var drop_m := 0.0
 
 
 func start() -> void:
@@ -133,7 +138,7 @@ func _add_foam() -> void:
 	_foam_positions = Texture2DRD.new()
 	_foam_motions = Texture2DRD.new()
 	_foam_material = ShaderMaterial.new()
-	_foam_material.shader = preload("shaders/river_spill_foam.gdshader")
+	_foam_material.shader = FoamShader
 	_foam_material.set_shader_parameter("positions", _foam_positions)
 	_foam_material.set_shader_parameter("motions", _foam_motions)
 	_foam_material.set_shader_parameter("texture_width", Solver.SPILL_TEXTURE_WIDTH)
@@ -196,6 +201,9 @@ func apply_config(value: RiverConfig) -> void:
 	_set_look("foam_amount", water.foam_amount)
 	_set_look("deep_color", water.deep_color)
 	_set_look("clarity", water.clarity)
+	_set_look("spill_foam_color", foam_color(water))
+	_set_look("spill_foam_emission", foam_emission(water))
+	_foam_material.shader = foam_shader(water.spill_foam_shadowed)
 	for spray in _sprays:
 		spray.set_mist_density(water.mist_density)
 
@@ -218,6 +226,23 @@ func set_quality(tier: int) -> void:
 # Beyond the measured range the issuance turbulence grows with q, so the length is held at its last measured value.
 static func breakup_length_m(discharge_m2_s: float) -> float:
 	return BREAKUP_COEFFICIENT_M * pow(clampf(discharge_m2_s, 0.0, BREAKUP_MAX_DISCHARGE_M2_S), BREAKUP_EXPONENT)
+
+
+static func foam_color(value: RiverConfig) -> Vector3:
+	return Vector3(value.spill_foam_color.r, value.spill_foam_color.g, value.spill_foam_color.b)
+
+
+static func foam_emission(value: RiverConfig) -> Vector3:
+	return Vector3(value.spill_foam_emission.r, value.spill_foam_emission.g, value.spill_foam_emission.b)
+
+
+static func foam_shader(shadowed: bool) -> Shader:
+	if not shadowed:
+		return FoamShader
+	if _shadowed_foam == null:
+		_shadowed_foam = Shader.new()
+		_shadowed_foam.code = FoamShader.code.replace("shader_type spatial;\n", "shader_type spatial;\n#define RIVER_SPILL_FOAM_SHADOWED\n")
+	return _shadowed_foam
 
 
 static func aeration_strength(discharge_m2_s: float, turbulence: float) -> float:
@@ -263,26 +288,31 @@ func _measure_discharge(words: PackedByteArray, elapsed: float) -> void:
 	_set_discharge(lerpf(unit_discharge_m2_s, measured, DISCHARGE_SMOOTHING))
 
 
-# Impact tiles: landings in water, then hits on dry ground, each as weight, weighted velocity x and z, weighted height.
+# Impact tiles: landings in water, then hits on dry ground, each as weight, weighted velocity x and z, weighted height,
+# weighted drop.
 func _follow_impacts(tiles: PackedInt32Array, window_s: float) -> void:
 	var columns: int = Solver.impact_tiles(swe.solver.grid, swe.cell_m).x
 	var origin: Vector2 = swe.region_m.position
 	var rate := Solver.SPILL_IMPACT_WEIGHT_UNITS * Solver.SPILL_VOLUME_UNIT_M3 / maxf(window_s, 0.001)
 	var landings := {}
 	var flows := {}
+	var drops := {}
 	var rocks := PackedVector4Array()
-	for tile in tiles.size() / 8:
+	var stride: int = Solver.SPILL_IMPACT_TILE_INTS
+	for tile in tiles.size() / stride:
 		var cell := Vector2i(tile % columns, tile / columns)
 		var center := origin + (Vector2(cell) + Vector2.ONE * 0.5) * Solver.SPILL_IMPACT_TILE_M
 		for kind in 2:
-			var base := tile * 8 + kind * 4
+			var base := tile * stride + kind * stride / 2
 			var weight := float(tiles[base])
 			if weight * rate < IMPACT_MIN_M3_S:
 				continue
-			var point := Vector4(center.x, tiles[base + 3] / weight, center.y, weight * rate)
+			var point := Vector4(center.x, swe.solver.spill_impact_base_m
+					+ tiles[base + 3] / (weight * Solver.SPILL_IMPACT_HEIGHT_SCALE), center.y, weight * rate)
 			if kind == 0:
 				landings[cell] = point
 				flows[cell] = Vector3(tiles[base + 1], 0.0, tiles[base + 2])
+				drops[cell] = tiles[base + 4] / (weight * Solver.SPILL_IMPACT_HEIGHT_SCALE)
 			else:
 				rocks.append(point)
 	var zones: Array[Zone] = []
@@ -298,11 +328,13 @@ func _follow_impacts(tiles: PackedInt32Array, window_s: float) -> void:
 			zone.points.append(landings[current])
 			zone.flow += flows[current]
 			zone.rate += landings[current].w
+			zone.drop_m += drops[current] * landings[current].w
 			for neighbour in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1), Vector2i(1, 1), Vector2i(-1, -1), Vector2i(1, -1), Vector2i(-1, 1)]:
 				var next: Vector2i = current + neighbour
 				if landings.has(next) and not seen.has(next):
 					seen[next] = true
 					stack.append(next)
+		zone.drop_m /= maxf(zone.rate, 1.0e-6)
 		zones.append(zone)
 	zones.sort_custom(func(a: Zone, b: Zone) -> bool: return a.rate > b.rate)
 	var taken := PackedByteArray()
@@ -337,7 +369,7 @@ func _follow_impacts(tiles: PackedInt32Array, window_s: float) -> void:
 		sorted.sort_custom(func(a: Vector3, b: Vector3) -> bool: return a.dot(across) < b.dot(across))
 		points = PackedVector3Array(sorted)
 		var width := (points[-1] - points[0]).dot(across) + Solver.SPILL_IMPACT_TILE_M
-		_sprays[index].set_impacts(points, downstream, across, width)
+		_sprays[index].set_impacts(points, downstream, across, width, zone.drop_m)
 	_spray_centers = centers
 	_spray_shares = shares
 	_rock_impacts = rocks

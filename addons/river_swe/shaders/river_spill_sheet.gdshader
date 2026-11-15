@@ -20,6 +20,8 @@ const float CLEARANCE_M = 0.03;
 const float DRAPE_REACH_CELLS = 2.0;
 const int DRAPE_STEPS = 8;
 const float FREE_SIDE_INSET_CELLS = 0.25;
+// Sine of the angle a viewer looks up at the sheet over which it shows its aerated underside, not the sky through it.
+const vec2 UNDERSIDE_ELEVATION = vec2(0.6, 0.8);
 
 varying vec3 world_position;
 varying vec3 sheet_normal;
@@ -221,8 +223,9 @@ void fragment() {
 	if (dot(view_normal, VIEW) < 0.0) { view_normal = -view_normal; }
 	float above_pool_m = world_position.y - receiving(world_position.xz);
 	vec3 view_across = normalize((VIEW_MATRIX * vec4(lip_across, 0.0)).xyz);
+	float underside = smoothstep(UNDERSIDE_ELEVATION.x, UNDERSIDE_ELEVATION.y, normalize(world_position - CAMERA_POSITION_WORLD).y);
 	WaterfallLook look = waterfall_look(view_normal, view_across, fall_m, flight_s, lip_point, lip_weight, lip_aeration, stream_share,
-		side_share, above_pool_m, VIEW, SCREEN_UV);
+		side_share, above_pool_m, underside, VIEW, SCREEN_UV);
 	NORMAL = look.normal;
 	ALBEDO = look.albedo;
 	EMISSION = look.emission;
@@ -230,6 +233,6 @@ void fragment() {
 	SPECULAR = look.specular;
 	BACKLIGHT = look.backlight;
 	// Clear water seen edge-on is a thin film, not a glossy ribbon; aerated water shows its body from any side.
-	float edge_on = mix(smoothstep(0.08, 0.35, abs(dot(view_normal, VIEW))), 1.0, look.foam);
+	float edge_on = mix(smoothstep(0.08, 0.35, abs(dot(view_normal, VIEW))), 1.0, max(look.foam, underside));
 	ALPHA = presence * spill_apart(above_pool_m, drop_m) * look.coverage * edge_on;
 }

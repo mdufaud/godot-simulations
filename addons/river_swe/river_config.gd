@@ -10,6 +10,9 @@ class_name RiverConfig extends Resource
 @export_range(0.02, 0.5, 0.01) var roughness: float = 0.085
 @export_range(0.0, 1.0, 0.01) var whitewater_strength: float = 0.12
 @export var deep_color: Color = Color(0.035, 0.19, 0.17)
+@export var spill_foam_color: Color = Color(0.56, 0.6, 0.61)
+@export var spill_foam_shadowed: bool = false
+@export var spill_foam_emission: Color = Color(0.0, 0.0, 0.0)
 @export_range(0.0, 10.0, 0.01) var current_guidance_hz: float = 0.2
 @export_range(0.0, 10.0, 0.01) var level_guidance_hz: float = 0.6
 

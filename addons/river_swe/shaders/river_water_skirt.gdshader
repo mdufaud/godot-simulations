@@ -85,7 +85,8 @@ void fragment() {
 	float streak = value_noise(vec2(across, world_position.y + TIME * STREAK_SPEED_M_S) * STREAK_SCALE_PER_M);
 	float depth = max(top_m - world_position.y, 0.0);
 	float white = aeration * mix(0.72, 1.0, streak) * mix(1.0, 0.8, smoothstep(0.2, 1.0, depth));
-	ALBEDO = mix(deep_color, FOAM_COLOR, white);
+	ALBEDO = mix(deep_color, spill_foam_color, white);
+	EMISSION = spill_foam_emission * white;
 	// As thick as it is tall: clear water shows the rock behind its side, as the surface above shows its bed.
 	ALPHA = 1.0 - exp(-river_water_absorption(clarity, 0.0) * side_m) * (1.0 - white);
 	NORMAL = normalize((VIEW_MATRIX * vec4(outward, 0.0)).xyz);

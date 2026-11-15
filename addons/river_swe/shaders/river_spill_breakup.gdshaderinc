@@ -8,8 +8,10 @@ uniform float breakup_length_m = 3.0;
 // Fractions of the break-up length: the sheet is clear past its lip and torn and white where its core is gone; the
 // streaks take over from it in between.
 const vec2 BREAKUP_SHARE = vec2(0.1, 1.0);
-// Dense foam in full sun stays under the tonemapper's white, so its shading survives.
-const vec3 FOAM_COLOR = vec3(0.56, 0.6, 0.61);
+// Dense foam in full sun stays under the tonemapper's white, so its shading survives (RiverConfig.spill_foam_color).
+uniform vec3 spill_foam_color = vec3(0.56, 0.6, 0.61);
+// Light the white water gives off on its own, scaled by its whiteness (RiverConfig.spill_foam_emission).
+uniform vec3 spill_foam_emission = vec3(0.0);
 
 // How far a fall of this aeration strength turns from threads to streamers and foam.
 float aerated(float strength) {

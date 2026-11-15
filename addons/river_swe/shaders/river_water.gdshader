@@ -268,6 +268,9 @@ void fragment() {
 	vec4 live = texture(swe_surface, live_uv);
 	float wet_coverage = 1.0;
 	vec3 guided_bed = texture(bed_height_texture, field_uv).rgb;
+	// A field marks a hole another water fills with a shore fade weight past 1: nothing of this one is drawn there.
+	if (guided_bed.z > 1.5) { discard; }
+	guided_bed.z = min(guided_bed.z, 1.0);
 	if (shore_fade_depth_m > 0.0) {
 		wet_coverage = mix(1.0, smoothstep(0.0, shore_fade_depth_m, guided_bed.y - guided_bed.x), guided_bed.z);
 	}

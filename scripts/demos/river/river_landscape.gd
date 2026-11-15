@@ -74,33 +74,18 @@ func sample(point: Vector2, level_m: float) -> Color:
 	if depth <= 0.0:
 		return Color(0.0, 0.0, 0.0, 0.0)
 	var velocity := _reference_velocity(point)
-	var tangent := velocity.normalized()
 	var source := 0.0
 	for index in 3:
 		var crest := sin(point.x * 0.95 + index * 2.1) + 0.3 * sin(point.x * 1.77 - index * 0.8)
 		var activity := lerpf(0.35, 1.0, smoothstep(-0.8, 0.8, crest))
 		source = maxf(source, exp(-pow((point.y - drop_center(point.x, index) + 0.7) / 0.9, 2.0)) * 0.3 * activity)
 	var wet := smoothstep(0.0, 0.12, depth)
-	for rock in obstacles:
-		if rock.w < height - 0.08:
-			continue
-		var offset := point - Vector2(rock.x, rock.y)
-		var radius := rock.z
-		var distance := offset.length()
-		if distance < radius * 0.82:
-			return Color(0.0, 0.0, 0.0, 0.0)
-		var normal := offset / maxf(distance, 0.001)
-		var influence := 1.0 - smoothstep(radius, radius * 3.0, distance)
-		velocity -= normal * velocity.dot(normal) * influence
-		velocity += tangent * influence * 0.18
-		var along := offset.dot(tangent)
-		var across := absf(offset.cross(tangent))
-		var wake := exp(-across * across / (radius * radius * 0.45))
-		wake *= smoothstep(0.0, radius, along) * (1.0 - smoothstep(radius, radius * 4.0, along))
-		var incoming := maxf(-normal.dot(tangent), 0.0)
-		var rim := exp(-pow((distance - radius * 1.05) / (radius * 0.24), 2.0)) * incoming * incoming
-		source = maxf(source, maxf(wake * 0.35, rim * 0.8))
-		wet *= smoothstep(radius * 0.82, radius * 1.0, distance)
+	var result := obstacle_flow(point, velocity, source, height, obstacles)
+	if result == Vector4.ZERO:
+		return Color(0.0, 0.0, 0.0, 0.0)
+	velocity = Vector2(result.x, result.y)
+	source = result.z
+	wet *= result.w
 	return Color(velocity.x * wet, velocity.y * wet, source * wet, wet)
 
 

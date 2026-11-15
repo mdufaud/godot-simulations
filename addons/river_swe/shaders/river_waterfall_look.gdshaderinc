@@ -25,6 +25,9 @@ const float STREAK_BIAS = -1.0;
 // Streak texture tiles per second of flight: the pattern rides the water and stretches as it speeds up.
 const float RIDE_RATE = 1.0;
 const float FAMILY_RIDE_RATE = 0.5;
+// Speed over which streaks and grain ride at twice the rate each time it doubles, one rate fading into the next: at one
+// rate a 20 m fall drew every streak metres long, a smear seen from its foot.
+const float STRETCH_SPEED_M_S = 6.0;
 // Pattern level over which broken water is white: the thin threads of a calm sheet, most of an aerated body.
 const vec2 WHITE_LEVEL = vec2(0.36, 0.2);
 // Pattern levels a ribbon's edge spans: threads and aerated streamers thin out to clear water, never cut like bars.
@@ -37,7 +40,7 @@ const float THREAD_WHITE = 0.75;
 const float WHITEN_SHARE = 0.35;
 // Fractions of the break-up length fallen below the lip over which gaps open between the ribbons.
 const vec2 GAP_SHARE = vec2(0.25, 0.9);
-// Thin foam at a ribbon's edge against FOAM_COLOR at its dense core.
+// Thin foam at a ribbon's edge against spill_foam_color at its dense core.
 const vec3 FOAM_EDGE_COLOR = vec3(0.17, 0.25, 0.29);
 // Slope of the streak pattern across and along the fall to tilt of the surface: ribbons stand in relief.
 const vec2 RIBBON_TILT = vec2(1.0, 0.4);
@@ -68,17 +71,37 @@ struct LipPattern {
 	float snow;
 };
 
-LipPattern lip_pattern(float across_m, float ride_s) {
+// The streak texture riding `rate` times faster. The gradients are the unscaled coordinate's: the rate steps along the
+// fall, and a step in the coordinate itself picked the smallest mip along a line.
+float streak_tap(vec2 uv, vec2 offset, float rate) {
+	vec2 scale = vec2(1.0, rate) * exp2(STREAK_BIAS);
+	return textureGrad(streak_texture, uv * vec2(1.0, rate) + offset, dFdx(uv) * scale, dFdy(uv) * scale).r;
+}
+
+float grain_tap(vec2 uv, float rate) {
+	vec2 scale = vec2(1.0, rate);
+	return textureGrad(turbulence_texture, uv * scale, dFdx(uv) * scale, dFdy(uv) * scale).r;
+}
+
+// stretch: the water's speed over STRETCH_SPEED_M_S.
+LipPattern lip_pattern(float across_m, float ride_s, float stretch) {
 	LipPattern lip;
+	float octave = log2(max(stretch, 1.0));
+	float rate = exp2(floor(octave));
+	float finer = fract(octave);
 	float warp = texture(turbulence_texture, vec2(across_m * 0.16, ride_s * 0.35)).r - 0.5;
 	lip.broad = texture(turbulence_texture, vec2(across_m * 0.1 + warp * 0.03, ride_s * 1.5)).r;
 	vec2 streamer_uv = vec2(across_m * STREAMERS_PER_M + warp * 0.04, ride_s * RIDE_RATE);
-	lip.streamer = texture(streak_texture, streamer_uv, STREAK_BIAS).r;
-	lip.slope = vec2(texture(streak_texture, streamer_uv + vec2(0.004, 0.0), STREAK_BIAS).r,
-		texture(streak_texture, streamer_uv + vec2(0.0, 0.01), STREAK_BIAS).r) - lip.streamer;
-	lip.thread = texture(streak_texture, vec2(across_m * THREADS_PER_M + warp * 0.02 + 0.37, ride_s * RIDE_RATE * 1.6 + 0.19), STREAK_BIAS).r;
+	lip.streamer = mix(streak_tap(streamer_uv, vec2(0.0), rate), streak_tap(streamer_uv, vec2(0.0), rate * 2.0), finer);
+	lip.slope = vec2(mix(streak_tap(streamer_uv, vec2(0.004, 0.0), rate), streak_tap(streamer_uv, vec2(0.004, 0.0), rate * 2.0), finer),
+		mix(streak_tap(streamer_uv, vec2(0.0, 0.01), rate), streak_tap(streamer_uv, vec2(0.0, 0.01), rate * 2.0), finer)) - lip.streamer;
+	vec2 thread_uv = vec2(across_m * THREADS_PER_M + warp * 0.02, ride_s * RIDE_RATE * 1.6);
+	lip.thread = mix(streak_tap(thread_uv, vec2(0.37, 0.19), rate), streak_tap(thread_uv, vec2(0.37, 0.19), rate * 2.0), finer);
 	lip.family = texture(streak_texture, vec2(across_m * FAMILIES_PER_M + warp * 0.02 + 0.71, ride_s * FAMILY_RIDE_RATE + 0.53)).r;
-	lip.snow = texture(turbulence_texture, vec2(across_m * SNOW_GRAIN.x, ride_s * SNOW_GRAIN.y) * 0.05).r;
+	vec2 snow_uv = vec2(across_m * SNOW_GRAIN.x, ride_s * SNOW_GRAIN.y) * 0.05;
+	// Two rates of grain share nothing: their mix keeps the contrast of one.
+	lip.snow = 0.5 + (mix(grain_tap(snow_uv, rate), grain_tap(snow_uv, rate * 2.0), finer) - 0.5)
+		/ sqrt(finer * finer + (1.0 - finer) * (1.0 - finer));
 	return lip;
 }
 
@@ -96,15 +119,16 @@ struct WaterfallLook {
 
 // lip_m, lip_weight: lip point and how much the lip runs along x and z (a turning tangent races the pattern).
 WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, float flight_s, vec2 lip_m, vec2 lip_weight,
-		float lip_aeration, float stream_share, float side_share, float above_pool_m, vec3 view, vec2 screen_uv) {
+		float lip_aeration, float stream_share, float side_share, float above_pool_m, float underside, vec3 view, vec2 screen_uv) {
 	float speed = sqrt(source_speed_m_s * source_speed_m_s + 2.0 * gravity_m_s2 * fall_m);
 	float film_m = unit_discharge_m2_s / max(speed, 0.05);
 	// A feature that left the lip at one time keeps the same pattern coordinate all the way down.
 	float ride_s = flight_s - simulation_time_s;
 	float strong = aerated(aeration_strength);
 
-	LipPattern along_x = lip_pattern(lip_m.x, ride_s);
-	LipPattern along_z = lip_pattern(lip_m.y + 17.3, ride_s);
+	float stretch = speed / STRETCH_SPEED_M_S;
+	LipPattern along_x = lip_pattern(lip_m.x, ride_s, stretch);
+	LipPattern along_z = lip_pattern(lip_m.y + 17.3, ride_s, stretch);
 	vec2 w = lip_weight / max(lip_weight.x + lip_weight.y, 1.0e-4);
 	float broad = along_x.broad * w.x + along_z.broad * w.y;
 	float streamer = along_x.streamer * w.x + along_z.streamer * w.y;
@@ -117,7 +141,7 @@ WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, f
 	float breakup = fall_m / breakup_length_m + (broad - 0.5) * 0.2;
 	float thin = 1.0 - smoothstep(0.01, 0.06, film_m);
 	float trickle = 1.0 - smoothstep(0.0, 1.0, stream_share);
-	float tear = max(max(smoothstep(0.0, WHITEN_SHARE, breakup), thin * (1.0 - strong)), trickle);
+	float tear = max(max(max(smoothstep(0.0, WHITEN_SHARE, breakup), thin * (1.0 - strong)), trickle), underside);
 	float level = mix(WHITE_LEVEL.x, WHITE_LEVEL.y, strong * (1.0 - trickle));
 	float edge = mix(RIBBON_EDGE.x, RIBBON_EDGE.y, strong);
 	float side = smoothstep(0.0, 1.0, side_share);
@@ -143,16 +167,16 @@ WaterfallLook waterfall_look(vec3 view_normal, vec3 view_across, float fall_m, f
 
 	float absorption = river_water_absorption(clarity, 0.0);
 	float path_m = max(film_m / max(dot(look.normal, view), 0.5), BODY_DEPTH_M) + glass * 0.25;
-	vec3 transmittance = exp(-vec3(1.25, 0.72, 0.63) * absorption * path_m);
+	vec3 transmittance = exp(-vec3(1.25, 0.72, 0.63) * absorption * path_m) * (1.0 - underside);
 	vec2 refraction = look.normal.xy * REFRACTION * smoothstep(0.0, 0.2, film_m);
 	float blur = mix(0.3, 1.5, smoothstep(0.05, 0.5, film_m));
 	vec3 behind = textureLod(screen_texture, clamp(screen_uv + refraction, vec2(0.001), vec2(0.999)), blur).rgb;
 	vec3 water_color = mix(vec3(0.11, 0.17, 0.17), deep_color, 0.35 + (1.0 - clarity) * 0.3);
 	vec3 scatter = water_color * BODY_SCATTER * (vec3(1.0) - transmittance);
-	vec3 foam_color = mix(FOAM_EDGE_COLOR, FOAM_COLOR, dense) * mix(0.85, 1.0, broad) * mix(0.8, 1.05, snow);
+	vec3 foam_color = mix(FOAM_EDGE_COLOR, spill_foam_color, dense) * mix(0.85, 1.0, broad) * mix(0.8, 1.05, snow);
 	look.albedo = mix(scatter, foam_color, foam);
 	look.foam = foam;
-	look.emission = behind * transmittance * (1.0 - foam);
+	look.emission = behind * transmittance * (1.0 - foam) + spill_foam_emission * foam;
 	// A falling sheet is never a mirror: its rippled surface breaks reflections up.
 	look.roughness = mix(0.35, 0.9, foam);
 	look.specular = mix(0.2, 0.1, foam);

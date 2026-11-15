@@ -1,5 +1,10 @@
 shader_type spatial;
+// RiverConfig.spill_foam_shadowed: the streaks fall dark in the shade like the surface's foam.
+#ifdef RIVER_SPILL_FOAM_SHADOWED
+render_mode skip_vertex_transform, cull_disabled, depth_draw_never, specular_disabled, diffuse_lambert_wrap, fog_disabled;
+#else
 render_mode skip_vertex_transform, cull_disabled, depth_draw_never, shadows_disabled, specular_disabled, diffuse_lambert_wrap, fog_disabled;
+#endif
 
 // Broken-up spilled water: each spill particle drawn as a soft white streak along its velocity.
 #include "res://addons/river_swe/shaders/river_spill_breakup.gdshaderinc"
@@ -63,7 +68,8 @@ void fragment() {
 	float scene_depth = texture(depth_texture, SCREEN_UV).r;
 	vec4 scene = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, scene_depth, 1.0);
 	float room = -scene.z / scene.w - (-VERTEX.z);
-	ALBEDO = FOAM_COLOR * mix(0.85, 1.0, grain);
+	ALBEDO = spill_foam_color * mix(0.85, 1.0, grain);
+	EMISSION = spill_foam_emission * mix(0.85, 1.0, grain);
 	ROUGHNESS = 1.0;
 	BACKLIGHT = vec3(0.6, 0.65, 0.65);
 	NORMAL = vec3(0.0, 0.0, 1.0);

@@ -127,6 +127,50 @@ func bake(level_m: float, size: Vector2i = Vector2i(384, 512), loading_stage := 
 	return _baked[2]
 
 
+## Deflects velocity around obstacle rocks (x, z, radius, top); returns (velocity.x, velocity.y, source, wet), ZERO inside a rock.
+static func obstacle_flow(point: Vector2, velocity: Vector2, source: float, height: float, obstacles: PackedVector4Array, foam_width_m: float = 0.0) -> Vector4:
+	var tangent := velocity.normalized()
+	var wet := 1.0
+	for rock in obstacles:
+		if rock.w < height - 0.08:
+			continue
+		var offset := point - Vector2(rock.x, rock.y)
+		var radius := rock.z
+		var reach := maxf(radius, foam_width_m)
+		var distance := offset.length()
+		if distance < radius * 0.82:
+			return Vector4.ZERO
+		var normal := offset / maxf(distance, 0.001)
+		var influence := 1.0 - smoothstep(radius, radius * 3.0, distance)
+		velocity -= normal * velocity.dot(normal) * influence
+		velocity += tangent * influence * 0.18
+		var along := offset.dot(tangent)
+		var across := absf(offset.cross(tangent))
+		var wake := exp(-across * across / (reach * reach * 0.45))
+		wake *= smoothstep(0.0, reach, along) * (1.0 - smoothstep(reach, reach * 4.0, along))
+		var incoming := maxf(-normal.dot(tangent), 0.0)
+		var rim := exp(-pow((distance - reach * 1.05) / (reach * 0.24), 2.0)) * incoming * incoming
+		source = maxf(source, maxf(wake * 0.35, rim * 0.8))
+		wet *= smoothstep(radius * 0.82, radius * 1.0, distance)
+	return Vector4(velocity.x, velocity.y, source, wet)
+
+
+## Generic riffle foam source: crest lines across the flow for reaches with no authored drops.
+static func riffle_source(point: Vector2, tangent: Vector2, grade: float) -> float:
+	var along := point.dot(tangent)
+	var across := point.dot(Vector2(-tangent.y, tangent.x))
+	var phase := 0.6 * sin(along * 0.07)
+	var lanes := smoothstep(0.1, 0.7, sin(across * 0.9 + phase) * sin(across * 0.37 + 2.0 * phase))
+	var breakup := smoothstep(-0.2, 0.6, sin(along * 0.23 + across * 0.11))
+	var source := lanes * breakup
+	if grade > 0.04:
+		var crest := sin(along * 0.95 + sin(across * 0.31) * 1.7) + 0.3 * sin(along * 1.77 - across * 0.23)
+		var activity := lerpf(0.35, 1.0, smoothstep(-0.8, 0.8, crest))
+		var band := exp(-pow((fposmod(along, 6.0) - 3.0) / 0.9, 2.0))
+		source = maxf(source, band * activity)
+	return clampf(source, 0.0, 1.0)
+
+
 static func wait_for_group(task: int, loading_stage: Callable) -> void:
 	while loading_stage.is_valid() and not WorkerThreadPool.is_group_task_completed(task):
 		loading_stage.call("")

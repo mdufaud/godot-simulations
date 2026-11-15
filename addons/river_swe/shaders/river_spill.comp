@@ -16,7 +16,8 @@ layout(std430, set = 0, binding = 5) buffer SpillState { uint words[]; } spill;
 // Drawn particles: position and distance along break-up (thinned free-fall drop plus aerated share of it), 0 when unused.
 layout(rgba32f, set = 0, binding = 6) uniform writeonly image2D positions;
 // Per impact tile: water landings then hits on dry ground, each as weight (volume units over impact.z),
-// weighted x and z velocity, weighted height. A landing weighs in by its drop, ramping over spray.xy metres.
+// weighted x and z velocity, weighted height, weighted drop. A landing weighs in by its drop, ramping over spray.xy
+// metres.
 layout(std430, set = 0, binding = 7) buffer Impacts { int tiles[]; } impacts;
 // Drawn particles: velocity and the share of the reference stream's radius its volume gives it, 0 when unused.
 layout(rgba32f, set = 0, binding = 8) uniform writeonly image2D motion;
@@ -85,16 +86,18 @@ vec3 ground(vec2 cell) {
     return vec3(height, gradient);
 }
 
-void record_impact(vec3 position, vec3 velocity, float units, int kind) {
+void record_impact(vec3 position, vec3 velocity, float units, float drop, int kind) {
     int columns = int(ceil(params.grid.x * params.domain.z / params.impact.x));
     ivec2 tile = ivec2(floor((position.xz - params.domain.xy) / params.impact.x));
-    int base = (tile.y * columns + tile.x) * 8 + kind * 4;
+    int base = (tile.y * columns + tile.x) * 10 + kind * 5;
     float weight = units / params.impact.z;
     if (weight < 0.5) return;
     atomicAdd(impacts.tiles[base], int(round(weight)));
     atomicAdd(impacts.tiles[base + 1], int(round(weight * velocity.x)));
     atomicAdd(impacts.tiles[base + 2], int(round(weight * velocity.z)));
-    atomicAdd(impacts.tiles[base + 3], int(round(weight * position.y)));
+    // From the base level and at the scale of river_swe_solver.gd SPILL_IMPACT_HEIGHT_SCALE: the sum is an int32.
+    atomicAdd(impacts.tiles[base + 3], int(round(weight * (position.y - params.impact.w) * 0.0625)));
+    atomicAdd(impacts.tiles[base + 4], int(round(weight * drop * 0.0625)));
 }
 
 void deposit_cell(ivec2 cell, float units, vec3 velocity) {
@@ -158,7 +161,8 @@ void integrate(uint i) {
     vec3 bed = ground(cell_position);
     if (!landed && body.y <= bed.x) {
         vec3 normal = normalize(vec3(-bed.y, 1.0, -bed.z));
-        if (-dot(motion.xyz, normal) > params.impact.y) record_impact(body.xyz, motion.xyz, body.w, 1);
+        if (-dot(motion.xyz, normal) > params.impact.y)
+            record_impact(body.xyz, motion.xyz, body.w, max(particles.data[i * 3u + 2u].z - body.y, 0.0), 1);
         // Gentle ground keeps the water; a face steeper than the spill slope lets it slide down.
         if (length(bed.yz) < uintBitsToFloat(spill.words[12])) {
             landed = true;
@@ -171,7 +175,7 @@ void integrate(uint i) {
     }
     if (landed) {
         float drop = particles.data[i * 3u + 2u].z - body.y;
-        if (wet) record_impact(body.xyz, motion.xyz, body.w * smoothstep(params.spray.x, params.spray.y, drop), 0);
+        if (wet) record_impact(body.xyz, motion.xyz, body.w * smoothstep(params.spray.x, params.spray.y, drop), drop, 0);
         deposit(cell_position, bed_at(cell) + depth, body.w, motion.xyz);
         particles.data[i * 3u].w = 0.0;
         return;

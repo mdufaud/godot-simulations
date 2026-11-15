@@ -10,7 +10,7 @@ extends Node3D
 ##   spray.noise_texture = seamless_noise           # tileable 2D noise
 ##   add_child(spray)
 ##   spray.start()
-##   spray.set_impacts(landing_points, downstream, across, width_m)
+##   spray.set_impacts(landing_points, downstream, across, width_m, drop_m)
 ##   spray.set_rock_impacts(rock_hits, downstream)           # Vector4(x, y, z, rate)
 ##   spray.tick(intensity, false)                    # every frame, intensity in [0, 1]
 
@@ -36,6 +36,10 @@ const FOG_DENSITY := 0.5
 const FOG_MARGIN_M := Vector3(4.0, 4.5, 6.0)
 const VISIBILITY_MARGIN_M := 6.0
 const ACTIVE_INTENSITY := 0.08
+# The sizes, speeds and counts above are those of a fall of REFERENCE_DROP_M. A taller one lands faster, as the root of
+# its drop: its boil and mist grow by that factor, up to MAX_SCALE (the emitters hold that many times the counts).
+const REFERENCE_DROP_M := 2.0
+const MAX_SCALE := 4
 
 var noise_texture: Texture2D
 var _boil: GPUParticles3D
@@ -49,6 +53,7 @@ var _fog_material: ShaderMaterial
 var _mist_density := 0.6
 var _splash_count := 0
 var _rock_count := 0
+var _scale := 1.0
 
 
 func start() -> void:
@@ -151,9 +156,9 @@ func stop() -> void:
 func set_quality(tier: int) -> void:
 	if _boil == null:
 		return
-	_boil.amount = BOIL_COUNT[tier]
-	_mist.amount = MIST_COUNT[tier]
-	_splash_count = SPLASH_COUNT[tier]
+	_boil.amount = BOIL_COUNT[tier] * MAX_SCALE
+	_mist.amount = MIST_COUNT[tier] * MAX_SCALE
+	_splash_count = SPLASH_COUNT[tier] * MAX_SCALE
 	_splash.amount = maxi(_splash_count, 1)
 	_splash.visible = _splash_count > 0
 	_rock_splash.amount = ROCK_SPLASH_COUNT[tier]
@@ -166,13 +171,14 @@ func set_mist_density(value: float) -> void:
 		_mist_material.set_shader_parameter("opacity", MIST_OPACITY * value)
 
 
-func set_impacts(points: PackedVector3Array, downstream: Vector3, across: Vector3, width_m: float) -> void:
+func set_impacts(points: PackedVector3Array, downstream: Vector3, across: Vector3, width_m: float, drop_m: float) -> void:
+	_set_scale(clampf(sqrt(drop_m / REFERENCE_DROP_M), 1.0, float(MAX_SCALE)))
 	var center := (points[0] + points[points.size() - 1]) * 0.5
 	var inset := PackedVector3Array()
 	for point in points:
 		inset.append(center + (point - center) * BOIL_INSET)
-	_emit_from(_boil, _band(inset, downstream, BOIL_OFFSETS_M, 0.1))
-	_emit_from(_mist, _band(points, downstream, MIST_OFFSETS_M, 0.3))
+	_emit_from(_boil, _band(inset, downstream, _scaled(BOIL_OFFSETS_M), 0.1))
+	_emit_from(_mist, _band(points, downstream, _scaled(MIST_OFFSETS_M), 0.3 * _scale))
 	_emit_from(_splash, _band(points, downstream, [0.0], 0.05))
 	(_boil.process_material as ParticleProcessMaterial).direction = (Vector3.UP + downstream * 0.9).normalized()
 	(_mist.process_material as ParticleProcessMaterial).direction = (Vector3.UP + downstream * 0.6).normalized()
@@ -184,12 +190,38 @@ func set_impacts(points: PackedVector3Array, downstream: Vector3, across: Vector
 	for point in points:
 		surface += point.y / points.size()
 	for particles: GPUParticles3D in [_boil, _mist, _splash]:
-		particles.visibility_aabb = bounds.grow(VISIBILITY_MARGIN_M)
+		particles.visibility_aabb = bounds.grow(VISIBILITY_MARGIN_M * _scale)
 	for particles: GPUParticles3D in [_boil, _mist]:
 		((particles.draw_pass_1 as QuadMesh).material as ShaderMaterial).set_shader_parameter("surface_m", surface)
 	_fog.transform = Transform3D(Basis(across, Vector3.UP, across.cross(Vector3.UP)),
-		bounds.get_center() + downstream * 1.5 + Vector3.UP * 1.5)
-	_fog.size = Vector3(width_m, 0.0, 0.0) + FOG_MARGIN_M
+		bounds.get_center() + (downstream + Vector3.UP) * 1.5 * _scale)
+	_fog.size = Vector3(width_m, 0.0, 0.0) + FOG_MARGIN_M * _scale
+
+
+# The emitters of a fall `value` times as fast at its foot as the reference one.
+func _set_scale(value: float) -> void:
+	if is_equal_approx(value, _scale):
+		return
+	_scale = value
+	var boil := _boil.process_material as ParticleProcessMaterial
+	boil.initial_velocity_min = 0.5 * value
+	boil.initial_velocity_max = 1.2 * value
+	boil.scale_min = 0.8 * value
+	boil.scale_max = 1.2 * value
+	var mist := _mist.process_material as ParticleProcessMaterial
+	mist.initial_velocity_min = 0.3 * value
+	mist.initial_velocity_max = 0.8 * value
+	mist.gravity = Vector3(0.0, 0.12 * value, 0.0)
+	mist.scale_min = 2.0 * value
+	mist.scale_max = 3.0 * value
+	var splash := _splash.process_material as ParticleProcessMaterial
+	# Splash drops rise as the root of the factor: at the full one they flew past the brink of a tall fall.
+	splash.initial_velocity_min = 3.0 * sqrt(value)
+	splash.initial_velocity_max = 6.0 * sqrt(value)
+
+
+func _scaled(offsets_m: Array) -> Array:
+	return offsets_m.map(func(offset_m: float) -> float: return offset_m * _scale)
 
 
 func set_rock_impacts(impacts: PackedVector4Array, downstream: Vector3) -> void:
@@ -215,6 +247,8 @@ func tick(intensity: float, frozen: bool) -> void:
 	for particles: GPUParticles3D in [_boil, _mist, _splash, _rock_splash, _rock_puff]:
 		particles.speed_scale = 0.0 if frozen else 1.0
 		particles.amount_ratio = clampf(intensity, 0.05, 1.0)
+	for particles: GPUParticles3D in [_boil, _mist, _splash]:
+		particles.amount_ratio *= _scale / float(MAX_SCALE)
 	_boil.emitting = active
 	_rock_splash.emitting = active and _rock_count > 0
 	_rock_puff.emitting = active and _rock_count > 0

@@ -32,6 +32,12 @@ const SPILL_STATE_BYTES := 80
 const SPILL_PARTICLE_BYTES := 48
 const SPILL_IMPACT_TILE_M := 1.0
 const SPILL_IMPACT_WEIGHT_UNITS := 16.0
+# An impact tile sums its landings' heights in an int32, as weight times height: counted from spill_impact_base_m and
+# at this scale, a second of a river landing 500 m from the world's zero no longer wraps it (its spray then stood
+# hundreds of metres up).
+const SPILL_IMPACT_HEIGHT_SCALE := 0.0625
+# Ints per impact tile: water landings then hits on dry ground, five each (river_spill.comp record_impact).
+const SPILL_IMPACT_TILE_INTS := 10
 const SPILL_ROCK_HIT_M_S := 2.5
 # A landing throws spray and foam in proportion to how far it fell, from nothing below x to fully past y.
 const SPILL_SPRAY_DROP_M := Vector2(0.5, 1.5)
@@ -95,6 +101,8 @@ var _spill_motion := RID()
 var _spill_lips := RID()
 var _spill_lip_flow := RID()
 var _spill_impacts := RID()
+# The level impact heights are counted from: the ground at the middle of the domain (SPILL_IMPACT_HEIGHT_SCALE).
+var spill_impact_base_m := 0.0
 var _spill_phase_s := 0.0
 var _impact_window_s := 0.0
 var _impact_pending := false
@@ -113,6 +121,7 @@ func start(field: RiverField, config: RiverConfig) -> void:
 	_spilling = field.spills
 	_source_domain = field.domain_rect()
 	var image := _solver_terrain(field)
+	spill_impact_base_m = floorf(image.get_pixel(image.get_width() / 2, image.get_height() / 2).r)
 	var parameters_bytes := parameters(config, 0.0)
 	_report_stage("Compiling water solver (GPU)")
 	RenderingServer.call_on_render_thread(_init_render.bind(image.get_data(), image.get_size(), parameters_bytes))
@@ -335,7 +344,7 @@ static func impact_tiles(size: Vector2i, cell: float) -> Vector2i:
 
 func _impact_bytes(size: Vector2i) -> int:
 	var tiles := impact_tiles(size, cell_m)
-	return tiles.x * tiles.y * 32
+	return tiles.x * tiles.y * SPILL_IMPACT_TILE_INTS * 4
 
 
 func _grid_size() -> Vector2i:
@@ -370,7 +379,7 @@ func _dispatch_spill(list: int, parameters_bytes: PackedByteArray, mode: float) 
 		parameters_bytes.decode_float(0), parameters_bytes.decode_float(4), parameters_bytes.decode_float(8), GRAVITY_M_S2,
 		parameters_bytes.decode_float(16), parameters_bytes.decode_float(20), parameters_bytes.decode_float(24), SPILL_CAPACITY,
 		SPILL_FRICTION_HZ, SPILL_MAX_AGE_S, mode, SPILL_ISSUANCE_JITTER,
-		SPILL_IMPACT_TILE_M, SPILL_ROCK_HIT_M_S, SPILL_IMPACT_WEIGHT_UNITS, 0.0,
+		SPILL_IMPACT_TILE_M, SPILL_ROCK_HIT_M_S, SPILL_IMPACT_WEIGHT_UNITS, spill_impact_base_m,
 		SPILL_SPRAY_DROP_M.x, SPILL_SPRAY_DROP_M.y, spill_breakup_reference_units, spill_breakup_exponent,
 		spill_breakup_length_m, SPILL_NAPPE_FROUDE.x, SPILL_NAPPE_FROUDE.y, SPILL_DROP_OFFSET_M,
 		WET_DEPTH_M, 0.0, 0.0, SPILL_MAX_THINNING,
