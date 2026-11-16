@@ -5,7 +5,7 @@ const RANGE_CONFIG := preload("res://resources/explosion/presets/range.tres")
 const FIREBALL_RANGE_CONFIG := preload("res://resources/explosion/presets/fireball_range.tres")
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
 const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_charge.tres")
-const TEST_COUNT := 11
+const TEST_COUNT := 12
 
 var _completed := 0
 
@@ -20,9 +20,10 @@ func _initialize() -> void:
 	_test_barrel_routing()
 	_test_charge_scale()
 	_test_settings_rules()
-	_test_camera_follow()
+	_test_framing()
 	_test_dust_ring()
 	_test_presets()
+	_test_pace()
 	_check(_completed == TEST_COUNT, "only %d of %d test groups ran to their end" % [_completed, TEST_COUNT])
 	_finish("explosion_blast")
 
@@ -316,16 +317,24 @@ func _test_click_and_clock() -> void:
 	actions.left_click(press)
 	release.position = Vector2(90, 50)
 	_check(not actions.left_click(release), "a dragged release is not a click")
-	_check(ExplosionActions.clamp_time_scale(4.0) == 1.0 and ExplosionActions.clamp_time_scale(-1.0) == 0.0
-		and ExplosionActions.clamp_time_scale(0.5) == 0.5, "time scale clamps to [0, 1]")
-	_check(is_equal_approx(actions.cycle_slow(), 0.5) and is_equal_approx(Engine.time_scale, 0.5), "slow motion halves the engine clock")
+	var base := ExplosionActions.BASE_PACE
+	_check(ExplosionActions.clamp_time_scale(9.0) == base and ExplosionActions.clamp_time_scale(-1.0) == 0.0
+		and ExplosionActions.clamp_time_scale(0.5) == 0.5, "time scale clamps to [0, base pace]")
+	var ticks := int(ExplosionActions.default_tick_rate())
+	actions = ExplosionActions.started()
+	_check(is_equal_approx(Engine.time_scale, base) and Engine.physics_ticks_per_second == ticks * 2,
+		"the demo starts at the base pace with the physics tick rate raised to match")
+	_check(is_equal_approx(actions.cycle_slow(), 0.5) and is_equal_approx(Engine.time_scale, 1.0)
+		and Engine.physics_ticks_per_second == ticks, "slow 0.5x runs the engine clock at 1, the pace before the base was raised")
 	actions.set_paused(true)
 	_check(Engine.time_scale == 0.0, "pause stops the engine clock")
 	actions.set_paused(false)
-	_check(is_equal_approx(Engine.time_scale, 0.5), "resume returns to the chosen slow scale")
-	actions.cycle_slow()
-	_check(is_equal_approx(actions.cycle_slow(), 1.0) and Engine.time_scale == 1.0, "the slow cycle wraps back to 1x")
+	_check(is_equal_approx(Engine.time_scale, 1.0), "resume returns to the chosen slow scale")
+	_check(is_equal_approx(actions.cycle_slow(), 0.25) and is_equal_approx(Engine.time_scale, 0.5)
+		and Engine.physics_ticks_per_second == ticks, "slow 0.25x halves it again without lowering the tick rate")
+	_check(is_equal_approx(actions.cycle_slow(), 1.0) and Engine.time_scale == base, "the slow cycle wraps back to 1x")
 	ExplosionActions.restore_clock()
+	_check(Engine.time_scale == 1.0 and Engine.physics_ticks_per_second == ticks, "restore_clock returns the engine clock and tick rate")
 	_completed += 1
 
 
@@ -343,10 +352,7 @@ func _test_barrel_routing() -> void:
 	var scenery := ExplosionScenery.new()
 	var env_node := WorldEnvironment.new()
 	env_node.environment = Environment.new()
-	var orbit := OrbitCamera.new()
-	var volume := MeshInstance3D.new()
-	volume.mesh = BoxMesh.new()
-	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new(), orbit, Camera3D.new(), volume)
+	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new())
 	var parent := Node3D.new()
 	root.add_child(parent)
 	scenery.build(parent, ExplosionMenu.SCENE_BARRELS, system)
@@ -372,81 +378,32 @@ func _free_stub_host_nodes(nodes: Array) -> void:
 
 
 func _free_stub_host(scenery: ExplosionScenery) -> void:
-	for node: Node in [scenery.world_env, scenery.sun, scenery.ground, scenery.orbit, scenery.camera, scenery.volume]:
+	for node: Node in [scenery.world_env, scenery.sun, scenery.ground]:
 		node.free()
 
 
-func _stub_follow(system: ExplosionSystem) -> ExplosionCameraFollow:
-	var follow := ExplosionCameraFollow.new()
-	follow.orbit = OrbitCamera.new()
-	follow.orbit.distance = 20.0
-	follow.camera = Camera3D.new()
-	follow.volume = MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(10.0, 10.0, 10.0)
-	follow.volume.mesh = box
-	follow.volume.position = Vector3(20.0, 5.0, 0.0)
-	follow.system = system
-	follow.start()
-	return follow
-
-
-func _free_follow(follow: ExplosionCameraFollow) -> void:
-	for node: Node in [follow.orbit, follow.camera, follow.volume, follow]:
-		node.free()
-
-
-func _test_camera_follow() -> void:
-	var system := ExplosionSystem.new()
-	system.fixed_delta_s = 0.5
-	var origin := Vector3(4.0, 1.0, 0.0)
-	var follow := _stub_follow(system)
-	system.detonated.emit(origin, BARREL_CHARGE)
-	_check(follow.is_following(), "a detonation starts the follow")
-	for i in 12:
-		follow._process(0.0)
-	_check(absf(follow.orbit.target.x - origin.x) < 0.05, "a single charge is followed at its own origin")
-	for i in 400:
-		follow._process(0.0)
-	_check(follow.is_following(), "the follow outlasts a cloud that no longer moves")
-	follow.system.detonated.emit(origin, BARREL_CHARGE)
-	var drag := InputEventMouseMotion.new()
-	follow._unhandled_input(drag)
-	_check(follow.is_following(), "a mouse move without a button leaves the follow alone")
-	drag.button_mask = MOUSE_BUTTON_MASK_LEFT
-	follow._unhandled_input(drag)
-	_check(not follow.is_following(), "an orbit drag hands the camera back")
-	system.detonated.emit(origin, BARREL_CHARGE)
-	var wheel := InputEventMouseButton.new()
-	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
-	follow._unhandled_input(wheel)
-	_check(not follow.is_following(), "the wheel hands the camera back")
-	system.detonated.emit(origin, BARREL_CHARGE)
-	Input.action_press(&"move_forward")
-	follow._process(0.0)
-	Input.action_release(&"move_forward")
-	_check(not follow.is_following(), "a move key hands the camera back")
-	follow.volume.position.y = 5.0
-	system.detonated.emit(origin, BARREL_CHARGE)
-	for i in 6:
-		follow.volume.position.y += 4.0
-		follow._process(0.0)
-	_check(follow.is_following(), "a cloud that keeps growing stays followed")
-	follow.follow_box = true
-	follow.orbit.target = Vector3.ZERO
-	system.detonated.emit(origin, BARREL_CHARGE)
-	for i in 12:
-		follow._process(0.0)
-	_check(absf(follow.orbit.target.x - follow.volume.position.x) < 0.5, "a chain is followed at the middle of its cloud")
-	system.detonated.emit(Vector3(-30.0, 1.0, 0.0), BARREL_CHARGE)
-	follow._process(0.0)
-	_check(follow.orbit.target.x > 0.0, "a new origin in the chain does not swing the camera")
-	follow.stop()
-	var held := follow.orbit.target
-	follow._process(0.0)
-	_check(follow.orbit.target == held, "a stopped follow leaves the camera where it is")
-	_free_follow(follow)
-	system.free()
+func _test_framing() -> void:
+	var orbit := OrbitCamera.new()
+	var camera := Camera3D.new()
+	_check(ExplosionMenu.THROW_ENABLED.size() == ExplosionMenu.SCENES.size() and ExplosionScenery.FRAMING.size() == ExplosionMenu.SCENES.size(),
+		"one framing and one throw flag per scene")
+	_check(not ExplosionMenu.THROW_ENABLED[ExplosionMenu.SCENE_MUSHROOM] and ExplosionMenu.THROW_ENABLED[0],
+		"the mushroom has no throw")
+	for index in ExplosionMenu.SCENES.size():
+		var framing: Dictionary = ExplosionScenery.FRAMING[index]
+		orbit.target = Vector3(99.0, 99.0, 99.0)
+		orbit.distance = 1.0
+		orbit.yaw = 33.0
+		ExplosionScenery.apply_framing(orbit, camera, index)
+		_check(orbit.target == framing.target and orbit.distance == framing.distance and orbit.min_distance == framing.min_distance
+			and orbit.max_distance == framing.max_distance and orbit.zoom_speed == framing.zoom_speed
+			and orbit.move_speed == framing.move_speed and camera.fov == framing.fov and camera.far == framing.far,
+			"scene %d applies its framing" % index)
+		_check(orbit.yaw == 33.0, "a scene change keeps the yaw")
+		_check(framing.distance >= framing.min_distance and framing.distance <= framing.max_distance
+			and framing.zoom_speed <= framing.distance * 0.1, "scene %d: the start distance is in range and a wheel notch is a small step" % index)
+	orbit.free()
+	camera.free()
 	_completed += 1
 
 
@@ -550,7 +507,7 @@ func _test_settings_rules() -> void:
 	var env_node := WorldEnvironment.new()
 	env_node.environment = Environment.new()
 	env_node.environment.ambient_light_color = Color(0.6, 0.7, 0.85)
-	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new(), null, null, null)
+	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new())
 	root.add_child(scenery.sun)
 	var gas := ExplosionSystem.new()
 	for scene in [0, ExplosionMenu.SCENE_MUSHROOM]:
@@ -591,4 +548,29 @@ func _test_settings_rules() -> void:
 	guard.free()
 	_free_stub_host_nodes([env_node, scenery.sun, scenery.ground])
 	gas.free()
+	_completed += 1
+
+
+func _test_pace() -> void:
+	var base := ExplosionActions.BASE_PACE
+	for config: ExplosionConfig in [RANGE_CONFIG, FIREBALL_RANGE_CONFIG, ExplosionScenery.MUSHROOM_CONFIG]:
+		_check(config.validate() == "", "preset validates at the base pace: band %.1f cells" % config.band_cells(config.velocity_clamp_mps))
+		var solver := FireGpuSolver.new()
+		solver.set_simulation_hz(config.simulation_hz)
+		solver.max_catchup_steps = config.max_substeps_per_frame
+		var steps := 0
+		for frame in 120:
+			steps += solver.schedule_steps(base / 60.0)
+		_check(solver.dropped_time == 0.0 and absf(float(steps) * solver.timestep - base * 2.0) <= solver.timestep,
+			"%d Hz runs %d steps in 120 frames at %.0fx with nothing dropped" % [config.simulation_hz, steps, base])
+	var wide := RANGE_CONFIG.duplicate() as ExplosionConfig
+	wide.topology_interval_steps = 0
+	wide.max_substeps_per_frame = 4
+	var per_frame_band := wide.band_cells(wide.velocity_clamp_mps)
+	_check(wide.validate() != "", "four substeps per refresh overrun the tile band")
+	wide.topology_interval_steps = 2
+	_check(wide.validate() == "" and is_equal_approx(wide.band_cells(wide.velocity_clamp_mps) * 2.0, per_frame_band),
+		"a refresh every two substeps keeps the band inside the limit")
+	wide.topology_interval_steps = 1
+	_check(wide.band_cells(45.0) < 4.0, "a refresh every substep halves the band again")
 	_completed += 1

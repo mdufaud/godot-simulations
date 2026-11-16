@@ -16,8 +16,6 @@ const BARREL_ROWS := 2
 const BARREL_SPACING_M := 2.2
 const BARREL_SEED := 1000
 const PLAIN_SIZE_M := 8000.0
-const TOWER_COUNT := 14
-const TOWER_SEED := 2024
 ## Night smoke is lit by a faint ambient that scales with its albedo.
 const NIGHT_AMBIENT_GAIN := 0.35
 const SMOKE_ABSORPTION_PER_M := 4.5
@@ -32,29 +30,24 @@ const SUN_PHASE_G := 0.2
 ## Sun seen from the default camera: from the side, so the cap has a lit and a shaded flank.
 const SUN_YAW_DEG := 80.0
 const SUN_ELEVATION_DEG := 35.0
-## Per scene: orbit camera target, distance range, pitch, fov and far plane, then how the
-## camera follows the cloud once a charge goes off: ease rate, whether it tracks the cap, whether it
-## aims at the middle of the whole cloud (a chain of charges).
+## Per scene: orbit camera target, distance range, pitch, fov, far plane, then the wheel step and the move speed
+## (metres): the mushroom's km scale needs them scaled with its distance, nothing else differs.
 const FRAMING := [
 	{target = Vector3(0.0, 2.5, 0.0), distance = 14.0, min_distance = 4.0, max_distance = 40.0,
-		pitch = -10.0, fov = 60.0, far = 300.0, follow_rate = 3.0, follow_top = false, follow_box = false},
+		pitch = -10.0, fov = 60.0, far = 300.0, zoom_speed = 1.0, move_speed = 15.0},
 	{target = Vector3(0.0, 6.0, 0.0), distance = 30.0, min_distance = 4.0, max_distance = 40.0,
-		pitch = -15.0, fov = 60.0, far = 300.0, follow_rate = 3.0, follow_top = false, follow_box = true},
-	{target = Vector3(0.0, 300.0, 0.0), distance = 700.0, min_distance = 300.0, max_distance = 3000.0,
-		pitch = -1.5, fov = 35.0, far = 8000.0, follow_rate = 1.2, follow_top = true, follow_box = false},
+		pitch = -15.0, fov = 60.0, far = 300.0, zoom_speed = 1.0, move_speed = 15.0},
+	{target = Vector3(0.0, 280.0, 0.0), distance = 600.0, min_distance = 300.0, max_distance = 3000.0,
+		pitch = -1.5, fov = 60.0, far = 8000.0, zoom_speed = 45.0, move_speed = 600.0},
 ]
 
 var world_env: WorldEnvironment
-var orbit: OrbitCamera
-var camera: Camera3D
-var volume: MeshInstance3D
 ## Never the preloaded const's radius scaled in place: the host hands a scaled duplicate.
 var barrel_charge: ExplosionCharge = BARREL_CHARGE
 var sun: DirectionalLight3D
 var ground: Node3D
 
 var _root: Node3D
-var _follow: ExplosionCameraFollow
 var _dust: ExplosionDustRing
 var _index := 0
 var _metric_scale := 1.0
@@ -80,14 +73,10 @@ static func metric_scale(config: ExplosionConfig) -> float:
 	return maxf(config.cell_size_m / REFERENCE_CELL_M, 1.0)
 
 
-func bind(host_env: WorldEnvironment, host_sun: DirectionalLight3D, host_ground: Node3D,
-		host_orbit: OrbitCamera, host_camera: Camera3D, host_volume: MeshInstance3D) -> void:
+func bind(host_env: WorldEnvironment, host_sun: DirectionalLight3D, host_ground: Node3D) -> void:
 	world_env = host_env
 	sun = host_sun
 	ground = host_ground
-	orbit = host_orbit
-	camera = host_camera
-	volume = host_volume
 
 
 func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
@@ -103,20 +92,17 @@ func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
 		_build_plain()
 	else:
 		_build_posts()
-	_add_follow(index, system)
+	_add_dust(system)
 
 
-## Stops what a detonation set going besides the gas: the camera follow and the dust rings.
+## Stops what a detonation set going besides the gas: the dust rings.
 func clear_effects() -> void:
-	if _follow != null:
-		_follow.stop()
 	if _dust != null:
 		_dust.clear()
 
 
 func clear() -> void:
 	_barrels.clear()
-	_follow = null
 	_dust = null
 	if _root != null:
 		_root.queue_free()
@@ -134,6 +120,8 @@ static func apply_framing(orbit: OrbitCamera, camera: Camera3D, index: int) -> v
 	orbit.max_distance = framing.max_distance
 	orbit.distance = framing.distance
 	orbit.pitch = framing.pitch
+	orbit.zoom_speed = framing.zoom_speed
+	orbit.move_speed = framing.move_speed
 	orbit.max_pitch = maxf(-5.0, framing.pitch)
 	camera.fov = framing.fov
 	camera.far = framing.far
@@ -221,19 +209,7 @@ static func scale_volume(presentation: FirePresentation, metric_scale: float, co
 	presentation.apply_billow(config.billow, config.cell_size_m)
 
 
-func _add_follow(index: int, system: ExplosionSystem) -> void:
-	var framing: Dictionary = FRAMING[index]
-	_follow = ExplosionCameraFollow.new()
-	_follow.orbit = orbit
-	_follow.camera = camera
-	_follow.volume = volume
-	_follow.system = system
-	_follow.home_target_y = framing.target.y
-	_follow.rate_per_s = framing.follow_rate
-	_follow.follow_top = framing.follow_top
-	_follow.follow_box = framing.follow_box
-	_root.add_child(_follow)
-	_follow.start()
+func _add_dust(system: ExplosionSystem) -> void:
 	_dust = ExplosionDustRing.new()
 	_dust.system = system
 	_root.add_child(_dust)
@@ -331,20 +307,3 @@ func _build_plain() -> void:
 	plane.material = plain_mat
 	plain.mesh = plane
 	_root.add_child(plain)
-
-	var tower_mat := StandardMaterial3D.new()
-	tower_mat.albedo_color = Color(0.78, 0.76, 0.72)
-	tower_mat.roughness = 0.9
-	var rng := RandomNumberGenerator.new()
-	rng.seed = TOWER_SEED
-	for i in TOWER_COUNT:
-		var angle := rng.randf_range(0.0, TAU)
-		var ring_m := rng.randf_range(250.0, 800.0)
-		var size := Vector3(rng.randf_range(15.0, 30.0), rng.randf_range(20.0, 50.0), rng.randf_range(15.0, 30.0))
-		var mesh := BoxMesh.new()
-		mesh.size = size
-		mesh.material = tower_mat
-		var tower := MeshInstance3D.new()
-		tower.mesh = mesh
-		tower.position = Vector3(cos(angle) * ring_m, size.y * 0.5, sin(angle) * ring_m)
-		_root.add_child(tower)

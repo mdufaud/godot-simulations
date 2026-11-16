@@ -24,7 +24,7 @@ var scene_index := 0
 var charge_scale := 1.0
 
 var _capture := ExplosionCapture.new()
-var _actions := ExplosionActions.new()
+@onready var _actions := ExplosionActions.started()
 var _barrel_ball := FIREBALL_PROJECTILE.duplicate() as ProjectilePreset
 var _fx := ExplosionFx.new()
 var _scenery := ExplosionScenery.new()
@@ -39,7 +39,7 @@ func _ready() -> void:
 		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
 		return
 	add_child(_fx)
-	_scenery.bind(world_env, sun, ground, orbit_cam, camera, fire_volume)
+	_scenery.bind(world_env, sun, ground)
 	_menu_builder.settings.scenery = _scenery
 	if not _build_simulation(ExplosionScenery.config_for(0)):
 		return
@@ -75,9 +75,8 @@ func _exit_tree() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if presentation == null or _actions.is_emulated_mouse(event) or not event is InputEventMouseButton:
 		return
-	if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-		_throw_at(event.position)
-	elif event.button_index == MOUSE_BUTTON_LEFT and _actions.left_click(event):
+	if (event.button_index == MOUSE_BUTTON_RIGHT and event.pressed) \
+			or (event.button_index == MOUSE_BUTTON_LEFT and _actions.left_click(event)):
 		_throw_at(event.position)
 
 
@@ -89,8 +88,13 @@ func set_scene(index: int) -> void:
 		return
 	_limit_charge_scale()
 	_menu_builder.show_scene(scene_index)
+	ExplosionScenery.apply_framing(orbit_cam, camera, scene_index)
 	launcher.arm(_barrel_ball if scene_index == ExplosionMenu.SCENE_BARRELS else FIREBALL_PROJECTILE)
 	reset_simulation()
+
+
+func next_scene() -> void:
+	set_scene((scene_index + 1) % ExplosionMenu.SCENES.size())
 
 
 func reset_simulation() -> void:
@@ -99,7 +103,6 @@ func reset_simulation() -> void:
 	launcher.clear()
 	_clear_effects()
 	explosion.reset()
-	ExplosionScenery.apply_framing(orbit_cam, camera, scene_index)
 	_scenery.build(self, scene_index, explosion)
 	_menu_builder.settings.apply_lighting()
 	_sync_barrel_charge()
@@ -141,8 +144,7 @@ func cycle_slow() -> void:
 
 
 func throw_ball() -> void:
-	if presentation != null:
-		_throw_at(get_viewport().get_visible_rect().size * 0.5)
+	_throw_at(get_viewport().get_visible_rect().size * 0.5)
 
 
 func set_charge_scale(value: float) -> void:
@@ -164,9 +166,7 @@ func _limit_charge_scale() -> void:
 
 
 func _throw_at(screen_position: Vector2) -> void:
-	if scene_index == ExplosionMenu.SCENE_MUSHROOM:
-		explosion.detonate(_ground_zero(), _charge())
-	else:
+	if presentation != null and ExplosionMenu.THROW_ENABLED[scene_index]:
 		launcher.fire(screen_position)
 
 

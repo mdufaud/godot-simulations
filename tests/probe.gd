@@ -9940,6 +9940,104 @@ func _actions_fuse_s(demo: Node) -> float:
 	return float(Time.get_ticks_msec() - start) / 1000.0
 
 
+func _actions_flash_s(demo: Node) -> float:
+	demo.set_scene(0)
+	await _actions_wait(demo, 1.0)
+	demo.detonate_scene()
+	var flash: OmniLight3D = null
+	var start := Time.get_ticks_msec()
+	while flash == null and Time.get_ticks_msec() - start < 2000:
+		await process_frame
+		for child in demo.projectile_root.get_children():
+			if child is OmniLight3D:
+				flash = child
+	var born := Time.get_ticks_msec()
+	while flash != null and is_instance_valid(flash) and Time.get_ticks_msec() - born < 15000:
+		await process_frame
+	return float(Time.get_ticks_msec() - born) / 1000.0
+
+
+func _actions_cam(demo: Node) -> Array:
+	return [demo.orbit_cam.target, demo.orbit_cam.distance, demo.orbit_cam.yaw, demo.orbit_cam.pitch]
+
+
+func _actions_intact(demo: Node) -> int:
+	var count := 0
+	for barrel in demo._scenery._barrels:
+		count += 1 if is_instance_valid(barrel) and not barrel.detonated else 0
+	return count
+
+
+func _actions_scene_reset_camera(demo: Node, events: Array) -> void:
+	var menu: ExplosionMenu = demo._menu_builder
+	demo.set_scene(0)
+	await _actions_wait(demo, 1.0)
+	var cam := _actions_cam(demo)
+	demo.throw_ball()
+	await _actions_wait(demo, 0.5)
+	demo.detonate_scene()
+	await _actions_wait(demo, 1.0)
+	demo.clear_smoke()
+	await _actions_wait(demo, 0.5)
+	demo.reset_simulation()
+	await _actions_wait(demo, 0.5)
+	print("EXPLOSION ACTIONS camera_range before=%s after=%s" % [str(cam), str(_actions_cam(demo))])
+	_check(_actions_cam(demo) == cam, "explosion_actions: throw, detonate, clear and reset leave the range camera alone")
+
+	var visited := []
+	for step in 3:
+		menu.scene_action.pressed.emit()
+		await _actions_wait(demo, 0.6)
+		var framing: Dictionary = ExplosionScenery.FRAMING[demo.scene_index]
+		visited.append(demo.scene_index)
+		print("EXPLOSION ACTIONS scene_action scene=%d option=%d label=%s target=%s distance=%.0f throw_visible=%s" % [
+			demo.scene_index, menu.scene_option.selected, _actions_caption(menu.scene_action), str(demo.orbit_cam.target),
+			demo.orbit_cam.distance, str(menu.throw_action.visible)])
+		_check(menu.scene_option.selected == demo.scene_index and _actions_caption(menu.scene_action) == ExplosionMenu.SCENES[demo.scene_index]
+			and demo.orbit_cam.target == framing.target and demo.orbit_cam.distance == framing.distance,
+			"explosion_actions: scene action %d syncs option, label and framing" % step)
+	_check(visited == [1, 2, 0], "explosion_actions: the scene action cycles 0 to 1 to 2 to 0")
+
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	await _actions_wait(demo, 1.0)
+	cam = _actions_cam(demo)
+	_check(_actions_intact(demo) == 8, "explosion_actions: barrels start with 8 intact")
+	demo.detonate_scene()
+	await _actions_wait(demo, 5.0)
+	var intact_after_chain := _actions_intact(demo)
+	demo.reset_simulation()
+	await _actions_wait(demo, 0.5)
+	print("EXPLOSION ACTIONS barrels_reset intact_after_chain=%d intact_after_reset=%d count=%d camera_same=%s" % [
+		intact_after_chain, _actions_intact(demo), demo._scenery._barrels.size(), str(_actions_cam(demo) == cam)])
+	_check(intact_after_chain < 8 and _actions_intact(demo) == 8 and demo._scenery._barrels.size() == 8,
+		"explosion_actions: reset respawns 8 intact barrels after a chain")
+	_check(_actions_cam(demo) == cam, "explosion_actions: the barrels chain and reset leave the camera alone")
+
+	demo.set_scene(ExplosionMenu.SCENE_MUSHROOM)
+	await _actions_wait(demo, 1.0)
+	cam = _actions_cam(demo)
+	_actions_watch(demo, events)
+	var balls_before := _actions_balls(demo)
+	await _actions_click(Vector2(root.size) * 0.5)
+	demo.throw_ball()
+	await _actions_wait(demo, 0.5)
+	print("EXPLOSION ACTIONS mushroom throw_visible=%s detonations_after_click_and_throw=%d balls=%d" % [
+		str(menu.throw_action.visible), events.size(), _actions_balls(demo) - balls_before])
+	_check(not menu.throw_action.visible and events.is_empty() and _actions_balls(demo) == balls_before,
+		"explosion_actions: mushroom hides Throw, a click and a throw do nothing")
+	demo.detonate_scene()
+	await _actions_wait(demo, 3.0)
+	var fired := events.size()
+	demo.clear_smoke()
+	demo.reset_simulation()
+	await _actions_wait(demo, 0.5)
+	print("EXPLOSION ACTIONS mushroom detonations=%d camera_same=%s cam=%s" % [fired, str(_actions_cam(demo) == cam), str(_actions_cam(demo))])
+	_check(fired == 1 and _actions_cam(demo) == cam, "explosion_actions: mushroom Detonate fires once and no action moves the camera")
+	demo.set_scene(0)
+	_check(menu.throw_action.visible, "explosion_actions: Throw is back outside the mushroom")
+	await _actions_wait(demo, 1.0)
+
+
 func _run_explosion_actions() -> void:
 	root.size = Vector2i(1280, 720)
 	var demo: Node = (load(ACTIONS_SCENE) as PackedScene).instantiate()
@@ -10029,7 +10127,7 @@ func _run_explosion_actions() -> void:
 		_actions_watch(demo, events)
 		var light_before: int = demo.projectile_root.get_child_count()
 		demo.detonate_scene()
-		await _actions_wait(demo, 0.3)
+		await _actions_wait(demo, 0.3 / ExplosionActions.BASE_PACE)
 		var lights := 0
 		for child in demo.projectile_root.get_children():
 			lights += 1 if child is OmniLight3D else 0
@@ -10068,20 +10166,28 @@ func _run_explosion_actions() -> void:
 	demo.detonate_scene()
 	var pending_before: int = demo.explosion.pending_count()
 	demo.clear_smoke()
-	var follow_live: bool = demo._scenery._follow.is_following()
 	var rings_left: int = demo._scenery._dust._rings.size()
 	var fx_left: int = demo._fx.get_child_count()
-	print("EXPLOSION ACTIONS clear_all pending=%d->%d follow_live=%s dust_rings=%d fx_nodes_queued_for_free=%d" % [
-		pending_before, demo.explosion.pending_count(), str(follow_live), rings_left, fx_left])
-	_check(demo.explosion.pending_count() == pending_before and pending_before >= 4 and not follow_live and rings_left == 0,
-		"explosion_actions: clear smoke keeps queued detonations and stops the follow and the dust rings")
+	print("EXPLOSION ACTIONS clear_all pending=%d->%d dust_rings=%d fx_nodes_queued_for_free=%d" % [
+		pending_before, demo.explosion.pending_count(), rings_left, fx_left])
+	_check(demo.explosion.pending_count() == pending_before and pending_before >= 4 and rings_left == 0,
+		"explosion_actions: clear smoke keeps queued detonations and stops the dust rings")
+	await _actions_scene_reset_camera(demo, events)
 
 	await _actions_wait(demo, 0.5)
+	var hz: int = demo.explosion.config.simulation_hz
+	var base_ticks := int(ExplosionActions.default_tick_rate())
+	var ticks_full := Engine.physics_ticks_per_second
+	var dropped_before: float = demo.explosion.solver.dropped_time
 	var rate_full := await _actions_rates(demo)
+	var dropped_full: float = demo.explosion.solver.dropped_time - dropped_before
+	var flash_full := await _actions_flash_s(demo)
 	demo.cycle_slow()
 	await _actions_wait(demo, 0.5)
+	var ticks_half := Engine.physics_ticks_per_second
 	var rate_half := await _actions_rates(demo)
 	var fuse_half := await _actions_fuse_s(demo)
+	var flash_half := await _actions_flash_s(demo)
 	demo.cycle_slow()
 	demo.cycle_slow()
 	var fuse_full := await _actions_fuse_s(demo)
@@ -10089,13 +10195,17 @@ func _run_explosion_actions() -> void:
 	demo.set_scene(0)
 	await _actions_wait(demo, 1.0)
 	solver = demo.explosion.solver
-	print("EXPLOSION ACTIONS slow time_scale=%.2f steps_per_s=%.1f->%.1f solver_clock=%.2f->%.2f fuse_s=%.2f->%.2f fuse_ratio=%.2f" % [
-		Engine.time_scale, rate_full.x, rate_half.x, rate_full.y, rate_half.y, fuse_full, fuse_half,
-		fuse_half / fuse_full])
-	_check(is_equal_approx(Engine.time_scale, 0.5), "explosion_actions: slow motion sets the engine clock to 0.5")
-	_check(rate_half.y / rate_full.y < 0.6 and rate_half.y / rate_full.y > 0.4, "explosion_actions: solver clock must halve")
-	_check(rate_half.x / rate_full.x < 0.6 and rate_half.x / rate_full.x > 0.4, "explosion_actions: solver substeps per second must halve")
-	_check(fuse_half / fuse_full > 1.7 and fuse_half / fuse_full < 2.4, "explosion_actions: fuse real time must double")
+	print("EXPLOSION ACTIONS slow time_scale=%.2f hz=%d steps_per_s=%.1f->%.1f solver_clock=%.2f->%.2f fuse_s=%.2f->%.2f fuse_ratio=%.2f flash_s=%.2f->%.2f ticks=%d->%d dropped_base=%.3f" % [
+		Engine.time_scale, hz, rate_full.x, rate_half.x, rate_full.y, rate_half.y, fuse_full, fuse_half,
+		fuse_half / fuse_full, flash_full, flash_half, ticks_full, ticks_half, dropped_full])
+	_check(is_equal_approx(Engine.time_scale, ExplosionActions.BASE_PACE * 0.5), "explosion_actions: slow 0.5x sets the engine clock to 1, the pace before the base was raised")
+	_check(absf(rate_half.y - 1.0) < 0.1 and absf(rate_full.y - ExplosionActions.BASE_PACE) < 0.2, "explosion_actions: solver clock runs 2x at base pace and 1x at slow 0.5x")
+	_check(absf(rate_half.x - float(hz)) < 0.1 * float(hz) and absf(rate_full.x - 2.0 * float(hz)) < 0.2 * float(hz),
+		"explosion_actions: solver substeps per second are %d at slow 0.5x and %d at base pace" % [hz, 2 * hz])
+	_check(fuse_half / fuse_full > 1.7 and fuse_half / fuse_full < 2.4, "explosion_actions: fuse real time halves at base pace")
+	_check(flash_half / flash_full > 1.7 and flash_half / flash_full < 2.4, "explosion_actions: flash tween real time halves at base pace")
+	_check(ticks_full == 2 * base_ticks and ticks_half == base_ticks, "explosion_actions: physics tick rate follows the clock")
+	_check(dropped_full < 1e-6, "explosion_actions: no simulation time dropped at base pace")
 
 	demo.set_paused(true)
 	await _actions_wait(demo, 0.3)
@@ -10125,10 +10235,11 @@ func _run_explosion_actions() -> void:
 	var resume_sim_s := solver.simulation_time - resume_sim
 	print("EXPLOSION ACTIONS resume sim_s=%.3f real_s=%.3f worst_frame_substeps=%d cap=%d" % [
 		resume_sim_s, resume_s, worst_frame_steps, solver.max_catchup_steps])
-	_check(resume_sim_s <= resume_s * 0.5 + 0.05, "explosion_actions: no catch-up burst after resume (slow 0.5x)")
+	_check(resume_sim_s <= resume_s * 1.0 + 0.05, "explosion_actions: no catch-up burst after resume (slow 0.5x)")
 	demo.queue_free()
 	await _boot_frames(2)
-	_check(Engine.time_scale == 1.0, "explosion_actions: leaving the demo restores the engine clock")
+	_check(Engine.time_scale == 1.0 and Engine.physics_ticks_per_second == int(ExplosionActions.default_tick_rate()),
+		"explosion_actions: leaving the demo restores the engine clock and tick rate")
 	_finish("explosion_actions")
 
 
@@ -10307,6 +10418,91 @@ func _run_explosion_chain() -> void:
 	quit(0)
 
 
+# explosion_pace: per scene, the solver and GPU cost per frame at the base pace and at slow 0.5x (the pace before the base was raised).
+func _run_explosion_pace() -> void:
+	var demo := await _settings_boot()
+	var solver_ref: FireGpuSolver
+	for scene in 3:
+		demo.set_scene(scene)
+		await _actions_wait(demo, 1.0)
+		solver_ref = demo.explosion.solver
+		solver_ref.profiling = true
+		demo.detonate_scene()
+		await _actions_wait(demo, 1.0)
+		for step in 2:
+			if step == 1:
+				demo.cycle_slow()
+			await _actions_wait(demo, 0.5)
+			var main_rid := root.get_viewport_rid()
+			var volume_rid: RID = demo.presentation._volume_vp.get_viewport_rid()
+			RenderingServer.viewport_set_measure_render_time(main_rid, true)
+			RenderingServer.viewport_set_measure_render_time(volume_rid, true)
+			var sums := {"total": 0.0, "topology": 0.0, "main": 0.0, "volume": 0.0, "substeps": 0.0, "frames": 0.0}
+			var wall0 := solver_ref.wall_time
+			var real0 := Time.get_ticks_msec()
+			var dropped0 := solver_ref.dropped_time
+			for i in 180:
+				await process_frame
+				var t := solver_ref.get_timings()
+				sums["total"] += float(t.get("total", 0.0))
+				sums["topology"] += float(t.get("topology", 0.0))
+				sums["main"] += RenderingServer.viewport_get_measured_render_time_gpu(main_rid)
+				sums["volume"] += RenderingServer.viewport_get_measured_render_time_gpu(volume_rid)
+				sums["substeps"] += float(solver_ref.last_substeps)
+				sums["frames"] += 1.0
+			RenderingServer.viewport_set_measure_render_time(main_rid, false)
+			RenderingServer.viewport_set_measure_render_time(volume_rid, false)
+			var n: float = sums["frames"]
+			print("EXPLOSION PACE scene=%d pace=%s time_scale=%.2f fps=%.1f substeps=%.2f solver_ms=%.2f topology_ms=%.2f main_ms=%.2f volume_ms=%.2f gpu_total_ms=%.2f dropped_s=%.3f sim_ratio=%.2f" % [
+				scene, "base" if step == 0 else "slow0.5", Engine.time_scale, n / (float(Time.get_ticks_msec() - real0) / 1000.0),
+				sums["substeps"] / n, sums["total"] / n, sums["topology"] / n, sums["main"] / n, sums["volume"] / n,
+				(sums["main"] + sums["volume"]) / n,
+				solver_ref.dropped_time - dropped0, (solver_ref.wall_time - wall0) / (float(Time.get_ticks_msec() - real0) / 1000.0)])
+		demo.cycle_slow()
+		demo.cycle_slow()
+		solver_ref.profiling = false
+	demo.queue_free()
+	await _boot_frames(2)
+	print("EXPLOSION PACE DONE")
+	quit(0)
+
+
+# explosion_pace_shots <scene> <base|slow> <out_dir>: frames at 0.5/1/2/4 simulated seconds after the detonation, one fixed step of game time per frame.
+func _run_explosion_pace_shots() -> void:
+	var scene_index := int(_extra[0]) if _extra.size() > 0 else 0
+	var slow := _extra.size() > 1 and str(_extra[1]) == "slow"
+	var out_dir := str(_extra[2]) if _extra.size() > 2 else "res://tmp/explosion_pace"
+	var demo := await _settings_boot()
+	if slow:
+		demo.cycle_slow()
+	var step_s: float = Engine.time_scale / 60.0
+	demo.set_capture_scene(scene_index)
+	demo.set_capture_fixed_delta(step_s)
+	demo.set_frozen(true)
+	for i in 3:
+		await process_frame
+	await demo.set_capture_params({"camera_scale": 1.5})
+	demo.set_capture_ui(false)
+	for i in 90:
+		await process_frame
+	demo.set_frozen(false)
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(out_dir))
+	var frame := 0
+	for instant in [0.5, 1.0, 2.0, 4.0]:
+		var target := int(roundf(instant / step_s))
+		while frame < target:
+			await process_frame
+			frame += 1
+		await RenderingServer.frame_post_draw
+		var path := "%s/s%d_%s_%.1fs.png" % [out_dir, scene_index, "slow" if slow else "base", instant]
+		root.get_texture().get_image().save_png(ProjectSettings.globalize_path(path))
+		print("EXPLOSION PACE SHOT %s frame=%d sim_s=%.2f solver_sim_s=%.2f" % [path, frame, float(frame) * step_s, demo.explosion.solver.simulation_time])
+	demo.queue_free()
+	await _boot_frames(2)
+	print("EXPLOSION PACE SHOTS DONE")
+	quit(0)
+
+
 # explosion_soak <scene> <frames> <charge> <wind_mps> [wind_deg]: fixed 60 Hz steps, then the pool counters.
 func _run_explosion_soak() -> void:
 	var scene_index := int(_extra[0]) if _extra.size() > 0 else 2
@@ -10316,7 +10512,7 @@ func _run_explosion_soak() -> void:
 	var wind_deg := float(_extra[4]) if _extra.size() > 4 else 0.0
 	var demo := await _settings_boot()
 	demo.set_capture_scene(scene_index)
-	demo.set_capture_fixed_delta(0.0166667)
+	demo.set_capture_fixed_delta(0.0166667 * Engine.time_scale)
 	demo.set_frozen(true)
 	for i in 3:
 		await process_frame

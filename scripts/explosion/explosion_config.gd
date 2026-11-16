@@ -1,8 +1,8 @@
 class_name ExplosionConfig extends Resource
 ## Grid and clock of one explosion system. Charges are separate resources.
 
-## The solver refreshes its tile topology once per frame and keeps a one-tile
-## dilation band, so the field may not travel further than this per frame.
+## The solver refreshes its tile topology once per frame (or every topology_interval_steps) and keeps a one-tile
+## dilation band, so the field may not travel further than this between refreshes.
 const BAND_CELLS := 8.0
 ## Shortest curl-noise wavelength in cells, and the tile edge it may not be a multiple of.
 const TURBULENCE_MIN_CELLS := 5.0
@@ -13,6 +13,8 @@ const VORTICITY_RAMP_S := 0.3
 @export_range(0.05, 5.0, 0.01) var cell_size_m := 0.2
 @export_range(5, 120, 1) var simulation_hz := 60
 @export_range(1, 4, 1) var max_substeps_per_frame := 2
+## Substeps between tile topology refreshes within a frame; 0 refreshes once per frame.
+@export_range(0, 4, 1) var topology_interval_steps := 0
 @export_range(5.0, 300.0, 0.5) var velocity_clamp_mps := 45.0
 @export_range(0.05, 20.0, 0.05) var keep_speed_mps := 0.5
 ## Resident tile capacity: 2048 or 4096 (the large atlas needs 16 KB of compute shared memory, else the solver falls back).
@@ -48,7 +50,8 @@ func turbulence_octaves() -> int:
 
 ## Cells a field moving at [param speed_mps] crosses in one frame's substeps.
 func band_cells(speed_mps: float) -> float:
-	return speed_mps * float(max_substeps_per_frame) / (float(simulation_hz) * cell_size_m)
+	var steps := max_substeps_per_frame if topology_interval_steps <= 0 else mini(max_substeps_per_frame, topology_interval_steps)
+	return speed_mps * float(steps) / (float(simulation_hz) * cell_size_m)
 
 
 func validate() -> String:

@@ -3,13 +3,20 @@ class_name ExplosionCapture extends RefCounted
 var soot_fraction := -1.0
 
 
-## Capture overrides: charge_scale, camera_scale, soot_fraction, quality (0 to 2), the menu settings smoke_darkness,
+## Capture overrides: charge_scale, camera_scale, camera_distance_m (below the orbit minimum too), soot_fraction, quality (0 to 2), the menu settings smoke_darkness,
 ## surface_detail, wind_speed and wind_deg (all through [ExplosionSettings]) and the billow keys of
 ## [method FireBillowConfig.apply_overrides]. The preset's billow resource is never mutated.
 func apply(controller: Node, values: Dictionary) -> void:
 	controller.charge_scale = minf(float(values.get("charge_scale", controller.charge_scale)),
 		controller._menu_builder.charge_slider.max_value)
 	ExplosionScenery.scale_distance(controller.orbit_cam, float(values.get("camera_scale", 1.0)))
+	if values.has("camera_distance_m"):
+		controller.orbit_cam.min_distance = minf(controller.orbit_cam.min_distance, float(values.camera_distance_m))
+		controller.orbit_cam.distance = float(values.camera_distance_m)
+	if values.has("camera_yaw_deg"):
+		controller.orbit_cam.yaw = float(values.camera_yaw_deg)
+	if values.has("camera_target_y_m"):
+		controller.orbit_cam.target.y = float(values.camera_target_y_m)
 	soot_fraction = float(values.get("soot_fraction", -1.0))
 	if values.has("quality"):
 		controller._menu_builder.settings.quality = int(values.quality)

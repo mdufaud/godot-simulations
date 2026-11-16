@@ -1,7 +1,9 @@
 class_name ExplosionActions extends RefCounted
 
 const CLICK_MAX_DRAG_PX := 6.0
-## Never above 1: the solver's tile band bounds the field's travel per frame.
+## Engine clock at the 1x label; the 0.5x slow-motion step runs at the pace the demo had before this was raised.
+const BASE_PACE := 2.0
+## Shown to the user; the engine clock is BASE_PACE times these.
 const SLOW_SCALES: Array[float] = [1.0, 0.5, 0.25]
 const BARREL_HIT_TOLERANCE_M := 0.2
 
@@ -18,7 +20,7 @@ static func is_click(press: Vector2, release: Vector2) -> bool:
 
 
 static func clamp_time_scale(value: float) -> float:
-	return clampf(value, 0.0, 1.0)
+	return clampf(value, 0.0, BASE_PACE)
 
 
 ## Ground point under [param screen_position], kept inside [param limit_m] of the origin.
@@ -77,7 +79,7 @@ func left_click(event: InputEventMouseButton) -> bool:
 
 
 func time_scale() -> float:
-	return 0.0 if paused else SLOW_SCALES[slow_index]
+	return 0.0 if paused else BASE_PACE * SLOW_SCALES[slow_index]
 
 
 func set_paused(on: bool) -> void:
@@ -92,9 +94,23 @@ func cycle_slow() -> float:
 
 
 ## Engine.time_scale is the one clock: frame deltas, fuses, tweens, particles and the solver's step budget all follow it.
+## Jolt ticks stretch by the scale, so the tick rate rises with it to keep each step at 1/60 s of game time.
 func apply_clock() -> void:
-	Engine.time_scale = clamp_time_scale(time_scale())
+	var scale := clamp_time_scale(time_scale())
+	Engine.time_scale = scale
+	Engine.physics_ticks_per_second = int(roundf(default_tick_rate() * maxf(scale, 1.0)))
+
+
+static func started() -> ExplosionActions:
+	var actions := ExplosionActions.new()
+	actions.apply_clock()
+	return actions
+
+
+static func default_tick_rate() -> float:
+	return float(ProjectSettings.get_setting("physics/common/physics_ticks_per_second", 60))
 
 
 static func restore_clock() -> void:
 	Engine.time_scale = 1.0
+	Engine.physics_ticks_per_second = int(default_tick_rate())

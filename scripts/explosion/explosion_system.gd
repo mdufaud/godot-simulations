@@ -17,7 +17,7 @@ signal blast(origin: Vector3, radius_m: float, speed_mps: float)
 
 var config: ExplosionConfig
 var solver: FireGpuSolver
-## Negative follows the frame delta; a capture harness sets a fixed step.
+## Negative follows the frame delta; a capture harness sets a fixed step of simulated seconds, which bypasses Engine.time_scale (bodies still follow it).
 var fixed_delta_s := -1.0
 ## Curl-noise strength the solver ramps in after each pulse; starts at the config value, a capture harness may override it.
 var turbulence_strength := 0.0
@@ -49,6 +49,7 @@ func start() -> void:
 	solver.cell_size = config.cell_size_m
 	solver.set_simulation_hz(config.simulation_hz)
 	solver.max_catchup_steps = config.max_substeps_per_frame
+	solver.topology_interval_steps = config.topology_interval_steps
 	solver.blast_velocity_clamp_mps = config.velocity_clamp_mps
 	solver.blast_keep_speed_mps = config.keep_speed_mps
 	solver.vorticity_strength = 0.0

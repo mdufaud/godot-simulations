@@ -7,7 +7,8 @@
 script = ExtResource("1_config")
 cell_size_m = 0.2
 simulation_hz = 60
-max_substeps_per_frame = 2
+max_substeps_per_frame = 4
+topology_interval_steps = 2
 velocity_clamp_mps = 45.0
 keep_speed_mps = 0.5
 pool_slots = 4096

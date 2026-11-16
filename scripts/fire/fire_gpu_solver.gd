@@ -229,6 +229,8 @@ var ambient_temperature := 300.0 ## Fire-X Tab. 3
 var simulation_hz := 30
 var timestep := 1.0 / 30.0
 var max_catchup_steps := 4
+## Substeps between topology refreshes inside one frame; 0 refreshes once per frame.
+var topology_interval_steps := 0
 ## Game policy: the clock's debt never exceeds what the catchup can clear in one
 ## frame, and wall time beyond that is counted in dropped_time instead of
 ## queueing an invisible catch-up sprint the frame rate pays for later.
@@ -409,6 +411,7 @@ var _config_cache := PackedByteArray()
 var _parity := 0
 var _simulation_step := 0
 var _topology_prepared := false
+var _stats_bucket := 0
 
 var _events: Array[Dictionary] = []
 var _events_mutex := Mutex.new()
@@ -1098,6 +1101,7 @@ func _bootstrap_pool() -> void:
 	# adopts its target outright rather than shrinking toward it for seconds.
 	_display_hyst = DisplayBoxHysteresis.new()
 	_frame = 0
+	_stats_bucket = 0
 
 
 ## Rebuild the tile pool at a new logical slot budget. Rendering thread only.
@@ -1426,6 +1430,11 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	var cl := _rd.compute_list_begin()
 
 	for i in count:
+		if topology_interval_steps > 0 and i > 0 and i % topology_interval_steps == 0:
+			_rd.compute_list_end()
+			prepare_topology_render()
+			_topology_prepared = false
+			cl = _rd.compute_list_begin()
 		# Events are injected once, on the first substep of the frame.
 		if i == 0:
 			for e in events:
@@ -1454,7 +1463,8 @@ func step_render(step_count: int, liquid_active := false) -> void:
 	# The pool counters ride their own tiny async readback every 8 frames
 	# regardless of profiling: the debug overlay and the capture harness both
 	# report occupancy, and a stale zero reads as "empty pool" to both.
-	if _frame % 8 == 0:
+	if _frame >> 3 != _stats_bucket:
+		_stats_bucket = _frame >> 3
 		_update_pool_stats_cache()
 
 
@@ -1930,7 +1940,7 @@ func _read_timings() -> void:
 		if nm == "fire/topology_start":
 			topology_start = t
 		elif nm == "fire/topology_end" and topology_start > 0:
-			acc["topology"] = float(t - topology_start) / 1e6
+			acc["topology"] = float(acc.get("topology", 0.0)) + float(t - topology_start) / 1e6
 		# A mark closes the interval opened by the previous one. "start" and "end"
 		# only bracket the total, so they open no stage of their own.
 		if prev_name.begins_with("fire/") and prev_name not in [

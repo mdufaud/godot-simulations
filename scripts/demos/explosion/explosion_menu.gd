@@ -6,8 +6,10 @@ const DETONATE_LABELS := ["Detonate aim", "Detonate barrel", "Detonate"]
 const HINTS := [
 	"Click to throw a fireball at the cursor (drag orbits); right-click also throws",
 	"Click to throw a ball at a barrel (drag orbits); right-click also throws",
-	"Click to detonate the charge (drag orbits)",
+	"Press Detonate to set off the charge (drag orbits)",
 ]
+## Per scene: whether a click and the Throw action launch a ball (the mushroom has one charge, Detonate).
+const THROW_ENABLED := [true, true, false]
 const SCENE_BARRELS := 1
 const SCENE_MUSHROOM := 2
 const CHARGE_SCALE_MIN := 0.5
@@ -18,7 +20,9 @@ const CHARGE_SCALE_STEP := 0.05
 
 var scene_option: OptionButton
 var charge_slider: HSlider
+var throw_action: Button
 var detonate_action: Button
+var scene_action: Button
 var slow_action: Button
 var settings := ExplosionSettings.new()
 var blast_slider: HSlider
@@ -40,13 +44,15 @@ static func slow_label(scale: float) -> String:
 	return "Slow " + String.num(scale) + "×"
 
 
-## [param controller] must provide set_scene, set_charge_scale, throw_ball, detonate_scene, clear_smoke,
+## [param controller] must provide set_scene, next_scene, set_charge_scale, throw_ball, detonate_scene, clear_smoke,
 ## set_paused, cycle_slow and reset_simulation.
 func build(menu: SimMenu, controller: Node) -> void:
 	_menu = menu
-	menu.add_action("💥", "Throw", controller.throw_ball)
+	throw_action = menu.add_action("💥", "Throw", controller.throw_ball)
 	detonate_action = menu.add_action("🧨", DETONATE_LABELS[0], controller.detonate_scene)
 	menu.add_action("🌫", "Clear smoke", controller.clear_smoke)
+	scene_action = menu.add_action("🎬", SCENES[0], controller.next_scene)
+	menu.add_action("↺", "Reset", controller.reset_simulation)
 	menu.add_action_toggle("⏸", "Pause", false, controller.set_paused)
 	slow_action = menu.add_action("🐢", slow_label(1.0), controller.cycle_slow)
 	menu.add_section("Explosions")
@@ -83,6 +89,8 @@ func set_slow_label(scale: float) -> void:
 func show_scene(index: int) -> void:
 	scene_option.select(index)
 	_menu.set_action_label(detonate_action, DETONATE_LABELS[index])
+	_menu.set_action_label(scene_action, SCENES[index])
+	throw_action.visible = THROW_ENABLED[index]
 	hint_label.text = HINTS[index]
 	_menu.set_slider_value(darkness_slider, settings.darkness)
 	blast_slider.get_parent().visible = ExplosionSettings.force_acts(index)
