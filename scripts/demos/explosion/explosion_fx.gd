@@ -18,7 +18,19 @@ static var _spark_material: StandardMaterial3D
 static var _spark_ramp: GradientTexture1D
 
 
+var system: ExplosionSystem
+var _hearth: OmniLight3D
+
+
+## Wires the effects to [param source]; [param hearth] is the light that follows each detonation.
+func attach(source: ExplosionSystem, hearth: OmniLight3D) -> void:
+	system = source
+	_hearth = hearth
+	source.detonated.connect(on_detonated)
+
+
 func on_detonated(origin: Vector3, charge: ExplosionCharge) -> void:
+	_hearth.position = origin
 	_flash(origin, charge)
 	_ring(origin, charge)
 	_sparks(origin, charge)
@@ -47,7 +59,8 @@ func _flash(origin: Vector3, charge: ExplosionCharge) -> void:
 ## The shell grows at the real blast speed from the charge radius to the blast radius.
 func _ring(origin: Vector3, charge: ExplosionCharge) -> void:
 	var span_m := charge.blast_radius_m - charge.radius_m
-	if charge.blast_speed_mps <= 0.0 or span_m <= 0.0:
+	var speed_mps := system.blast_speed_mps(charge)
+	if speed_mps <= 0.0 or span_m <= 0.0:
 		return
 	var ring := MeshInstance3D.new()
 	ring.mesh = _shared_ring_mesh()
@@ -57,7 +70,7 @@ func _ring(origin: Vector3, charge: ExplosionCharge) -> void:
 	add_child(ring)
 	var tween := ring.create_tween()
 	tween.tween_method(_step_ring.bind(ring, charge.radius_m, charge.blast_radius_m), 0.0, 1.0,
-		span_m / charge.blast_speed_mps)
+		span_m / speed_mps)
 	tween.finished.connect(ring.queue_free)
 
 
@@ -68,7 +81,7 @@ func _step_ring(t: float, ring: MeshInstance3D, from_m: float, to_m: float) -> v
 
 func _sparks(origin: Vector3, charge: ExplosionCharge) -> void:
 	var size := clampf(charge.radius_m / SPARK_BARREL_RADIUS_M, 0.5, 20.0)
-	var speed_mps := clampf(charge.blast_speed_mps * 1.2, 6.0, SPARK_MAX_SPEED_MPS)
+	var speed_mps := clampf(system.blast_speed_mps(charge) * 1.2, 6.0, SPARK_MAX_SPEED_MPS)
 	var life_s := 0.9 * sqrt(size)
 	var material := ParticleProcessMaterial.new()
 	material.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE

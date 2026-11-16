@@ -77,7 +77,7 @@ func detonate() -> void:
 	var origin := global_position
 	origin.y = maxf(origin.y, charge.radius_m)
 	system.detonate(origin, charge)
-	BarrelDebris.spawn(get_parent(), global_transform, charge.blast_speed_mps, rng)
+	BarrelDebris.spawn(get_parent(), global_transform, system.blast_speed_mps(charge), rng)
 	queue_free()
 
 

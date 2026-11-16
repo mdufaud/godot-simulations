@@ -72,6 +72,11 @@ func set_render_scale(mode: Viewport.Scaling3DMode, scale: float) -> void:
 	_viewport.scaling_3d_scale = scale
 
 
+## Puts the entry mode and scale back without touching MSAA, TAA or measurement.
+func restore_render_scale() -> void:
+	set_render_scale(_scaling_mode, _scaling_scale)
+
+
 ## Enables the per-frame timestamp pair the GPU render-time read costs, and
 ## remembers it so release() can undo exactly this write.
 func set_measure_render_time(enabled: bool) -> void:

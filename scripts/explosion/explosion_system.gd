@@ -21,6 +21,8 @@ var solver: FireGpuSolver
 var fixed_delta_s := -1.0
 ## Curl-noise strength the solver ramps in after each pulse; starts at the config value, a capture harness may override it.
 var turbulence_strength := 0.0
+## Multiplies the shock speed handed to rigid bodies by [signal blast]; read when a charge is released.
+var blast_force_scale := 1.0
 
 var _pending: Array[Dictionary] = []
 var _slots: Array[Dictionary] = []
@@ -114,13 +116,29 @@ func reset() -> void:
 		return
 	solver.reset_clock()
 	_vorticity_ramp = 0.0
-	RenderingServer.call_on_render_thread(solver.clear_fields)
+	clear_smoke()
+
+
+## Empties the gas fields only: queued detonations and running pulses carry on.
+func clear_smoke() -> void:
+	if _started:
+		RenderingServer.call_on_render_thread(solver.clear_fields)
+
+
+## Seconds of simulation this frame advances: the capture's fixed step when set, else [param delta].
+func step_s(delta: float) -> float:
+	return fixed_delta_s if fixed_delta_s >= 0.0 else delta
+
+
+## Shock speed of [param charge] as the bodies and the visible rings feel it.
+func blast_speed_mps(charge: ExplosionCharge) -> float:
+	return charge.blast_speed_mps * blast_force_scale
 
 
 func _process(delta: float) -> void:
 	if not _started or not solver.initialized:
 		return
-	var steps := solver.schedule_steps(fixed_delta_s if fixed_delta_s >= 0.0 else delta)
+	var steps := solver.schedule_steps(step_s(delta))
 	advance(float(steps) * solver.timestep)
 	_warn_on_exhaustion()
 	RenderingServer.call_on_render_thread(ExplosionSystem._step_render.bind(solver, steps))
@@ -161,7 +179,7 @@ func _release_next() -> void:
 	if charge.continuous:
 		return
 	detonated.emit(origin, charge)
-	blast.emit(origin, charge.blast_radius_m, charge.blast_speed_mps)
+	blast.emit(origin, charge.blast_radius_m, blast_speed_mps(charge))
 
 
 ## Rates are uploaded at the slot's current age, then the age advances.

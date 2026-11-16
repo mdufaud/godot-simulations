@@ -9875,3 +9875,467 @@ func _run_fire_camp() -> void:
 	print("FIRE_CAMP spectrum_top=%s" % str(ranked.slice(0, 6)))
 	print("FIRE_CAMP DONE")
 	quit(0)
+
+
+const ACTIONS_SCENE := "res://scenes/explosion_demo.tscn"
+
+
+func _actions_wait(_demo: Node, seconds: float) -> void:
+	var end := Time.get_ticks_msec() + int(seconds * 1000.0)
+	while Time.get_ticks_msec() < end:
+		await process_frame
+
+
+func _actions_mouse(button: int, pressed: bool, at: Vector2) -> void:
+	var event := InputEventMouseButton.new()
+	event.button_index = button
+	event.pressed = pressed
+	event.position = at
+	event.global_position = at
+	Input.parse_input_event(event)
+	await process_frame
+
+
+func _actions_click(at: Vector2) -> void:
+	await _actions_mouse(MOUSE_BUTTON_LEFT, true, at)
+	await _actions_mouse(MOUSE_BUTTON_LEFT, false, at)
+
+
+func _actions_watch(demo: Node, events: Array) -> void:
+	events.clear()
+	demo.explosion.detonated.connect(func(origin: Vector3, charge: ExplosionCharge) -> void:
+		events.append({origin = origin, flash = charge.flash_energy, radius = charge.radius_m}))
+
+
+func _actions_caption(button: Button) -> String:
+	return (button.find_child("ActionCaption", true, false) as Label).text
+
+
+func _actions_balls(demo: Node) -> int:
+	var count := 0
+	for child in demo.projectile_root.get_children():
+		if child is RigidBody3D and not child.is_queued_for_deletion():
+			count += 1
+	return count
+
+
+func _actions_rates(demo: Node) -> Vector2:
+	var solver: FireGpuSolver = demo.explosion.solver
+	var sim0 := solver.simulation_time
+	var wall0 := solver.wall_time
+	var real0 := Time.get_ticks_msec()
+	await _actions_wait(demo, 2.0)
+	var real_s := float(Time.get_ticks_msec() - real0) / 1000.0
+	return Vector2((solver.simulation_time - sim0) / solver.timestep / real_s, (solver.wall_time - wall0) / real_s)
+
+
+func _actions_fuse_s(demo: Node) -> float:
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	await _actions_wait(demo, 0.3)
+	var barrel: ExplosiveBarrel = demo._scenery._barrels[0]
+	barrel.apply_blast(barrel.global_position + Vector3(1.0, 0.0, 0.0), 6.0, 20.0)
+	var start := Time.get_ticks_msec()
+	while is_instance_valid(barrel) and not barrel.detonated and Time.get_ticks_msec() - start < 20000:
+		await process_frame
+	return float(Time.get_ticks_msec() - start) / 1000.0
+
+
+func _run_explosion_actions() -> void:
+	root.size = Vector2i(1280, 720)
+	var demo: Node = (load(ACTIONS_SCENE) as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 60000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	_check(demo.capture_ready(), "explosion_actions: demo did not initialise")
+	if not demo.capture_ready():
+		_finish("explosion_actions")
+		return
+	var events := []
+	var camera: Camera3D = demo.camera
+	var size := Vector2(root.size)
+
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	_check(_actions_caption(demo._menu_builder.detonate_action) == "Detonate barrel", "barrels label")
+	await _actions_wait(demo, 1.0)
+	_actions_watch(demo, events)
+	demo.orbit_cam.min_distance = 4.0
+	demo.orbit_cam.distance = 6.0
+	demo.orbit_cam.target = Vector3(0.0, 1.0, 0.0)
+	await _actions_wait(demo, 0.3)
+	var target: ExplosiveBarrel = demo._scenery._barrels[5]
+	var aimed := Vector3(target.position.x, 0.0, target.position.z)
+	var screen := camera.unproject_position(target.global_position)
+	var yaw := float(demo.orbit_cam.yaw)
+	await _actions_mouse(MOUSE_BUTTON_LEFT, true, size * 0.5)
+	for i in 3:
+		var motion := InputEventMouseMotion.new()
+		motion.relative = Vector2(20.0, 0.0)
+		motion.position = size * 0.5 + Vector2(20.0 * (i + 1), 0.0)
+		Input.parse_input_event(motion)
+		await process_frame
+	await _actions_mouse(MOUSE_BUTTON_LEFT, false, size * 0.5 + Vector2(60.0, 0.0))
+	_check(_actions_balls(demo) == 0 and not is_equal_approx(float(demo.orbit_cam.yaw), yaw),
+		"explosion_actions: a left drag orbits and throws nothing")
+	demo.orbit_cam.yaw = yaw
+	await _actions_wait(demo, 0.3)
+	screen = camera.unproject_position(target.global_position)
+	var impacts := []
+	demo.launcher.impact.connect(func(at: Vector3, _r: float, _i: float) -> void: impacts.append(at))
+	await _actions_click(screen)
+	_check(_actions_balls(demo) == 1, "explosion_actions: a left click throws one ball")
+	await _actions_wait(demo, 3.0)
+	var fireballs := 0
+	for entry in events:
+		fireballs += 1 if entry.flash == 0.0 else 0
+	var first_hit := Vector3(events[0].origin.x, 0.0, events[0].origin.z) if not events.is_empty() else Vector3(99, 0, 99)
+	var target_gone := not is_instance_valid(target) or target.detonated
+	print("EXPLOSION ACTIONS impacts=%s aimed=%s screen=%s" % [str(impacts), str(aimed), str(screen)])
+	print("EXPLOSION ACTIONS barrel_hit detonations=%d fireball_charges=%d first_hit_dist_m=%.2f target_gone=%s" % [
+		events.size(), fireballs, first_hit.distance_to(aimed), str(target_gone)])
+	_check(target_gone and fireballs == 0 and first_hit.distance_to(aimed) < 1.0,
+		"explosion_actions: the ball must detonate the barrel it hit, not spawn a fireball")
+
+	demo.reset_simulation()
+	await _actions_wait(demo, 1.0)
+	_actions_watch(demo, events)
+	screen = camera.unproject_position(Vector3(10.0, 0.0, 5.0))
+	await _actions_click(screen)
+	await _actions_wait(demo, 3.0)
+	var any_barrel := false
+	for barrel in demo._scenery._barrels:
+		any_barrel = any_barrel or not is_instance_valid(barrel) or barrel.detonated
+	print("EXPLOSION ACTIONS ground_hit detonations=%d barrel_detonated=%s" % [events.size(), str(any_barrel)])
+	_check(events.is_empty() and not any_barrel, "explosion_actions: a ball on the ground makes no explosion in barrels")
+	await _actions_click(screen)
+	var late_ball: RigidBody3D = null
+	for child in demo.projectile_root.get_children():
+		late_ball = child as RigidBody3D if late_ball == null else late_ball
+	await _actions_wait(demo, 0.5)
+	var late_target: ExplosiveBarrel = demo._scenery._barrels[0]
+	if late_ball != null and is_instance_valid(late_ball):
+		late_ball.linear_velocity = Vector3.ZERO
+		late_ball.global_position = late_target.global_position + Vector3(ExplosiveBarrel.RADIUS_M + 0.1, 0.0, 0.0)
+	await _actions_wait(demo, 1.0)
+	print("EXPLOSION ACTIONS late_hit ball_found=%s barrel_detonated=%s" % [str(late_ball != null),
+		str(not is_instance_valid(late_target) or late_target.detonated)])
+	_check(late_ball != null and (not is_instance_valid(late_target) or late_target.detonated),
+		"explosion_actions: a ball that touched the ground first still detonates a barrel it reaches later")
+
+	var expected := ["Detonate aim", "Detonate barrel", "Detonate"]
+	for index in 3:
+		demo.set_scene(index)
+		await _actions_wait(demo, 1.0)
+		_actions_watch(demo, events)
+		var light_before: int = demo.projectile_root.get_child_count()
+		demo.detonate_scene()
+		await _actions_wait(demo, 0.3)
+		var lights := 0
+		for child in demo.projectile_root.get_children():
+			lights += 1 if child is OmniLight3D else 0
+		print("EXPLOSION ACTIONS detonate scene=%d label=%s detonations=%d flash_lights=%d origin=%s" % [
+			index, _actions_caption(demo._menu_builder.detonate_action), events.size(), lights,
+			str(events[0].origin) if not events.is_empty() else "none"])
+		_check(_actions_caption(demo._menu_builder.detonate_action) == expected[index], "explosion_actions: label scene %d" % index)
+		_check(events.size() == 1, "explosion_actions: Detonate in scene %d must fire exactly one detonation" % index)
+		if index == 0:
+			_check(lights == 1 and light_before == 0 and events.size() == 1 and absf(events[0].origin.y - events[0].radius) < 1e-3,
+				"explosion_actions: range Detonate must flash and sit on the ground")
+
+	demo.set_scene(0)
+	await _actions_wait(demo, 1.0)
+	var solver: FireGpuSolver = demo.explosion.solver
+	var explosion_before: ExplosionSystem = demo.explosion
+	var root_before: Node = demo._scenery._root
+	var baseline := int(solver.get_debug_pool_stats().get("resident", 0))
+	demo.detonate_scene()
+	await _actions_wait(demo, 2.0)
+	var busy := int(solver.get_debug_pool_stats().get("resident", 0))
+	demo.clear_smoke()
+	var after := busy
+	var frames := 0
+	while frames < 90 and after > baseline + 2:
+		await process_frame
+		frames += 1
+		after = int(solver.get_debug_pool_stats().get("resident", 0))
+	print("EXPLOSION ACTIONS clear baseline=%d busy=%d after=%d frames=%d same_system=%s same_scenery=%s" % [
+		baseline, busy, after, frames, str(demo.explosion == explosion_before), str(demo._scenery._root == root_before)])
+	_check(busy > baseline + 2 and after <= baseline + 2, "explosion_actions: clear smoke must return resident tiles to the baseline")
+	_check(demo.explosion == explosion_before and demo._scenery._root == root_before, "explosion_actions: clear smoke must not rebuild")
+	var queued := ExplosionScenery.base_charge(0)
+	for i in 4:
+		demo.explosion.detonate(Vector3(float(i), 1.0, 0.0), queued)
+	demo.detonate_scene()
+	var pending_before: int = demo.explosion.pending_count()
+	demo.clear_smoke()
+	var follow_live: bool = demo._scenery._follow.is_following()
+	var rings_left: int = demo._scenery._dust._rings.size()
+	var fx_left: int = demo._fx.get_child_count()
+	print("EXPLOSION ACTIONS clear_all pending=%d->%d follow_live=%s dust_rings=%d fx_nodes_queued_for_free=%d" % [
+		pending_before, demo.explosion.pending_count(), str(follow_live), rings_left, fx_left])
+	_check(demo.explosion.pending_count() == pending_before and pending_before >= 4 and not follow_live and rings_left == 0,
+		"explosion_actions: clear smoke keeps queued detonations and stops the follow and the dust rings")
+
+	await _actions_wait(demo, 0.5)
+	var rate_full := await _actions_rates(demo)
+	demo.cycle_slow()
+	await _actions_wait(demo, 0.5)
+	var rate_half := await _actions_rates(demo)
+	var fuse_half := await _actions_fuse_s(demo)
+	demo.cycle_slow()
+	demo.cycle_slow()
+	var fuse_full := await _actions_fuse_s(demo)
+	demo.cycle_slow()
+	demo.set_scene(0)
+	await _actions_wait(demo, 1.0)
+	solver = demo.explosion.solver
+	print("EXPLOSION ACTIONS slow time_scale=%.2f steps_per_s=%.1f->%.1f solver_clock=%.2f->%.2f fuse_s=%.2f->%.2f fuse_ratio=%.2f" % [
+		Engine.time_scale, rate_full.x, rate_half.x, rate_full.y, rate_half.y, fuse_full, fuse_half,
+		fuse_half / fuse_full])
+	_check(is_equal_approx(Engine.time_scale, 0.5), "explosion_actions: slow motion sets the engine clock to 0.5")
+	_check(rate_half.y / rate_full.y < 0.6 and rate_half.y / rate_full.y > 0.4, "explosion_actions: solver clock must halve")
+	_check(rate_half.x / rate_full.x < 0.6 and rate_half.x / rate_full.x > 0.4, "explosion_actions: solver substeps per second must halve")
+	_check(fuse_half / fuse_full > 1.7 and fuse_half / fuse_full < 2.4, "explosion_actions: fuse real time must double")
+
+	demo.set_paused(true)
+	await _actions_wait(demo, 0.3)
+	var paused_sim := solver.simulation_time
+	var paused_wall := solver.wall_time
+	demo.detonate_scene()
+	await _actions_wait(demo, 0.3)
+	var flash: OmniLight3D
+	for child in demo.projectile_root.get_children():
+		if child is OmniLight3D:
+			flash = child
+	var flash_before := flash.light_energy if flash != null else -1.0
+	await _actions_wait(demo, 1.5)
+	var flash_after := flash.light_energy if flash != null else -2.0
+	print("EXPLOSION ACTIONS pause time_scale=%.2f sim_delta=%.4f wall_delta=%.4f flash=%.3f->%.3f" % [
+		Engine.time_scale, solver.simulation_time - paused_sim, solver.wall_time - paused_wall, flash_before, flash_after])
+	_check(Engine.time_scale == 0.0 and solver.wall_time == paused_wall, "explosion_actions: pause stops the solver clock")
+	_check(flash != null and is_equal_approx(flash_before, flash_after), "explosion_actions: pause freezes the flash tween")
+	demo.set_paused(false)
+	var resume_sim := solver.simulation_time
+	var resume_real := Time.get_ticks_msec()
+	var worst_frame_steps := 0
+	while Time.get_ticks_msec() - resume_real < 1000:
+		await process_frame
+		worst_frame_steps = maxi(worst_frame_steps, solver.last_substeps)
+	var resume_s := float(Time.get_ticks_msec() - resume_real) / 1000.0
+	var resume_sim_s := solver.simulation_time - resume_sim
+	print("EXPLOSION ACTIONS resume sim_s=%.3f real_s=%.3f worst_frame_substeps=%d cap=%d" % [
+		resume_sim_s, resume_s, worst_frame_steps, solver.max_catchup_steps])
+	_check(resume_sim_s <= resume_s * 0.5 + 0.05, "explosion_actions: no catch-up burst after resume (slow 0.5x)")
+	demo.queue_free()
+	await _boot_frames(2)
+	_check(Engine.time_scale == 1.0, "explosion_actions: leaving the demo restores the engine clock")
+	_finish("explosion_actions")
+
+
+func _settings_boot() -> Node:
+	root.size = Vector2i(1280, 720)
+	var demo: Node = (load(ACTIONS_SCENE) as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 60000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return demo
+
+
+func _settings_vec(value: Variant) -> String:
+	var v: Vector3 = value
+	return "(%.3f,%.3f,%.3f)" % [v.x, v.y, v.z]
+
+
+# Frame-averaged GPU ms of the main viewport and of the half-resolution volume viewport after the chain starts.
+func _settings_gpu_ms(demo: Node, frames: int) -> Vector2:
+	var main_rid := root.get_viewport_rid()
+	var volume_rid: RID = demo.presentation._volume_vp.get_viewport_rid()
+	RenderingServer.viewport_set_measure_render_time(main_rid, true)
+	RenderingServer.viewport_set_measure_render_time(volume_rid, true)
+	var main_sum := 0.0
+	var volume_sum := 0.0
+	for i in 20:
+		await process_frame
+	for i in frames:
+		await process_frame
+		main_sum += RenderingServer.viewport_get_measured_render_time_gpu(main_rid)
+		volume_sum += RenderingServer.viewport_get_measured_render_time_gpu(volume_rid)
+	RenderingServer.viewport_set_measure_render_time(main_rid, false)
+	RenderingServer.viewport_set_measure_render_time(volume_rid, false)
+	return Vector2(main_sum, volume_sum) / float(frames)
+
+
+func _run_explosion_settings() -> void:
+	var demo := await _settings_boot()
+	_check(demo.capture_ready(), "explosion_settings: demo did not initialise")
+	if not demo.capture_ready():
+		_finish("explosion_settings")
+		return
+	var menu: ExplosionMenu = demo._menu_builder
+	var settings: ExplosionSettings = menu.settings
+	var material: ShaderMaterial = demo.presentation.volume_material
+
+	for scene in 3:
+		demo.set_scene(scene)
+		await _actions_wait(demo, 0.3)
+		var shown: float = menu.darkness_slider.value
+		var used: Vector3 = demo.presentation.volume_material.get_shader_parameter("smoke_albedo")
+		var ambient: Vector3 = demo.presentation.volume_material.get_shader_parameter("smoke_ambient_rgb")
+		print("EXPLOSION SETTINGS default_darkness scene=%d slider=%.2f albedo=%s ambient=%s" % [
+			scene, shown, _settings_vec(used), _settings_vec(ambient)])
+		_check(used.is_equal_approx(ExplosionSettings.albedo_for(shown)), "explosion_settings: scene %d slider shows the albedo in use" % scene)
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	await _actions_wait(demo, 0.5)
+	var speeds := []
+	demo.explosion.blast.connect(func(_o: Vector3, _r: float, speed: float) -> void: speeds.append(speed))
+	var base_speed := ExplosionScenery.base_charge(ExplosionMenu.SCENE_BARRELS).blast_speed_mps
+	menu.blast_slider.value = 1.5
+	demo.detonate_scene()
+	await _actions_wait(demo, 0.5)
+	var blast_speed: float = speeds[0] if not speeds.is_empty() else -1.0
+	print("EXPLOSION SETTINGS blast_force slider=%.2f system=%.2f emitted_speed=%.2f base=%.2f row_visible=%s" % [
+		menu.blast_slider.value, demo.explosion.blast_force_scale, blast_speed, base_speed, menu.blast_slider.get_parent().visible])
+	_check(is_equal_approx(blast_speed, base_speed * 1.5), "explosion_settings: blast force scales the emitted shock speed")
+	_check(menu.blast_slider.min_value >= ExplosionSettings.BLAST_FORCE_MIN, "explosion_settings: blast force minimum")
+
+	menu.darkness_slider.value = 0.0
+	var light_albedo: Vector3 = material.get_shader_parameter("smoke_albedo")
+	menu.darkness_slider.value = 1.0
+	var black_albedo: Vector3 = material.get_shader_parameter("smoke_albedo")
+	demo.reset_simulation()
+	var after_reset: Vector3 = material.get_shader_parameter("smoke_albedo")
+	demo.set_scene(ExplosionMenu.SCENE_MUSHROOM)
+	var after_scene: Vector3 = demo.presentation.volume_material.get_shader_parameter("smoke_albedo")
+	material = demo.presentation.volume_material
+	print("EXPLOSION SETTINGS darkness 0=%s 1=%s after_reset=%s after_scene_change=%s soot_fraction_untouched=%s" % [
+		_settings_vec(light_albedo), _settings_vec(black_albedo), _settings_vec(after_reset), _settings_vec(after_scene),
+		str(demo._capture.soot_fraction < 0.0)])
+	_check(light_albedo.is_equal_approx(ExplosionSettings.ALBEDO_LIGHT) and black_albedo.is_equal_approx(ExplosionSettings.ALBEDO_BLACK),
+		"explosion_settings: darkness drives smoke_albedo from light grey to black")
+	_check(after_reset.is_equal_approx(black_albedo) and after_scene.is_equal_approx(black_albedo),
+		"explosion_settings: the chosen darkness survives reset and scene change")
+
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	menu.wind_slider.value = 2.5
+	menu.wind_dir_slider.value = 90.0
+	var wind: Vector3 = demo.explosion.solver.wind
+	demo.set_scene(ExplosionMenu.SCENE_MUSHROOM)
+	menu.wind_slider.value = 99.0
+	var capped: Vector3 = demo.explosion.solver.wind
+	print("EXPLOSION SETTINGS wind barrels(2.5 m/s, 90deg)=%s mushroom_request_99=%s cap=%.1f" % [
+		_settings_vec(wind), _settings_vec(capped), ExplosionSettings.wind_max(ExplosionMenu.SCENE_MUSHROOM)])
+	_check(wind.is_equal_approx(Vector3(0.0, 0.0, 2.5)), "explosion_settings: wind speed and direction reach the solver")
+	_check(is_equal_approx(capped.length(), ExplosionSettings.wind_max(ExplosionMenu.SCENE_MUSHROOM)),
+		"explosion_settings: the mushroom wind is capped")
+
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	material = demo.presentation.volume_material
+	var base_step := 0.0
+	var base_budget := 0
+	for level in 3:
+		menu.quality_option.select(level)
+		menu.quality_option.item_selected.emit(level)
+		var step: float = material.get_shader_parameter("march_step")
+		var budget: int = material.get_shader_parameter("march_budget")
+		if level == ExplosionSettings.QUALITY_MEDIUM:
+			base_step = step
+			base_budget = budget
+		print("EXPLOSION SETTINGS quality=%s march_step=%.3f march_budget=%d half_res=%s render_scale=%.2f" % [
+			ExplosionSettings.QUALITY_NAMES[level], step, budget, str(demo.presentation._volume_half_res),
+			root.scaling_3d_scale])
+		_check(is_equal_approx(root.scaling_3d_scale, ExplosionSettings.QUALITY_LEVELS[level].render_scale),
+			"explosion_settings: quality %d render scale" % level)
+	menu.quality_option.item_selected.emit(0)
+	_check(float(material.get_shader_parameter("march_step")) > base_step and int(material.get_shader_parameter("march_budget")) < base_budget,
+		"explosion_settings: Low marches coarser and shorter than Medium")
+
+	menu.detail_slider.value = 0.0
+	var mode_off: int = material.get_shader_parameter("billow_mode")
+	menu.detail_slider.value = 0.5
+	var mode_on: int = material.get_shader_parameter("billow_mode")
+	var strength: float = material.get_shader_parameter("billow_strength")
+	print("EXPLOSION SETTINGS detail 0 -> billow_mode=%d, 0.5 -> billow_mode=%d billow_strength=%.2f preset_strength=%.2f" % [
+		mode_off, mode_on, strength, demo.explosion.config.billow.strength])
+	_check(mode_off == 0 and mode_on > 0 and is_equal_approx(strength, 0.5), "explosion_settings: surface detail drives the billow strength")
+	_check(is_equal_approx(demo.explosion.config.billow.strength, 1.0), "explosion_settings: the preset billow is never mutated")
+
+	demo.set_scene(0)
+	_check(not menu.blast_slider.get_parent().visible, "explosion_settings: blast force is hidden where no body feels it")
+	demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+	_check(menu.blast_slider.get_parent().visible, "explosion_settings: blast force is shown with barrels")
+
+	menu.detail_slider.value = 1.0
+	for level in 3:
+		menu.quality_option.select(level)
+		menu.quality_option.item_selected.emit(level)
+		demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+		await _actions_wait(demo, 1.0)
+		demo.detonate_scene()
+		var ms := await _settings_gpu_ms(demo, 120)
+		print("EXPLOSION SETTINGS gpu quality=%s main_ms=%.2f volume_vp_ms=%.2f" % [
+			ExplosionSettings.QUALITY_NAMES[level], ms.x, ms.y])
+	menu.quality_option.item_selected.emit(ExplosionSettings.QUALITY_MEDIUM)
+	demo.queue_free()
+	await _boot_frames(2)
+	_check(is_equal_approx(root.scaling_3d_scale, 1.0), "explosion_settings: leaving the demo restores the render scale")
+	_finish("explosion_settings")
+
+
+func _run_explosion_chain() -> void:
+	var demo := await _settings_boot()
+	var menu: ExplosionMenu = demo._menu_builder
+	var forces: Array[float] = []
+	for value in _extra:
+		forces.append(float(value))
+	for force in forces:
+		var count := [0]
+		demo.set_scene(ExplosionMenu.SCENE_BARRELS)
+		demo.explosion.detonated.connect(func(_o: Vector3, _c: ExplosionCharge) -> void: count[0] += 1)
+		menu.blast_slider.min_value = 0.0
+		menu.blast_slider.value = force
+		await _actions_wait(demo, 0.5)
+		demo.detonate_scene()
+		var start := Time.get_ticks_msec()
+		while count[0] < 8 and Time.get_ticks_msec() - start < 12000:
+			await process_frame
+		print("EXPLOSION CHAIN force=%.2f detonations=%d/8 after_s=%.1f" % [
+			force, count[0], float(Time.get_ticks_msec() - start) / 1000.0])
+	demo.queue_free()
+	await _boot_frames(2)
+	print("EXPLOSION CHAIN DONE")
+	quit(0)
+
+
+# explosion_soak <scene> <frames> <charge> <wind_mps> [wind_deg]: fixed 60 Hz steps, then the pool counters.
+func _run_explosion_soak() -> void:
+	var scene_index := int(_extra[0]) if _extra.size() > 0 else 2
+	var frames := int(_extra[1]) if _extra.size() > 1 else 3600
+	var charge := float(_extra[2]) if _extra.size() > 2 else 1.0
+	var wind_mps := float(_extra[3]) if _extra.size() > 3 else 0.0
+	var wind_deg := float(_extra[4]) if _extra.size() > 4 else 0.0
+	var demo := await _settings_boot()
+	demo.set_capture_scene(scene_index)
+	demo.set_capture_fixed_delta(0.0166667)
+	demo.set_frozen(true)
+	for i in 3:
+		await process_frame
+	await demo.set_capture_params({"charge_scale": charge})
+	demo.set_charge_scale(demo.charge_scale)
+	demo._menu_builder.settings.wind_mps = wind_mps
+	demo._menu_builder.settings.wind_deg = wind_deg
+	demo._menu_builder.settings.apply_wind()
+	for i in 60:
+		await process_frame
+	demo.set_frozen(false)
+	for i in frames:
+		await process_frame
+	var pool_out := {}
+	RenderingServer.call_on_render_thread(_blast_pool_read.bind(demo.explosion.solver, pool_out))
+	await _fire_parity_wait(pool_out, 60000)
+	var failed := _blast_pool_report(pool_out, "explosion_soak", demo._peak_tiles)
+	var stats: Dictionary = demo.explosion.solver.get_stats()
+	print("EXPLOSION SOAK scene=%d frames=%d charge=%.2f (applied %.2f) wind=%.1f@%.0f peak_tiles=%d max_temp=%d" % [
+		scene_index, frames, charge, demo.charge_scale, wind_mps, wind_deg, demo._peak_tiles, int(stats["max_temperature"])])
+	print("EXPLOSION SOAK %s" % ("FAIL" if failed or demo._peak_tiles >= int(pool_out["stats"]["budget"]) else "DONE"))
+	quit(1 if failed else 0)

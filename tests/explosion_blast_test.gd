@@ -5,6 +5,9 @@ const RANGE_CONFIG := preload("res://resources/explosion/presets/range.tres")
 const FIREBALL_RANGE_CONFIG := preload("res://resources/explosion/presets/fireball_range.tres")
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
 const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_charge.tres")
+const TEST_COUNT := 11
+
+var _completed := 0
 
 
 func _initialize() -> void:
@@ -13,6 +16,14 @@ func _initialize() -> void:
 	_test_barrel_fuse()
 	_test_validation()
 	_test_queue()
+	_test_click_and_clock()
+	_test_barrel_routing()
+	_test_charge_scale()
+	_test_settings_rules()
+	_test_camera_follow()
+	_test_dust_ring()
+	_test_presets()
+	_check(_completed == TEST_COUNT, "only %d of %d test groups ran to their end" % [_completed, TEST_COUNT])
 	_finish("explosion_blast")
 
 
@@ -42,6 +53,7 @@ func _test_impulse_law() -> void:
 	_check(behind.x < 0.0, "impulse follows the direction from the origin")
 	var on_top := ExplosiveBarrel.blast_impulse(Vector3.ZERO, radius, speed, mass)
 	_check(is_equal_approx(on_top.length(), mass * speed), "centred blast still has a finite impulse")
+	_completed += 1
 
 
 func _test_barrel_fuse() -> void:
@@ -85,9 +97,10 @@ func _test_barrel_fuse() -> void:
 	twin.global_position = Vector3(10.0, 1.0, 0.0)
 	twin.apply_blast(Vector3(10.0, 1.0, 2.5), 6.0, 14.0)
 	_check(is_equal_approx(twin._fuse_left_s, fuse), "same seed gives the same fuse")
-	system.free()
 	barrel.free()
 	twin.free()
+	system.free()
+	_completed += 1
 
 
 func _test_validation() -> void:
@@ -134,6 +147,7 @@ func _test_validation() -> void:
 	config.turbulence_wavelength_m = config.cell_size_m
 	_check(config.validate() == "", "a disabled disturbance skips its wavelength check")
 	_test_billow_config()
+	_test_glow_window()
 	var charge := BARREL_CHARGE.duplicate() as ExplosionCharge
 	charge.radius_m = 0.0
 	_check(charge.validate() != "", "zero radius is refused")
@@ -151,6 +165,7 @@ func _test_validation() -> void:
 	system.detonate(Vector3.ZERO, strong)
 	_check(system.pending_count() == 0, "a charge past the residency bound is refused")
 	system.free()
+	_completed += 1
 
 
 func _test_billow_config() -> void:
@@ -274,6 +289,7 @@ func _test_queue() -> void:
 	_check(released.size() == FireGpuSolver.MAX_BLASTS + 1, "a slot freed after pulse_duration_s takes the next one")
 	_check(system.pending_count() == 2, "one waiting detonation left the queue")
 	system.free()
+	_completed += 1
 
 
 func _make_barrel(system: ExplosionSystem, seed_value: int) -> ExplosiveBarrel:
@@ -282,3 +298,297 @@ func _make_barrel(system: ExplosionSystem, seed_value: int) -> ExplosiveBarrel:
 	barrel.charge = BARREL_CHARGE
 	barrel.rng.seed = seed_value
 	return barrel
+
+
+func _test_click_and_clock() -> void:
+	_check(ExplosionActions.is_click(Vector2(100, 100), Vector2(103, 104)), "a 5 px press-release is a click")
+	_check(not ExplosionActions.is_click(Vector2(100, 100), Vector2(107, 100)), "a 7 px press-release is a drag")
+	var actions := ExplosionActions.new()
+	var press := InputEventMouseButton.new()
+	press.button_index = MOUSE_BUTTON_LEFT
+	press.pressed = true
+	press.position = Vector2(50, 50)
+	var release := press.duplicate() as InputEventMouseButton
+	release.pressed = false
+	release.position = Vector2(52, 50)
+	_check(not actions.left_click(press) and actions.left_click(release), "press then near release fires one click")
+	_check(not actions.left_click(release), "a release without a press is not a click")
+	actions.left_click(press)
+	release.position = Vector2(90, 50)
+	_check(not actions.left_click(release), "a dragged release is not a click")
+	_check(ExplosionActions.clamp_time_scale(4.0) == 1.0 and ExplosionActions.clamp_time_scale(-1.0) == 0.0
+		and ExplosionActions.clamp_time_scale(0.5) == 0.5, "time scale clamps to [0, 1]")
+	_check(is_equal_approx(actions.cycle_slow(), 0.5) and is_equal_approx(Engine.time_scale, 0.5), "slow motion halves the engine clock")
+	actions.set_paused(true)
+	_check(Engine.time_scale == 0.0, "pause stops the engine clock")
+	actions.set_paused(false)
+	_check(is_equal_approx(Engine.time_scale, 0.5), "resume returns to the chosen slow scale")
+	actions.cycle_slow()
+	_check(is_equal_approx(actions.cycle_slow(), 1.0) and Engine.time_scale == 1.0, "the slow cycle wraps back to 1x")
+	ExplosionActions.restore_clock()
+	_completed += 1
+
+
+func _test_barrel_routing() -> void:
+	var reach := 0.12 + ExplosionActions.BARREL_HIT_TOLERANCE_M
+	var at := Vector3(2.0, 0.45, 0.0)
+	_check(ExplosionActions.barrel_touched(at, Vector3.UP, at + Vector3(ExplosiveBarrel.RADIUS_M + 0.1, 0.0, 0.0), reach),
+		"a ball at the barrel wall touches it")
+	_check(not ExplosionActions.barrel_touched(at, Vector3.UP, at + Vector3(1.5, 0.0, 0.0), reach), "a ball 1.5 m away misses")
+	_check(not ExplosionActions.barrel_touched(at, Vector3.UP, at + Vector3(0.0, 1.5, 0.0), reach), "a ball above the lid misses")
+	_check(ExplosionActions.barrel_touched(at, Vector3.RIGHT, at + Vector3(0.4, 0.2, 0.0), reach), "a tipped barrel is hit along its axis")
+	var system := ExplosionSystem.new()
+	system.config = RANGE_CONFIG
+	root.add_child(system)
+	var scenery := ExplosionScenery.new()
+	var env_node := WorldEnvironment.new()
+	env_node.environment = Environment.new()
+	var orbit := OrbitCamera.new()
+	var volume := MeshInstance3D.new()
+	volume.mesh = BoxMesh.new()
+	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new(), orbit, Camera3D.new(), volume)
+	var parent := Node3D.new()
+	root.add_child(parent)
+	scenery.build(parent, ExplosionMenu.SCENE_BARRELS, system)
+	var first := scenery._barrels[0]
+	_check(not scenery.detonate_touching(Vector3(0.0, 30.0, 0.0), reach) and system.pending_count() == 0,
+		"a ball that hits the ground detonates nothing")
+	_check(scenery.detonate_touching(first.global_position + Vector3(ExplosiveBarrel.RADIUS_M, 0.0, 0.0), reach)
+		and first.detonated and system.pending_count() == 1, "a ball that touches a barrel detonates that barrel only")
+	_check(not scenery._barrels[1].detonated, "the neighbours stay intact")
+	var scaled := ExplosionActions.scaled_charge(BARREL_CHARGE, 1.4)
+	scenery.set_barrel_charge(scaled)
+	_check(scenery._barrels[1].charge == scaled and scenery.barrel_charge == scaled, "live barrels take the scaled charge")
+	scenery.clear_effects()
+	_free_stub_host(scenery)
+	parent.free()
+	system.free()
+	_completed += 1
+
+
+func _free_stub_host_nodes(nodes: Array) -> void:
+	for node: Node in nodes:
+		node.free()
+
+
+func _free_stub_host(scenery: ExplosionScenery) -> void:
+	for node: Node in [scenery.world_env, scenery.sun, scenery.ground, scenery.orbit, scenery.camera, scenery.volume]:
+		node.free()
+
+
+func _stub_follow(system: ExplosionSystem) -> ExplosionCameraFollow:
+	var follow := ExplosionCameraFollow.new()
+	follow.orbit = OrbitCamera.new()
+	follow.orbit.distance = 20.0
+	follow.camera = Camera3D.new()
+	follow.volume = MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(10.0, 10.0, 10.0)
+	follow.volume.mesh = box
+	follow.volume.position = Vector3(20.0, 5.0, 0.0)
+	follow.system = system
+	follow.start()
+	return follow
+
+
+func _free_follow(follow: ExplosionCameraFollow) -> void:
+	for node: Node in [follow.orbit, follow.camera, follow.volume, follow]:
+		node.free()
+
+
+func _test_camera_follow() -> void:
+	var system := ExplosionSystem.new()
+	system.fixed_delta_s = 0.5
+	var origin := Vector3(4.0, 1.0, 0.0)
+	var follow := _stub_follow(system)
+	system.detonated.emit(origin, BARREL_CHARGE)
+	_check(follow.is_following(), "a detonation starts the follow")
+	for i in 12:
+		follow._process(0.0)
+	_check(absf(follow.orbit.target.x - origin.x) < 0.05, "a single charge is followed at its own origin")
+	for i in 400:
+		follow._process(0.0)
+	_check(follow.is_following(), "the follow outlasts a cloud that no longer moves")
+	follow.system.detonated.emit(origin, BARREL_CHARGE)
+	var drag := InputEventMouseMotion.new()
+	follow._unhandled_input(drag)
+	_check(follow.is_following(), "a mouse move without a button leaves the follow alone")
+	drag.button_mask = MOUSE_BUTTON_MASK_LEFT
+	follow._unhandled_input(drag)
+	_check(not follow.is_following(), "an orbit drag hands the camera back")
+	system.detonated.emit(origin, BARREL_CHARGE)
+	var wheel := InputEventMouseButton.new()
+	wheel.button_index = MOUSE_BUTTON_WHEEL_UP
+	follow._unhandled_input(wheel)
+	_check(not follow.is_following(), "the wheel hands the camera back")
+	system.detonated.emit(origin, BARREL_CHARGE)
+	Input.action_press(&"move_forward")
+	follow._process(0.0)
+	Input.action_release(&"move_forward")
+	_check(not follow.is_following(), "a move key hands the camera back")
+	follow.volume.position.y = 5.0
+	system.detonated.emit(origin, BARREL_CHARGE)
+	for i in 6:
+		follow.volume.position.y += 4.0
+		follow._process(0.0)
+	_check(follow.is_following(), "a cloud that keeps growing stays followed")
+	follow.follow_box = true
+	follow.orbit.target = Vector3.ZERO
+	system.detonated.emit(origin, BARREL_CHARGE)
+	for i in 12:
+		follow._process(0.0)
+	_check(absf(follow.orbit.target.x - follow.volume.position.x) < 0.5, "a chain is followed at the middle of its cloud")
+	system.detonated.emit(Vector3(-30.0, 1.0, 0.0), BARREL_CHARGE)
+	follow._process(0.0)
+	_check(follow.orbit.target.x > 0.0, "a new origin in the chain does not swing the camera")
+	follow.stop()
+	var held := follow.orbit.target
+	follow._process(0.0)
+	_check(follow.orbit.target == held, "a stopped follow leaves the camera where it is")
+	_free_follow(follow)
+	system.free()
+	_completed += 1
+
+
+func _test_dust_ring() -> void:
+	var system := ExplosionSystem.new()
+	system.fixed_delta_s = 0.1
+	var ring := ExplosionDustRing.new()
+	ring.system = system
+	root.add_child(ring)
+	ring.start()
+	for i in ExplosionDustRing.MAX_RINGS + 4:
+		system.detonated.emit(Vector3(float(i), 1.0, 0.0), BARREL_CHARGE)
+	_check(ring._rings.size() == ExplosionDustRing.MAX_RINGS, "concurrent rings are capped")
+	var speed_before: float = ring._rings[-1].speed_mps
+	system.blast_force_scale = 1.5
+	system.detonated.emit(Vector3.ZERO, BARREL_CHARGE)
+	_check(is_equal_approx(ring._rings[-1].speed_mps, BARREL_CHARGE.blast_speed_mps * 1.5)
+		and is_equal_approx(speed_before, BARREL_CHARGE.blast_speed_mps), "the ring travels at the force-scaled blast speed")
+	ring.clear()
+	_check(ring._rings.is_empty(), "clear drops every ring")
+	ring.free()
+	system.free()
+	_completed += 1
+
+
+func _test_presets() -> void:
+	var nuke := ExplosionScenery.NUKE_CHARGE
+	var dust := nuke.companion
+	_check(nuke.validate() == "" and dust != null and dust.validate() == "", "the nuke charge and its dust companion validate")
+	var mushroom := ExplosionSystem.new()
+	mushroom.config = ExplosionScenery.MUSHROOM_CONFIG
+	_check(ExplosionScenery.MUSHROOM_CONFIG.validate() == "" and mushroom.refusal(nuke) == "", "the nuke charge runs on the mushroom config")
+	for scene in ExplosionMenu.SCENES.size():
+		var system := ExplosionSystem.new()
+		system.config = ExplosionScenery.config_for(scene)
+		var base := ExplosionScenery.base_charge(scene)
+		var top := ExplosionActions.scaled_charge(base, ExplosionMenu.charge_scale_max(scene))
+		_check(system.refusal(top) == "", "the largest slider charge of scene %d is accepted" % scene)
+		system.free()
+	mushroom.free()
+	_completed += 1
+
+
+func _test_glow_window() -> void:
+	for config: ExplosionConfig in [RANGE_CONFIG, FIREBALL_RANGE_CONFIG, ExplosionScenery.MUSHROOM_CONFIG]:
+		_check(config.validate() == "", "preset glow window validates")
+	var config := RANGE_CONFIG.duplicate() as ExplosionConfig
+	config.glow_visible_full_k = config.glow_visible_from_k
+	_check(config.validate() != "", "a glow window with full <= from is refused")
+	config.glow_visible_from_k = 0.0
+	config.glow_visible_full_k = 0.0
+	_check(config.validate() == "", "0/0 disables the glow window")
+	config.glow_visible_full_k = 1200.0
+	_check(config.validate() == "", "a window starting at 0 K is accepted")
+
+
+func _test_charge_scale() -> void:
+	var radius := BARREL_CHARGE.radius_m
+	var scaled := ExplosionActions.scaled_charge(BARREL_CHARGE, 1.4, 0.2)
+	_check(scaled != BARREL_CHARGE and is_equal_approx(scaled.radius_m, radius * 1.4), "the scaled charge is a duplicate with the new radius")
+	_check(BARREL_CHARGE.radius_m == radius, "the preloaded preset stays untouched")
+	_check(is_equal_approx(scaled.soot_fraction, 0.2), "an explicit soot fraction overrides the copy only")
+	var nuke := ExplosionScenery.NUKE_CHARGE
+	var companion_radius := nuke.companion.radius_m
+	var big := ExplosionActions.scaled_charge(nuke, 0.5)
+	_check(big.companion != nuke.companion and nuke.companion.radius_m == companion_radius
+		and is_equal_approx(big.companion.radius_m, companion_radius * 0.5), "a companion is duplicated before it is scaled")
+	_completed += 1
+
+
+func _test_settings_rules() -> void:
+	_check(ExplosionSettings.albedo_for(0.0).is_equal_approx(ExplosionSettings.ALBEDO_LIGHT)
+		and ExplosionSettings.albedo_for(1.0).is_equal_approx(ExplosionSettings.ALBEDO_BLACK), "darkness spans light grey to black")
+	_check(ExplosionSettings.albedo_for(2.0).is_equal_approx(ExplosionSettings.ALBEDO_BLACK), "darkness is clamped")
+	_check(ExplosionSettings.wind_vector(4.0, 90.0).is_equal_approx(Vector3(0.0, 0.0, 4.0)), "wind points along the chosen heading")
+	_check(ExplosionSettings.force_acts(ExplosionMenu.SCENE_BARRELS) and not ExplosionSettings.force_acts(0)
+		and not ExplosionSettings.force_acts(ExplosionMenu.SCENE_MUSHROOM), "blast force only acts where bodies feel the blast")
+	var base := FireBillowConfig.new()
+	base.mode = 3
+	base.strength = 1.0
+	var half := ExplosionSettings.billow_for(base, 0.5)
+	_check(half != base and is_equal_approx(half.strength, 0.5) and half.mode == 3 and base.strength == 1.0,
+		"surface detail changes a duplicate, never the preset")
+	_check(ExplosionSettings.billow_for(base, 0.0).mode == 0, "surface detail 0 switches the billow off")
+	var system := ExplosionSystem.new()
+	system.config = RANGE_CONFIG
+	system.solver = FireGpuSolver.new()
+	var settings := ExplosionSettings.new()
+	settings._explosion = system
+	settings.wind_mps = 9.0
+	for scene in [0, 2]:
+		settings._scene_index = scene
+		settings.apply_wind()
+		_check(is_equal_approx(system.solver.wind.length(), ExplosionSettings.wind_max(scene)) and settings.wind_mps == 9.0,
+			"scene %d caps the applied wind and keeps the requested speed" % scene)
+	settings.wind_mps = 1.0
+	settings.apply_wind()
+	_check(is_equal_approx(system.solver.wind.length(), 1.0), "a raised cap lets the requested wind through")
+	system.free()
+	var scenery := ExplosionScenery.new()
+	var env_node := WorldEnvironment.new()
+	env_node.environment = Environment.new()
+	env_node.environment.ambient_light_color = Color(0.6, 0.7, 0.85)
+	scenery.bind(env_node, DirectionalLight3D.new(), Node3D.new(), null, null, null)
+	root.add_child(scenery.sun)
+	var gas := ExplosionSystem.new()
+	for scene in [0, ExplosionMenu.SCENE_MUSHROOM]:
+		gas.config = ExplosionScenery.config_for(scene)
+		scenery._index = scene
+		scenery._metric_scale = ExplosionScenery.metric_scale(gas.config)
+		var dark := scenery.smoke_lighting(ExplosionSettings.albedo_for(0.5))
+		var light := scenery.smoke_lighting(ExplosionSettings.albedo_for(0.0))
+		var ratio := ExplosionSettings.albedo_for(0.5) / ExplosionSettings.albedo_for(0.0)
+		_check(dark.smoke_albedo == ExplosionSettings.albedo_for(0.5)
+			and (dark.smoke_ambient_rgb / light.smoke_ambient_rgb).is_equal_approx(ratio),
+			"scene %d: the albedo and the ambient fill follow the same darkness" % scene)
+	var host := ExplosionSettings.new()
+	host.scenery = scenery
+	var presentation := FirePresentation.new()
+	presentation.solver = FireGpuSolver.new()
+	presentation.volume_material = ShaderMaterial.new()
+	presentation.volume_material.set_shader_parameter("march_step", 0.75)
+	presentation.volume_material.set_shader_parameter("march_budget", 320)
+	var guard := ViewportGuard.new()
+	var host_system := ExplosionSystem.new()
+	host_system.solver = FireGpuSolver.new()
+	host_system.config = ExplosionScenery.config_for(ExplosionMenu.SCENE_MUSHROOM)
+	for scene in [ExplosionMenu.SCENE_MUSHROOM, 0]:
+		host.attach(host_system, presentation, guard, scene)
+		scenery._index = scene
+		_check(is_equal_approx(host.darkness, ExplosionSettings.DARKNESS_DEFAULTS[scene]), "attach takes the scene %d default darkness" % scene)
+	host.attach(host_system, presentation, guard, ExplosionMenu.SCENE_MUSHROOM)
+	scenery._index = ExplosionMenu.SCENE_MUSHROOM
+	host.apply_lighting()
+	_check(is_zero_approx(host.darkness) and presentation.volume_material.get_shader_parameter("smoke_albedo") == ExplosionSettings.ALBEDO_LIGHT,
+		"the mushroom starts at the light albedo through attach and lighting")
+	host.set_darkness(0.9)
+	host.attach(host_system, presentation, guard, 0)
+	_check(is_equal_approx(host.darkness, 0.9), "a chosen darkness survives a scene switch")
+	host_system.free()
+	presentation.free()
+	guard.free()
+	_free_stub_host_nodes([env_node, scenery.sun, scenery.ground])
+	gas.free()
+	_completed += 1

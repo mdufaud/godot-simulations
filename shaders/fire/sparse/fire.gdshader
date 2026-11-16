@@ -438,7 +438,7 @@ void fragment() {
 					float sun_depth = 0.0;
 					float tap_step = sun_shadow_length / float(sun_shadow_taps);
 					for (int k = 0; k < sun_shadow_taps; k++) {
-						float d = (float(k) + sun_jitter) * tap_step;
+						float d = (float(k) + mix(0.5, sun_jitter, sun_jitter_strength)) * tap_step;
 						sun_depth += sample_virtual(
 							(p + sun_obj * d + volume_center - virtual_origin) / cell_size,
 							ti, current_slot, current_atlas, false).g;

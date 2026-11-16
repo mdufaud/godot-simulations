@@ -33,6 +33,10 @@ const VORTICITY_RAMP_S := 0.3
 @export_range(250.0, 4000.0, 10.0) var turbulence_band_hi_k := 1800.0
 ## Time the noise pattern takes to drift one wavelength.
 @export_range(0.05, 10.0, 0.05) var turbulence_evolution_s := 0.5
+## Emission temperature window of the render: no glow below the first, full glow from the second; both 0 = off.
+## Soot stops glowing near 800 K (Draper point), so the cold smoke skin is drawn dark instead of red-brown.
+@export_range(0.0, 4000.0, 10.0) var glow_visible_from_k := 800.0
+@export_range(0.0, 4000.0, 10.0) var glow_visible_full_k := 1200.0
 ## Render-time billow detail; its reset_s is the period of the lattices that ride the flow.
 @export var billow := FireBillowConfig.new()
 
@@ -66,6 +70,9 @@ func validate() -> String:
 	var billow_error := billow.validate()
 	if billow_error != "":
 		return "billow: " + billow_error
+	if glow_visible_from_k > 0.0 or glow_visible_full_k > 0.0:
+		if glow_visible_full_k <= glow_visible_from_k:
+			return "glow_visible_full_k must exceed glow_visible_from_k, both 0 disables the fade"
 	if turbulence_strength > 0.0:
 		var cells := turbulence_wavelength_m / cell_size_m
 		if cells < TURBULENCE_MIN_CELLS:

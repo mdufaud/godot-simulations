@@ -91,6 +91,9 @@ var _display_samples: Array[float] = []
 var _timing_solver: Object = null
 var _param_overrides: Dictionary = {}
 var _nbody_render_overrides: Dictionary = {}
+var _diag_tiles := false
+var _vol_debug := -1
+var _diag_tile_log: Array[Vector2i] = []
 
 
 func _initialize() -> void:
@@ -139,6 +142,8 @@ func _initialize() -> void:
 			"ab_tags":
 				for tag_text in value.split(",", false):
 					_ab_tags.append(tag_text)
+			"vol_debug": _vol_debug = int(value)
+			"diag_tiles": _diag_tiles = value == "1"
 			"ab_debug": _ab_debug = value == "1" or value.to_lower() == "true"
 			"nbody_star_size": _nbody_render_overrides.star_size = float(value)
 			"nbody_brightness": _nbody_render_overrides.brightness = float(value)
@@ -437,6 +442,8 @@ func _run() -> void:
 		_foam_warmup, _foam_distance, _wind_direction, _sun_elevation, _sun_azimuth, _frames,
 		_every, _size.x, _size.y, _foam_feedback, _micro_normals, _reflection,
 		_debug_view, _scene, _cascade, _jet])
+	if _vol_debug >= 0 and _demo.get("presentation") != null:
+		_demo.presentation.set_volume_parameter("debug_mode", _vol_debug)
 	var waited := 0
 	var toss_frame := maxi(1, int(_frames / 3))
 	while waited < _frames:
@@ -462,6 +469,11 @@ func _run() -> void:
 			await _grab(_numbered(capture_frame))
 		await process_frame
 		_sample_timings()
+		if _diag_tiles and _timing_solver != null:
+			var pool_stats: Dictionary = _timing_solver.get_debug_pool_stats()
+			_diag_tile_log.append(Vector2i(int(pool_stats.get("resident", 0)), int(pool_stats.get("exhausted", 0))))
+			print("CAPTURE DIAGTILE frame=%d resident=%d exhausted=%d budget=%d" % [waited + 1,
+				_diag_tile_log[-1].x, _diag_tile_log[-1].y, int(pool_stats.get("budget", 0))])
 		waited += 1
 	var final_numbered := _out if _every <= 0 and _shots.is_empty() else _numbered(waited)
 	if _demo.has_method("set_frozen"):

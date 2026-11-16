@@ -273,7 +273,19 @@ var vorticity_velocity_lo := 0.0 ## Fire-X Tab. 3, range 0.0-0.1
 var vorticity_velocity_hi := 50.0
 var vorticity_temperature_lo := 301.0 ## Fire-X Tab. 3
 
-var wind := Vector3.ZERO ## NON-PAPER: inflow boundary condition for the demo
+## NON-PAPER: inflow boundary condition for the demo. Written on the main thread, read on the render thread.
+var wind: Vector3:
+	set(value):
+		_wind_mutex.lock()
+		_wind = value
+		_wind_mutex.unlock()
+	get:
+		_wind_mutex.lock()
+		var current := _wind
+		_wind_mutex.unlock()
+		return current
+var _wind := Vector3.ZERO
+var _wind_mutex := Mutex.new()
 var gravity := 9.81 ## Buoyancy magnitude in Eq. 1
 var kinematic_viscosity := 1.5e-5 ## NON-PAPER: air at ambient, Eq. 1 nu
 var smagorinsky_cs := 0.17 ## NON-PAPER: sub-grid turbulence constant, 0 = disabled

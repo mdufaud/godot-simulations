@@ -3,13 +3,26 @@ class_name ExplosionCapture extends RefCounted
 var soot_fraction := -1.0
 
 
-## Capture overrides: charge_scale, camera_scale, soot_fraction and the billow keys of
+## Capture overrides: charge_scale, camera_scale, soot_fraction, quality (0 to 2), the menu settings smoke_darkness,
+## surface_detail, wind_speed and wind_deg (all through [ExplosionSettings]) and the billow keys of
 ## [method FireBillowConfig.apply_overrides]. The preset's billow resource is never mutated.
 func apply(controller: Node, values: Dictionary) -> void:
 	controller.charge_scale = minf(float(values.get("charge_scale", controller.charge_scale)),
 		controller._menu_builder.charge_slider.max_value)
 	ExplosionScenery.scale_distance(controller.orbit_cam, float(values.get("camera_scale", 1.0)))
 	soot_fraction = float(values.get("soot_fraction", -1.0))
+	if values.has("quality"):
+		controller._menu_builder.settings.quality = int(values.quality)
+		controller._menu_builder.settings.apply_quality()
+	var settings: ExplosionSettings = controller._menu_builder.settings
+	if values.has("smoke_darkness"):
+		settings.set_darkness(float(values.smoke_darkness))
+	if values.has("surface_detail"):
+		settings.set_detail(float(values.surface_detail))
+	if values.has("wind_speed"):
+		settings.set_wind_speed(float(values.wind_speed))
+	if values.has("wind_deg"):
+		settings.set_wind_direction(float(values.wind_deg))
 	var billow_values := {}
 	for key: String in values:
 		if key.begins_with("billow_"):

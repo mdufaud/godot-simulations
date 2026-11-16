@@ -3,6 +3,13 @@ class_name ExplosionScenery extends RefCounted
 const POST_COUNT := 8
 const POST_RING_M := 9.0
 const POST_HEIGHT_M := 3.0
+const RANGE_CONFIG := preload("res://resources/explosion/presets/range.tres")
+const FIREBALL_RANGE_CONFIG := preload("res://resources/explosion/presets/fireball_range.tres")
+const MUSHROOM_CONFIG := preload("res://resources/explosion/presets/mushroom.tres")
+const NUKE_CHARGE := preload("res://resources/explosion/presets/nuke_charge.tres")
+const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_charge.tres")
+## Cell size the raymarcher's metre constants were tuned at.
+const REFERENCE_CELL_M := 0.2
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
 const BARREL_COLUMNS := 4
 const BARREL_ROWS := 2
@@ -11,36 +18,82 @@ const BARREL_SEED := 1000
 const PLAIN_SIZE_M := 8000.0
 const TOWER_COUNT := 14
 const TOWER_SEED := 2024
-const SMOKE_ALBEDO := Vector3(0.3, 0.27, 0.24)
+## Night smoke is lit by a faint ambient that scales with its albedo.
+const NIGHT_AMBIENT_GAIN := 0.35
 const SMOKE_ABSORPTION_PER_M := 4.5
 ## Scales the sun and the sky fill; the fill is a quarter of the sun's strength at most.
 const SUN_GAIN := 0.8
-const SKY_GAIN := 0.25
+const SKY_GAIN := 0.04
 const SUN_SHADOW_TAPS := 6
-const SUN_SHADOW_LENGTH_M := 8.0
+const SUN_SHADOW_LENGTH_M := 16.0
+## Taps at mid-step: a blue-noise offset prints a 1 px stipple into the sunlit smoke.
+const SUN_JITTER_STRENGTH := 0.0
 const SUN_PHASE_G := 0.2
-## Per scene: orbit camera target, distance range, pitch, fov and far plane.
+## Sun seen from the default camera: from the side, so the cap has a lit and a shaded flank.
+const SUN_YAW_DEG := 80.0
+const SUN_ELEVATION_DEG := 35.0
+## Per scene: orbit camera target, distance range, pitch, fov and far plane, then how the
+## camera follows the cloud once a charge goes off: ease rate, whether it tracks the cap, whether it
+## aims at the middle of the whole cloud (a chain of charges).
 const FRAMING := [
 	{target = Vector3(0.0, 2.5, 0.0), distance = 14.0, min_distance = 4.0, max_distance = 40.0,
-		pitch = -10.0, fov = 60.0, far = 300.0},
+		pitch = -10.0, fov = 60.0, far = 300.0, follow_rate = 3.0, follow_top = false, follow_box = false},
 	{target = Vector3(0.0, 6.0, 0.0), distance = 30.0, min_distance = 4.0, max_distance = 40.0,
-		pitch = -15.0, fov = 60.0, far = 300.0},
-	{target = Vector3(0.0, 330.0, 0.0), distance = 1300.0, min_distance = 300.0, max_distance = 3000.0,
-		pitch = -1.5, fov = 35.0, far = 8000.0},
+		pitch = -15.0, fov = 60.0, far = 300.0, follow_rate = 3.0, follow_top = false, follow_box = true},
+	{target = Vector3(0.0, 300.0, 0.0), distance = 700.0, min_distance = 300.0, max_distance = 3000.0,
+		pitch = -1.5, fov = 35.0, far = 8000.0, follow_rate = 1.2, follow_top = true, follow_box = false},
 ]
 
 var world_env: WorldEnvironment
+var orbit: OrbitCamera
+var camera: Camera3D
+var volume: MeshInstance3D
+## Never the preloaded const's radius scaled in place: the host hands a scaled duplicate.
+var barrel_charge: ExplosionCharge = BARREL_CHARGE
 var sun: DirectionalLight3D
 var ground: Node3D
 
 var _root: Node3D
+var _follow: ExplosionCameraFollow
+var _dust: ExplosionDustRing
+var _index := 0
+var _metric_scale := 1.0
 var _barrels: Array[ExplosiveBarrel] = []
 var _night_env: Environment
 var _night_sun := {}
 
 
+static func config_for(index: int) -> ExplosionConfig:
+	if index == ExplosionMenu.SCENE_MUSHROOM:
+		return MUSHROOM_CONFIG
+	return RANGE_CONFIG if index == ExplosionMenu.SCENE_BARRELS else FIREBALL_RANGE_CONFIG
+
+
+static func base_charge(index: int) -> ExplosionCharge:
+	if index == ExplosionMenu.SCENE_MUSHROOM:
+		return NUKE_CHARGE
+	return BARREL_CHARGE if index == ExplosionMenu.SCENE_BARRELS else FIREBALL_CHARGE
+
+
+## Metre constants only grow with coarse cells; a finer grid resolves the same picture.
+static func metric_scale(config: ExplosionConfig) -> float:
+	return maxf(config.cell_size_m / REFERENCE_CELL_M, 1.0)
+
+
+func bind(host_env: WorldEnvironment, host_sun: DirectionalLight3D, host_ground: Node3D,
+		host_orbit: OrbitCamera, host_camera: Camera3D, host_volume: MeshInstance3D) -> void:
+	world_env = host_env
+	sun = host_sun
+	ground = host_ground
+	orbit = host_orbit
+	camera = host_camera
+	volume = host_volume
+
+
 func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
 	clear()
+	_index = index
+	_metric_scale = metric_scale(system.config)
 	_root = Node3D.new()
 	parent.add_child(_root)
 	_set_daylight(index == ExplosionMenu.SCENE_MUSHROOM)
@@ -50,10 +103,21 @@ func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
 		_build_plain()
 	else:
 		_build_posts()
+	_add_follow(index, system)
+
+
+## Stops what a detonation set going besides the gas: the camera follow and the dust rings.
+func clear_effects() -> void:
+	if _follow != null:
+		_follow.stop()
+	if _dust != null:
+		_dust.clear()
 
 
 func clear() -> void:
 	_barrels.clear()
+	_follow = null
+	_dust = null
 	if _root != null:
 		_root.queue_free()
 		_root = null
@@ -83,22 +147,58 @@ func detonate_first() -> bool:
 	return false
 
 
-## [param metric_scale] is the cell size over the reference 0.2 m cell, never below 1.
-func smoke_lighting(index: int, metric_scale: float) -> Dictionary:
-	if index != ExplosionMenu.SCENE_MUSHROOM:
+func set_barrel_charge(charge: ExplosionCharge) -> void:
+	barrel_charge = charge
+	for barrel in _barrels:
+		if is_instance_valid(barrel):
+			barrel.charge = charge
+
+
+## The standing barrel a ball centred at [param point] touches, or null.
+func barrel_at(point: Vector3, reach_m: float) -> ExplosiveBarrel:
+	for barrel in _barrels:
+		if is_instance_valid(barrel) and not barrel.detonated \
+				and ExplosionActions.barrel_touched(barrel.global_position, barrel.global_basis.y, point, reach_m):
+			return barrel
+	return null
+
+
+func detonate_touching(point: Vector3, reach_m: float) -> bool:
+	var barrel := barrel_at(point, reach_m)
+	if barrel != null:
+		barrel.detonate()
+	return barrel != null
+
+
+static func make_presentation(solver: FireGpuSolver, volume: MeshInstance3D, camera: Camera3D,
+		light: OmniLight3D, metric_scale: float) -> FirePresentation:
+	var presentation := FirePresentation.new()
+	presentation.solver = solver
+	presentation.fire_volume = volume
+	presentation.camera = camera
+	presentation.fire_light = light
+	presentation.proxy_margin_m *= metric_scale
+	presentation.smoke_light_gain = 0.06 if metric_scale <= 1.0 else 0.0
+	return presentation
+
+
+## Smoke lighting of the built scene for a smoke of [param albedo]; the ambient fill follows the albedo.
+func smoke_lighting(albedo: Vector3) -> Dictionary:
+	if _index != ExplosionMenu.SCENE_MUSHROOM:
 		return {sun_rgb = Vector3.ZERO, sun_shadow_taps = 0,
-			smoke_ambient_rgb = Vector3(0.0875, 0.084, 0.0805), smoke_albedo = Vector3(0.25, 0.24, 0.23)}
-	var per_m := SMOKE_ABSORPTION_PER_M / metric_scale
+			smoke_ambient_rgb = albedo * NIGHT_AMBIENT_GAIN, smoke_albedo = albedo}
+	var per_m := SMOKE_ABSORPTION_PER_M / _metric_scale
 	var sun_color := Vector3(sun.light_color.r, sun.light_color.g, sun.light_color.b)
 	var sky := world_env.environment.ambient_light_color
 	var sky_rgb := Vector3(sky.r, sky.g, sky.b) * world_env.environment.ambient_light_energy
 	return {
 		sun_dir = sun.global_basis.z,
 		sun_rgb = sun_color * (sun.light_energy * SUN_GAIN * per_m),
-		smoke_ambient_rgb = SMOKE_ALBEDO * sky_rgb * (SKY_GAIN * per_m),
-		smoke_albedo = SMOKE_ALBEDO,
+		smoke_ambient_rgb = albedo * sky_rgb * (SKY_GAIN * per_m),
+		smoke_albedo = albedo,
 		sun_shadow_taps = SUN_SHADOW_TAPS,
-		sun_shadow_length = SUN_SHADOW_LENGTH_M * metric_scale,
+		sun_jitter_strength = SUN_JITTER_STRENGTH,
+		sun_shadow_length = SUN_SHADOW_LENGTH_M * _metric_scale,
 		sun_phase_g = SUN_PHASE_G,
 	}
 
@@ -114,10 +214,30 @@ static func scale_volume(presentation: FirePresentation, metric_scale: float, co
 		march_step = 1.5 if coarse else 0.75, march_budget = 512 if coarse else 320,
 		external_scene_depth = false, scene_distance_tex = null,
 		noise_detail = 0.0, scroll_speed = 0.0,
+		glow_visible_from_k = config.glow_visible_from_k, glow_visible_full_k = config.glow_visible_full_k,
 	}
 	for key: String in values:
 		presentation.set_volume_parameter(key, values[key])
 	presentation.apply_billow(config.billow, config.cell_size_m)
+
+
+func _add_follow(index: int, system: ExplosionSystem) -> void:
+	var framing: Dictionary = FRAMING[index]
+	_follow = ExplosionCameraFollow.new()
+	_follow.orbit = orbit
+	_follow.camera = camera
+	_follow.volume = volume
+	_follow.system = system
+	_follow.home_target_y = framing.target.y
+	_follow.rate_per_s = framing.follow_rate
+	_follow.follow_top = framing.follow_top
+	_follow.follow_box = framing.follow_box
+	_root.add_child(_follow)
+	_follow.start()
+	_dust = ExplosionDustRing.new()
+	_dust.system = system
+	_root.add_child(_dust)
+	_dust.start()
 
 
 func _build_barrels(system: ExplosionSystem) -> void:
@@ -126,7 +246,7 @@ func _build_barrels(system: ExplosionSystem) -> void:
 	for i in BARREL_COLUMNS * BARREL_ROWS:
 		var barrel := ExplosiveBarrel.new()
 		barrel.system = system
-		barrel.charge = BARREL_CHARGE
+		barrel.charge = barrel_charge
 		barrel.rng.seed = BARREL_SEED + i
 		barrel.position = Vector3(
 			float(i % BARREL_COLUMNS) * BARREL_SPACING_M - half_x,
@@ -185,7 +305,7 @@ func _set_daylight(day: bool) -> void:
 	world_env.environment = env
 	sun.light_color = Color(1.0, 0.95, 0.85)
 	sun.light_energy = 1.3
-	sun.basis = Basis.from_euler(Vector3(deg_to_rad(-38.0), deg_to_rad(20.0), 0.0))
+	sun.basis = Basis.from_euler(Vector3(deg_to_rad(-SUN_ELEVATION_DEG), deg_to_rad(SUN_YAW_DEG), 0.0))
 
 
 func _build_plain() -> void:

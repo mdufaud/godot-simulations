@@ -43,6 +43,8 @@ uniform vec3 sun_dir = vec3(0.0, 1.0, 0.0);
 uniform vec3 sun_rgb = vec3(0.0);
 uniform int sun_shadow_taps : hint_range(0, 6) = 0;
 uniform float sun_shadow_length = 8.0;
+// 1 = blue-noise offset of the shadow taps over a full tap step, 0 = taps at mid-step.
+uniform float sun_jitter_strength : hint_range(0.0, 1.0) = 1.0;
 uniform float sun_phase_g : hint_range(-0.9, 0.9) = 0.0;
 uniform bool animated_jitter = true;
 
@@ -53,6 +55,10 @@ uniform float ambient_temperature = 300.0;
 uniform float display_temperature = 2600.0;
 // Linear radiance of a blackbody at display_temperature: the brightest value the volume can emit.
 uniform float emission_strength : hint_range(0.5, 24.0) = 8.0;
+// Window of emission temperature, in kelvin, over which the glow fades in: none below glow_visible_from_k,
+// full from glow_visible_full_k. Both 0 = no fade. Cold soot stops glowing near 800 K (Draper point).
+uniform float glow_visible_from_k = 0.0;
+uniform float glow_visible_full_k = 0.0;
 // Absorption of the hot gas per metre at full flame temperature (soot has smoke_absorption).
 uniform float flame_absorption : hint_range(0.0, 10.0) = 2.5;
 uniform float smoke_absorption : hint_range(0.0, 20.0) = 9.0;
@@ -117,7 +123,9 @@ vec3 blackbody_chroma(float T_kelvin) {
 vec3 blackbody_radiance(float T_kelvin) {
 	float ratio = T_kelvin / display_temperature;
 	float r2 = ratio * ratio;
-	return blackbody_chroma(T_kelvin) * (r2 * r2 * emission_strength);
+	float visible = glow_visible_full_k > glow_visible_from_k
+		? smoothstep(glow_visible_from_k, glow_visible_full_k, T_kelvin) : 1.0;
+	return blackbody_chroma(T_kelvin) * (r2 * r2 * emission_strength * visible);
 }
 
 void vertex() {

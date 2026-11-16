@@ -16,6 +16,8 @@ var container: Node3D
 ## Host multipliers on every blast, driven by the panel.
 var radius_scale := 1.0
 var power_scale := 1.0
+## A ball that does not explode reports every body it touches, not only the first.
+var report_every_contact := false
 
 var _preset: ProjectilePreset
 
@@ -63,7 +65,7 @@ func fire(screen_pos: Vector2) -> void:
 	sphere.material = mat
 	mi.mesh = sphere
 	ball.add_child(mi)
-	ball.body_entered.connect(_on_hit.bind(ball, preset), CONNECT_ONE_SHOT)
+	ball.body_entered.connect(_on_hit.bind(ball, preset), 0 if report_every_contact else CONNECT_ONE_SHOT)
 	ball.set_meta("fired_at_msec", Time.get_ticks_msec())
 	container.add_child(ball)
 
@@ -84,17 +86,19 @@ func despawn_fallen() -> void:
 
 
 func _on_hit(_other: Node, ball: RigidBody3D, preset: ProjectilePreset) -> void:
+	if ball.is_queued_for_deletion():
+		return
 	# The kinetic energy the projectile actually arrives with drives the blast, so
 	# a slow lob dents the wall and a full-speed shot blows a hole through it.
 	var strength := clampf(ball.linear_velocity.length() / preset.speed_mps, 0.1, 1.5)
 	impact.emit(ball.global_position, preset.blast_radius_m * radius_scale,
 		strength * preset.blast_impulse * power_scale)
 	if preset.explodes:
-		_flash(ball.global_position)
+		flash(ball.global_position)
 		ball.queue_free()
 
 
-func _flash(pos: Vector3) -> void:
+func flash(pos: Vector3) -> void:
 	var light := OmniLight3D.new()
 	light.position = pos
 	light.light_color = Color(1.0, 0.55, 0.2)
