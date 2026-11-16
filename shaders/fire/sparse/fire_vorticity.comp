@@ -44,8 +44,14 @@ void main() {
 	// The normalised gradient is meaningless where |omega| is flat, so a single
 	// noisy cell can produce a spike; clamp guards against blow-up.
 	float mag = length(f);
-	if (mag > 50.0) {
-		f *= 50.0 / mag;
+#ifdef FIRE_BLAST
+	// Explosion speeds reach 100 m/s: the ceiling follows the local flow, not a fixed 50.
+	float ceiling = 0.2 * speed / max(params.cell.y * cfg.misc.x, 1e-6);
+#else
+	float ceiling = 50.0;
+#endif
+	if (mag > ceiling) {
+		f *= ceiling / mag;
 	}
 
 	store_scal_fwd(c, vec4(f, 0.0));

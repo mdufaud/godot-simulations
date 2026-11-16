@@ -19,7 +19,7 @@ uniform vec2 low_res_size = vec2(640.0, 360.0);
 // ends of an 80 m march.
 uniform float depth_tolerance = 0.05;
 // Tent radius in low-res texels: 1 is plain bilinear; 2 also averages out the
-// raymarch's interleaved-gradient jitter, which nothing temporal resolves here.
+// raymarch's blue-noise jitter, which nothing temporal resolves here.
 uniform float filter_radius : hint_range(1.0, 2.0) = 2.0;
 
 void vertex() {

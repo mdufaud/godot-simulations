@@ -67,6 +67,17 @@ layout(r32f, set = 0, binding = 9) uniform restrict image3D diverg;
 #endif
 layout(FMT_DISPLAY, set = 0, binding = 10) uniform restrict image3D display_tex;
 layout(r32f, set = 0, binding = 29) uniform restrict image3D visual_activity_tex;
+#ifdef FIRE_REST
+// Rest displacement d = X_rest - x [m] of two billow noise lattices that ride the flow,
+// reset half a period apart (fire_display). *_src/*_dst ping-pong on their own parity;
+// *_out is what the raymarcher reads: xyz = d, w = blend weight of that lattice.
+layout(rgba16f, set = 0, binding = 34) uniform restrict image3D rest1_src;
+layout(rgba16f, set = 0, binding = 35) uniform restrict image3D rest1_dst;
+layout(rgba16f, set = 0, binding = 36) uniform restrict image3D rest2_src;
+layout(rgba16f, set = 0, binding = 37) uniform restrict image3D rest2_dst;
+layout(rgba16f, set = 0, binding = 38) uniform restrict image3D rest1_out;
+layout(rgba16f, set = 0, binding = 39) uniform restrict image3D rest2_out;
+#endif
 
 layout(std430, set = 0, binding = 11) restrict buffer Stats {
 	uint data[];
@@ -393,6 +404,16 @@ DEF_LOAD4(load_liquid_vel, liquid_vel, vec4(0.0))
 DEF_STORE4(store_liquid_vel, liquid_vel)
 DEF_STORE4(store_display, display_tex)
 DEF_STORE1(store_visual_activity, visual_activity_tex)
+#ifdef FIRE_REST
+DEF_LOAD4(load_rest1_src, rest1_src, vec4(0.0))
+DEF_LOAD4(load_rest2_src, rest2_src, vec4(0.0))
+DEF_STORE4(store_rest1_src, rest1_src)
+DEF_STORE4(store_rest2_src, rest2_src)
+DEF_STORE4(store_rest1_dst, rest1_dst)
+DEF_STORE4(store_rest2_dst, rest2_dst)
+DEF_STORE4(store_rest1_out, rest1_out)
+DEF_STORE4(store_rest2_out, rest2_out)
+#endif
 
 DEF_LOAD1(load_press_src, press_src)
 DEF_STORE1(store_press_src, press_src)
@@ -438,6 +459,124 @@ vec3 cell_to_world(ivec3 c) {
 	vec3 half_xz = vec3(params.dims.x, 0.0, params.dims.z) * params.cell.x * 0.5;
 	return (vec3(c) + vec3(0.5)) * params.cell.x - half_xz;
 }
+
+#ifdef FIRE_BLAST
+float blast_hash(vec3 q) {
+	q = fract(q * 0.3183099 + 0.1);
+	q *= 17.0;
+	return fract(q.x * q.y * q.z * (q.x + q.y + q.z));
+}
+
+// Trilinear value noise in [0, 1].
+float blast_noise(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float x00 = mix(blast_hash(i), blast_hash(i + vec3(1, 0, 0)), f.x);
+	float x10 = mix(blast_hash(i + vec3(0, 1, 0)), blast_hash(i + vec3(1, 1, 0)), f.x);
+	float x01 = mix(blast_hash(i + vec3(0, 0, 1)), blast_hash(i + vec3(1, 0, 1)), f.x);
+	float x11 = mix(blast_hash(i + vec3(0, 1, 1)), blast_hash(i + vec3(1, 1, 1)), f.x);
+	return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+
+// Quintic value noise in [-1, 1] with its analytic gradient wrt the lattice coordinate.
+vec4 blast_noise_grad(vec3 p) {
+	vec3 i = floor(p);
+	vec3 f = fract(p);
+	vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+	vec3 du = 30.0 * f * f * (f - 1.0) * (f - 1.0);
+	float a = blast_hash(i);
+	float b = blast_hash(i + vec3(1, 0, 0));
+	float c = blast_hash(i + vec3(0, 1, 0));
+	float d = blast_hash(i + vec3(1, 1, 0));
+	float e = blast_hash(i + vec3(0, 0, 1));
+	float g = blast_hash(i + vec3(1, 0, 1));
+	float h = blast_hash(i + vec3(0, 1, 1));
+	float k = blast_hash(i + vec3(1, 1, 1));
+	float k1 = b - a;
+	float k2 = c - a;
+	float k3 = e - a;
+	float k4 = a - b - c + d;
+	float k5 = a - c - e + h;
+	float k6 = a - b - e + g;
+	float k7 = -a + b + c - d + e - g - h + k;
+	float n = a + k1 * u.x + k2 * u.y + k3 * u.z + k4 * u.x * u.y + k5 * u.y * u.z
+		+ k6 * u.z * u.x + k7 * u.x * u.y * u.z;
+	vec3 grad = du * vec3(k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z,
+		k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
+		k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y);
+	return vec4(2.0 * n - 1.0, 2.0 * grad);
+}
+
+// One component of the curl of a vector potential made of three noise fields,
+// scaled by the wavelength so it stays O(1) (Bridson 2007). The lattice is rotated off
+// the grid axes and drifts one wavelength per evolution_s, so the pattern neither aligns
+// with the 8-cell tiles nor stands still.
+const mat3 BLAST_LATTICE = mat3(0.648638, 0.682114, -0.337622,
+	-0.574003, 0.729721, 0.371520, 0.499789, -0.047186, 0.864861);
+const vec3 BLAST_DRIFT = vec3(0.57, 0.31, -0.76);
+const vec3 BLAST_PSI_Y = vec3(37.0, 11.0, 23.0);
+const vec3 BLAST_PSI_Z = vec3(71.0, 47.0, 5.0);
+
+float blast_curl_axis(vec3 p, int axis, mat3 lattice) {
+	if (axis == 0) {
+		vec3 gz = blast_noise_grad(p + BLAST_PSI_Z).yzw * lattice;
+		vec3 gy = blast_noise_grad(p + BLAST_PSI_Y).yzw * lattice;
+		return gz.y - gy.z;
+	}
+	if (axis == 1) {
+		vec3 gx = blast_noise_grad(p).yzw * lattice;
+		vec3 gz = blast_noise_grad(p + BLAST_PSI_Z).yzw * lattice;
+		return gx.z - gz.x;
+	}
+	vec3 gy = blast_noise_grad(p + BLAST_PSI_Y).yzw * lattice;
+	vec3 gx = blast_noise_grad(p).yzw * lattice;
+	return gy.x - gx.y;
+}
+
+float blast_curl_noise(vec3 x, float t, int axis, float wavelength_m, float evolution_s) {
+	vec3 p = BLAST_LATTICE * (x / wavelength_m) + BLAST_DRIFT * (t / evolution_s);
+	return blast_curl_axis(p, axis, BLAST_LATTICE);
+}
+
+// Second octave: its own rotation of the lattice, drift direction and phase, so it
+// neither aligns with the first octave nor moves with it.
+const mat3 BLAST_LATTICE_FINE = mat3(0.553630, 0.621016, -0.554827,
+	0.146581, 0.583175, 0.799012, 0.819760, -0.523685, 0.231834);
+const vec3 BLAST_DRIFT_FINE = vec3(-0.43, 0.66, 0.29);
+const vec3 BLAST_PHASE_FINE = vec3(19.0, 53.0, 7.0);
+
+float blast_curl_noise_fine(vec3 x, float t, int axis, float wavelength_m, float evolution_s) {
+	vec3 p = BLAST_LATTICE_FINE * (x / wavelength_m) + BLAST_DRIFT_FINE * (t / evolution_s)
+		+ BLAST_PHASE_FINE;
+	return blast_curl_axis(p, axis, BLAST_LATTICE_FINE);
+}
+
+const float BLAST_WAVELENGTH_CELLS = 4.0;
+const float BLAST_ROUGHNESS = 0.35;
+
+// Both the divergence source and the injection use this one function. The noise only
+// pushes the edge inward, so the sphere stays inside the tiles seeded around its radius.
+float blast_falloff(vec3 p, int i) {
+	vec3 centre = cfg.blast[i].xyz;
+	vec3 offset = centre * 0.173 + vec3(float(i) * 13.7, float(i) * 5.1, float(i) * 9.3);
+	float n = blast_noise((p - centre) / (BLAST_WAVELENGTH_CELLS * params.cell.x) + offset);
+	float d = distance(p, centre) * (1.0 + BLAST_ROUGHNESS * n);
+	return 1.0 - smoothstep(0.0, max(cfg.blast[i].w, 1e-6), d);
+}
+
+// Detonation divergence [1/s] at a cell: every active charge's rate times its radial falloff.
+float blast_source(ivec3 c) {
+	vec3 p = cell_to_world(c);
+	float source = 0.0;
+	for (int i = 0; i < int(cfg.explosion.y); i++) {
+		if (cfg.blast_rate[i].x != 0.0) {
+			source += cfg.blast_rate[i].x * blast_falloff(p, i);
+		}
+	}
+	return source;
+}
+#endif
 
 // NON-PAPER: the wood bed shelters its own flame base. The logs are a porous
 // obstacle and the volatile layer lives in their wind shadow, so fire_forces

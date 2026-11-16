@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="ExplosionConfig" format=3]
+
+[ext_resource type="Script" path="res://scripts/explosion/explosion_config.gd" id="1_config"]
+[ext_resource type="Resource" path="res://resources/explosion/presets/billow_explosion.tres" id="2_billow"]
+
+[resource]
+script = ExtResource("1_config")
+cell_size_m = 2.0
+simulation_hz = 30
+max_substeps_per_frame = 2
+velocity_clamp_mps = 240.0
+keep_speed_mps = 1.0
+pool_slots = 4096
+tile_keep_scale = 4.0
+vorticity_strength = 1.5
+radiation_coefficient = 4.0
+residual_dissipation = 0.0
+billow = ExtResource("2_billow")

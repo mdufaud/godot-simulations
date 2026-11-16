@@ -54,6 +54,7 @@ declare -a SUITES=(
 	"ambient_fluid_float|cpu|-|-s res://tests/ambient_fluid_float_test.gd"
 	"native_kernels|cpu|-|-s res://tests/native_kernels_test.gd"
 	"portal_math|cpu|-|-s res://tests/portal_math_test.gd"
+	"explosion_blast|cpu|-|-s res://tests/explosion_blast_test.gd"
 	"river_field|cpu|-|-s res://tests/river_field_test.gd"
 	"river_boot|cpu|-|-s res://tests/river_boot_test.gd"
 	"growing_corridor_state|cpu|-|-s res://tests/growing_corridor_state_test.gd"

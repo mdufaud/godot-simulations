@@ -35,6 +35,28 @@ void main() {
 	barrier();
 	store_visual_activity(c, uintBitsToFloat(visual_max_bits));
 
+#ifdef FIRE_REST
+	// Rest displacement of the render-time billow lattices, advected with the flow:
+	// d_new(x) = d_old(x - u dt) - u(x) dt. A fresh tile holds d = 0 (fire_clear), so
+	// churn is harmless. event.x = bit0/bit1 reset lattice 1/2 this substep, bit2 on;
+	// event.y/z = phase in [0, 1) of each lattice at the end of the substep. The weight
+	// is a triangle of the phase: zero at the reset instant, so the reset never pops.
+	if ((int(params.event.x) & 4) != 0) {
+		int flags = int(params.event.x);
+		vec3 u_dt = vel_at_cell(c) * params.cell.y;
+		vec3 back = vec3(c) - u_dt * params.cell.z;
+		vec4 d1, d2, lo, hi;
+		SAMPLE_TRI(load_rest1_src, rest1_src, back, d1, lo, hi);
+		SAMPLE_TRI(load_rest2_src, rest2_src, back, d2, lo, hi);
+		vec3 r1 = (flags & 1) != 0 ? vec3(0.0) : d1.xyz - u_dt;
+		vec3 r2 = (flags & 2) != 0 ? vec3(0.0) : d2.xyz - u_dt;
+		store_rest1_dst(c, vec4(r1, 0.0));
+		store_rest2_dst(c, vec4(r2, 0.0));
+		store_rest1_out(c, vec4(r1, 1.0 - abs(2.0 * params.event.y - 1.0)));
+		store_rest2_out(c, vec4(r2, 1.0 - abs(2.0 * params.event.z - 1.0)));
+	}
+#endif
+
 	atomicMax(stats.data[STAT_MAX_T], uint(max(s.x, 0.0)));
 
 	// Peak |div u| surviving the projection, in milli-1/s so it fits an atomic
@@ -48,7 +70,11 @@ void main() {
 	// divergence by construction, since one of its faces does not exist to be
 	// corrected.
 	if (solved_cell(c)) {
+#ifdef FIRE_BLAST
+		atomicMax(stats.data[STAT_MAX_DIVERGENCE], uint(clamp(abs(divergence_at(c) - blast_source(c)) * STAT_SCALE, 0.0, 4.2e9)));
+#else
 		atomicMax(stats.data[STAT_MAX_DIVERGENCE], uint(clamp(abs(divergence_at(c)) * STAT_SCALE, 0.0, 4.2e9)));
+#endif
 	}
 	atomicAdd(stats.data[STAT_REACTION_SUM], uint(reaction * STAT_SCALE));
 	atomicMax(stats.data[STAT_REACTION_MAX], uint(reaction * STAT_SCALE));
@@ -120,7 +146,11 @@ void main() {
 	// since the wind is exactly what fire_clear fills a new tile with. What matters
 	// is air the fire has disturbed, which is the departure from the profile.
 	const float KEEP_TEMPERATURE = 5.0; // K above ambient
+#ifdef FIRE_BLAST
+	float KEEP_SPEED = cfg.explosion.w;
+#else
 	const float KEEP_SPEED = 0.5; // m/s
+#endif
 	const float KEEP_FUEL = 1e-4;
 	const float KEEP_SOOT = 1e-3;
 	const float KEEP_STEAM = 1e-2;

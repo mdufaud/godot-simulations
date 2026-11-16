@@ -29,6 +29,12 @@ layout(std430, set = 0, binding = 2) restrict buffer FreeList { uint free_list[]
 layout(std430, set = 0, binding = 3) restrict buffer ActiveList { uint active_list[]; };
 layout(std430, set = 0, binding = 4) restrict buffer AllocReq { uint alloc_request[]; };
 layout(std430, set = 0, binding = 5) restrict buffer Counts { uint counts[]; };
+#ifdef FIRE_BLAST
+layout(std430, set = 0, binding = 10) restrict readonly buffer Config {
+	FIRE_CONFIG_FIELDS
+}
+cfg;
+#endif
 layout(set = 0, binding = 6, r32f) uniform restrict image3D activity;
 layout(std430, set = 0, binding = 7) restrict buffer NewList { uint new_list[]; };
 layout(std430, set = 0, binding = 8) restrict buffer ActiveSlots { uint active_slots[]; };

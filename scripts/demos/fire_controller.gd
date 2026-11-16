@@ -79,10 +79,21 @@ var _log_cooldown := 0.0
 var wind_vector := Vector3(2.0, 0.0, 0.5)
 var _wind_enabled := false
 
+## Flame tongues: billow detail on lattices carried by the flow. Render-side only, so
+## the simulated fields are the same with it on or off.
+var flame_billows := true
+var flame_billow: FireBillowConfig = preload("res://resources/fire/billow_campfire.tres").duplicate()
+
 
 func _ready() -> void:
 	solver = FireGpuSolver.new()
 	solver.config = config
+	var billow_error := flame_billow.validate()
+	if billow_error != "":
+		push_error("Flame billow config: %s" % billow_error)
+		flame_billows = false
+	solver.rest_enabled = flame_billows and flame_billow.rest_active()
+	solver.blast_rest_period_s = flame_billow.reset_s if flame_billows and flame_billow.rest_active() else 0.0
 	water_particle_cap = config.water_particle_count
 	solver.profiling = debug_info
 	RenderingServer.call_on_render_thread(solver.init_render)
@@ -113,6 +124,7 @@ func _ready() -> void:
 	presentation.sparks = spark_particles
 	add_child(presentation)
 	presentation.start()
+	_apply_flame_billow()
 
 	interaction = FireInteraction.new()
 	interaction.player = player
@@ -571,6 +583,25 @@ func set_quality_profile(tier: int) -> void:
 
 func set_frozen(on: bool) -> void:
 	_frozen = on
+
+
+func _apply_flame_billow() -> void:
+	presentation.apply_billow(flame_billow if flame_billows else null, solver.cell_size)
+
+
+## Capture overrides of the flame billow look: the billow_* keys of
+## [method FireBillowConfig.apply_overrides], and billows=0/1.
+func set_capture_params(values: Dictionary) -> void:
+	var billow_values := {}
+	for key: String in values:
+		if key == "billows":
+			flame_billows = float(values[key]) != 0.0
+		elif key != "march_step":
+			billow_values[key] = values[key]
+	for key in flame_billow.apply_overrides(billow_values):
+		push_warning("fire_demo: unknown capture param %s" % key)
+	solver.blast_rest_period_s = flame_billow.reset_s if flame_billows and flame_billow.rest_active() else 0.0
+	_apply_flame_billow()
 
 
 func set_capture_fixed_delta(value: float) -> void:

@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="FireBillowConfig" format=3]
+
+[ext_resource type="Script" path="res://scripts/fire/fire_billow_config.gd" id="1_billow"]
+
+[resource]
+script = ExtResource("1_billow")
+mode = 2
+strength = 0.8
+crevice_cooling_fraction = 0.3
+crevice_soot_gain = 1.5
+wavelength_cells = 5.0
+vertical_stretch = 0.4
+rise_m = 3.0
+rise_base = 0.3
+reset_s = 0.3
+anchor = 1.0
+fade_start_k = 700.0
+fade_full_k = 1000.0

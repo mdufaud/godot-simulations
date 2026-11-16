@@ -54,6 +54,7 @@ var _travel_speed := -1.0
 var _smoketaps := -1
 var _cascade := -1
 var _scene := -1
+var _taa := -1
 var _scenario := -1
 var _medium := -1
 var _flow := -1.0
@@ -70,6 +71,24 @@ var _foam_warmup := 0.0
 var _foam_distance := -1.0
 var _detail_distance := -1.0
 var _camera_speed := 0.0
+var _ab_modes := PackedInt32Array()
+var _ab_at := -1
+var _ab_shader := ""
+var _ab_debug := false
+var _ab_param := ""
+var _ab_values := PackedFloat64Array()
+var _ab_scale := false
+var _ab_linear := false
+var _ab_floor := -1.0
+var _ab_trans := -1.0
+var _ab_debug_mode := 1
+var _ab_pre_filter := false
+var _ab_billow: Array[Vector2] = []
+var _ab_tags: Array[String] = []
+var _gpu_samples: Array[float] = []
+var _solver_samples: Array[float] = []
+var _display_samples: Array[float] = []
+var _timing_solver: Object = null
 var _param_overrides: Dictionary = {}
 var _nbody_render_overrides: Dictionary = {}
 
@@ -98,6 +117,29 @@ func _initialize() -> void:
 					push_error("CAPTURE FAIL: param must be key:value")
 					quit(1)
 					return
+			"ab":
+				for mode_text in value.split(","):
+					_ab_modes.append(int(mode_text))
+			"ab_at": _ab_at = maxi(0, int(value))
+			"ab_shader": _ab_shader = value
+			"ab_param": _ab_param = value
+			"ab_values":
+				for value_text in value.split(","):
+					_ab_values.append(float(value_text))
+			"ab_scale": _ab_scale = value == "1" or value.to_lower() == "true"
+			"ab_linear": _ab_linear = value == "1" or value.to_lower() == "true"
+			"ab_floor": _ab_floor = float(value)
+			"ab_trans": _ab_trans = float(value)
+			"ab_pre_filter": _ab_pre_filter = value == "1"
+			"ab_debug_mode": _ab_debug_mode = int(value)
+			"ab_billow":
+				for pair_text in value.split(",", false):
+					var pair := pair_text.split(":")
+					_ab_billow.append(Vector2(float(pair[0]), float(pair[1])))
+			"ab_tags":
+				for tag_text in value.split(",", false):
+					_ab_tags.append(tag_text)
+			"ab_debug": _ab_debug = value == "1" or value.to_lower() == "true"
 			"nbody_star_size": _nbody_render_overrides.star_size = float(value)
 			"nbody_brightness": _nbody_render_overrides.brightness = float(value)
 			"nbody_min_pixel_size": _nbody_render_overrides.min_pixel_size = float(value)
@@ -142,6 +184,7 @@ func _initialize() -> void:
 			"smoketaps": _smoketaps = int(value)
 			"cascade": _cascade = int(value)
 			"scene": _scene = int(value)
+			"taa": _taa = int(value)
 			"scenario": _scenario = clampi(int(value), 0, 4)
 			"medium": _medium = clampi(int(value), 0, 4)
 			"flow": _flow = float(value)
@@ -162,6 +205,8 @@ func _initialize() -> void:
 				var dims := value.split("x")
 				if dims.size() == 2:
 					_size = Vector2i(maxi(16, int(dims[0])), maxi(16, int(dims[1])))
+	if _ab_at >= 0:
+		_frames = maxi(_frames, _ab_at + 1)
 	# Unique default so concurrent captures never overwrite each other.
 	if not _shots.is_empty():
 		for frame in _shots:
@@ -230,6 +275,8 @@ func _run() -> void:
 			push_error("CAPTURE FAIL: target does not support parameter overrides")
 			quit(1)
 			return
+		if _param_overrides.has("march_step") and _demo.get("presentation") != null:
+			_demo.presentation.set_volume_parameter("march_step", float(_param_overrides["march_step"]))
 		await _demo.set_capture_params(_param_overrides)
 		ready_deadline = Time.get_ticks_msec() + 20000
 		while _demo.has_method("capture_ready") and not _demo.capture_ready() \
@@ -334,8 +381,18 @@ func _run() -> void:
 		_demo.set_capture_fixed_delta(_fixed_delta)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
+	_timing_solver = _find_solver()
+	if _timing_solver != null:
+		_timing_solver.set("profiling", true)
+	RenderingServer.viewport_set_measure_render_time(root.get_viewport_rid(), true)
+	if _taa >= 0:
+		if _demo.get("viewport_guard") != null:
+			_demo.viewport_guard.set_taa(_taa >= 1)
+		if _demo.get("presentation") != null:
+			_demo.presentation.set_volume_taa(_taa == 1)
 	for frame in _warmup:
 		await process_frame
+		_sample_timings()
 	if _capture_time >= 0.0 and _demo.has_method("set_capture_time"):
 		_demo.set_capture_time(_capture_time)
 	# Foam equilibrium warmup (fix plan 0.6): live steps between the spectral
@@ -394,6 +451,9 @@ func _run() -> void:
 			_demo.move_capture_camera(Vector3(_camera_speed * maxf(_fixed_delta, 1.0 / 60.0), 0.0, 0.0))
 		if _interaction and _demo.has_method("throw_crate") and waited == toss_frame:
 			_demo.throw_crate()
+		if waited == _ab_at:
+			await _run_temperature_ab()
+			return
 		var capture_frame := waited + 1
 		if _shots.is_empty() and _every > 0 and waited > 0 and waited % _every == 0:
 			await _grab(_numbered(waited))
@@ -401,22 +461,151 @@ func _run() -> void:
 				and _shots.has(capture_frame):
 			await _grab(_numbered(capture_frame))
 		await process_frame
+		_sample_timings()
 		waited += 1
 	var final_numbered := _out if _every <= 0 and _shots.is_empty() else _numbered(waited)
 	if _demo.has_method("set_frozen"):
 		_demo.set_frozen(true)
 	if _demo.has_method("capture_metadata_async"):
 		var metadata: String = await _demo.capture_metadata_async(final_numbered)
-		print(metadata)
+		print(metadata + _timing_suffix())
 		if metadata.begins_with("CAPTURE FAIL"):
 			await create_timer(0.1, true, false, true).timeout
 			quit(1)
 			return
 	elif _demo.has_method("capture_metadata"):
-		print(_demo.capture_metadata(final_numbered))
+		print(_demo.capture_metadata(final_numbered) + _timing_suffix())
 	await _grab(final_numbered)
 	print("CAPTURE DONE target=%s frames=%d" % [_scene_path, waited])
 	quit(0)
+
+
+## Frozen-field A/B of the raymarcher's temperature reconstruction: the simulation
+## stops at this frame and every mode is rendered from the same field in this one
+## process, noise and jitter off so the only difference is the filter. `ab_shader`
+## adds a "pre" capture with another shader on the same material; `ab_debug` adds
+## debug_mode 1 (peak temperature along the ray) for each mode.
+func _run_temperature_ab() -> void:
+	var presentation: Object = _demo.get("presentation")
+	if presentation == null or not presentation.has_method("set_temperature_filter"):
+		push_error("CAPTURE FAIL: target has no temperature_filter")
+		quit(1)
+		return
+	_demo.set_frozen(true)
+	paused = true
+	presentation.set_volume_parameter("noise_detail", 0.0)
+	presentation.set_volume_parameter("scroll_speed", 0.0)
+	presentation.set_volume_parameter("animated_jitter", false)
+	if _ab_floor >= 0.0:
+		presentation.set_volume_parameter("temperature_filter_floor", _ab_floor)
+	if _ab_trans >= 0.0:
+		presentation.set_volume_parameter("temperature_filter_min_transmittance", _ab_trans)
+	var base := _out.get_basename()
+	var volume_rid := RID()
+	var volume_viewport: SubViewport = presentation.get("_volume_vp")
+	if volume_viewport != null:
+		volume_rid = volume_viewport.get_viewport_rid()
+		RenderingServer.viewport_set_measure_render_time(volume_rid, true)
+	var variants: Array[String] = []
+	variants.append("novol")
+	if not _ab_shader.is_empty():
+		variants.append("pre")
+	var param_values := {}
+	var param_base := 1.0
+	if not _ab_param.is_empty() and _ab_scale:
+		var current: Variant = presentation.volume_material.get_shader_parameter(_ab_param)
+		if current == null:
+			current = RenderingServer.shader_get_parameter_default(
+				presentation.volume_material.shader.get_rid(), _ab_param)
+		param_base = float(current)
+		print("AB base %s=%s" % [_ab_param, String.num(param_base)])
+	for value in _ab_values:
+		var label: String = ("e" if _ab_param == "emission_strength" else _ab_param) \
+			+ _num(value * param_base)
+		param_values[label] = value * param_base
+		variants.append(label)
+	var original_filter: int = presentation.get("temperature_filter")
+	var environments: Array[Node] = root.find_children("*", "WorldEnvironment", true, false)
+	if not environments.is_empty():
+		var env: Environment = environments[0].environment
+		if _ab_linear:
+			env.tonemap_mode = Environment.TONE_MAPPER_LINEAR
+			env.tonemap_exposure = 1.0
+			env.glow_enabled = false
+			env.adjustment_enabled = false
+		print("AB env tonemap_mode=%d exposure=%.2f glow=%s intensity=%.2f hdr_threshold=%.2f bloom=%.2f adjustment=%s contrast=%.2f saturation=%.2f" % [
+			env.tonemap_mode, env.tonemap_exposure, env.glow_enabled, env.glow_intensity,
+			env.glow_hdr_threshold, env.glow_bloom, env.adjustment_enabled,
+			env.adjustment_contrast, env.adjustment_saturation])
+	var billow_labels := {}
+	for pair in _ab_billow:
+		var billow_label := "m%s_s%s" % [_num(pair.x), _num(pair.y)]
+		billow_labels[billow_label] = pair
+		variants.append(billow_label)
+	for mode in _ab_modes:
+		var label := str(mode)
+		while variants.has(label):
+			label += "r"
+		variants.append(label)
+	for tag in _ab_tags:
+		variants.append(tag)
+	var original_shader: Shader = presentation.volume_material.shader
+	for variant: String in variants:
+		presentation.set_volume_parameter("animated_jitter", variant == "anim")
+		if presentation.has_method("set_half_res") and (variant == "half" or presentation.get("_volume_half_res")):
+			presentation.set_half_res(variant == "half")
+		presentation.fire_volume.visible = variant != "novol"
+		if variant == "novol":
+			presentation.set_temperature_filter(0)
+		elif variant == "pre":
+			presentation.volume_material.shader = load(_ab_shader)
+			presentation.set_temperature_filter(original_filter if _ab_pre_filter else 0)
+		elif billow_labels.has(variant):
+			presentation.volume_material.shader = original_shader
+			presentation.set_temperature_filter(original_filter)
+			presentation.set_volume_parameter("billow_mode", int(billow_labels[variant].x))
+			presentation.set_volume_parameter("billow_strength", billow_labels[variant].y)
+		elif _ab_tags.has(variant):
+			presentation.volume_material.shader = original_shader
+			presentation.set_temperature_filter(original_filter)
+		elif param_values.has(variant):
+			presentation.volume_material.shader = original_shader
+			presentation.set_temperature_filter(original_filter)
+			if _ab_param == "debug_mode":
+				presentation.set_volume_parameter(_ab_param, int(param_values[variant]))
+			else:
+				presentation.set_volume_parameter(_ab_param, float(param_values[variant]))
+		else:
+			presentation.volume_material.shader = original_shader
+			presentation.set_temperature_filter(int(variant.replace("r", "")))
+		var debug_passes: Array[int] = [0]
+		if _ab_debug:
+			debug_passes.append(1)
+		for debug_pass: int in debug_passes:
+			if not (param_values.has(variant) and _ab_param == "debug_mode"):
+				presentation.set_volume_parameter("debug_mode",
+					_ab_debug_mode if debug_pass == 1 else 0)
+			for settle in 6:
+				await process_frame
+			var root_ms: Array[float] = []
+			var volume_ms: Array[float] = []
+			for sample in 20:
+				await process_frame
+				root_ms.append(RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()))
+				if volume_rid.is_valid():
+					volume_ms.append(RenderingServer.viewport_get_measured_render_time_gpu(volume_rid))
+			var suffix := "_dbg%d" % _ab_debug_mode if debug_pass == 1 else ""
+			var file_variant := variant if param_values.has(variant) or billow_labels.has(variant) or _ab_tags.has(variant) \
+				else "m" + variant
+			await _grab("%s_%s%s.png" % [base, file_variant, suffix])
+			print("AB mode=%s debug=%d gpu_root_ms=%.3f gpu_volume_ms=%.3f" % [
+				variant, 1 if suffix != "" else 0, _median(root_ms), _median(volume_ms)])
+	print("CAPTURE DONE target=%s ab=%d" % [_scene_path, variants.size()])
+	quit(0)
+
+
+func _num(value: float) -> String:
+	return str(int(value)) if is_equal_approx(value, roundf(value)) else String.num(value)
 
 
 func _set_target(value: String) -> void:
@@ -457,7 +646,48 @@ func _grab(path: String, mirror_path: String = "") -> void:
 	if not mirror_path.is_empty() and mirror_path != path:
 		image.save_png(mirror_path)
 	print("CAPTURE SHOT ", path)
+	print("CAPTURE TIMING shot=%s%s" % [path, _timing_suffix()])
 
 
 func _numbered(frame: int) -> String:
 	return "%s_%04d.png" % [_out.get_basename(), frame]
+
+
+func _find_solver() -> Object:
+	var solver: Object = _demo.get("solver")
+	if solver == null:
+		var system: Object = _demo.get("explosion")
+		if system != null:
+			solver = system.get("solver")
+	return solver if solver != null and solver.has_method("get_timings") else null
+
+
+func _sample_timings() -> void:
+	_gpu_samples.append(RenderingServer.viewport_get_measured_render_time_gpu(root.get_viewport_rid()))
+	if _timing_solver != null:
+		var timings: Dictionary = _timing_solver.get_timings()
+		if timings.has("total"):
+			_solver_samples.append(float(timings["total"]))
+		if timings.has("display"):
+			_display_samples.append(float(timings["display"]))
+	if _gpu_samples.size() > 30:
+		_gpu_samples.remove_at(0)
+	if _solver_samples.size() > 30:
+		_solver_samples.remove_at(0)
+	if _display_samples.size() > 30:
+		_display_samples.remove_at(0)
+
+
+func _median(values: Array[float]) -> float:
+	if values.is_empty():
+		return -1.0
+	var sorted := values.duplicate()
+	sorted.sort()
+	return sorted[sorted.size() / 2]
+
+
+func _timing_suffix() -> String:
+	var suffix := " gpu_ms=%.2f" % _median(_gpu_samples)
+	if _timing_solver != null:
+		suffix += " solver_ms=%.2f display_ms=%.3f" % [_median(_solver_samples), _median(_display_samples)]
+	return suffix

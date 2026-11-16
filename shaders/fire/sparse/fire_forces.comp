@@ -12,6 +12,36 @@
 // averaged from the two cells the face separates. Applying it to a cell-centred
 // vector and splitting afterwards would smear the force by half a cell.
 
+#ifdef FIRE_BLAST
+#define VELOCITY_CLAMP cfg.explosion.x
+#else
+#define VELOCITY_CLAMP 50.0
+#endif
+
+#ifdef FIRE_BLAST
+// Curl-noise disturbance on one face, as a velocity change. The speed is the face's own
+// component against the ambient wind: the other faces of the cell are written by
+// neighbouring threads in this same pass, so reading them would race.
+float turbulence_dv(vec3 p, int axis, float temp, float u_rel, float dt) {
+	float lo = cfg.turbulence.y;
+	float hi = cfg.turbulence.z;
+	if (temp <= lo || temp >= hi) {
+		return 0.0;
+	}
+	float s = sin(3.14159265 * (temp - lo) / (hi - lo));
+	float band = s * s;
+	float lambda = cfg.turbulence.x;
+	float c = blast_curl_noise(p, params.event.x, axis, lambda, cfg.turbulence.w);
+	if (cfg.turbulence2.x > 1.5) {
+		// Kolmogorov: velocity amplitude ~ lambda^(1/3) and turnover time ~ lambda^(2/3),
+		// so at lambda / 2 the amplitude is 2^(-1/3) and the lattice drifts 2^(2/3) faster.
+		c += 0.7937005 * blast_curl_noise_fine(p, params.event.x, axis, 0.5 * lambda,
+			0.6299605 * cfg.turbulence.w);
+	}
+	return cfg.explosion.z * band * u_rel * u_rel / lambda * c * dt;
+}
+#endif
+
 // The wind profile itself lives in fire_common.comp: fire_clear fills newly
 // resident tiles with it and fire_display measures activity against it, so it can
 // no longer belong to this stage alone.
@@ -70,7 +100,13 @@ void main() {
 		float cool_u = clamp(1.0 - (t_u - t_amb) / RELAX_T_BAND, 0.0, 1.0);
 		u = mix(u, amb.x, relax_base * cool_u);
 		u *= mix(1.0, shelter_decay, wood_shelter(u_face_to_world(c)));
-		store_u_src(c, clamp(u, -50.0, 50.0));
+#ifdef FIRE_BLAST
+		if (cfg.explosion.z > 0.0) {
+			float temp_u = 0.5 * (load_scal_src(ivec3(max(c.x - 1, 0), c.y, c.z)).x + load_scal_src(c).x);
+			u += turbulence_dv(u_face_to_world(c), 0, temp_u, u - amb.x, dt);
+		}
+#endif
+		store_u_src(c, clamp(u, -VELOCITY_CLAMP, VELOCITY_CLAMP));
 	}
 
 	if (in_v(c)) {
@@ -83,11 +119,16 @@ void main() {
 		if (temp > t_amb + 1.0) {
 			v += cfg.transport.x * (1.0 - t_amb / temp) * dt;
 		}
+#ifdef FIRE_BLAST
+		if (cfg.explosion.z > 0.0) {
+			v += turbulence_dv(v_face_to_world(c), 1, temp, v, dt);
+		}
+#endif
 		// Solid ground: no flow through the floor.
 		if (c.y == 0) {
 			v = 0.0;
 		}
-		store_v_src(c, clamp(v, -50.0, 50.0));
+		store_v_src(c, clamp(v, -VELOCITY_CLAMP, VELOCITY_CLAMP));
 	}
 
 	if (in_w(c)) {
@@ -96,6 +137,12 @@ void main() {
 		float cool_w = clamp(1.0 - (t_w - t_amb) / RELAX_T_BAND, 0.0, 1.0);
 		w = mix(w, amb.z, relax_base * cool_w);
 		w *= mix(1.0, shelter_decay, wood_shelter(w_face_to_world(c)));
-		store_w_src(c, clamp(w, -50.0, 50.0));
+#ifdef FIRE_BLAST
+		if (cfg.explosion.z > 0.0) {
+			float temp_w = 0.5 * (load_scal_src(ivec3(c.x, c.y, max(c.z - 1, 0))).x + load_scal_src(c).x);
+			w += turbulence_dv(w_face_to_world(c), 2, temp_w, w - amb.z, dt);
+		}
+#endif
+		store_w_src(c, clamp(w, -VELOCITY_CLAMP, VELOCITY_CLAMP));
 	}
 }

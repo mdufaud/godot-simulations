@@ -56,4 +56,12 @@ void main() {
 	store_display(c, vec4(0.0));
 	store_activity(c, 0.0);
 	store_visual_activity(c, 0.0);
+#ifdef FIRE_REST
+	store_rest1_src(c, vec4(0.0));
+	store_rest1_dst(c, vec4(0.0));
+	store_rest2_src(c, vec4(0.0));
+	store_rest2_dst(c, vec4(0.0));
+	store_rest1_out(c, vec4(0.0));
+	store_rest2_out(c, vec4(0.0));
+#endif
 }

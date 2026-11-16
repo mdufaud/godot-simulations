@@ -90,6 +90,16 @@ var _seed_hi := Vector3i.ZERO
 var _seed_p0 := Vector3.ZERO
 var _seed_p1 := Vector3.ZERO
 var _seed_radius := 0.0
+## FIRE_BLAST only: the solver's Config buffer and the GLSL header that declares it,
+## set before init_render. Empty header = shipped passes.
+var blast_config := RID()
+var blast_header := ""
+var _blast_active := false
+var _blast_lo := Vector3i.ZERO
+var _blast_hi := Vector3i.ZERO
+var _blast_offset := Vector3.ZERO
+var _blast_inv_tile := 0.0
+var _blast_margin := 0.0
 
 
 ## Compile the passes and allocate every resource on [param rd]. Returns false on
@@ -121,7 +131,8 @@ func init_render(rd: RenderingDevice, activity_tex := RID(), budget := NSLOTS,
 		push_error("FireTilePool needs maxComputeWorkGroupInvocations >= 512.")
 		return false
 
-	var common := glsl_header(_nslots) + FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
+	var common := blast_header + glsl_header(_nslots) \
+		+ FileAccess.get_file_as_string(SHADER_DIR + "tile_common.comp")
 	for pass_name in PASSES:
 		var src := FileAccess.get_file_as_string(SHADER_DIR + "tile_" + pass_name + ".comp")
 		var spirv := ShaderCache.compile(_rd, "tile_" + pass_name, "#version 450\n\n" + common + "\n" + src)
@@ -221,11 +232,13 @@ func _build_uniform_sets() -> void:
 		var bufs := [[1, "slot_meta"], [2, "free_list"], [3, "active_list"],
 			[4, "alloc_request"], [5, "counts"], [7, "new_list"], [8, "active_slots"],
 			[9, "active_args"]]
+		if not blast_header.is_empty():
+			bufs.append([10, ""])
 		for pair in bufs:
 			var b := RDUniform.new()
 			b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
 			b.binding = pair[0]
-			b.add_id(_buf[pair[1]])
+			b.add_id(_buf[pair[1]] if pair[0] != 10 else blast_config)
 			uniforms.append(b)
 		_sets[pass_name] = _rd.uniform_set_create(uniforms, _shaders[pass_name], 0)
 
@@ -331,6 +344,23 @@ func clear_seed_capsule() -> void:
 	_seed_active = false
 
 
+## FIRE_BLAST only. [param lo]/[param hi] bound, in tile units, every tile the
+## charges can touch; tile_seed re-derives the spheres from the Config table with
+## [param offset] (domain half extent in tiles), [param inv_tile] and the margin.
+func set_blast_seed(offset: Vector3, inv_tile: float, margin_tiles: float,
+		lo: Vector3, hi: Vector3) -> void:
+	_blast_offset = offset
+	_blast_inv_tile = inv_tile
+	_blast_margin = margin_tiles
+	_blast_lo = Vector3i(lo.floor()).clamp(Vector3i.ZERO, VTILES - Vector3i.ONE)
+	_blast_hi = Vector3i(hi.ceil()).clamp(Vector3i.ZERO, VTILES - Vector3i.ONE)
+	_blast_active = true
+
+
+func clear_blast_seed() -> void:
+	_blast_active = false
+
+
 ## Record the six topology passes into an open compute list. Barriers between
 ## passes make each one see the previous one's writes.
 func record(cl: int, frame: int, threshold: float, hold_frames: int,
@@ -362,6 +392,17 @@ func record(cl: int, frame: int, threshold: float, hold_frames: int,
 		var seed_size := _seed_hi - _seed_lo + Vector3i.ONE
 		_pass(cl, "seed", ceili(float(seed_size.x) / 4.0),
 			ceili(float(seed_size.y) / 4.0), ceili(float(seed_size.z) / 4.0), pc)
+	if _blast_active:
+		var blast_pc := pc.duplicate()
+		for i in 3:
+			blast_pc.encode_s32(80 + i * 4, _blast_lo[i])
+			blast_pc.encode_float(96 + i * 4, _blast_offset[i])
+		blast_pc.encode_s32(92, 2)
+		blast_pc.encode_float(108, _blast_margin)
+		blast_pc.encode_float(112, _blast_inv_tile)
+		var blast_size := _blast_hi - _blast_lo + Vector3i.ONE
+		_pass(cl, "seed", ceili(float(blast_size.x) / 4.0),
+			ceili(float(blast_size.y) / 4.0), ceili(float(blast_size.z) / 4.0), blast_pc)
 	_pass(cl, "dilate", _budget, 1, 1, pc)   # one workgroup per slot
 	_pass(cl, "free", per_slot, 1, 1, pc)
 	_pass(cl, "alloc", _nslots, 1, 1, pc)   # one workgroup per possible request

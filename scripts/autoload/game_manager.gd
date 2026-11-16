@@ -84,6 +84,8 @@ const DEMOS: Array[Dictionary] = [
 		scene = "res://scenes/fire_demo.tscn"},
 	{key = "wildfire_demo", title = "Wildfire",            icon = "🔥", category = "particles",
 		scene = "res://scenes/wildfire_demo.tscn"},
+	{key = "explosion_demo", title = "Explosions",         icon = "💥", category = "particles",
+		scene = "res://scenes/explosion_demo.tscn"},
 	{key = "nbody_demo",    title = "N-Body Gallery",       icon = "🌌", category = "particles",
 		scene = "res://scenes/nbody_demo.tscn"},
 	{key = "grass_demo",    title = "Grass Simulation",     icon = "🌿", category = "other",

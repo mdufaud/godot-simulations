@@ -4,8 +4,8 @@ class_name FirePresentation extends Node3D
 ##
 ## Holds no simulation state — it reads the solver's textures and the SPH position
 ## texture and owns the Texture3DRD wrappers around them, which is why it also owns
-## their teardown. The host must assign [member solver], [member water],
-## [member fire_volume] and [member camera] before [method start].
+## their teardown. The host must assign [member solver], [member fire_volume]
+## and [member camera] before [method start]; [member water] is optional.
 ##
 ##     var presentation := FirePresentation.new()
 ##     presentation.solver = solver
@@ -19,6 +19,7 @@ class_name FirePresentation extends Node3D
 ## camera stops drawing it and only the half-res camera does. Bits 2/4/8 belong to
 ## ScreenSpaceFluidRenderer's prepasses.
 const LAYER_FIRE_VOLUME := 16
+const BLUE_NOISE: Texture2D = preload("res://resources/fire/blue_noise_64.png")
 const VOLUME_UPSAMPLE_SHADER := "res://shaders/fire/fire_volume_upsample.gdshader"
 const SPARK_WIND_DRAG := 2.0 ## 1/s
 
@@ -44,6 +45,10 @@ var water_depth_composite := true
 var smoke_light_gain := 0.06
 ## Fraction of the hearth light the omni dips by (multi-sine, lot J).
 var flicker_amount := 0.12
+## Margin the display proxy keeps around the resident tiles; scales with the cell size.
+var proxy_margin_m := 1.6
+## Raymarcher temperature reconstruction (see [method set_temperature_filter]); on for every demo.
+var temperature_filter := 1
 
 var _volume_texture: Texture3DRD
 var _previous_volume_texture: Texture3DRD
@@ -51,6 +56,7 @@ var _indir_texture: Texture3DRD
 var _previous_indir_texture: Texture3DRD
 var _visual_activity_texture: Texture3DRD
 var _previous_visual_activity_texture: Texture3DRD
+var _rest_textures: Array[Texture3DRD] = []
 
 var _volume_half_res := false
 var _volume_vp: SubViewport
@@ -68,12 +74,13 @@ var _water_surface_active := false
 
 
 func start() -> void:
-	assert(solver != null and water != null, "FirePresentation: solver and water required")
+	assert(solver != null, "FirePresentation: solver required")
 	assert(fire_volume != null and camera != null, "FirePresentation: fire_volume and camera required")
 	volume_material = fire_volume.material_override as ShaderMaterial
 	if volume_material:
 		_setup_volume_material()
-	_setup_fluid_renderer()
+	if water != null:
+		_setup_fluid_renderer()
 	_setup_half_res_volume()
 
 
@@ -83,10 +90,14 @@ func update_volume() -> void:
 	if not texture_bound:
 		_bind_textures()
 	if volume_material:
-		_set_volume_proxy(solver.display_clip_box())
+		_set_volume_proxy(solver.display_clip_box(proxy_margin_m))
+		volume_material.set_shader_parameter("jitter_phase",
+			fposmod(float(Engine.get_frames_drawn()) * 0.6180339887, 1.0))
 
 
 func update_water_surface() -> void:
+	if water == null:
+		return
 	var active := water.initialized and water.particles_active
 	if active != _water_surface_active:
 		_water_surface_active = active
@@ -183,9 +194,38 @@ func set_temporal_interpolation(on: bool) -> void:
 		RenderingServer.call_on_render_thread(solver.capture_interpolation_state_render)
 
 
+## Temperature reconstruction in the raymarcher: 0 = trilinear, 1 = tricubic B-spline.
+func set_temperature_filter(mode: int) -> void:
+	temperature_filter = clampi(mode, 0, 1)
+	set_volume_parameter("temperature_filter", temperature_filter)
+
+
 func set_volume_parameter(name: String, value: Variant) -> void:
 	if volume_material != null:
 		volume_material.set_shader_parameter(name, value)
+
+
+## Pushes the billow look to the material; off writes billow_mode alone.
+func apply_billow(billow: FireBillowConfig, cell_size_m: float) -> void:
+	if billow == null or billow.mode == 0:
+		set_volume_parameter("billow_mode", 0)
+		return
+	set_volume_parameter("billow_mode", billow.mode)
+	set_volume_parameter("billow_strength", billow.strength)
+	set_volume_parameter("billow_cool", billow.crevice_cooling_fraction)
+	set_volume_parameter("billow_soot", billow.crevice_soot_gain)
+	set_volume_parameter("billow_wavelength_m", billow.wavelength_cells * cell_size_m)
+	set_volume_parameter("billow_stretch_y", billow.vertical_stretch)
+	set_volume_parameter("billow_rise_m", billow.rise_m)
+	set_volume_parameter("billow_rise_base", billow.rise_base)
+	set_volume_parameter("billow_anchor", billow.anchor)
+	var span_k := solver.display_temperature - solver.ambient_temperature
+	set_volume_parameter("billow_fade_start", clampf((billow.fade_start_k - solver.ambient_temperature) / span_k, 0.0, 1.0))
+	set_volume_parameter("billow_fade_full", clampf((billow.fade_full_k - solver.ambient_temperature) / span_k, 0.0, 1.0))
+	var rest_built := solver != null and solver.rest_active()
+	if billow.rest_active() and not rest_built:
+		push_warning("FirePresentation: billow reset_s is set but the solver has no rest lattices (enable them before init_render)")
+	set_volume_parameter("billow_rest", billow.rest_active() and rest_built)
 
 
 func set_water_render_scale(value: float) -> void:
@@ -202,6 +242,11 @@ func unbind_textures() -> void:
 	_clear_volume_rids()
 	fire_volume.visible = false
 	texture_bound = false
+
+
+func set_volume_taa(on: bool) -> void:
+	if _volume_vp != null:
+		_volume_vp.use_taa = on
 
 
 func set_half_res(on: bool) -> void:
@@ -316,6 +361,14 @@ func _bind_textures() -> void:
 			solver.get_previous_visual_activity_tex_rid()
 		volume_material.set_shader_parameter("visual_activity_tex_prev",
 			_previous_visual_activity_texture)
+		_rest_textures.clear()
+		for index in 2:
+			var rest_rid := solver.get_rest_tex_rid(index)
+			if rest_rid.is_valid():
+				var rest_texture := Texture3DRD.new()
+				rest_texture.texture_rd_rid = rest_rid
+				_rest_textures.append(rest_texture)
+				volume_material.set_shader_parameter("rest%d_tex" % (index + 1), rest_texture)
 		_push_grid_params()
 	fire_volume.visible = true
 	texture_bound = true
@@ -324,7 +377,7 @@ func _bind_textures() -> void:
 func _clear_volume_rids() -> void:
 	for texture in [_volume_texture, _previous_volume_texture, _indir_texture,
 			_previous_indir_texture, _visual_activity_texture,
-			_previous_visual_activity_texture]:
+			_previous_visual_activity_texture] + _rest_textures:
 		if texture != null:
 			texture.texture_rd_rid = RID()
 
@@ -333,10 +386,11 @@ func _clear_volume_rids() -> void:
 func _setup_volume_material() -> void:
 	var box := Vector3(solver.sim_dims()) * solver.cell_size
 	volume_material.set_shader_parameter("cell_size", solver.cell_size)
+	volume_material.set_shader_parameter("blue_noise_tex", BLUE_NOISE)
 	_push_grid_params()
 	volume_material.set_shader_parameter("virtual_origin",
 		Vector3(-box.x * 0.5, 0.0, -box.z * 0.5))
-	_set_volume_proxy(solver.display_clip_box())
+	_set_volume_proxy(solver.display_clip_box(proxy_margin_m))
 	# The blue reaction core fades over the height of a burner-sized domain; over
 	# the virtual one it would never fade at all.
 	volume_material.set_shader_parameter("blue_height", solver.dense_domain_size_m().y)
@@ -346,6 +400,7 @@ func _setup_volume_material() -> void:
 	volume_material.set_shader_parameter("display_temperature", solver.display_temperature)
 	# Matches the menu's "Smoke light taps" default (uniform defaults to 0).
 	volume_material.set_shader_parameter("smoke_light_taps", 1)
+	volume_material.set_shader_parameter("temperature_filter", temperature_filter)
 	# Nothing to march until the solver's textures exist: an unbound sampler falls
 	# back to Godot's default texture, which for the indirection volume is not even
 	# the right format to read.

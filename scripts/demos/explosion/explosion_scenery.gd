@@ -1,0 +1,230 @@
+class_name ExplosionScenery extends RefCounted
+
+const POST_COUNT := 8
+const POST_RING_M := 9.0
+const POST_HEIGHT_M := 3.0
+const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
+const BARREL_COLUMNS := 4
+const BARREL_ROWS := 2
+const BARREL_SPACING_M := 2.2
+const BARREL_SEED := 1000
+const PLAIN_SIZE_M := 8000.0
+const TOWER_COUNT := 14
+const TOWER_SEED := 2024
+const SMOKE_ALBEDO := Vector3(0.3, 0.27, 0.24)
+const SMOKE_ABSORPTION_PER_M := 4.5
+## Scales the sun and the sky fill; the fill is a quarter of the sun's strength at most.
+const SUN_GAIN := 0.8
+const SKY_GAIN := 0.25
+const SUN_SHADOW_TAPS := 6
+const SUN_SHADOW_LENGTH_M := 8.0
+const SUN_PHASE_G := 0.2
+## Per scene: orbit camera target, distance range, pitch, fov and far plane.
+const FRAMING := [
+	{target = Vector3(0.0, 2.5, 0.0), distance = 14.0, min_distance = 4.0, max_distance = 40.0,
+		pitch = -10.0, fov = 60.0, far = 300.0},
+	{target = Vector3(0.0, 6.0, 0.0), distance = 30.0, min_distance = 4.0, max_distance = 40.0,
+		pitch = -15.0, fov = 60.0, far = 300.0},
+	{target = Vector3(0.0, 330.0, 0.0), distance = 1300.0, min_distance = 300.0, max_distance = 3000.0,
+		pitch = -1.5, fov = 35.0, far = 8000.0},
+]
+
+var world_env: WorldEnvironment
+var sun: DirectionalLight3D
+var ground: Node3D
+
+var _root: Node3D
+var _barrels: Array[ExplosiveBarrel] = []
+var _night_env: Environment
+var _night_sun := {}
+
+
+func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
+	clear()
+	_root = Node3D.new()
+	parent.add_child(_root)
+	_set_daylight(index == ExplosionMenu.SCENE_MUSHROOM)
+	if index == ExplosionMenu.SCENE_BARRELS:
+		_build_barrels(system)
+	elif index == ExplosionMenu.SCENE_MUSHROOM:
+		_build_plain()
+	else:
+		_build_posts()
+
+
+func clear() -> void:
+	_barrels.clear()
+	if _root != null:
+		_root.queue_free()
+		_root = null
+
+
+static func scale_distance(orbit: OrbitCamera, factor: float) -> void:
+	orbit.distance = clampf(orbit.distance * factor, orbit.min_distance, orbit.max_distance)
+
+
+static func apply_framing(orbit: OrbitCamera, camera: Camera3D, index: int) -> void:
+	var framing: Dictionary = FRAMING[index]
+	orbit.target = framing.target
+	orbit.min_distance = framing.min_distance
+	orbit.max_distance = framing.max_distance
+	orbit.distance = framing.distance
+	orbit.pitch = framing.pitch
+	orbit.max_pitch = maxf(-5.0, framing.pitch)
+	camera.fov = framing.fov
+	camera.far = framing.far
+
+
+func detonate_first() -> bool:
+	for barrel in _barrels:
+		if is_instance_valid(barrel) and not barrel.detonated:
+			barrel.detonate()
+			return true
+	return false
+
+
+## [param metric_scale] is the cell size over the reference 0.2 m cell, never below 1.
+func smoke_lighting(index: int, metric_scale: float) -> Dictionary:
+	if index != ExplosionMenu.SCENE_MUSHROOM:
+		return {sun_rgb = Vector3.ZERO, sun_shadow_taps = 0,
+			smoke_ambient_rgb = Vector3(0.0875, 0.084, 0.0805), smoke_albedo = Vector3(0.25, 0.24, 0.23)}
+	var per_m := SMOKE_ABSORPTION_PER_M / metric_scale
+	var sun_color := Vector3(sun.light_color.r, sun.light_color.g, sun.light_color.b)
+	var sky := world_env.environment.ambient_light_color
+	var sky_rgb := Vector3(sky.r, sky.g, sky.b) * world_env.environment.ambient_light_energy
+	return {
+		sun_dir = sun.global_basis.z,
+		sun_rgb = sun_color * (sun.light_energy * SUN_GAIN * per_m),
+		smoke_ambient_rgb = SMOKE_ALBEDO * sky_rgb * (SKY_GAIN * per_m),
+		smoke_albedo = SMOKE_ALBEDO,
+		sun_shadow_taps = SUN_SHADOW_TAPS,
+		sun_shadow_length = SUN_SHADOW_LENGTH_M * metric_scale,
+		sun_phase_g = SUN_PHASE_G,
+	}
+
+
+## Every per-metre raymarcher constant follows the cell size, so a 2 m grid draws the same picture ten times larger.
+static func scale_volume(presentation: FirePresentation, metric_scale: float, config: ExplosionConfig) -> void:
+	var coarse := metric_scale > 1.0
+	var values := {
+		max_distance = 80.0 * metric_scale, smoke_light_range = 8.0 * metric_scale,
+		noise_scale = 0.35 / metric_scale, emission_strength = 12.0,
+		flame_absorption = 1.0 / metric_scale, smoke_absorption = SMOKE_ABSORPTION_PER_M / metric_scale,
+		steam_strength = 6.0 / metric_scale, steam_absorption = 4.0 / metric_scale,
+		march_step = 1.5 if coarse else 0.75, march_budget = 512 if coarse else 320,
+		external_scene_depth = false, scene_distance_tex = null,
+		noise_detail = 0.0, scroll_speed = 0.0,
+	}
+	for key: String in values:
+		presentation.set_volume_parameter(key, values[key])
+	presentation.apply_billow(config.billow, config.cell_size_m)
+
+
+func _build_barrels(system: ExplosionSystem) -> void:
+	var half_x := float(BARREL_COLUMNS - 1) * BARREL_SPACING_M * 0.5
+	var half_z := float(BARREL_ROWS - 1) * BARREL_SPACING_M * 0.5
+	for i in BARREL_COLUMNS * BARREL_ROWS:
+		var barrel := ExplosiveBarrel.new()
+		barrel.system = system
+		barrel.charge = BARREL_CHARGE
+		barrel.rng.seed = BARREL_SEED + i
+		barrel.position = Vector3(
+			float(i % BARREL_COLUMNS) * BARREL_SPACING_M - half_x,
+			ExplosiveBarrel.HEIGHT_M * 0.5 + 0.01,
+			float(i / BARREL_COLUMNS) * BARREL_SPACING_M - half_z)
+		_root.add_child(barrel)
+		system.blast.connect(barrel.apply_blast)
+		_barrels.append(barrel)
+
+
+func _build_posts() -> void:
+	var mesh := CylinderMesh.new()
+	mesh.top_radius = 0.08
+	mesh.bottom_radius = 0.08
+	mesh.height = POST_HEIGHT_M
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.22, 0.23, 0.26)
+	mat.roughness = 0.9
+	mesh.material = mat
+	for i in POST_COUNT:
+		var angle := TAU * float(i) / float(POST_COUNT)
+		var post := MeshInstance3D.new()
+		post.mesh = mesh
+		post.position = Vector3(cos(angle) * POST_RING_M, POST_HEIGHT_M * 0.5, sin(angle) * POST_RING_M)
+		_root.add_child(post)
+
+
+func _set_daylight(day: bool) -> void:
+	if _night_env == null:
+		_night_env = world_env.environment
+		_night_sun = {color = sun.light_color, energy = sun.light_energy, basis = sun.basis}
+	ground.visible = not day
+	if not day:
+		world_env.environment = _night_env
+		sun.light_color = _night_sun.color
+		sun.light_energy = _night_sun.energy
+		sun.basis = _night_sun.basis
+		return
+	var sky_material := ProceduralSkyMaterial.new()
+	sky_material.sky_top_color = Color(0.22, 0.42, 0.78)
+	sky_material.sky_horizon_color = Color(0.66, 0.78, 0.9)
+	sky_material.ground_horizon_color = Color(0.6, 0.66, 0.66)
+	sky_material.ground_bottom_color = Color(0.3, 0.34, 0.3)
+	var sky := Sky.new()
+	sky.sky_material = sky_material
+	var env := _night_env.duplicate() as Environment
+	env.sky = sky
+	env.ambient_light_color = Color(0.6, 0.7, 0.85)
+	env.ambient_light_energy = 0.8
+	env.glow_intensity = 0.4
+	env.glow_hdr_threshold = 2.5
+	env.tonemap_exposure = 1.6
+	env.adjustment_enabled = true
+	env.adjustment_contrast = 1.1
+	env.adjustment_saturation = 1.4
+	world_env.environment = env
+	sun.light_color = Color(1.0, 0.95, 0.85)
+	sun.light_energy = 1.3
+	sun.basis = Basis.from_euler(Vector3(deg_to_rad(-38.0), deg_to_rad(20.0), 0.0))
+
+
+func _build_plain() -> void:
+	var noise := FastNoiseLite.new()
+	noise.frequency = 0.04
+	noise.fractal_octaves = 4
+	var ramp := Gradient.new()
+	ramp.colors = PackedColorArray([Color(0.3, 0.3, 0.2), Color(0.46, 0.43, 0.3)])
+	var texture := NoiseTexture2D.new()
+	texture.noise = noise
+	texture.color_ramp = ramp
+	texture.seamless = true
+	texture.width = 512
+	texture.height = 512
+	var plain_mat := StandardMaterial3D.new()
+	plain_mat.albedo_texture = texture
+	plain_mat.uv1_scale = Vector3.ONE * 24.0
+	plain_mat.roughness = 1.0
+	plain_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
+	var plain := MeshInstance3D.new()
+	var plane := PlaneMesh.new()
+	plane.size = Vector2.ONE * PLAIN_SIZE_M
+	plane.material = plain_mat
+	plain.mesh = plane
+	_root.add_child(plain)
+
+	var tower_mat := StandardMaterial3D.new()
+	tower_mat.albedo_color = Color(0.78, 0.76, 0.72)
+	tower_mat.roughness = 0.9
+	var rng := RandomNumberGenerator.new()
+	rng.seed = TOWER_SEED
+	for i in TOWER_COUNT:
+		var angle := rng.randf_range(0.0, TAU)
+		var ring_m := rng.randf_range(250.0, 800.0)
+		var size := Vector3(rng.randf_range(15.0, 30.0), rng.randf_range(20.0, 50.0), rng.randf_range(15.0, 30.0))
+		var mesh := BoxMesh.new()
+		mesh.size = size
+		mesh.material = tower_mat
+		var tower := MeshInstance3D.new()
+		tower.mesh = mesh
+		tower.position = Vector3(cos(angle) * ring_m, size.y * 0.5, sin(angle) * ring_m)
+		_root.add_child(tower)

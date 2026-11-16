@@ -1,0 +1,15 @@
+[gd_resource type="Resource" script_class="ExplosionCharge" format=3]
+
+[ext_resource type="Script" path="res://scripts/explosion/explosion_charge.gd" id="1_charge"]
+
+[resource]
+script = ExtResource("1_charge")
+radius_m = 1.0
+temperature_k = 2400.0
+fuel_fraction = 0.1
+soot_fraction = 0.9
+divergence_per_s = 80.0
+pulse_duration_s = 0.4
+blast_radius_m = 4.0
+blast_speed_mps = 12.0
+flash_energy = 0.0

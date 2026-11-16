@@ -8757,3 +8757,1121 @@ func _river_fixture_difference(a: Image, b: Image) -> float:
 		for x in 320:
 			total += absf(small_a.get_pixel(x, y).get_luminance() - small_b.get_pixel(x, y).get_luminance())
 	return total / (320.0 * 180.0)
+
+
+const PARITY_FRAMES := 150
+const PARITY_FIELDS := {"u": 4, "v": 4, "w": 4, "scal": 16, "scal2": 16}
+const PARITY_OUT_DIR := "res://tmp/fire_parity"
+const PARITY_FUEL_POS := Vector3(0.0, 0.3, 0.0)
+const PARITY_FUEL_RADIUS_M := 0.8
+const PARITY_FUEL_RATE_PER_S := 0.2
+
+
+func _fire_parity_fail(reason: String) -> void:
+	print("FIRE_PARITY FAIL %s" % reason)
+	quit(1)
+
+
+func _fire_parity_wait(out: Dictionary, timeout_ms: int) -> bool:
+	var deadline := Time.get_ticks_msec() + timeout_ms
+	while not out.get("done", false) and Time.get_ticks_msec() < deadline:
+		await process_frame
+	return out.get("done", false)
+
+
+func _run_fire_parity() -> void:
+	var label := _extra[0] if not _extra.is_empty() else "run"
+	await _boot_frames(2)
+	var solver := FireGpuSolver.new()
+	solver.set_simulation_hz(30)
+	if label.begins_with("rest"):
+		solver.rest_enabled = true
+		solver.blast_rest_period_s = 0.3
+	RenderingServer.call_on_render_thread(solver.init_render)
+	var init_deadline := Time.get_ticks_msec() + 60000
+	while not solver.initialized and Time.get_ticks_msec() < init_deadline:
+		await process_frame
+	if not solver.initialized:
+		_fire_parity_fail("solver not initialized (no RenderingDevice or init error)")
+		return
+	var fuel_per_step := PARITY_FUEL_RATE_PER_S * solver.timestep
+	for frame in PARITY_FRAMES:
+		solver.push_event(FireGpuSolver.EVENT_FUEL, PARITY_FUEL_POS, PARITY_FUEL_RADIUS_M, fuel_per_step)
+		if frame == 0:
+			solver.push_event(FireGpuSolver.EVENT_IGNITE, Vector3(0.0, 0.5, 0.0), 1.0, 0.4)
+		RenderingServer.call_on_render_thread(solver.step_render.bind(1))
+		await process_frame
+	var out := {}
+	RenderingServer.call_on_render_thread(_fire_parity_read.bind(solver, out))
+	if not await _fire_parity_wait(out, 60000):
+		_fire_parity_fail("readback timed out")
+		return
+	if out.has("error"):
+		_fire_parity_fail(out["error"])
+		return
+	var lines: PackedStringArray = out["lines"]
+	var head := "FIRE_PARITY %s tiles=%d frames=%d" % [out["hash"], out["tiles"], PARITY_FRAMES]
+	lines.insert(0, head)
+	var dir := ProjectSettings.globalize_path(PARITY_OUT_DIR)
+	DirAccess.make_dir_recursive_absolute(dir)
+	var file := FileAccess.open("%s/%s.txt" % [dir, label], FileAccess.WRITE)
+	if file == null:
+		_fire_parity_fail("cannot write %s" % dir)
+		return
+	file.store_string("\n".join(lines) + "\n")
+	file.close()
+	for line in lines:
+		print(line)
+	var freed := {}
+	RenderingServer.call_on_render_thread(func():
+		solver.free_render()
+		freed["done"] = true)
+	await _fire_parity_wait(freed, 10000)
+	quit(0)
+
+
+func _fire_parity_hash(chunks: Array) -> String:
+	var ctx := HashingContext.new()
+	ctx.start(HashingContext.HASH_SHA256)
+	for chunk in chunks:
+		ctx.update(chunk)
+	return ctx.finish().hex_encode()
+
+
+func _fire_parity_read(solver: FireGpuSolver, out: Dictionary) -> void:
+	var rd: RenderingDevice = solver._rd
+	var pool: FireTilePool = solver._pool
+	var indir := rd.texture_get_data(pool._tex["indir"], 0).to_int32_array()
+	var vtis := PackedInt32Array()
+	for i in indir.size():
+		if indir[i] >= 0:
+			vtis.append(i)
+	if vtis.is_empty():
+		out["error"] = "no resident tiles"
+		out["done"] = true
+		return
+	var cells := pool.atlas_cells()
+	var suffix := "_a" if solver._parity == 0 else "_b"
+	var field_hashes := PackedStringArray()
+	var lines := PackedStringArray()
+	var tile := FireTilePool.TILE
+	for field in PARITY_FIELDS:
+		var bpp: int = PARITY_FIELDS[field]
+		var data: PackedByteArray = rd.texture_get_data(solver._tex[field + suffix], 0)
+		var chunks: Array = []
+		for vti in vtis:
+			chunks.append(PackedInt32Array([vti]).to_byte_array())
+			var origin := pool.atlas_origin(indir[vti])
+			for lz in tile:
+				for ly in tile:
+					var off := (((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x) * bpp
+					chunks.append(data.slice(off, off + tile * bpp))
+		var h := _fire_parity_hash(chunks)
+		field_hashes.append(h)
+		lines.append("field_%s %s" % [field, h])
+	var tile_hash := _fire_parity_hash([vtis.to_byte_array()])
+	lines.append("tile_set %s" % tile_hash)
+	var stats := rd.buffer_get_data(solver._stats_buf, 0, FireGpuSolver.STATS_WORDS * 4)
+	var stats_hash := _fire_parity_hash([stats])
+	lines.append("stats %s" % stats_hash)
+	lines.append("max_temperature_k=%d reaction_sum=%d fuel_sum=%d parity=%d" % [
+		stats.decode_u32(FireGpuSolver.STAT_MAX_T * 4),
+		stats.decode_u32(FireGpuSolver.STAT_REACTION_SUM * 4),
+		stats.decode_u32(FireGpuSolver.STAT_FUEL_SUM * 4), solver._parity])
+	out["hash"] = _fire_parity_hash(["".join(field_hashes).to_utf8_buffer(),
+		tile_hash.to_utf8_buffer(), stats_hash.to_utf8_buffer()])
+	out["tiles"] = vtis.size()
+	out["lines"] = lines
+	out["done"] = true
+
+
+const BLAST_FRAMES := 60
+const BLAST_PULSE_S := 0.15
+const BLAST_CENTRE := Vector3(0.0, 1.5, 0.0)
+const BLAST_RADIUS_M := 1.5
+const BLAST_RATE := Vector4(30.0, 2200.0, 0.3, 0.2)
+const BLAST_SHELL_M := Vector2(2.4, 2.6)
+const BLAST_RESIDUAL_LIMIT := 0.10
+
+
+func _blast_fail(reason: String) -> void:
+	print("TEST FAIL fire_blast %s" % reason)
+	quit(1)
+
+
+func _run_fire_blast() -> void:
+	await _boot_frames(2)
+	var solver := FireGpuSolver.new()
+	solver.blast_enabled = true
+	solver.set_simulation_hz(30)
+	RenderingServer.call_on_render_thread(solver.init_render)
+	var init_deadline := Time.get_ticks_msec() + 60000
+	while not solver.initialized and Time.get_ticks_msec() < init_deadline:
+		await process_frame
+	if not solver.initialized:
+		_blast_fail("solver not initialized (no RenderingDevice or init error)")
+		return
+	var pulse_frames := ceili(BLAST_PULSE_S / solver.timestep)
+	var rows: Array[Dictionary] = []
+	for frame in BLAST_FRAMES:
+		var rate := BLAST_RATE
+		if frame >= pulse_frames:
+			rate.x = 0.0
+		solver.set_blasts(PackedVector4Array([Vector4(BLAST_CENTRE.x, BLAST_CENTRE.y,
+			BLAST_CENTRE.z, BLAST_RADIUS_M)]), PackedVector4Array([rate]))
+		if frame == 0:
+			solver.push_event(FireGpuSolver.EVENT_BLAST, BLAST_CENTRE, BLAST_RADIUS_M, 0.0)
+		var out := {"rate": rate.x}
+		RenderingServer.call_on_render_thread(_fire_blast_frame.bind(solver, out))
+		if not await _fire_parity_wait(out, 60000):
+			_blast_fail("frame %d readback timed out" % frame)
+			return
+		out["frame"] = frame
+		rows.append(out)
+		await process_frame
+	var freed := {}
+	RenderingServer.call_on_render_thread(func():
+		solver.free_render()
+		freed["done"] = true)
+	await _fire_parity_wait(freed, 10000)
+
+	var failures := PackedStringArray()
+	print("FIRE_BLAST frame rate  resid/s  S_max/s  ratio  max_face_mps  shell_vr_mps  max_T_K  tiles")
+	for row in rows:
+		print("FIRE_BLAST %3d %5.1f %8.3f %8.3f %6.3f %10.2f %12.3f %8.0f %5d" % [row["frame"],
+			row["rate"], row["residual"], row["s_max"], row["ratio"], row["max_face"],
+			row["shell_vr"], row["max_t"], row["tiles"]])
+		if row["bad"] > 0:
+			failures.append("non-finite values at frame %d" % row["frame"])
+		if row["frame"] < pulse_frames:
+			if row["ratio"] >= BLAST_RESIDUAL_LIMIT:
+				failures.append("residual/S_max %.3f at frame %d" % [row["ratio"], row["frame"]])
+			if row["shell_vr"] <= 0.0:
+				failures.append("shell radial velocity %.3f not outward at frame %d" % [
+					row["shell_vr"], row["frame"]])
+	if rows[0]["max_t"] <= 1500.0:
+		failures.append("max temperature after injection %.0f K" % rows[0]["max_t"])
+	var tail := 0.0
+	for row in rows.slice(BLAST_FRAMES - 10):
+		tail += row["residual"] / 10.0
+	var tail_limit: float = BLAST_RESIDUAL_LIMIT * BLAST_RATE.x
+	print("FIRE_BLAST tail_residual_mean=%.3f limit=%.3f" % [tail, tail_limit])
+	if tail >= tail_limit:
+		failures.append("residual %.3f 1/s after the pulse" % tail)
+	if failures.is_empty():
+		print("TEST PASS fire_blast")
+		quit(0)
+	else:
+		_blast_fail("; ".join(failures))
+
+
+func _fire_blast_frame(solver: FireGpuSolver, out: Dictionary) -> void:
+	solver.step_render(1)
+	var rd: RenderingDevice = solver._rd
+	var pool: FireTilePool = solver._pool
+	var stats := rd.buffer_get_data(solver._stats_buf, 0, FireGpuSolver.STATS_WORDS * 4)
+	out["residual"] = float(stats.decode_u32(FireGpuSolver.STAT_MAX_DIVERGENCE * 4)) / FireGpuSolver.STAT_SCALE
+	out["max_t"] = float(stats.decode_u32(FireGpuSolver.STAT_MAX_T * 4))
+	var indir := rd.texture_get_data(pool._tex["indir"], 0).to_int32_array()
+	var suffix := "_a" if solver._parity == 0 else "_b"
+	var fields := {}
+	for field in ["u", "v", "w", "scal", "scal2"]:
+		fields[field] = rd.texture_get_data(solver._tex[field + suffix], 0).to_float32_array()
+	var cells := pool.atlas_cells()
+	var dims := solver.sim_dims()
+	var h := solver.cell_size
+	var half := Vector3(dims.x, 0.0, dims.z) * h * 0.5
+	var tile := FireTilePool.TILE
+	var tiles := 0
+	var bad := 0
+	var s_max := 0.0
+	var max_face := 0.0
+	var shell_sum := 0.0
+	var shell_n := 0
+	var face_shift := [Vector3(0.5, 0.0, 0.0), Vector3(0.0, 0.5, 0.0), Vector3(0.0, 0.0, 0.5)]
+	for vti in indir.size():
+		if indir[vti] < 0:
+			continue
+		tiles += 1
+		var vt := FireTilePool.vt_of(vti)
+		var origin := pool.atlas_origin(indir[vti])
+		for lz in tile:
+			for ly in tile:
+				for lx in tile:
+					var idx := ((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x + lx
+					var centre := (Vector3(vt * tile + Vector3i(lx, ly, lz)) + Vector3.ONE * 0.5) * h - half
+					var d := centre.distance_to(BLAST_CENTRE)
+					s_max = maxf(s_max, out["rate"] * (1.0 - smoothstep(0.0, BLAST_RADIUS_M, d)))
+					for k in 4:
+						if not is_finite(fields["scal"][idx * 4 + k]) or not is_finite(fields["scal2"][idx * 4 + k]):
+							bad += 1
+					for axis in 3:
+						var value: float = fields["uvw"[axis]][idx]
+						if not is_finite(value):
+							bad += 1
+							continue
+						max_face = maxf(max_face, absf(value))
+						var shift: Vector3 = face_shift[axis]
+						var r: Vector3 = centre - shift * h - BLAST_CENTRE
+						var rl: float = r.length()
+						if rl >= BLAST_SHELL_M.x and rl <= BLAST_SHELL_M.y:
+							shell_sum += value * r[axis] / rl
+							shell_n += 1
+	out["tiles"] = tiles
+	out["bad"] = bad
+	out["s_max"] = s_max
+	out["ratio"] = out["residual"] / s_max if s_max > 0.0 else 0.0
+	out["max_face"] = max_face
+	out["shell_vr"] = 3.0 * shell_sum / maxf(float(shell_n), 1.0)
+	out["done"] = true
+
+
+const TERRACE_CUBE := 48
+const TERRACE_FRAMES := [12, 24, 36]
+const TERRACE_LAST_FRAME := 36
+const TERRACE_MIN_AMP_K := 100.0
+const TERRACE_FRONT_GRAD_K := 100.0
+const TERRACE_RANGE := "res://resources/explosion/presets/fireball_range.tres"
+const TERRACE_CHARGE := "res://resources/explosion/presets/fireball_charge.tres"
+const TERRACE_POINT := Vector3(0.0, 1.4, 0.0)
+
+
+func _run_blast_terrace() -> void:
+	var variant := _extra[0] if not _extra.is_empty() else "base"
+	if not ["base", "sl", "rad0", "vort0", "press4"].has(variant):
+		print("TEST FAIL blast_terrace unknown variant %s" % variant)
+		quit(1)
+		return
+	await _boot_frames(2)
+	var system := ExplosionSystem.new()
+	system.config = load(TERRACE_RANGE)
+	system.start()
+	var solver := system.solver
+	if solver == null:
+		print("TEST FAIL blast_terrace solver not created")
+		quit(1)
+		return
+	match variant:
+		"sl": solver.advection_mode = FireGpuSolver.ADVECTION_SEMI_LAGRANGIAN
+		"rad0": solver.radiation_coefficient = 0.0
+		"vort0": solver.vorticity_mode = FireGpuSolver.VORTICITY_OFF
+		"press4": solver.pressure_iterations *= 4
+	var init_deadline := Time.get_ticks_msec() + 60000
+	while not solver.initialized and Time.get_ticks_msec() < init_deadline:
+		await process_frame
+	if not solver.initialized:
+		print("TEST FAIL blast_terrace solver not initialized (no RenderingDevice or init error)")
+		quit(1)
+		return
+	var charge: ExplosionCharge = load(TERRACE_CHARGE)
+	print("BLAST_TERRACE %s charge continuous=%s pulse_s=%.3f radius_m=%.2f cell_m=%.3f hz=%d" % [
+		variant, charge.continuous, charge.pulse_duration_s, charge.radius_m,
+		system.config.cell_size_m, system.config.simulation_hz])
+	system.detonate(TERRACE_POINT, charge)
+	var failed := false
+	for frame in range(1, TERRACE_LAST_FRAME + 1):
+		system.advance(solver.timestep)
+		RenderingServer.call_on_render_thread(ExplosionSystem._step_render.bind(solver, 1))
+		if TERRACE_FRAMES.has(frame):
+			var raw := {}
+			RenderingServer.call_on_render_thread(_terrace_read.bind(solver, raw))
+			if not await _fire_parity_wait(raw, 60000) or raw.has("error"):
+				failed = true
+				print("BLAST_TERRACE %s %d readback failed %s" % [variant, frame, raw.get("error", "timeout")])
+				break
+			if frame == TERRACE_FRAMES[0]:
+				print("BLAST_TERRACE FORMAT scal=%s display=%s" % [raw["scal_format"], raw["display_format"]])
+			_terrace_report(variant, frame, solver, raw)
+		await process_frame
+	var freed := {}
+	RenderingServer.call_on_render_thread(func():
+		solver.free_render()
+		freed["done"] = true)
+	await _fire_parity_wait(freed, 10000)
+	if failed:
+		print("TEST FAIL blast_terrace")
+		quit(1)
+		return
+	system.free()
+	print("BLAST_TERRACE DONE %s" % variant)
+	quit(0)
+
+
+const BLAST_PARITY_STEPS := 90
+
+
+func _run_blast_parity() -> void:
+	await _boot_frames(2)
+	var system := ExplosionSystem.new()
+	system.config = load(TERRACE_RANGE)
+	system.start()
+	var solver := system.solver
+	if solver == null:
+		print("BLAST_PARITY FAIL solver not created")
+		quit(1)
+		return
+	var init_deadline := Time.get_ticks_msec() + 60000
+	while not solver.initialized and Time.get_ticks_msec() < init_deadline:
+		await process_frame
+	if not solver.initialized:
+		print("BLAST_PARITY FAIL solver not initialized (no RenderingDevice or init error)")
+		quit(1)
+		return
+	system.detonate(TERRACE_POINT, load(TERRACE_CHARGE))
+	var peak := 0
+	for step in BLAST_PARITY_STEPS:
+		system.advance(solver.timestep)
+		RenderingServer.call_on_render_thread(ExplosionSystem._step_render.bind(solver, 1))
+		await process_frame
+		peak = maxi(peak, int(solver.get_debug_pool_stats().get("resident", 0)))
+	var pool_out := {}
+	RenderingServer.call_on_render_thread(_blast_pool_read.bind(solver, pool_out))
+	if not await _fire_parity_wait(pool_out, 60000) or _blast_pool_report(pool_out, "blast_parity", peak):
+		quit(1)
+		return
+	var out := {}
+	RenderingServer.call_on_render_thread(_fire_parity_read.bind(solver, out))
+	if not await _fire_parity_wait(out, 60000) or out.has("error"):
+		print("BLAST_PARITY FAIL readback %s" % out.get("error", "timeout"))
+		quit(1)
+		return
+	var lines: PackedStringArray = out["lines"]
+	lines.insert(0, "BLAST_PARITY %s tiles=%d steps=%d strength=%.3f" % [
+		out["hash"], out["tiles"], BLAST_PARITY_STEPS, solver.blast_turbulence_strength])
+	var dir := ProjectSettings.globalize_path(PARITY_OUT_DIR)
+	DirAccess.make_dir_recursive_absolute(dir)
+	var file := FileAccess.open("%s/p2_blast.txt" % dir, FileAccess.WRITE)
+	if file == null:
+		print("BLAST_PARITY FAIL cannot write %s" % dir)
+		quit(1)
+		return
+	file.store_string("\n".join(lines) + "\n")
+	file.close()
+	for line in lines:
+		print(line)
+	var freed := {}
+	RenderingServer.call_on_render_thread(func():
+		solver.free_render()
+		freed["done"] = true)
+	await _fire_parity_wait(freed, 10000)
+	system.free()
+	quit(0)
+
+
+func _blast_pool_read(solver: FireGpuSolver, out: Dictionary) -> void:
+	out["stats"] = solver.read_pool_stats()
+	out["done"] = true
+
+
+## Prints the POOL line; true when tiles were dropped or the readback failed.
+func _blast_pool_report(out: Dictionary, probe: String, peak: int) -> bool:
+	if not out.get("done", false) or out["stats"].is_empty():
+		print("TEST FAIL %s pool readback" % probe)
+		return true
+	var stats: Dictionary = out["stats"]
+	print("POOL peak=%d slots=%d exhausted=%d" % [peak, stats["budget"], stats["exhausted"]])
+	if int(stats["exhausted"]) > 0:
+		print("TEST FAIL %s pool exhausted" % probe)
+		return true
+	return false
+
+
+func _terrace_format_name(format: int) -> String:
+	match format:
+		RenderingDevice.DATA_FORMAT_R32G32B32A32_SFLOAT: return "rgba32f"
+		RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT: return "rgba16f"
+		RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM: return "rgba8"
+	return "format_%d" % format
+
+
+func _terrace_read(solver: FireGpuSolver, out: Dictionary) -> void:
+	var rd: RenderingDevice = solver._rd
+	var pool: FireTilePool = solver._pool
+	var suffix := "_a" if solver._parity == 0 else "_b"
+	out["indir"] = rd.texture_get_data(pool._tex["indir"], 0).to_int32_array()
+	out["scal"] = rd.texture_get_data(solver._tex["scal" + suffix], 0).to_float32_array()
+	out["scal_format"] = _terrace_format_name(rd.texture_get_format(solver._tex["scal" + suffix]).format)
+	out["display_format"] = _terrace_format_name(solver._display_format)
+	out["cells"] = pool.atlas_cells()
+	out["done"] = true
+
+
+func _terrace_slot_origin(slot: int, tiles: Vector3i) -> Vector3i:
+	return Vector3i(slot % tiles.x, (slot / tiles.x) % tiles.y, slot / (tiles.x * tiles.y)) * FireTilePool.TILE
+
+
+func _terrace_report(variant: String, frame: int, solver: FireGpuSolver, raw: Dictionary) -> void:
+	var indir: PackedInt32Array = raw["indir"]
+	var scal: PackedFloat32Array = raw["scal"]
+	var cells: Vector3i = raw["cells"]
+	var atlas_tiles := cells / FireTilePool.TILE
+	var ambient := solver.ambient_temperature
+	var resident := {}
+	for i in indir.size():
+		if indir[i] >= 0 and indir[i] < 0xFFFFFFF0:
+			resident[i] = indir[i]
+	var best_t := -1.0
+	var hot := Vector3i.ZERO
+	var tile := FireTilePool.TILE
+	for vti: int in resident:
+		var vt := Vector3i(vti % FireTilePool.VTILES.x, (vti / FireTilePool.VTILES.x) % FireTilePool.VTILES.y,
+			vti / (FireTilePool.VTILES.x * FireTilePool.VTILES.y))
+		var origin := _terrace_slot_origin(resident[vti], atlas_tiles)
+		for lz in tile:
+			for ly in tile:
+				for lx in tile:
+					var t := scal[(((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x + lx) * 4]
+					if t > best_t:
+						best_t = t
+						hot = vt * tile + Vector3i(lx, ly, lz)
+	var half := TERRACE_CUBE / 2
+	var lo := hot - Vector3i(half, half, half)
+	var cube := PackedFloat32Array()
+	cube.resize(TERRACE_CUBE * TERRACE_CUBE * TERRACE_CUBE)
+	var hot_cells := 0
+	var centroid := Vector3.ZERO
+	var dims := solver.sim_dims()
+	var cell_m := solver.cell_size
+	for z in TERRACE_CUBE:
+		for y in TERRACE_CUBE:
+			for x in TERRACE_CUBE:
+				var c := lo + Vector3i(x, y, z)
+				var t := ambient
+				if c.x >= 0 and c.y >= 0 and c.z >= 0:
+					var vt := c / tile
+					if vt.x < FireTilePool.VTILES.x and vt.y < FireTilePool.VTILES.y and vt.z < FireTilePool.VTILES.z:
+						var slot: int = resident.get(FireTilePool.vti_of(vt), -1)
+						if slot >= 0:
+							var o := _terrace_slot_origin(slot, atlas_tiles) + Vector3i(c.x & 7, c.y & 7, c.z & 7)
+							t = scal[((o.z * cells.y + o.y) * cells.x + o.x) * 4]
+				cube[x + TERRACE_CUBE * (y + TERRACE_CUBE * z)] = t
+				if t >= 1000.0:
+					hot_cells += 1
+					centroid += Vector3((c.x + 0.5) * cell_m - dims.x * cell_m * 0.5, (c.y + 0.5) * cell_m,
+						(c.z + 0.5) * cell_m - dims.z * cell_m * 0.5)
+	var front_cells := 0
+	var n := TERRACE_CUBE
+	for z in range(1, n - 1):
+		for y in range(1, n - 1):
+			for x in range(1, n - 1):
+				var i := x + n * (y + n * z)
+				var g := 0.5 * Vector3(cube[i + 1] - cube[i - 1], cube[i + n] - cube[i - n],
+					cube[i + n * n] - cube[i - n * n])
+				if g.length() >= TERRACE_FRONT_GRAD_K:
+					front_cells += 1
+	print("BLAST_TERRACE %s %d info hot_cell=%s max_t=%.0f display_t=%.0f t_clamp=%.0f cells_ge_1000K=%d r_eq_1000K_cells=%.2f front_cells_in_cube=%d tiles=%d centroid_m=%s r_eq_1000K_m=%.2f" % [
+		variant, frame, hot, best_t, solver.display_temperature, solver.temperature_clamp, hot_cells,
+		pow(3.0 * hot_cells / (4.0 * PI), 1.0 / 3.0), front_cells, resident.size(),
+		centroid / maxf(hot_cells, 1), pow(3.0 * hot_cells / (4.0 * PI), 1.0 / 3.0) * cell_m])
+
+	_terrace_interior(variant, frame, cube, best_t, hot_cells, lo, solver)
+	var widths := PackedFloat32Array()
+	var inflections := PackedInt32Array()
+	var plateau_pairs := 0
+	var plateau_equal := 0
+	var line := PackedFloat32Array()
+	line.resize(n)
+	for axis in 3:
+		for a in n:
+			for b in n:
+				for k in n:
+					match axis:
+						0: line[k] = cube[k + n * (a + n * b)]
+						1: line[k] = cube[a + n * (k + n * b)]
+						2: line[k] = cube[a + n * (b + n * k)]
+				var stat := _terrace_line(line, solver.temperature_clamp)
+				for crossing: Dictionary in stat:
+					widths.append(crossing["width"])
+					inflections.append(crossing["inflections"])
+					plateau_pairs += crossing["pairs"]
+					plateau_equal += crossing["equal"]
+	if widths.is_empty():
+		print("BLAST_TERRACE %s %d crossings=0" % [variant, frame])
+		return
+	var sorted_w := widths.duplicate()
+	sorted_w.sort()
+	var infl_hist := PackedInt32Array([0, 0, 0, 0, 0])
+	for count in inflections:
+		infl_hist[mini(count, 4)] += 1
+	var width_edges := [1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+	var width_hist := PackedInt32Array()
+	width_hist.resize(width_edges.size() + 1)
+	for w in widths:
+		var bin := 0
+		while bin < width_edges.size() and w >= width_edges[bin]:
+			bin += 1
+		width_hist[bin] += 1
+	print("BLAST_TERRACE %s %d crossings=%d width_med=%.2f width_p90=%.2f infl_hist(0,1,2,3,4+)=%s infl_ge3=%.3f plateau_frac=%.4f plateau_pairs=%d" % [
+		variant, frame, widths.size(), sorted_w[sorted_w.size() / 2], sorted_w[int(sorted_w.size() * 0.9)],
+		Array(infl_hist), float(infl_hist[3] + infl_hist[4]) / widths.size(),
+		float(plateau_equal) / maxf(plateau_pairs, 1), plateau_pairs])
+	print("BLAST_TERRACE %s %d width_hist(<1,1-1.5,1.5-2,2-3,3-4,4-6,>=6)=%s" % [variant, frame, Array(width_hist)])
+
+
+# One crossing per side of the line's peak: front rising from <= 10 % to >= 90 % of the line's range.
+func _terrace_line(line: PackedFloat32Array, t_clamp: float) -> Array:
+	var found := []
+	var n := line.size()
+	var lo := line[0]
+	var pk := line[0]
+	var peak := 0
+	for i in n:
+		lo = minf(lo, line[i])
+		if line[i] > pk:
+			pk = line[i]
+			peak = i
+	var amp := pk - lo
+	if amp < TERRACE_MIN_AMP_K:
+		return found
+	var t10 := lo + 0.1 * amp
+	var t90 := lo + 0.9 * amp
+	for dir: int in [-1, 1]:
+		var r := peak
+		while r + dir >= 0 and r + dir < n and line[r + dir] >= t90:
+			r += dir
+		var k := r + dir
+		if k < 0 or k >= n:
+			continue
+		while k >= 0 and k < n and line[k] > t10:
+			k += dir
+		if k < 0 or k >= n:
+			continue
+		var seg := PackedFloat32Array()
+		var i := k
+		while true:
+			seg.append(line[i])
+			if i == r:
+				break
+			i -= dir
+		var m := seg.size()
+		var x10 := (t10 - seg[0]) / (seg[1] - seg[0])
+		var x90 := float(m - 2) + (t90 - seg[m - 2]) / (seg[m - 1] - seg[m - 2])
+		var thr := 0.02 * (seg[m - 1] - seg[0])
+		var ext := PackedFloat32Array()
+		var e_lo := maxi(mini(k, r) - 1, 0)
+		var e_hi := mini(maxi(k, r) + 1, n - 1)
+		for j in range(e_lo, e_hi + 1):
+			ext.append(line[j])
+		var flips := 0
+		var last_sign := 0
+		for j in range(1, ext.size() - 1):
+			var d2 := ext[j - 1] - 2.0 * ext[j] + ext[j + 1]
+			if absf(d2) <= thr:
+				continue
+			var sgn := 1 if d2 > 0.0 else -1
+			if last_sign != 0 and sgn != last_sign:
+				flips += 1
+			last_sign = sgn
+		var pairs := 0
+		var equal := 0
+		for j in range(m - 1):
+			var p := seg[j]
+			var q := seg[j + 1]
+			if absf(p - t_clamp) <= 1e-4 * t_clamp or absf(q - t_clamp) <= 1e-4 * t_clamp:
+				continue
+			pairs += 1
+			if absf(p - q) <= 1e-4 * maxf(absf(p), absf(q)):
+				equal += 1
+		found.append({"width": x90 - x10, "inflections": flips, "pairs": pairs, "equal": equal})
+	return found
+
+
+# Core metrics over samples with T >= 0.5 max_T: Nyquist energy fraction, alternating-d2 fraction, radial profile.
+func _terrace_interior(variant: String, frame: int, cube: PackedFloat32Array, max_t: float, _hot_cells: int,
+		_lo: Vector3i, solver: FireGpuSolver) -> void:
+	var n := TERRACE_CUBE
+	var thr := 0.5 * max_t
+	var ambient := solver.ambient_temperature
+	var num := [0.0, 0.0, 0.0]
+	var den := [0.0, 0.0, 0.0]
+	var alt := [0, 0, 0]
+	var tot := [0, 0, 0]
+	var line := PackedFloat32Array()
+	line.resize(n)
+	for axis in 3:
+		for a in n:
+			for b in n:
+				for k in n:
+					match axis:
+						0: line[k] = cube[k + n * (a + n * b)]
+						1: line[k] = cube[a + n * (k + n * b)]
+						2: line[k] = cube[a + n * (b + n * k)]
+				for i in range(2, n - 2):
+					if line[i - 2] < thr or line[i - 1] < thr or line[i] < thr or line[i + 1] < thr or line[i + 2] < thr:
+						continue
+					var d2 := line[i - 1] - 2.0 * line[i] + line[i + 1]
+					var dm := line[i - 2] - 2.0 * line[i - 1] + line[i]
+					var dp := line[i] - 2.0 * line[i + 1] + line[i + 2]
+					var g := (line[i + 1] - line[i - 1]) * 0.5
+					num[axis] += d2 * d2
+					den[axis] += g * g
+					tot[axis] += 1
+					if absf(d2) > 0.1 and absf(dm) > 0.1 and absf(dp) > 0.1 and d2 * dm < 0.0 and d2 * dp < 0.0:
+						alt[axis] += 1
+	var names := ["x", "y", "z"]
+	for axis in 3:
+		print("BLAST_TERRACE %s %d core axis=%s samples=%d nyquist_frac=%.4f alternating_frac=%.4f" % [
+			variant, frame, names[axis], tot[axis], num[axis] / maxf(num[axis] + den[axis], 1e-9),
+			float(alt[axis]) / maxf(tot[axis], 1)])
+	var xy_n: float = num[0] + num[1]
+	var xy_d: float = den[0] + den[1]
+	print("BLAST_TERRACE %s %d core xy nyquist_frac=%.4f alternating_frac=%.4f | z nyquist_frac=%.4f alternating_frac=%.4f | all nyquist_frac=%.4f" % [
+		variant, frame, xy_n / maxf(xy_n + xy_d, 1e-9), float(alt[0] + alt[1]) / maxf(tot[0] + tot[1], 1),
+		num[2] / maxf(num[2] + den[2], 1e-9), float(alt[2]) / maxf(tot[2], 1),
+		(xy_n + num[2]) / maxf(xy_n + num[2] + xy_d + den[2], 1e-9)])
+	var cc := Vector3.ZERO
+	var cn := 0
+	for z in n:
+		for y in n:
+			for x in n:
+				if cube[x + n * (y + n * z)] >= 1000.0:
+					cc += Vector3(x, y, z)
+					cn += 1
+	cc /= maxf(cn, 1)
+	var bins := 26
+	var sum := PackedFloat64Array()
+	var cnt := PackedInt32Array()
+	sum.resize(bins)
+	cnt.resize(bins)
+	for z in n:
+		for y in n:
+			for x in n:
+				var bin := int(Vector3(x, y, z).distance_to(cc) / 0.5)
+				if bin < bins:
+					sum[bin] += cube[x + n * (y + n * z)]
+					cnt[bin] += 1
+	var core_min := INF
+	var core_max := -INF
+	var core_sum := 0.0
+	var core_sq := 0.0
+	var core_n := 0
+	for z in n:
+		for y in n:
+			for x in n:
+				if Vector3(x, y, z).distance_to(cc) < 4.0:
+					var t := cube[x + n * (y + n * z)]
+					core_min = minf(core_min, t)
+					core_max = maxf(core_max, t)
+					core_sum += t
+					core_sq += t * t
+					core_n += 1
+	var core_mean := core_sum / maxf(core_n, 1)
+	print("BLAST_TERRACE %s %d core_r<4cells n=%d min=%.4f max=%.4f mean=%.3f std=%.4f" % [
+		variant, frame, core_n, core_min, core_max, core_mean, sqrt(maxf(core_sq / maxf(core_n, 1) - core_mean * core_mean, 0.0))])
+	_terrace_hp(variant, frame, cube, max_t, ambient)
+	_terrace_rim(variant, frame, cube, cell_m_for_rim(solver), ambient, solver)
+	var profile := PackedStringArray()
+	for bin in bins:
+		profile.append("%.1f:%.0f" % [bin * 0.5, sum[bin] / maxf(cnt[bin], 1) if cnt[bin] > 0 else ambient])
+	print("BLAST_TERRACE %s %d radial(cells:meanK)=%s" % [variant, frame, " ".join(profile)])
+
+
+func cell_m_for_rim(solver: FireGpuSolver) -> float:
+	return solver.cell_size
+
+
+# Tangential variation per 0.25-cell radial bin (3.5..7 cells) about the (T - ambient)-weighted centroid,
+# next to the same statistics on the analytic logistic shell + rim bump sampled at the same cells.
+func _terrace_rim(variant: String, frame: int, cube: PackedFloat32Array, cell_m: float, ambient: float,
+		_solver: FireGpuSolver) -> void:
+	var n := TERRACE_CUBE
+	var cc := Vector3.ZERO
+	var wsum := 0.0
+	for z in n:
+		for y in n:
+			for x in n:
+				var w := cube[x + n * (y + n * z)] - ambient
+				cc += w * Vector3(x, y, z)
+				wsum += w
+	cc /= maxf(wsum, 1e-6)
+	var peak_k := 0.5 * (cube[n / 2 + n * (n / 2 + n * (n / 2))] + ambient)
+	var fields := {"field": cube}
+	for sigma in [0.6, 1.2]:
+		var ana := PackedFloat32Array()
+		ana.resize(cube.size())
+		for z in n:
+			for y in n:
+				for x in n:
+					var r := Vector3(x, y, z).distance_to(cc)
+					var bump := 100.0 * exp(-0.5 * pow((r - 5.25) / sigma, 2.0))
+					ana[x + n * (y + n * z)] = ambient + (1506.0 - ambient) / (1.0 + exp((r - 6.75) * 4.394 / 2.5)) + bump
+		fields["ana_s%.1f" % sigma] = ana
+	for key: String in fields:
+		var f: PackedFloat32Array = fields[key]
+		var sum := PackedFloat64Array()
+		var sq := PackedFloat64Array()
+		var cnt := PackedInt32Array()
+		for arr in [sum, sq, cnt]:
+			arr.resize(14)
+		for z in n:
+			for y in n:
+				for x in n:
+					var r := Vector3(x, y, z).distance_to(cc)
+					if r < 3.5 or r >= 7.0:
+						continue
+					var bin := int((r - 3.5) / 0.25)
+					var t := f[x + n * (y + n * z)]
+					sum[bin] += t
+					sq[bin] += t * t
+					cnt[bin] += 1
+		var parts := PackedStringArray()
+		for bin in 14:
+			var mean := sum[bin] / maxf(cnt[bin], 1)
+			var sd := sqrt(maxf(sq[bin] / maxf(cnt[bin], 1) - mean * mean, 0.0))
+			parts.append("%.2f:%.0f/%.1f/%.4f" % [3.5 + bin * 0.25, mean, sd, sd / maxf(mean, 1.0)])
+		print("BLAST_TERRACE %s %d rim[%s] r:mean/std/cv=%s" % [variant, frame, key, " ".join(parts)])
+
+
+func _terrace_box3(f: PackedFloat32Array, i: int, n: int) -> float:
+	var sum := 0.0
+	for dz in range(-1, 2):
+		for dy in range(-1, 2):
+			for dx in range(-1, 2):
+				sum += f[i + dx + n * (dy + n * dz)]
+	return sum / 27.0
+
+
+# Rim cells 0.3 < (T-Tamb)/(Tmax-Tamb) < 0.95: RMS of T - box3(T) for the field and for its own radial-mean reference.
+func _terrace_hp(variant: String, frame: int, cube: PackedFloat32Array, max_t: float, ambient: float) -> void:
+	var n := TERRACE_CUBE
+	var cc := Vector3.ZERO
+	var wsum := 0.0
+	for z in n:
+		for y in n:
+			for x in n:
+				var w := cube[x + n * (y + n * z)] - ambient
+				cc += w * Vector3(x, y, z)
+				wsum += w
+	cc /= maxf(wsum, 1e-6)
+	var nb := 180
+	var sum := PackedFloat64Array()
+	var cnt := PackedInt32Array()
+	sum.resize(nb + 1)
+	cnt.resize(nb + 1)
+	for z in n:
+		for y in n:
+			for x in n:
+				var bin := mini(int(Vector3(x, y, z).distance_to(cc) / 0.25), nb)
+				sum[bin] += cube[x + n * (y + n * z)]
+				cnt[bin] += 1
+	var prof := PackedFloat32Array()
+	prof.resize(nb + 1)
+	for b in nb + 1:
+		prof[b] = sum[b] / maxf(cnt[b], 1) if cnt[b] > 0 else ambient
+	var ref := PackedFloat32Array()
+	ref.resize(cube.size())
+	for z in n:
+		for y in n:
+			for x in n:
+				var q := Vector3(x, y, z).distance_to(cc) / 0.25 - 0.5
+				var b0 := clampi(int(floor(q)), 0, nb - 1)
+				ref[x + n * (y + n * z)] = lerpf(prof[b0], prof[b0 + 1], clampf(q - b0, 0.0, 1.0))
+	var hp_f := 0.0
+	var hp_r := 0.0
+	var d2 := [0.0, 0.0, 0.0]
+	var count := 0
+	for z in range(1, n - 1):
+		for y in range(1, n - 1):
+			for x in range(1, n - 1):
+				var i := x + n * (y + n * z)
+				var frac := (cube[i] - ambient) / maxf(max_t - ambient, 1.0)
+				if frac <= 0.3 or frac >= 0.95:
+					continue
+				var h := cube[i] - _terrace_box3(cube, i, n)
+				var hr := ref[i] - _terrace_box3(ref, i, n)
+				hp_f += h * h
+				hp_r += hr * hr
+				d2[0] += pow(cube[i - 1] - 2.0 * cube[i] + cube[i + 1], 2.0)
+				d2[1] += pow(cube[i - n] - 2.0 * cube[i] + cube[i + n], 2.0)
+				d2[2] += pow(cube[i - n * n] - 2.0 * cube[i] + cube[i + n * n], 2.0)
+				count += 1
+	var c := maxf(count, 1)
+	var rms_f := sqrt(hp_f / c)
+	var rms_r := sqrt(hp_r / c)
+	print("BLAST_TERRACE %s %d hp rim_cells=%d rms_field=%.3f rms_ref=%.3f R_hp=%.2f d2_rms x=%.2f y=%.2f z=%.2f" % [
+		variant, frame, count, rms_f, rms_r, rms_f / maxf(rms_r, 1e-6), sqrt(d2[0] / c), sqrt(d2[1] / c), sqrt(d2[2] / c)])
+
+
+# Scene probe: runs the explosion demo scene [scene, frame] like the capture harness and reports the hottest fireball.
+func _run_blast_scene() -> void:
+	var scene_index := int(_extra[0]) if _extra.size() > 0 else 1
+	var frames := int(_extra[1]) if _extra.size() > 1 else 60
+	root.size = Vector2i(1280, 720)
+	var demo: Node = (load("res://scenes/explosion_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 60000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	demo.set_capture_scene(scene_index)
+	demo.set_capture_fixed_delta(0.0166667)
+	demo.set_frozen(true)
+	for i in 3:
+		await process_frame
+	await demo.set_capture_params({"camera_scale": 0.5, "charge_scale": float(_extra[2]) if _extra.size() > 2 else 1.0})
+	for i in 90:
+		await process_frame
+	demo.set_frozen(false)
+	for i in frames:
+		await process_frame
+	var solver: FireGpuSolver = demo.explosion.solver
+	var pool_out := {}
+	RenderingServer.call_on_render_thread(_blast_pool_read.bind(solver, pool_out))
+	if not await _fire_parity_wait(pool_out, 60000) or _blast_pool_report(pool_out, "blast_scene", demo._peak_tiles):
+		quit(1)
+		return
+	var raw := {}
+	RenderingServer.call_on_render_thread(_terrace_read.bind(solver, raw))
+	if not await _fire_parity_wait(raw, 60000):
+		print("TEST FAIL blast_scene readback")
+		quit(1)
+		return
+	var indir: PackedInt32Array = raw["indir"]
+	var scal: PackedFloat32Array = raw["scal"]
+	var cells: Vector3i = raw["cells"]
+	var atlas_tiles := cells / FireTilePool.TILE
+	var tile := FireTilePool.TILE
+	var ambient := solver.ambient_temperature
+	var resident := {}
+	for i in indir.size():
+		if indir[i] >= 0 and indir[i] < 0xFFFFFFF0:
+			resident[i] = indir[i]
+	var best_t := -1.0
+	var hot := Vector3i.ZERO
+	for vti: int in resident:
+		var vt := Vector3i(vti % FireTilePool.VTILES.x, (vti / FireTilePool.VTILES.x) % FireTilePool.VTILES.y,
+			vti / (FireTilePool.VTILES.x * FireTilePool.VTILES.y))
+		var origin := _terrace_slot_origin(resident[vti], atlas_tiles)
+		for lz in tile:
+			for ly in tile:
+				for lx in tile:
+					var t := scal[(((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x + lx) * 4]
+					if t > best_t:
+						best_t = t
+						hot = vt * tile + Vector3i(lx, ly, lz)
+	var n := TERRACE_CUBE
+	var lo := hot - Vector3i(n / 2, n / 2, n / 2)
+	var cube := PackedFloat32Array()
+	cube.resize(n * n * n)
+	for z in n:
+		for y in n:
+			for x in n:
+				var c := lo + Vector3i(x, y, z)
+				var t := ambient
+				if c.x >= 0 and c.y >= 0 and c.z >= 0:
+					var vt := c / tile
+					if vt.x < FireTilePool.VTILES.x and vt.y < FireTilePool.VTILES.y and vt.z < FireTilePool.VTILES.z:
+						var slot: int = resident.get(FireTilePool.vti_of(vt), -1)
+						if slot >= 0:
+							var o := _terrace_slot_origin(slot, atlas_tiles) + Vector3i(c.x & 7, c.y & 7, c.z & 7)
+							t = scal[((o.z * cells.y + o.y) * cells.x + o.x) * 4]
+				cube[x + n * (y + n * z)] = t
+	var cc := Vector3.ZERO
+	var wsum := 0.0
+	var hot_cells := 0
+	for z in n:
+		for y in n:
+			for x in n:
+				var w := cube[x + n * (y + n * z)] - ambient
+				if cube[x + n * (y + n * z)] >= 1000.0:
+					hot_cells += 1
+				cc += w * Vector3(x, y, z)
+				wsum += w
+	cc /= maxf(wsum, 1e-6)
+	var core_sum := 0.0
+	var core_n := 0
+	for z in n:
+		for y in n:
+			for x in n:
+				if Vector3(x, y, z).distance_to(cc) < 2.0:
+					core_sum += cube[x + n * (y + n * z)]
+					core_n += 1
+	var cell_m := solver.cell_size
+	var dims := solver.sim_dims()
+	var centre_cell := Vector3(lo) + cc
+	var centre_m := Vector3((centre_cell.x + 0.5) * cell_m - dims.x * cell_m * 0.5, (centre_cell.y + 0.5) * cell_m,
+		(centre_cell.z + 0.5) * cell_m - dims.z * cell_m * 0.5)
+	var r_eq_cells := pow(3.0 * hot_cells / (4.0 * PI), 1.0 / 3.0)
+	var screen: Vector2 = demo.camera.unproject_position(centre_m)
+	print("BLAST_TERRACE scene=%d step=%d hot_cell=%s max_t=%.0f centroid_m=%s r_eq_1000K_cells=%.2f r_eq_1000K_m=%.3f core_t=%.0f cells_ge_1000K=%d screen_px=%s fireballs_tiles=%d" % [
+		scene_index, frames, hot, best_t, centre_m, r_eq_cells, r_eq_cells * cell_m, core_sum / maxf(core_n, 1),
+		hot_cells, screen, resident.size()])
+	var rs := PackedFloat64Array()
+	var rc := PackedInt32Array()
+	rs.resize(26)
+	rc.resize(26)
+	var cube_max_r := PackedFloat32Array()
+	cube_max_r.resize(26)
+	for z in n:
+		for y in n:
+			for x in n:
+				var b := int(Vector3(x, y, z).distance_to(cc) / 0.5)
+				if b < 26:
+					rs[b] += cube[x + n * (y + n * z)]
+					rc[b] += 1
+					cube_max_r[b] = maxf(cube_max_r[b], cube[x + n * (y + n * z)])
+	var prof := PackedStringArray()
+	for b in 26:
+		prof.append("%.1f:%.0f/%.0f" % [b * 0.5, rs[b] / maxf(rc[b], 1), cube_max_r[b]])
+	print("BLAST_TERRACE scene radial(cells:mean/max K)=%s" % " ".join(prof))
+	print("BLAST_TERRACE DONE scene")
+	quit(0)
+
+
+const CAMP_TIP_K := 900.0
+const CAMP_OUT_DIR := "res://tmp/fire_realism/campfire"
+
+
+func _camp_tip(solver: FireGpuSolver, out: Dictionary) -> void:
+	var rd: RenderingDevice = solver._rd
+	var pool: FireTilePool = solver._pool
+	var suffix := "_a" if solver._parity == 0 else "_b"
+	var indir := rd.texture_get_data(pool._tex["indir"], 0).to_int32_array()
+	var scal := rd.texture_get_data(solver._tex["scal" + suffix], 0).to_float32_array()
+	var cells := pool.atlas_cells()
+	var atlas_tiles := cells / FireTilePool.TILE
+	var tile := FireTilePool.TILE
+	var top := -1
+	var tiles := 0
+	for vti in indir.size():
+		var slot := indir[vti]
+		if slot < 0 or slot >= 0xFFFFFFF0:
+			continue
+		tiles += 1
+		var vy := (vti / FireTilePool.VTILES.x) % FireTilePool.VTILES.y
+		if (vy + 1) * tile <= top:
+			continue
+		var origin := _terrace_slot_origin(slot, atlas_tiles)
+		for ly in range(tile - 1, -1, -1):
+			var cy := vy * tile + ly
+			if cy <= top:
+				break
+			var hit := false
+			for lz in tile:
+				var row := ((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x
+				for lx in tile:
+					if scal[(row + lx) * 4] >= CAMP_TIP_K:
+						hit = true
+						break
+				if hit:
+					break
+			if hit:
+				top = cy
+				break
+	out["top_cell"] = top
+	out["tiles"] = tiles
+	out["done"] = true
+
+
+func _camp_spectrum(series: PackedFloat64Array, rate_hz: float) -> Array:
+	var n := series.size()
+	var mean := 0.0
+	for v in series:
+		mean += v
+	mean /= float(n)
+	var x := PackedFloat64Array()
+	x.resize(n)
+	for i in n:
+		x[i] = (series[i] - mean) * (0.5 - 0.5 * cos(TAU * float(i) / float(n - 1)))
+	var out: Array = []
+	var f := 0.1
+	while f <= 6.0:
+		var re := 0.0
+		var im := 0.0
+		for i in n:
+			var a := TAU * f * float(i) / rate_hz
+			re += x[i] * cos(a)
+			im -= x[i] * sin(a)
+		out.append(Vector2(f, sqrt(re * re + im * im)))
+		f += 0.02
+	return out
+
+
+func _run_fire_camp() -> void:
+	var fuel_mode := _extra[0] if _extra.size() > 0 else "wood"
+	var preset := int(_extra[1]) if _extra.size() > 1 else 1
+	var warm_s := float(_extra[2]) if _extra.size() > 2 else 15.0
+	var measure_s := float(_extra[3]) if _extra.size() > 3 else 12.0
+	var label := _extra[4] if _extra.size() > 4 else fuel_mode
+	root.size = Vector2i(1280, 720)
+	var demo: Node = (load("res://scenes/fire_demo.tscn") as PackedScene).instantiate()
+	root.add_child(demo)
+	var deadline := Time.get_ticks_msec() + 90000
+	while not demo.capture_ready() and Time.get_ticks_msec() < deadline:
+		await process_frame
+	demo.apply_preset(preset)
+	for i in 3:
+		await process_frame
+	if fuel_mode == "gas":
+		demo.set_capture_fuel(true)
+	if _extra.size() > 5:
+		demo.wood_pile.set_flame_boost(float(_extra[5]))
+	var solver: FireGpuSolver = demo.solver
+	solver.diagnostic_counters = true
+	demo.set_capture_fixed_delta(solver.timestep)
+	for i in 3:
+		await process_frame
+	var cell_m := solver.cell_size
+	var emitter_text := ""
+	if fuel_mode == "wood":
+		var emitters = demo.wood_pile.emitters()
+		emitter_text = "emitters=%s" % str(emitters)
+	print("FIRE_CAMP start mode=%s preset=%d cell=%.3f hz=%d dt=%.5f substeps_per_frame_target=1 fuel=%d %s" % [
+		fuel_mode, preset, cell_m, solver.simulation_hz, solver.timestep, solver.fuel_index, emitter_text.left(400)])
+	var warm_frames := ceili(warm_s / solver.timestep)
+	var total_frames := warm_frames + ceili(measure_s / solver.timestep)
+	var heights := PackedFloat64Array()
+	var q_kw := PackedFloat64Array()
+	var burn_kg_s := PackedFloat64Array()
+	var csv := PackedStringArray(["frame,sim_step,top_m,q_kw,tiles,max_t"])
+	var last_step := solver._simulation_step
+	for frame in total_frames:
+		await process_frame
+		var out := {}
+		RenderingServer.call_on_render_thread(_camp_tip.bind(solver, out))
+		if not await _fire_parity_wait(out, 60000):
+			print("FIRE_CAMP FAIL readback timeout")
+			quit(1)
+			return
+		var stats := solver.get_stats()
+		var steps := solver._simulation_step - last_step
+		last_step = solver._simulation_step
+		var top_m := (float(out["top_cell"]) + 1.0) * cell_m
+		var q := float(stats["diag_chemical_heat_j"]) / solver.timestep / 1000.0
+		csv.append("%d,%d,%.3f,%.2f,%d,%.0f" % [frame, solver._simulation_step, top_m, q, out["tiles"], stats["max_temperature"]])
+		if frame >= warm_frames and steps == 1:
+			heights.append(top_m)
+			q_kw.append(q)
+			burn_kg_s.append(float(stats["diag_fuel_burned_kg"]) / solver.timestep)
+		if frame % 90 == 0:
+			print("FIRE_CAMP t=%.1fs top=%.2fm Q=%.1fkW maxT=%.0f tiles=%d" % [float(frame) * solver.timestep, top_m, q, stats["max_temperature"], out["tiles"]])
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(CAMP_OUT_DIR))
+	var file := FileAccess.open("%s/probe_%s.csv" % [CAMP_OUT_DIR, label], FileAccess.WRITE)
+	if file != null:
+		file.store_string("\n".join(csv) + "\n")
+		file.close()
+	var n := heights.size()
+	var sorted := heights.duplicate()
+	sorted.sort()
+	var l50 := sorted[n / 2]
+	var l90 := sorted[int(float(n) * 0.9)]
+	var l10 := sorted[int(float(n) * 0.1)]
+	var mean_q := 0.0
+	var mean_burn := 0.0
+	for v in q_kw:
+		mean_q += v
+	for v in burn_kg_s:
+		mean_burn += v
+	mean_q /= float(n)
+	mean_burn /= float(n)
+	var spectrum := _camp_spectrum(heights, 1.0 / solver.timestep)
+	var best := Vector2.ZERO
+	for p: Vector2 in spectrum:
+		if p.y > best.y:
+			best = p
+	var ranked: Array = spectrum.duplicate()
+	ranked.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.y > b.y)
+	print("FIRE_CAMP RESULT mode=%s samples=%d Q_mean_kW=%.1f fuel_burn_g_s=%.2f L50_above_ground_m=%.2f L10=%.2f L90=%.2f L50_above_emitter_m=%.2f puff_peak_hz=%.2f amp=%.1f" % [
+		fuel_mode, n, mean_q, mean_burn * 1000.0, l50, l10, l90, l50 - demo.emitter_position.y, best.x, best.y])
+	print("FIRE_CAMP spectrum_top=%s" % str(ranked.slice(0, 6)))
+	print("FIRE_CAMP DONE")
+	quit(0)

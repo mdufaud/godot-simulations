@@ -22,6 +22,9 @@ const STAGES: Array[String] = [
 	"comb_strain", "diffusion", "evaporate", "evapapply", "divergence",
 	"pressure", "project", "display",
 ]
+## Billow rest-displacement textures (FIRE_REST variant): two lattices, each a ping-pong
+## pair plus the render copy, at fire_common.comp bindings 34-39 in this order.
+const REST_KEYS := ["rest1_a", "rest1_b", "rest2_a", "rest2_b", "rest1_out", "rest2_out"]
 ## Resets tiles the pool allocated this frame to ambient air before anything
 ## reads them. Dispatched over the pool's new-tile list, not the
 ## active list, so it never appears in the substep loop.
@@ -47,6 +50,8 @@ const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
 ## Wood emitters the campfire can hold. Each one costs a slot in the config tail
 ## and a distance test per cell in fire_display.
 const MAX_LOGS := 12
+## Detonation charges the blast tables can hold (FIRE_BLAST variant only).
+const MAX_BLASTS := 8
 ## Stats buffer words, reduced by fire_display and fire_evaporate: 11 scalars, then
 ## one probed gas temperature per wood emitter, then the six words of the
 ## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to,
@@ -93,6 +98,9 @@ const STAT_MASS_SCALE := 1e9
 ##   torch      pos.xyz, nozzle radius
 ##   torch2     direction * length, fuel rate
 ##   torch3     tip radius, temperature, speed, pilot fraction
+##   explosion  velocity clamp, blast count, curl-noise strength (0 = off), keep speed
+##   turbulence curl-noise wavelength [m], band low [K], band high [K], evolution time [s]
+##   turbulence2 curl-noise octave count (2 adds the lambda / 2 octave)
 ##   diag       flags (bit0 counters, bit1 Cp probe), probe T [K],
 ##              Eq. 27 evaporation Cp A/B (0 gas [shipped], 1 liquid),
 ##              droplet h model (0 constant [shipped], 1 Ranz-Marshall)
@@ -105,10 +113,12 @@ const CONFIG_LAYOUT := [
 	["transport", 1], ["vort", 1], ["wind", 1], ["molar", 1], ["misc", 1],
 	["liquid", 1], ["liquid2", 1], ["wood", MAX_LOGS], ["wood_rate", MAX_LOGS],
 	["torch", 1], ["torch2", 1], ["torch3", 1], ["diag", 1],
+	["blast", MAX_BLASTS], ["blast_rate", MAX_BLASTS], ["explosion", 1],
+	["turbulence", 1], ["turbulence2", 1],
 ]
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
-	EVENT_WOOD = 5, EVENT_TORCH = 6 }
+	EVENT_WOOD = 5, EVENT_TORCH = 6, EVENT_BLAST = 7 }
 
 ## Concentration units the Arrhenius pre-exponential factor is expressed in.
 ## Westbrook & Dryer Tab. I states "Units are cm-sec-mole-kcal-Kelvins", so the
@@ -404,6 +414,98 @@ var _torch_seed_radius := 0.0
 var _torch_any := false
 var _torch_seed_any := false
 var _torch_mutex := Mutex.new()
+## Opt-in detonation term, read once by init_render: every stage and tile pass is
+## compiled with FIRE_BLAST, so a solver that leaves it off runs the shipped shaders.
+var blast_enabled := false
+## Face-velocity clamp and the speed above which a tile is kept alive, used only
+## under FIRE_BLAST (the shipped literals are 50 and 0.5).
+var blast_velocity_clamp_mps := 50.0
+var blast_keep_speed_mps := 0.5
+## Curl-noise disturbance (FIRE_BLAST only): the dimensionless strength already scaled by
+## the host's ramp, 0 skips the stage, the noise wavelength, the temperature window it acts
+## in and the time its lattice takes to drift one wavelength.
+## Written on the main thread, read on the render thread: every access goes through [member _blast_mutex].
+var blast_turbulence_strength := 0.0:
+	set(value):
+		_blast_mutex.lock()
+		_turbulence_strength = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _turbulence_strength
+		_blast_mutex.unlock()
+		return value
+var blast_turbulence_wavelength_m := 1.0:
+	set(value):
+		_blast_mutex.lock()
+		_turbulence_wavelength_m = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _turbulence_wavelength_m
+		_blast_mutex.unlock()
+		return value
+var blast_turbulence_band_k := Vector2(500.0, 1800.0):
+	set(value):
+		_blast_mutex.lock()
+		_turbulence_band_k = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _turbulence_band_k
+		_blast_mutex.unlock()
+		return value
+var blast_turbulence_evolution_s := 0.5:
+	set(value):
+		_blast_mutex.lock()
+		_turbulence_evolution_s = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _turbulence_evolution_s
+		_blast_mutex.unlock()
+		return value
+var blast_turbulence_octaves := 1:
+	set(value):
+		_blast_mutex.lock()
+		_turbulence_octaves = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _turbulence_octaves
+		_blast_mutex.unlock()
+		return value
+## Period [s] of the billow rest-displacement lattices, quantised to an even number of
+## substeps. Each of the two is reset to d = 0 once per period, half a period apart, on the
+## substep where its triangle weight is exactly 0 (fire_display). 0 leaves them off. The
+## lattices exist only when allocated at init_render: [member rest_enabled], or blast mode
+## with a period above 0 then. Mutex-guarded like the turbulence fields.
+var blast_rest_period_s := 0.0:
+	set(value):
+		_blast_mutex.lock()
+		_rest_period_s = value
+		_blast_mutex.unlock()
+	get:
+		_blast_mutex.lock()
+		var value := _rest_period_s
+		_blast_mutex.unlock()
+		return value
+## Render-side billow lattices without the blast solver variant: compiles only the
+## rest-displacement passes (FIRE_REST), the simulated fields stay bit-identical.
+## Set before init_render.
+var rest_enabled := false
+var _turbulence_strength := 0.0
+var _turbulence_wavelength_m := 1.0
+var _turbulence_band_k := Vector2(500.0, 1800.0)
+var _turbulence_evolution_s := 0.5
+var _turbulence_octaves := 1
+var _rest_period_s := 0.0
+var _rest_built := false
+var _rest_steps := 0
+var _rest_base_step := 0
+var _blast := PackedVector4Array()
+var _blast_rate := PackedVector4Array()
+var _blast_mutex := Mutex.new()
 var _stats := PackedInt64Array()
 var _stats_mutex := Mutex.new()
 var _stats_pending := false
@@ -425,6 +527,22 @@ func _init() -> void:
 
 func get_display_tex_rid() -> RID:
 	return _tex.get("display", RID())
+
+
+## True when the billow rest lattices are (or, before init_render, will be) allocated.
+func rest_active() -> bool:
+	if initialized:
+		return _rest_built
+	return _rest_wanted()
+
+
+func _rest_wanted() -> bool:
+	return rest_enabled or (blast_enabled and blast_rest_period_s > 0.0)
+
+
+## Billow rest field of lattice [param index] (0 or 1): xyz = d [m], w = blend weight.
+func get_rest_tex_rid(index: int) -> RID:
+	return _tex.get("rest%d_out" % (index + 1), RID())
 
 
 func get_previous_display_tex_rid() -> RID:
@@ -563,6 +681,19 @@ func set_wood_emitters(emitters: Array) -> void:
 	_wood = flat
 	_wood_any = count > 0
 	_wood_mutex.unlock()
+
+
+## Active detonation charges. [param blast] holds (centre xyz in push_event space,
+## radius_m) and [param blast_rate] (divergence_per_s, temperature_k, fuel_fraction,
+## soot_fraction); a zero divergence_per_s is inactive. The caller shapes the pulse
+## by updating the rate every frame. Only read when [member blast_enabled].
+## Safe to call from the main thread.
+func set_blasts(blast: PackedVector4Array, blast_rate: PackedVector4Array) -> void:
+	var count := mini(mini(blast.size(), blast_rate.size()), MAX_BLASTS)
+	_blast_mutex.lock()
+	_blast = blast.slice(0, count)
+	_blast_rate = blast_rate.slice(0, count)
+	_blast_mutex.unlock()
 
 
 func set_torch(position: Vector3, direction: Vector3, length: float) -> void:
@@ -755,12 +886,16 @@ static func atlas_slots_for_budget(budget: int) -> int:
 		else FireTilePool.NSLOTS
 
 
-## Diagnostic A/B for the display soot channel (lot K): when the environment
-## asks for it, display/display_prev are RGBA16F instead of RGBA8, which keeps
-## the finely visible smoke band from quantising into ~5-7 levels. Off by
-## default; adoption is pending the baseline's memory/cost/fumée-fine comparison.
+## Display field format A/B: display/display_prev are RGBA16F when the device
+## supports it, because the emission now follows the soot channel and RGBA8 leaves
+## it 5-7 levels, printing the cell pitch as streaks. FIRE_DISPLAY_F16=0 forces
+## the RGBA8 fallback; "1" asks for f16 explicitly.
 static func display_fp16_requested() -> bool:
 	return OS.get_environment("FIRE_DISPLAY_F16") == "1"
+
+
+static func display_fp16_disabled() -> bool:
+	return OS.get_environment("FIRE_DISPLAY_F16") == "0"
 
 
 # =========================================================================
@@ -795,7 +930,7 @@ func init_render() -> void:
 	# decision is taken once here and both sides read it.
 	_display_format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
 	var display_fmt_name := "rgba8"
-	if display_fp16_requested():
+	if not display_fp16_disabled():
 		var f16 := RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT
 		if _rd.texture_is_format_supported_for_usage(f16, TEX_USAGE):
 			_display_format = f16
@@ -806,6 +941,11 @@ func init_render() -> void:
 	var preamble: String = "#version 450\n" + str(scratch_formats(_rd)["preamble"]) \
 		+ glsl_defines() + FireTilePool.glsl_header(slots) \
 		+ "#define FMT_DISPLAY %s\n" % display_fmt_name
+	if blast_enabled:
+		preamble += "#define FIRE_BLAST\n"
+	_rest_built = _rest_wanted()
+	if _rest_built:
+		preamble += "#define FIRE_REST\n"
 	_stages = STAGES.duplicate()
 	_stages.append(CLEAR_STAGE)
 	_stages.append_array(COARSE_STAGES)
@@ -837,7 +977,12 @@ func init_render() -> void:
 	# The pool shares the solver's device and borrows the activity texture, which
 	# fire_display writes and tile_mark reduces. It has to come up before the
 	# uniform sets, which bind its indirection volume and tile lists.
+	var config_bytes := PackedByteArray()
+	config_bytes.resize(config_vec4s() * 16)
+	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
+
 	_pool = FireTilePool.new()
+	_attach_blast_config()
 	if not _pool.init_render(_rd, _tex["activity"], mini(pool_budget, slots), slots):
 		push_error("Fire solver could not bring up the tile pool.")
 		_pool = null
@@ -846,10 +991,6 @@ func init_render() -> void:
 	var stats_bytes := PackedByteArray()
 	stats_bytes.resize(STATS_WORDS * 4)
 	_stats_buf = _rd.storage_buffer_create(stats_bytes.size(), stats_bytes)
-
-	var config_bytes := PackedByteArray()
-	config_bytes.resize(config_vec4s() * 16)
-	_config_buf = _rd.storage_buffer_create(config_bytes.size(), config_bytes)
 
 	# The coarse level of the pressure solve. One unknown per atlas slot, so both
 	# buffers are fixed size: the right-hand side and the correction, then the face
@@ -865,6 +1006,8 @@ func init_render() -> void:
 	_bootstrap_pool()
 	_parity = 0
 	_simulation_step = 0
+	_rest_steps = 0
+	_rest_base_step = 0
 	_topology_prepared = false
 	initialized = true
 
@@ -968,6 +1111,7 @@ func set_pool_budget(budget: int) -> void:
 	_pool_counts_pending = false
 	pool_budget = clampi(budget if budget > 0 else pool_budget, 1, atlas_slots)
 	_pool = FireTilePool.new()
+	_attach_blast_config()
 	# Same slot layout as init_render: without it a 4096-slot atlas got a pool
 	# laid out for the default 2048 slots.
 	if not _pool.init_render(_rd, _tex["activity"], pool_budget, atlas_slots):
@@ -978,6 +1122,12 @@ func set_pool_budget(budget: int) -> void:
 	clear_fields()
 	_parity = 0
 	initialized = true
+
+
+func _attach_blast_config() -> void:
+	if blast_enabled:
+		_pool.blast_config = _config_buf
+		_pool.blast_header = "#define FIRE_BLAST\n" + glsl_defines()
 
 
 func _create_textures() -> void:
@@ -1029,6 +1179,11 @@ func _create_textures() -> void:
 	_tex["display_prev"] = _rd.texture_create(
 		_make_format(_display_format, usage, dims),
 		RDTextureView.new(), [])
+	if _rest_built:
+		for key in REST_KEYS:
+			_tex[key] = _rd.texture_create(
+				_make_format(RenderingDevice.DATA_FORMAT_R16G16B16A16_SFLOAT, usage, dims),
+				RDTextureView.new(), [])
 	_tex["visual_activity"] = _rd.texture_create(
 		_make_format(RenderingDevice.DATA_FORMAT_R32_SFLOAT, usage, dims),
 		RDTextureView.new(), [])
@@ -1108,6 +1263,8 @@ func clear_fields() -> void:
 		_rd.texture_clear(_tex[key], Color(0, 0, 0, 0), 0, 1, 0, 1)
 	_parity = 0
 	_simulation_step = 0
+	_rest_steps = 0
+	_rest_base_step = 0
 	_topology_prepared = false
 	# The atlas now holds nothing, so the pool's topology must be reset to match:
 	# leaving tiles resident over cleared fields would keep them alive on stale
@@ -1124,6 +1281,8 @@ func _zeroed_keys() -> Array:
 	for axis in "uvw":
 		for suffix in ["_a", "_b", "_fwd"]:
 			keys.append(axis + suffix)
+	if _rest_built:
+		keys.append_array(REST_KEYS)
 	return keys
 
 
@@ -1162,6 +1321,9 @@ func _build_uniform_sets() -> void:
 	}
 	fields[27] = "activity"
 	fields[29] = "visual_activity"
+	if _rest_built:
+		for i in REST_KEYS.size():
+			fields[34 + i] = REST_KEYS[i]
 	var fields_flipped := fields.duplicate()
 	for pair in [[0, 1], [16, 17], [19, 20], [2, 3], [12, 13]]:
 		_swap_binding(fields_flipped, pair[0], pair[1])
@@ -1181,8 +1343,18 @@ func _build_uniform_sets() -> void:
 	for stage in _stages:
 		var variants := [fields, pressure_flipped] if stage == "pressure" \
 			else [fields, fields_flipped]
+		if _rest_built and stage == "display":
+			# Variant = field parity + 2 * rest parity: the rest pair flips every substep
+			# while the field parity returns to its start after the two flips of one.
+			var rest_flipped := fields.duplicate()
+			_swap_binding(rest_flipped, 34, 35)
+			_swap_binding(rest_flipped, 36, 37)
+			var both_flipped := fields_flipped.duplicate()
+			_swap_binding(both_flipped, 34, 35)
+			_swap_binding(both_flipped, 36, 37)
+			variants = [fields, fields_flipped, rest_flipped, both_flipped]
 		var sets := []
-		for variant in 2:
+		for variant in variants.size():
 			var uniforms: Array[RDUniform] = []
 			var order: Dictionary = variants[variant]
 			for binding in order:
@@ -1290,10 +1462,12 @@ func prepare_topology_render() -> void:
 	var seed_p1 := _torch_seed_p1
 	var seed_radius := _torch_seed_radius
 	_torch_mutex.unlock()
+	var dims := sim_dims()
+	var half := Vector3(dims.x, 0.0, dims.z) * cell_size * 0.5
+	var tile_size := cell_size * float(FireTilePool.TILE)
+	if blast_enabled:
+		_seed_blasts(half, tile_size)
 	if seed_active:
-		var dims := sim_dims()
-		var half := Vector3(dims.x, 0.0, dims.z) * cell_size * 0.5
-		var tile_size := cell_size * float(FireTilePool.TILE)
 		_pool.set_seed_capsule((seed_p0 + half) / tile_size,
 			(seed_p1 + half) / tile_size, seed_radius / tile_size)
 	else:
@@ -1319,6 +1493,30 @@ func prepare_topology_render() -> void:
 	_topology_prepared = true
 
 
+# Two tiles past the charge radius keep the source resident while the pulse pushes the field out.
+const BLAST_SEED_MARGIN_TILES := 2.0
+
+
+func _seed_blasts(half: Vector3, tile_size: float) -> void:
+	_blast_mutex.lock()
+	var blast := _blast
+	var rate := _blast_rate
+	_blast_mutex.unlock()
+	var lo := Vector3(INF, INF, INF)
+	var hi := -lo
+	for i in blast.size():
+		if rate[i].x == 0.0:
+			continue
+		var centre := (Vector3(blast[i].x, blast[i].y, blast[i].z) + half) / tile_size
+		var reach := Vector3.ONE * (blast[i].w / tile_size + BLAST_SEED_MARGIN_TILES)
+		lo = lo.min(centre - reach)
+		hi = hi.max(centre + reach)
+	if lo.x == INF:
+		_pool.clear_blast_seed()
+	else:
+		_pool.set_blast_seed(half / tile_size, 1.0 / tile_size, BLAST_SEED_MARGIN_TILES, lo, hi)
+
+
 func _substep(cl: int, liquid_active: bool) -> void:
 	var pc := _push_constant(advection_mode, Vector3.ZERO, 1.0, 0.0)
 	var p := _parity
@@ -1329,7 +1527,11 @@ func _substep(cl: int, liquid_active: bool) -> void:
 	p = 1 - p
 
 	# 17. Buoyancy (+ vorticity confinement, Tab. 3).
-	_dispatch(cl, "forces", p, pc)
+	var forces_pc := pc
+	if blast_enabled:
+		forces_pc = pc.duplicate()
+		forces_pc.encode_float(32, float(_simulation_step) * timestep)
+	_dispatch(cl, "forces", p, forces_pc)
 	if vorticity_runs_on_step(_simulation_step):
 		# Three passes now: the confinement force is a cell-centred quantity but
 		# the velocity it corrects lives on faces. Computing it once per cell into
@@ -1389,10 +1591,55 @@ func _substep(cl: int, liquid_active: bool) -> void:
 		for i in passes:
 			_dispatch(cl, "pressure", i & 1, pc, i == 0)
 	_dispatch(cl, "project", p, pc)
-	_dispatch(cl, "display", p, pc)
+	var rest_pc := _rest_display_constant(pc)
+	if not rest_pc.is_empty():
+		_dispatch(cl, "display", p + 2 * (_simulation_step & 1), rest_pc)
+	else:
+		_dispatch(cl, "display", p, pc)
 
 	_parity = p
 	_simulation_step += 1
+
+
+## Display push constant with the rest state, empty when the lattices are off. Switching
+## off forgets the period so the next enable resets both lattices.
+func _rest_display_constant(pc: PackedByteArray) -> PackedByteArray:
+	var steps := _rest_period_steps() if _rest_built else 0
+	if steps == 0:
+		_rest_steps = 0
+		return PackedByteArray()
+	return _rest_push_constant(pc, steps)
+
+
+## The reset period in substeps: even, so the half-period offset of the second lattice is a
+## whole number of substeps. 0 when the period is off.
+func _rest_period_steps() -> int:
+	var period_s := blast_rest_period_s
+	if period_s <= 0.0:
+		return 0
+	return maxi(2, 2 * roundi(period_s / (2.0 * timestep)))
+
+
+## Push constant of the display stage with the rest-displacement state in the event
+## slot (see fire_display.comp): reset flags and the phase of each lattice at the end
+## of this substep. The phase comes from the substep count since the period last changed,
+## so a lattice is reset exactly when its triangle weight is 0, and the two weights always
+## sum to 1. A change of period resets both lattices and restarts the count.
+func _rest_push_constant(pc: PackedByteArray, steps: int) -> PackedByteArray:
+	var out := pc.duplicate()
+	var flags := 4
+	if steps != _rest_steps:
+		_rest_steps = steps
+		_rest_base_step = _simulation_step
+		flags |= 3
+	var count := _simulation_step - _rest_base_step
+	for k in 2:
+		var phase_step := (count + k * (steps / 2)) % steps
+		if phase_step == 0:
+			flags |= 1 << k
+		out.encode_float(36 + 4 * k, float(phase_step) / float(steps))
+	out.encode_float(32, float(flags))
+	return out
 
 
 ## Relaxations per pressure dispatch, against the halo cache.
@@ -1510,6 +1757,7 @@ static func glsl_float(x: float) -> String:
 static func glsl_defines() -> String:
 	var lines := PackedStringArray([
 		"#define MAX_LOGS %d" % MAX_LOGS,
+		"#define MAX_BLASTS %d" % MAX_BLASTS,
 		"#define STAT_BOUNDS %d" % STAT_BOUNDS,
 		"#define STAT_DIAG %d" % STAT_DIAG,
 		"#define STATS_WORDS %d" % STATS_WORDS,
@@ -1538,6 +1786,15 @@ func _put_config(v: PackedFloat32Array, block: String, values: Array) -> void:
 	var offset := config_offset(block)
 	for i in values.size():
 		v[offset + i] = values[i]
+
+
+func _put_vec4s(v: PackedFloat32Array, block: String, values: PackedVector4Array) -> void:
+	var offset := config_offset(block)
+	for i in values.size():
+		v[offset + i * 4] = values[i].x
+		v[offset + i * 4 + 1] = values[i].y
+		v[offset + i * 4 + 2] = values[i].z
+		v[offset + i * 4 + 3] = values[i].w
 
 
 func _upload_config() -> void:
@@ -1584,10 +1841,26 @@ func _upload_config() -> void:
 		torch_ignite_fraction])
 	_torch_mutex.unlock()
 
+	if blast_enabled:
+		_blast_mutex.lock()
+		_put_vec4s(v, "blast", _blast)
+		_put_vec4s(v, "blast_rate", _blast_rate)
+		var blast_count := _blast.size()
+		_blast_mutex.unlock()
+		_put_config(v, "explosion", [blast_velocity_clamp_mps, float(blast_count),
+			blast_turbulence_strength, blast_keep_speed_mps])
+		_blast_mutex.lock()
+		var band_k := _turbulence_band_k
+		_put_config(v, "turbulence", [_turbulence_wavelength_m,
+			band_k.x, band_k.y, _turbulence_evolution_s])
+		_put_config(v, "turbulence2", [float(_turbulence_octaves), 0.0, 0.0, 0.0])
+		_blast_mutex.unlock()
+
 	# Diagnostic block: flags in x, the Cp probe temperature in y.
 	_put_config(v, "diag", [(1.0 if diagnostic_counters else 0.0)
 		+ (2.0 if diagnostic_cp_probe else 0.0), diagnostic_probe_temperature,
 		1.0 if diagnostic_evap_liquid_cp else 0.0, 1.0 if droplet_ranz_marshall else 0.0])
+
 
 	var bytes := v.to_byte_array()
 	if bytes == _config_cache:

@@ -1,7 +1,7 @@
 // Scene interaction with the grid: one dispatch per queued event, the kind
 // arriving in params.dims.w.
 //   1 = fuel emitter, 2 = ignition source, 3 = water spray, 4 = smother,
-//   5 = wood pile, 6 = flamethrower
+//   5 = wood pile, 6 = flamethrower, 7 = detonation charge (FIRE_BLAST only)
 //
 // Fire-X drives its scenes with grid emitters carrying fuel/oxygen/nitrogen
 // mass fractions and a temperature in the 300-1500 K band (Tab. 3, "Grid
@@ -209,6 +209,15 @@ void main() {
 		s.z = max(s.z - f * 0.6, 0.0);
 		s.y = max(s.y - f * 0.08, 0.0);
 	}
+#ifdef FIRE_BLAST
+	else if (mode == 7) {
+		int i = clamp(int(amount), 0, MAX_BLASTS - 1);
+		float f = blast_falloff(cell_to_world(c), i);
+		s.x = max(s.x, mix(t_amb, cfg.blast_rate[i].y, f));
+		add_fuel(s, s2, cfg.blast_rate[i].z * f);
+		s2.y = clamp(s2.y + cfg.blast_rate[i].w * f, 0.0, 1.0);
+	}
+#endif
 
 	store_scal_src(c, s);
 	store_scal2_src(c, s2);

@@ -17,5 +17,9 @@ void main() {
 		return;
 	}
 
+#ifdef FIRE_BLAST
+	store_diverg(c, divergence_at(c) - blast_source(c));
+#else
 	store_diverg(c, divergence_at(c));
+#endif
 }
