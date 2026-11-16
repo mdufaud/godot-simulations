@@ -137,9 +137,15 @@ void combustion_body(ivec3 c) {
 	s2.w = max(s2.w * exp(-0.6 * dt), 0.0);
 
 	// Soot only settles out where the gas has cooled; hot soot keeps glowing.
+#ifdef FIRE_BLAST
+	if (s.x < 500.0) {
+		s2.y *= exp(-cfg.blast_soot.y * dt);
+	}
+#else
 	if (s.x < 500.0) {
 		s2.y = max(s2.y - cfg.wind.w * dt, 0.0);
 	}
+#endif
 
 	// Reaction intensity for the renderer: a decaying trace of recent activity,
 	// advected with the other scalars.

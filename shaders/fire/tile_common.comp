@@ -85,8 +85,7 @@ uint claimable_free() {
 }
 
 float keep_threshold() {
-	float relief = clamp(float(claimable_free()) / max(pc.relief.x, 1.0), 0.0, 1.0);
-	return pc.threshold * mix(pc.relief.y, 1.0, relief);
+	return pc.threshold * pool_relief_scale(float(claimable_free()), pc.relief.x, pc.relief.y);
 }
 
 bool tile_pinned(ivec3 vt) {

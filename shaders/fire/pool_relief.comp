@@ -1,0 +1,4 @@
+// The factor the keep bar rises by when the pool runs out of free slots: relief_max at none, 1 from relief_slots free. tile_common.comp's keep_threshold and fire_display's soot floor both read it.
+float pool_relief_scale(float claimable_free, float relief_slots, float relief_max) {
+	return mix(relief_max, 1.0, clamp(claimable_free / max(relief_slots, 1.0), 0.0, 1.0));
+}

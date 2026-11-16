@@ -10,7 +10,7 @@ const TILE_CELLS := float(FireTilePool.TILE)
 ## Seconds over which confinement fades in once the detonation pulse has ended.
 const VORTICITY_RAMP_S := 0.3
 
-@export_range(0.05, 5.0, 0.01) var cell_size_m := 0.2
+@export_range(0.05, 20.0, 0.01) var cell_size_m := 0.2
 @export_range(5, 120, 1) var simulation_hz := 60
 @export_range(1, 4, 1) var max_substeps_per_frame := 2
 ## Substeps between tile topology refreshes within a frame; 0 refreshes once per frame.
@@ -20,13 +20,15 @@ const VORTICITY_RAMP_S := 0.3
 ## Resident tile capacity: 2048 or 4096 (the large atlas needs 16 KB of compute shared memory, else the solver falls back).
 @export_range(2048, 4096, 2048) var pool_slots := 2048
 ## Multiplies the cut-offs that keep a tile resident; above 1 the faint smoke tail is released sooner.
-@export_range(1.0, 16.0, 0.5) var tile_keep_scale := 1.0
+@export_range(1.0, 1000.0, 0.5) var tile_keep_scale := 1.0
 ## Dimensionless confinement applied after the pulse only; during it the field is off, at 8 it carves terraces into the fireball.
 @export_range(0.0, 50.0, 0.1) var vorticity_strength := 0.0
 ## Fire-X Tab. 3 radiative loss; higher cools the fireball into smoke sooner.
 @export_range(0.0, 6.0, 0.1) var radiation_coefficient := 1.0
-## Soot settling per second in cold cells.
-@export_range(0.0, 0.1, 0.005) var residual_dissipation := 0.03
+## Soot mass fraction that keeps a tile resident, times tile_keep_scale; the render draws no soot below that bar.
+@export_range(0.00001, 0.01, 0.00001) var soot_keep_fraction := 0.001
+## Half-life of the soot in cells cooler than 500 K; the smoke thins out in proportion and the render draws none below the tile keep bar.
+@export_range(0.5, 300.0, 0.5) var soot_half_life_s := 5.0
 ## Curl-noise disturbance, scaled by |u - wind|^2 / wavelength: dimensionless, 0 disables it. Acts after the pulse, on the same ramp as confinement.
 @export_range(0.0, 2.0, 0.01) var turbulence_strength := 0.0
 @export_range(0.1, 50.0, 0.05) var turbulence_wavelength_m := 1.0
@@ -39,6 +41,10 @@ const VORTICITY_RAMP_S := 0.3
 ## Soot stops glowing near 800 K (Draper point), so the cold smoke skin is drawn dark instead of red-brown.
 @export_range(0.0, 4000.0, 10.0) var glow_visible_from_k := 800.0
 @export_range(0.0, 4000.0, 10.0) var glow_visible_full_k := 1200.0
+## Upward-velocity damping layer standing in for the tropopause: damping ramps from 0 at lid_base_m to lid_damping_per_s at lid_base_m + lid_thickness_m (world height); 0 disables it.
+@export_range(0.0, 5000.0, 1.0) var lid_base_m := 0.0
+@export_range(1.0, 2000.0, 1.0) var lid_thickness_m := 80.0
+@export_range(0.0, 20.0, 0.05) var lid_damping_per_s := 0.0
 ## Render-time billow detail; its reset_s is the period of the lattices that ride the flow.
 @export var billow := FireBillowConfig.new()
 
@@ -68,6 +74,14 @@ func validate() -> String:
 	if band_cells(velocity_clamp_mps) > BAND_CELLS:
 		return "velocity_clamp_mps crosses %.1f cells per frame, tile band is %d" % [
 			band_cells(velocity_clamp_mps), int(BAND_CELLS)]
+	if lid_damping_per_s < 0.0 or lid_base_m < 0.0:
+		return "lid_damping_per_s and lid_base_m must not be negative"
+	if lid_damping_per_s > 0.0 and lid_thickness_m <= 0.0:
+		return "lid_thickness_m must be positive when the lid is on"
+	if soot_keep_fraction <= 0.0:
+		return "soot_keep_fraction must be positive"
+	if soot_half_life_s <= 0.0:
+		return "soot_half_life_s must be positive"
 	if billow == null:
 		return "billow is required"
 	var billow_error := billow.validate()

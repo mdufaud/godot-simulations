@@ -27,8 +27,17 @@ void main() {
 	// not Y_H2O: Fire-X Sec. 5.6 samples "vapor" as its own field, and combustion
 	// water alone would paint a permanent white cloud over a methane flame. The
 	// channel used to hold the fuel fraction, which no shader ever read.
+#ifdef FIRE_BLAST
+	uint free_slots = tile_counts[C_FREE];
+	float reserve = cfg.blast_soot.w;
+	float claimable = float(free_slots > uint(reserve) ? free_slots - uint(reserve) : 0u);
+	float soot_floor = cfg.blast_soot.x * cfg.blast_soot.z * pool_relief_scale(claimable, cfg.blast_relief.x, cfg.blast_relief.y);
+	float soot_visible = max(s2.y - soot_floor, 0.0);
+#else
+	float soot_visible = s2.y;
+#endif
 	store_display(c,
-		vec4(clamp(t_norm, 0.0, 1.0) * fade, s2.y * fade, reaction, s2.w * fade));
+		vec4(clamp(t_norm, 0.0, 1.0) * fade, soot_visible * fade, reaction, s2.w * fade));
 	float visual_signal = max(max(clamp(t_norm, 0.0, 1.0), s2.y),
 		max(s2.w, reaction));
 	atomicMax(visual_max_bits, floatBitsToUint(max(visual_signal, 0.0)));
@@ -152,7 +161,11 @@ void main() {
 	const float KEEP_SPEED = 0.5; // m/s
 #endif
 	const float KEEP_FUEL = 1e-4;
+#ifdef FIRE_BLAST
+	float KEEP_SOOT = cfg.blast_soot.x;
+#else
 	const float KEEP_SOOT = 1e-3;
+#endif
 	const float KEEP_STEAM = 1e-2;
 	const float KEEP_LIQUID = 1e-3; // kg/m^3
 	float act = max(

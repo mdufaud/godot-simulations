@@ -1,18 +1,39 @@
 class_name ExplosionActions extends RefCounted
 
 const CLICK_MAX_DRAG_PX := 6.0
-## Engine clock at the 1x label; the 0.5x slow-motion step runs at the pace the demo had before this was raised.
-const BASE_PACE := 2.0
+## Engine clock at the 1x label, 1.4 times the original pace; the 0.5x slow-motion step runs at 0.7 times that original pace.
+const BASE_PACE := 1.4
 ## Shown to the user; the engine clock is BASE_PACE times these.
 const SLOW_SCALES: Array[float] = [1.0, 0.5, 0.25]
 const BARREL_HIT_TOLERANCE_M := 0.2
+## Game seconds between two throws, and balls that may be flying at once: stops clicks stacking balls on one spot.
+const THROW_COOLDOWN_S := 0.6
+const MAX_BALLS_IN_FLIGHT := 3
 
 var paused := false
 var slow_index := 0
 
+var shake := ExplosionCameraShake.new()
+
 var _press_position := Vector2.ZERO
 var _pressed := false
 var _touches := {}
+var _cooldown_s := 0.0
+
+
+static func make_launcher(camera: Camera3D, container: Node3D) -> ProjectileLauncher:
+	var launcher := ProjectileLauncher.new()
+	launcher.camera = camera
+	launcher.container = container
+	launcher.report_every_contact = true
+	launcher.fired.connect(ExplosionFireball.attach)
+	return launcher
+
+
+static func barrel_ball(fireball: ProjectilePreset) -> ProjectilePreset:
+	var ball := fireball.duplicate() as ProjectilePreset
+	ball.explodes = false
+	return ball
 
 
 static func is_click(press: Vector2, release: Vector2) -> bool:
@@ -46,6 +67,8 @@ static func scaled_charge(base: ExplosionCharge, scale: float, soot_fraction: fl
 		charge.companion = charge.companion.duplicate() as ExplosionCharge
 		charge.companion.radius_m *= scale
 		charge.companion.sink_m *= scale
+		charge.companion.afterwind_radius_m *= scale
+		charge.companion.afterwind_height_m *= scale
 	return charge
 
 
@@ -76,6 +99,24 @@ func left_click(event: InputEventMouseButton) -> bool:
 	var clicked := _pressed and is_click(_press_position, event.position)
 	_pressed = false
 	return clicked
+
+
+func tick(delta: float) -> void:
+	_cooldown_s = maxf(_cooldown_s - delta, 0.0)
+	shake.update(delta)
+
+
+## True, and the cooldown starts, when a ball may be thrown with [param flying] balls already in the air.
+func allow_throw(flying: int) -> bool:
+	if _cooldown_s > 0.0 or flying >= MAX_BALLS_IN_FLIGHT:
+		return false
+	_cooldown_s = THROW_COOLDOWN_S
+	return true
+
+
+func reset() -> void:
+	_cooldown_s = 0.0
+	shake.stop()
 
 
 func time_scale() -> float:

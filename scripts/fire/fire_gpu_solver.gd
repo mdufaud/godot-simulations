@@ -99,6 +99,9 @@ const STAT_MASS_SCALE := 1e9
 ##   torch2     direction * length, fuel rate
 ##   torch3     tip radius, temperature, speed, pilot fraction
 ##   explosion  velocity clamp, blast count, curl-noise strength (0 = off), keep speed
+##   blast_carry per slot: horizontal velocity [m/s] added once inside the source sphere
+##   blast_soot soot keep unit, decay rate [1/s], base keep threshold, reserved slots
+##   blast_relief relief slots, relief max (the tile pool's keep-bar ramp, for the soot floor)
 ##   turbulence curl-noise wavelength [m], band low [K], band high [K], evolution time [s]
 ##   turbulence2 curl-noise octave count (2 adds the lambda / 2 octave)
 ##   diag       flags (bit0 counters, bit1 Cp probe), probe T [K],
@@ -114,7 +117,8 @@ const CONFIG_LAYOUT := [
 	["liquid", 1], ["liquid2", 1], ["wood", MAX_LOGS], ["wood_rate", MAX_LOGS],
 	["torch", 1], ["torch2", 1], ["torch3", 1], ["diag", 1],
 	["blast", MAX_BLASTS], ["blast_rate", MAX_BLASTS], ["explosion", 1],
-	["turbulence", 1], ["turbulence2", 1],
+	["turbulence", 1], ["turbulence2", 1], ["blast_carry", MAX_BLASTS], ["blast_soot", 1],
+	["blast_relief", 1], ["lid", 1], ["afterwind", 2],
 ]
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
@@ -436,6 +440,14 @@ var blast_enabled := false
 ## under FIRE_BLAST (the shipped literals are 50 and 0.5).
 var blast_velocity_clamp_mps := 50.0
 var blast_keep_speed_mps := 0.5
+## Soot concentration that keeps a tile resident, times tile_keep_scale; fire_display draws no soot below it.
+var blast_soot_keep := 1e-3
+## Half-life of the soot in cells cooler than 500 K under FIRE_BLAST; 0 keeps the soot.
+var blast_soot_half_life_s := 0.0
+## Upward-velocity damping layer (FIRE_BLAST only): world height the ramp starts at, its thickness, full rate [1/s]; 0 rate = off.
+var blast_lid_base_m := 0.0
+var blast_lid_thickness_m := 1.0
+var blast_lid_damping_per_s := 0.0
 ## Curl-noise disturbance (FIRE_BLAST only): the dimensionless strength already scaled by
 ## the host's ramp, 0 skips the stage, the noise wavelength, the temperature window it acts
 ## in and the time its lattice takes to drift one wavelength.
@@ -520,6 +532,8 @@ var _rest_steps := 0
 var _rest_base_step := 0
 var _blast := PackedVector4Array()
 var _blast_rate := PackedVector4Array()
+var _blast_carry := PackedVector4Array()
+var _afterwind := PackedVector4Array([Vector4.ZERO, Vector4.ZERO])
 var _blast_mutex := Mutex.new()
 var _stats := PackedInt64Array()
 var _stats_mutex := Mutex.new()
@@ -703,11 +717,21 @@ func set_wood_emitters(emitters: Array) -> void:
 ## soot_fraction); a zero divergence_per_s is inactive. The caller shapes the pulse
 ## by updating the rate every frame. Only read when [member blast_enabled].
 ## Safe to call from the main thread.
-func set_blasts(blast: PackedVector4Array, blast_rate: PackedVector4Array) -> void:
+func set_blasts(blast: PackedVector4Array, blast_rate: PackedVector4Array,
+		blast_carry := PackedVector4Array()) -> void:
 	var count := mini(mini(blast.size(), blast_rate.size()), MAX_BLASTS)
 	_blast_mutex.lock()
 	_blast = blast.slice(0, count)
 	_blast_rate = blast_rate.slice(0, count)
+	_blast_carry = blast_carry.slice(0, mini(blast_carry.size(), count))
+	_blast_mutex.unlock()
+
+
+## Inward ground wind: [param params_a] is (centre x, centre z, speed_mps, tau_s), [param params_b] is
+## (outer radius_m, band_m, height_m, core_radius_m). Zero speed is off. Safe to call from the main thread.
+func set_afterwind(params_a: Vector4, params_b: Vector4) -> void:
+	_blast_mutex.lock()
+	_afterwind = PackedVector4Array([params_a, params_b])
 	_blast_mutex.unlock()
 
 
@@ -1500,11 +1524,9 @@ func prepare_topology_render() -> void:
 	if profiling:
 		_rd.capture_timestamp("fire/topology_start")
 	var tcl := _rd.compute_list_begin()
-	var budget := _pool.budget() if tile_budget <= 0 else mini(tile_budget, _pool.budget())
+	var relief := _relief_params()
 	_pool.record(tcl, _frame, TILE_ACTIVITY_THRESHOLD * tile_keep_scale, TILE_HOLD_FRAMES,
-		TILE_DILATE_RADIUS, wind,
-		float(budget) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX,
-		float(_pool.budget() - budget))
+		TILE_DILATE_RADIUS, wind, relief.x, relief.y, relief.z)
 	_rd.compute_list_end()
 	if profiling:
 		_rd.capture_timestamp("fire/topology_end")
@@ -1513,6 +1535,17 @@ func prepare_topology_render() -> void:
 		_push_constant(0, Vector3.ZERO, 1.0, 0.0), false)
 	_rd.compute_list_end()
 	_topology_prepared = true
+
+
+## Soot concentration below which fire_display draws nothing, at pool relief factor [param relief] (1 with the pool not under pressure).
+func soot_floor(relief := 1.0) -> float:
+	return blast_soot_keep * TILE_ACTIVITY_THRESHOLD * tile_keep_scale * relief
+
+
+## (relief slots, relief max, reserved slots) of the keep-bar ramp, for the pool passes and the soot floor alike.
+func _relief_params() -> Vector3:
+	var budget := _pool.budget() if tile_budget <= 0 else mini(tile_budget, _pool.budget())
+	return Vector3(float(budget) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX, float(_pool.budget() - budget))
 
 
 # Two tiles past the charge radius keep the source resident while the pulse pushes the field out.
@@ -1867,6 +1900,7 @@ func _upload_config() -> void:
 		_blast_mutex.lock()
 		_put_vec4s(v, "blast", _blast)
 		_put_vec4s(v, "blast_rate", _blast_rate)
+		_put_vec4s(v, "blast_carry", _blast_carry)
 		var blast_count := _blast.size()
 		_blast_mutex.unlock()
 		_put_config(v, "explosion", [blast_velocity_clamp_mps, float(blast_count),
@@ -1876,6 +1910,13 @@ func _upload_config() -> void:
 		_put_config(v, "turbulence", [_turbulence_wavelength_m,
 			band_k.x, band_k.y, _turbulence_evolution_s])
 		_put_config(v, "turbulence2", [float(_turbulence_octaves), 0.0, 0.0, 0.0])
+		var relief := _relief_params()
+		_put_config(v, "blast_soot", [blast_soot_keep,
+			0.0 if blast_soot_half_life_s <= 0.0 else log(2.0) / blast_soot_half_life_s,
+			TILE_ACTIVITY_THRESHOLD * tile_keep_scale, relief.z])
+		_put_config(v, "blast_relief", [relief.x, relief.y])
+		_put_config(v, "lid", [blast_lid_base_m, blast_lid_thickness_m, blast_lid_damping_per_s, 0.0])
+		_put_vec4s(v, "afterwind", _afterwind)
 		_blast_mutex.unlock()
 
 	# Diagnostic block: flags in x, the Cp probe temperature in y.

@@ -4,11 +4,15 @@ class_name ProjectileLauncher extends RefCounted
 
 ## Emitted on impact, in world space. The host decides which walls it reaches.
 signal impact(origin: Vector3, radius_m: float, impulse: float)
+## Emitted once per spawned projectile, after it joined the container.
+signal fired(ball: RigidBody3D, preset: ProjectilePreset)
 
 const DESPAWN_Y := -8.0
 ## The floor is an infinite WorldBoundary: a spent round rests on it forever
 ## instead of falling out of the world, so age is the real despawn bound.
 const ROUND_LIFETIME_S := 20.0
+## A straight flight that never touched anything is retired beyond this distance.
+const STRAIGHT_RANGE_M := 400.0
 
 var camera: Camera3D
 ## Projectiles are parented here, so clearing them is one subtree.
@@ -18,6 +22,8 @@ var radius_scale := 1.0
 var power_scale := 1.0
 ## A ball that does not explode reports every body it touches, not only the first.
 var report_every_contact := false
+## Velocity a straight-flight projectile carried into the contact that last emitted [signal impact].
+var impact_velocity := Vector3.ZERO
 
 var _preset: ProjectilePreset
 
@@ -38,6 +44,12 @@ func fire(screen_pos: Vector2) -> void:
 	var preset := _preset
 	var origin := camera.project_ray_origin(screen_pos)
 	var dir := camera.project_ray_normal(screen_pos)
+	var velocity_dir := dir
+	if preset.straight_flight and dir.y < -1e-4:
+		# The ball centre reaches the aimed ground point at the height where its surface touches the ground.
+		var t := (origin.y - preset.radius_m) / -dir.y
+		if t > 0.0:
+			velocity_dir = (origin + dir * t - (origin + dir * 0.6)).normalized()
 
 	var ball := RigidBody3D.new()
 	ball.position = origin + dir * 0.6
@@ -45,7 +57,17 @@ func fire(screen_pos: Vector2) -> void:
 	ball.continuous_cd = true
 	ball.contact_monitor = true
 	ball.max_contacts_reported = 4
-	ball.linear_velocity = dir * preset.speed_mps
+	ball.linear_velocity = velocity_dir * preset.speed_mps
+	if preset.straight_flight:
+		ball.gravity_scale = 0.0
+		ball.set_meta("launch_velocity", ball.linear_velocity)
+		ball.set_meta("flying", true)
+		ball.set_meta("launch_origin", ball.position)
+	if not preset.collide_with_projectiles:
+		for other in container.get_children():
+			if other is RigidBody3D and not other.is_queued_for_deletion():
+				ball.add_collision_exception_with(other)
+				other.add_collision_exception_with(ball)
 	var shape := SphereShape3D.new()
 	shape.radius = preset.radius_m
 	var col := CollisionShape3D.new()
@@ -68,6 +90,16 @@ func fire(screen_pos: Vector2) -> void:
 	ball.body_entered.connect(_on_hit.bind(ball, preset), 0 if report_every_contact else CONNECT_ONE_SHOT)
 	ball.set_meta("fired_at_msec", Time.get_ticks_msec())
 	container.add_child(ball)
+	fired.emit(ball, preset)
+
+
+## Straight-flight projectiles that have not touched anything yet.
+func flying_count() -> int:
+	var count := 0
+	for p in container.get_children():
+		if p.get_meta("flying", false) and not p.is_queued_for_deletion():
+			count += 1
+	return count
 
 
 func clear() -> void:
@@ -80,7 +112,9 @@ func clear() -> void:
 func despawn_fallen() -> void:
 	var now := Time.get_ticks_msec()
 	for p in container.get_children():
-		if p is Node3D and (p.global_position.y < DESPAWN_Y
+		var lost: bool = p.get_meta("flying", false) \
+			and p.global_position.distance_to(p.get_meta("launch_origin")) > STRAIGHT_RANGE_M
+		if p is Node3D and (lost or p.global_position.y < DESPAWN_Y
 				or now - int(p.get_meta("fired_at_msec", now)) > ROUND_LIFETIME_S * 1000.0):
 			p.queue_free()
 
@@ -90,6 +124,10 @@ func _on_hit(_other: Node, ball: RigidBody3D, preset: ProjectilePreset) -> void:
 		return
 	# The kinetic energy the projectile actually arrives with drives the blast, so
 	# a slow lob dents the wall and a full-speed shot blows a hole through it.
+	if ball.get_meta("flying", false):
+		ball.set_meta("flying", false)
+		ball.set_deferred("gravity_scale", 1.0)
+		impact_velocity = ball.get_meta("launch_velocity")
 	var strength := clampf(ball.linear_velocity.length() / preset.speed_mps, 0.1, 1.5)
 	impact.emit(ball.global_position, preset.blast_radius_m * radius_scale,
 		strength * preset.blast_impulse * power_scale)

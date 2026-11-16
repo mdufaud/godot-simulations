@@ -13,3 +13,4 @@ pulse_duration_s = 0.4
 blast_radius_m = 4.0
 blast_speed_mps = 12.0
 flash_energy = 0.0
+carry_fraction = 0.5

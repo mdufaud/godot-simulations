@@ -19,7 +19,7 @@ const QUALITY_MEDIUM := 1
 const QUALITY_LEVELS: Array[Dictionary] = [
 	{step = 1.6, budget = 0.5, half_res = true, render_scale = 0.75},
 	{step = 1.0, budget = 1.0, half_res = true, render_scale = 1.0},
-	{step = 0.7, budget = 1.5, half_res = false, render_scale = 1.0},
+	{step = 0.85, budget = 1.5, half_res = true, render_scale = 1.0},
 ]
 
 var blast_force := 1.0

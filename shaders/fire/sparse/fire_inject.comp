@@ -76,6 +76,21 @@ void main() {
 		}
 	}
 
+#ifdef FIRE_BLAST
+	if (mode_v == 7) {
+		int slot = clamp(int(params.event2.x), 0, MAX_BLASTS - 1);
+		vec3 carry = cfg.blast_carry[slot].xyz;
+		if (carry != vec3(0.0)) {
+			if (in_u(c)) {
+				store_u_src(c, load_u_src(c) + carry.x * blast_falloff(u_face_to_world(c), slot));
+			}
+			if (in_w(c)) {
+				store_w_src(c, load_w_src(c) + carry.z * blast_falloff(w_face_to_world(c), slot));
+			}
+		}
+	}
+#endif
+
 	if (out_of_grid(c)) {
 		return;
 	}

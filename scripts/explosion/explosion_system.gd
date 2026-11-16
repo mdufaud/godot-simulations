@@ -12,7 +12,7 @@ class_name ExplosionSystem extends Node3D
 ##     system.start()
 ##     system.detonate(Vector3(0, 1, 0), preload("res://resources/explosion/presets/fireball_charge.tres"))
 
-signal detonated(origin: Vector3, charge: ExplosionCharge)
+signal detonated(origin: Vector3, charge: ExplosionCharge, carry_velocity: Vector3)
 signal blast(origin: Vector3, radius_m: float, speed_mps: float)
 
 var config: ExplosionConfig
@@ -24,7 +24,11 @@ var turbulence_strength := 0.0
 ## Multiplies the shock speed handed to rigid bodies by [signal blast]; read when a charge is released.
 var blast_force_scale := 1.0
 
+const AFTERWIND_RAMP_IN_S := 1.5
+const AFTERWIND_CORE_M := 40.0
+
 var _pending: Array[Dictionary] = []
+var _delayed: Array[Dictionary] = []
 var _slots: Array[Dictionary] = []
 var _started := false
 var _vorticity_ramp := 0.0
@@ -62,7 +66,11 @@ func start() -> void:
 	solver.blast_turbulence_octaves = config.turbulence_octaves()
 	solver.blast_rest_period_s = config.billow.reset_s if config.billow.rest_active() else 0.0
 	solver.radiation_coefficient = config.radiation_coefficient
-	solver.residual_dissipation = config.residual_dissipation
+	solver.blast_soot_half_life_s = config.soot_half_life_s
+	solver.blast_soot_keep = config.soot_keep_fraction
+	solver.blast_lid_base_m = config.lid_base_m
+	solver.blast_lid_thickness_m = config.lid_thickness_m
+	solver.blast_lid_damping_per_s = config.lid_damping_per_s
 	_started = true
 	RenderingServer.call_on_render_thread(solver.init_render)
 
@@ -72,13 +80,20 @@ func stop() -> void:
 		return
 	_started = false
 	_pending.clear()
+	_delayed.clear()
 	_slots.fill({})
+	solver.set_afterwind(Vector4.ZERO, Vector4.ZERO)
 	RenderingServer.call_on_render_thread(solver.free_render)
 
 
 ## Peak speed of the flow the source sphere injects, which the solver's velocity clamp must not cut.
 func peak_source_mps(charge: ExplosionCharge) -> float:
 	return charge.divergence_per_s * charge.radius_m / 3.0
+
+
+## Speed the clamp leaves above the source flow of [param charge] for a carried impulse.
+func carry_headroom_mps(charge: ExplosionCharge) -> float:
+	return maxf(config.velocity_clamp_mps - peak_source_mps(charge), 0.0)
 
 
 ## "" when [param charge] and its companions may run on this config, else the reason they may not.
@@ -89,6 +104,8 @@ func refusal(charge: ExplosionCharge) -> String:
 	if peak_source_mps(charge) > config.velocity_clamp_mps:
 		return "peak source speed %.1f m/s exceeds the %.1f m/s velocity clamp" % [
 			peak_source_mps(charge), config.velocity_clamp_mps]
+	if charge.carry_fraction > 0.0 and carry_headroom_mps(charge) <= 0.0:
+		return "carry_fraction needs headroom under the %.1f m/s velocity clamp" % config.velocity_clamp_mps
 	if charge.companion != null:
 		return refusal(charge.companion)
 	return ""
@@ -102,17 +119,20 @@ func max_charge_scale(charge: ExplosionCharge) -> float:
 	return limit
 
 
-func detonate(origin: Vector3, charge: ExplosionCharge) -> void:
+func detonate(origin: Vector3, charge: ExplosionCharge, carry_velocity := Vector3.ZERO) -> void:
 	var error := refusal(charge)
 	if error != "":
 		push_error("Explosion charge refused: %s" % error)
 		return
-	_pending.append({origin = origin, charge = charge})
+	_pending.append({origin = origin, charge = charge, carry_velocity = carry_velocity})
 
 
 func reset() -> void:
 	_pending.clear()
+	_delayed.clear()
 	_slots.fill({})
+	if solver != null:
+		solver.set_afterwind(Vector4.ZERO, Vector4.ZERO)
 	if not _started:
 		return
 	solver.reset_clock()
@@ -156,12 +176,25 @@ func _warn_on_exhaustion() -> void:
 
 
 func advance(sim_dt: float) -> void:
+	_tick_delayed(sim_dt)
 	_release_next()
 	_upload_blasts(sim_dt)
 
 
 func pending_count() -> int:
 	return _pending.size()
+
+
+func delayed_count() -> int:
+	return _delayed.size()
+
+
+func _tick_delayed(sim_dt: float) -> void:
+	for i in range(_delayed.size() - 1, -1, -1):
+		_delayed[i].wait_s -= sim_dt
+		if _delayed[i].wait_s <= 0.0:
+			_pending.push_front({origin = _delayed[i].origin, charge = _delayed[i].charge})
+			_delayed.remove_at(i)
 
 
 func _release_next() -> void:
@@ -173,22 +206,36 @@ func _release_next() -> void:
 	var entry: Dictionary = _pending.pop_front()
 	var charge: ExplosionCharge = entry.charge
 	var origin: Vector3 = entry.origin
-	_slots[slot] = {origin = origin, charge = charge, age = 0.0}
+	_slots[slot] = {origin = origin, charge = charge, age = 0.0, carry = carry_impulse(charge, entry.get("carry_velocity", Vector3.ZERO))}
 	solver.push_event(FireGpuSolver.EVENT_BLAST, origin, charge.radius_m, float(slot))
 	if charge.companion != null:
-		_pending.push_front({origin = Vector3(origin.x, -charge.companion.sink_m, origin.z), charge = charge.companion})
+		var companion_origin := Vector3(origin.x, -charge.companion.sink_m, origin.z)
+		if charge.companion.delay_s > 0.0:
+			_delayed.append({origin = companion_origin, charge = charge.companion, wait_s = charge.companion.delay_s})
+		else:
+			_pending.push_front({origin = companion_origin, charge = charge.companion})
 	if charge.continuous:
 		return
-	detonated.emit(origin, charge)
+	detonated.emit(origin, charge, _slots[slot].carry)
 	blast.emit(origin, charge.blast_radius_m, blast_speed_mps(charge))
+
+
+## Horizontal share of [param velocity] the flow receives, within the clamp headroom; zero for a continuous charge.
+func carry_impulse(charge: ExplosionCharge, velocity: Vector3) -> Vector3:
+	if charge.continuous:
+		return Vector3.ZERO
+	var impulse := Vector3(velocity.x, 0.0, velocity.z) * charge.carry_fraction
+	return impulse.limit_length(carry_headroom_mps(charge))
 
 
 ## Rates are uploaded at the slot's current age, then the age advances.
 func _upload_blasts(sim_dt: float) -> void:
 	var table := PackedVector4Array()
 	var rate := PackedVector4Array()
+	var carry := PackedVector4Array()
 	table.resize(_slots.size())
 	rate.resize(_slots.size())
+	carry.resize(_slots.size())
 	for i in _slots.size():
 		if _slots[i].is_empty():
 			continue
@@ -196,6 +243,8 @@ func _upload_blasts(sim_dt: float) -> void:
 		var origin: Vector3 = _slots[i].origin
 		var age: float = _slots[i].age
 		table[i] = Vector4(origin.x, origin.y, origin.z, charge.radius_m)
+		var impulse: Vector3 = _slots[i].carry
+		carry[i] = Vector4(impulse.x, impulse.y, impulse.z, 0.0)
 		rate[i] = Vector4(charge.divergence_per_s * (1.0 - age / charge.pulse_duration_s),
 			charge.temperature_k, charge.fuel_fraction, charge.soot_fraction)
 		if charge.continuous and age > 0.0 and sim_dt > 0.0:
@@ -203,13 +252,52 @@ func _upload_blasts(sim_dt: float) -> void:
 		_slots[i].age = age + sim_dt
 		if age + sim_dt >= charge.pulse_duration_s:
 			_slots[i] = {}
-	solver.set_blasts(table, rate)
+	solver.set_blasts(table, rate, carry)
+	_push_afterwind()
 	_ramp_vorticity(sim_dt)
+
+
+## The afterwind envelope of a charge [param age_s] into its pulse: ramps in, holds, ramps out; 0 outside the pulse.
+static func afterwind_envelope(age_s: float, pulse_s: float) -> float:
+	if age_s < 0.0 or age_s >= pulse_s:
+		return 0.0
+	var ramp_out_s := 0.75 * pulse_s
+	return smoothstep(0.0, AFTERWIND_RAMP_IN_S, age_s) * (1.0 - smoothstep(pulse_s - ramp_out_s, pulse_s, age_s))
+
+
+## CPU mirror of afterwind_dv in fire_forces.comp: the change of a horizontal face speed [param face_speed] at [param p] over [param dt].
+static func afterwind_dv(a: Vector4, b: Vector4, p: Vector3, axis: int, face_speed: float, dt: float) -> float:
+	var d := Vector2(p.x - a.x, p.z - a.y)
+	var r := d.length()
+	if r < 1e-3:
+		return 0.0
+	var mask := (1.0 - smoothstep(b.x, b.x + b.y, r)) * (1.0 - smoothstep(0.5 * b.z, b.z, p.y))
+	var target := -a.z * (d.x if axis == 0 else d.y) / r * smoothstep(0.0, b.w, r)
+	if target == 0.0:
+		return 0.0
+	var dv := (target - face_speed) * (1.0 - exp(-dt / a.w)) * mask
+	return minf(dv, 0.0) if target < 0.0 else maxf(dv, 0.0)
+
+
+## One afterwind at a time: the first running slot whose charge has one; speed 0 otherwise.
+func _push_afterwind() -> void:
+	for slot in _slots:
+		if slot.is_empty():
+			continue
+		var charge: ExplosionCharge = slot.charge
+		if charge.afterwind_mps <= 0.0:
+			continue
+		var speed := charge.afterwind_mps * afterwind_envelope(slot.age, charge.pulse_duration_s)
+		solver.set_afterwind(
+			Vector4(slot.origin.x, slot.origin.z, speed, charge.afterwind_tau_s),
+			Vector4(charge.afterwind_radius_m, 0.25 * charge.afterwind_radius_m, charge.afterwind_height_m, AFTERWIND_CORE_M))
+		return
+	solver.set_afterwind(Vector4.ZERO, Vector4.ZERO)
 
 
 ## Confinement stays off while a pulse drives the flow, then ramps to the configured strength.
 func _ramp_vorticity(sim_dt: float) -> void:
-	var pulsing := not _pending.is_empty()
+	var pulsing := not _pending.is_empty() or not _delayed.is_empty()
 	for slot in _slots:
 		if not slot.is_empty() and not slot.charge.continuous:
 			pulsing = true

@@ -5,7 +5,7 @@
 
 [resource]
 script = ExtResource("1_config")
-cell_size_m = 0.2
+cell_size_m = 0.25
 simulation_hz = 60
 max_substeps_per_frame = 4
 topology_interval_steps = 2
@@ -16,5 +16,6 @@ tile_keep_scale = 8.0
 vorticity_strength = 1.5
 radiation_coefficient = 3.5
 turbulence_strength = 0.3
-turbulence_wavelength_m = 2.0
+turbulence_wavelength_m = 2.5
+soot_half_life_s = 3.0
 billow = ExtResource("2_billow")

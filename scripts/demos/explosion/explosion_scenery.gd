@@ -11,11 +11,11 @@ const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_cha
 ## Cell size the raymarcher's metre constants were tuned at.
 const REFERENCE_CELL_M := 0.2
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
-const BARREL_COLUMNS := 4
-const BARREL_ROWS := 2
-const BARREL_SPACING_M := 2.2
-const BARREL_SEED := 1000
-const PLAIN_SIZE_M := 8000.0
+const PLAIN_SIZE_M := 60000.0
+## Metres per texture tile on the plain.
+const PLAIN_TILE_M := 333.0
+## Depth fog starts here and reaches full strength at the camera far plane, hiding the plain's far edge.
+const FOG_BEGIN_M := 6000.0
 ## Night smoke is lit by a faint ambient that scales with its albedo.
 const NIGHT_AMBIENT_GAIN := 0.35
 const SMOKE_ABSORPTION_PER_M := 4.5
@@ -35,10 +35,10 @@ const SUN_ELEVATION_DEG := 35.0
 const FRAMING := [
 	{target = Vector3(0.0, 2.5, 0.0), distance = 14.0, min_distance = 4.0, max_distance = 40.0,
 		pitch = -10.0, fov = 60.0, far = 300.0, zoom_speed = 1.0, move_speed = 15.0},
-	{target = Vector3(0.0, 6.0, 0.0), distance = 30.0, min_distance = 4.0, max_distance = 40.0,
-		pitch = -15.0, fov = 60.0, far = 300.0, zoom_speed = 1.0, move_speed = 15.0},
-	{target = Vector3(0.0, 280.0, 0.0), distance = 600.0, min_distance = 300.0, max_distance = 3000.0,
-		pitch = -1.5, fov = 60.0, far = 8000.0, zoom_speed = 45.0, move_speed = 600.0},
+	{target = Vector3(0.0, 2.2, 0.0), distance = 15.0, min_distance = 4.0, max_distance = 40.0,
+		pitch = -22.0, fov = 60.0, far = 300.0, zoom_speed = 1.0, move_speed = 15.0},
+	{target = Vector3(0.0, 529.0, 0.0), distance = 3700.0, min_distance = 1500.0, max_distance = 3800.0,
+		pitch = 7.9, fov = 19.5, far = 14000.0, zoom_speed = 150.0, move_speed = 1500.0},
 ]
 
 var world_env: WorldEnvironment
@@ -52,6 +52,8 @@ var _dust: ExplosionDustRing
 var _index := 0
 var _metric_scale := 1.0
 var _barrels: Array[ExplosiveBarrel] = []
+var _yard: ExplosionBarrelYard
+var _on_barrels_full: Callable
 var _night_env: Environment
 var _night_sun := {}
 
@@ -73,7 +75,8 @@ static func metric_scale(config: ExplosionConfig) -> float:
 	return maxf(config.cell_size_m / REFERENCE_CELL_M, 1.0)
 
 
-func bind(host_env: WorldEnvironment, host_sun: DirectionalLight3D, host_ground: Node3D) -> void:
+func bind(host_env: WorldEnvironment, host_sun: DirectionalLight3D, host_ground: Node3D, on_barrels_full := Callable()) -> void:
+	_on_barrels_full = on_barrels_full
 	world_env = host_env
 	sun = host_sun
 	ground = host_ground
@@ -95,6 +98,10 @@ func build(parent: Node3D, index: int, system: ExplosionSystem) -> void:
 	_add_dust(system)
 
 
+func ground_height_m() -> float:
+	return ExplosionBarrelYard.SLAB_THICKNESS_M if _yard != null else 0.0
+
+
 ## Stops what a detonation set going besides the gas: the dust rings.
 func clear_effects() -> void:
 	if _dust != null:
@@ -102,7 +109,8 @@ func clear_effects() -> void:
 
 
 func clear() -> void:
-	_barrels.clear()
+	_barrels = []
+	_yard = null
 	_dust = null
 	if _root != null:
 		_root.queue_free()
@@ -137,9 +145,15 @@ func detonate_first() -> bool:
 
 func set_barrel_charge(charge: ExplosionCharge) -> void:
 	barrel_charge = charge
+	if _yard != null:
+		_yard.charge = charge
 	for barrel in _barrels:
 		if is_instance_valid(barrel):
 			barrel.charge = charge
+
+
+func add_cluster_at(camera: Camera3D, screen_position: Vector2) -> bool:
+	return _yard != null and _yard.add_cluster_at_screen(camera, screen_position)
 
 
 ## The standing barrel a ball centred at [param point] touches, or null.
@@ -217,20 +231,13 @@ func _add_dust(system: ExplosionSystem) -> void:
 
 
 func _build_barrels(system: ExplosionSystem) -> void:
-	var half_x := float(BARREL_COLUMNS - 1) * BARREL_SPACING_M * 0.5
-	var half_z := float(BARREL_ROWS - 1) * BARREL_SPACING_M * 0.5
-	for i in BARREL_COLUMNS * BARREL_ROWS:
-		var barrel := ExplosiveBarrel.new()
-		barrel.system = system
-		barrel.charge = barrel_charge
-		barrel.rng.seed = BARREL_SEED + i
-		barrel.position = Vector3(
-			float(i % BARREL_COLUMNS) * BARREL_SPACING_M - half_x,
-			ExplosiveBarrel.HEIGHT_M * 0.5 + 0.01,
-			float(i / BARREL_COLUMNS) * BARREL_SPACING_M - half_z)
-		_root.add_child(barrel)
-		system.blast.connect(barrel.apply_blast)
-		_barrels.append(barrel)
+	_yard = ExplosionBarrelYard.new()
+	_yard.system = system
+	_yard.charge = barrel_charge
+	if _on_barrels_full.is_valid():
+		_yard.full_changed.connect(_on_barrels_full)
+	_root.add_child(_yard)
+	_barrels = _yard.barrels
 
 
 func _build_posts() -> void:
@@ -264,8 +271,8 @@ func _set_daylight(day: bool) -> void:
 	var sky_material := ProceduralSkyMaterial.new()
 	sky_material.sky_top_color = Color(0.22, 0.42, 0.78)
 	sky_material.sky_horizon_color = Color(0.66, 0.78, 0.9)
-	sky_material.ground_horizon_color = Color(0.6, 0.66, 0.66)
-	sky_material.ground_bottom_color = Color(0.3, 0.34, 0.3)
+	sky_material.ground_horizon_color = sky_material.sky_horizon_color
+	sky_material.ground_bottom_color = sky_material.sky_horizon_color
 	var sky := Sky.new()
 	sky.sky_material = sky_material
 	var env := _night_env.duplicate() as Environment
@@ -278,6 +285,12 @@ func _set_daylight(day: bool) -> void:
 	env.adjustment_enabled = true
 	env.adjustment_contrast = 1.1
 	env.adjustment_saturation = 1.4
+	env.fog_enabled = true
+	env.fog_mode = Environment.FOG_MODE_DEPTH
+	env.fog_depth_begin = FOG_BEGIN_M
+	env.fog_depth_end = FRAMING[ExplosionMenu.SCENE_MUSHROOM].far
+	env.fog_light_color = sky_material.sky_horizon_color
+	env.fog_sky_affect = 0.0
 	world_env.environment = env
 	sun.light_color = Color(1.0, 0.95, 0.85)
 	sun.light_energy = 1.3
@@ -298,7 +311,7 @@ func _build_plain() -> void:
 	texture.height = 512
 	var plain_mat := StandardMaterial3D.new()
 	plain_mat.albedo_texture = texture
-	plain_mat.uv1_scale = Vector3.ONE * 24.0
+	plain_mat.uv1_scale = Vector3.ONE * (PLAIN_SIZE_M / PLAIN_TILE_M)
 	plain_mat.roughness = 1.0
 	plain_mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
 	var plain := MeshInstance3D.new()

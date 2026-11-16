@@ -4,8 +4,8 @@ const RADIUS_M := 0.3
 const HEIGHT_M := 0.9
 const MASS_KG := 40.0
 const ARM_SPEED_MPS := 4.0
-const FUSE_MIN_S := 0.2
-const FUSE_MAX_S := 0.6
+const FUSE_MIN_S := 0.35
+const FUSE_MAX_S := 0.8
 ## Added to the blast direction so barrels are lifted instead of only slid.
 const UPWARD_BIAS := 0.35
 
@@ -23,6 +23,20 @@ var _fuse_left_s := 0.0
 
 static func blast_speed_share(offset: Vector3, radius_m: float, speed_mps: float) -> float:
 	return speed_mps * maxf(1.0 - offset.length() / radius_m, 0.0)
+
+
+## Largest distance from a blast at which the shock still speeds a barrel past ARM_SPEED_MPS; -1 when it never does.
+static func arm_distance_m(radius_m: float, speed_mps: float) -> float:
+	if speed_mps < ARM_SPEED_MPS:
+		return -1.0
+	return radius_m * (1.0 - ARM_SPEED_MPS / speed_mps)
+
+
+## Ground distance a resting barrel can be from a burst centred [param burst_height_m] up and still arm.
+static func chain_reach_m(radius_m: float, speed_mps: float, burst_height_m: float) -> float:
+	var arm := arm_distance_m(radius_m, speed_mps)
+	var rise := maxf(burst_height_m - HEIGHT_M * 0.5, 0.0)
+	return sqrt(maxf(arm * arm - rise * rise, 0.0)) if arm > 0.0 else 0.0
 
 
 static func blast_impulse(offset: Vector3, radius_m: float, speed_mps: float, mass_kg: float) -> Vector3:
@@ -65,7 +79,7 @@ func apply_blast(origin: Vector3, radius_m: float, speed_mps: float) -> void:
 		return
 	var offset := global_position - origin
 	apply_central_impulse(blast_impulse(offset, radius_m, speed_mps, mass))
-	if not armed and blast_speed_share(offset, radius_m, speed_mps) >= ARM_SPEED_MPS:
+	if not armed and offset.length() <= arm_distance_m(radius_m, speed_mps):
 		armed = true
 		_fuse_left_s = rng.randf_range(FUSE_MIN_S, FUSE_MAX_S)
 

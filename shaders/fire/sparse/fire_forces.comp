@@ -71,6 +71,28 @@ float turbulence_dv(vec3 p, int axis, float temp, float u_rel, float dt) {
 const float WIND_RELAX = 7.0; // 1/s, on cold air only
 const float RELAX_T_BAND = 15.0; // K above ambient over which the sponge fades out
 
+#ifdef FIRE_BLAST
+// NON-PAPER: the afterwind, Glasstone & Dolan 1977 s2.09. Ground air rushes back towards
+// ground zero; relaxes a horizontal face towards an inward radial speed, never slower than
+// the flow already is and never outward. The floor turns the convergence into the updraft.
+float afterwind_dv(vec3 p, int axis, float face_speed, float dt) {
+	vec4 a = cfg.afterwind[0];
+	vec4 b = cfg.afterwind[1];
+	vec2 d = p.xz - a.xy;
+	float r = length(d);
+	if (r < 1e-3) {
+		return 0.0;
+	}
+	float mask = (1.0 - smoothstep(b.x, b.x + b.y, r)) * (1.0 - smoothstep(0.5 * b.z, b.z, p.y));
+	float target = -a.z * (axis == 0 ? d.x : d.y) / r * smoothstep(0.0, b.w, r);
+	if (target == 0.0) {
+		return 0.0;
+	}
+	float dv = (target - face_speed) * (1.0 - exp(-dt / a.w)) * mask;
+	return target < 0.0 ? min(dv, 0.0) : max(dv, 0.0);
+}
+#endif
+
 void main() {
 	ivec3 c = cell_coord();
 	float dt = params.cell.y;
@@ -105,6 +127,9 @@ void main() {
 			float temp_u = 0.5 * (load_scal_src(ivec3(max(c.x - 1, 0), c.y, c.z)).x + load_scal_src(c).x);
 			u += turbulence_dv(u_face_to_world(c), 0, temp_u, u - amb.x, dt);
 		}
+		if (cfg.afterwind[0].z > 0.0) {
+			u += afterwind_dv(u_face_to_world(c), 0, u, dt);
+		}
 #endif
 		store_u_src(c, clamp(u, -VELOCITY_CLAMP, VELOCITY_CLAMP));
 	}
@@ -122,6 +147,11 @@ void main() {
 #ifdef FIRE_BLAST
 		if (cfg.explosion.z > 0.0) {
 			v += turbulence_dv(v_face_to_world(c), 1, temp, v, dt);
+		}
+		// NON-PAPER: a stand-in for the tropopause stable layer, Glasstone & Dolan 1977 s2.14.
+		if (cfg.lid.z > 0.0 && v > 0.0) {
+			float ramp = smoothstep(cfg.lid.x, cfg.lid.x + cfg.lid.y, v_face_to_world(c).y);
+			v /= 1.0 + cfg.lid.z * ramp * dt;
 		}
 #endif
 		// Solid ground: no flow through the floor.
@@ -141,6 +171,9 @@ void main() {
 		if (cfg.explosion.z > 0.0) {
 			float temp_w = 0.5 * (load_scal_src(ivec3(c.x, c.y, max(c.z - 1, 0))).x + load_scal_src(c).x);
 			w += turbulence_dv(w_face_to_world(c), 2, temp_w, w - amb.z, dt);
+		}
+		if (cfg.afterwind[0].z > 0.0) {
+			w += afterwind_dv(w_face_to_world(c), 1, w, dt);
 		}
 #endif
 		store_w_src(c, clamp(w, -VELOCITY_CLAMP, VELOCITY_CLAMP));

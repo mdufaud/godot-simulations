@@ -5,14 +5,14 @@
 
 [resource]
 script = ExtResource("1_charge")
-radius_m = 20.0
+radius_m = 110.0
 temperature_k = 2400.0
-fuel_fraction = 0.2
+fuel_fraction = 0.3
 soot_fraction = 1.0
-divergence_per_s = 28.0
+divergence_per_s = 6.9
 pulse_duration_s = 0.8
-blast_radius_m = 300.0
-blast_speed_mps = 60.0
+blast_radius_m = 4600.0
+blast_speed_mps = 343.0
 flash_energy = 100.0
 continuous = false
 companion = ExtResource("2_dust")

@@ -5,14 +5,18 @@
 
 [resource]
 script = ExtResource("1_config")
-cell_size_m = 2.0
+cell_size_m = 12.0
 simulation_hz = 30
 max_substeps_per_frame = 2
-velocity_clamp_mps = 240.0
+velocity_clamp_mps = 300.0
 keep_speed_mps = 1.0
 pool_slots = 4096
-tile_keep_scale = 16.0
-vorticity_strength = 1.5
-radiation_coefficient = 4.0
-residual_dissipation = 0.0
+tile_keep_scale = 500.0
+vorticity_strength = 0.3
+radiation_coefficient = 0.5
+soot_keep_fraction = 0.00012
+soot_half_life_s = 5.0
+lid_base_m = 750.0
+lid_thickness_m = 170.0
+lid_damping_per_s = 1.5
 billow = ExtResource("2_billow")

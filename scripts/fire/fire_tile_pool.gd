@@ -57,6 +57,7 @@ const COUNTS_WORDS := 12
 const ACTIVE_ARGS_OFFSET := C_ACTIVE * 4
 const NEW_ARGS_OFFSET := C_NEW * 4
 const LAYOUT_HEADER := "res://shaders/fire/tile_layout.comp"
+const RELIEF_HEADER := "res://shaders/fire/pool_relief.comp"
 
 ## Atlas geometry for a slot count. Both layouts keep 16 slots across x, so a
 ## slot's atlas origin never changes meaning for slots < 2048.
@@ -502,7 +503,8 @@ static func glsl_header(slots := NSLOTS) -> String:
 		"C_NEW": C_NEW}
 	for counter in counters:
 		defines.append("#define %s %du" % [counter, counters[counter]])
-	return "\n".join(defines) + "\n" + FileAccess.get_file_as_string(LAYOUT_HEADER) + "\n"
+	return "\n".join(defines) + "\n" + FileAccess.get_file_as_string(LAYOUT_HEADER) + "\n" \
+		+ FileAccess.get_file_as_string(RELIEF_HEADER) + "\n"
 
 
 static func vti_of(vt: Vector3i) -> int:

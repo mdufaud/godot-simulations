@@ -1,12 +1,11 @@
 class_name ExplosionMenu extends RefCounted
 
 const SCENES := ["Fireball range", "Barrels", "Mushroom cloud"]
-const DETONATE_LABELS := ["Detonate aim", "Detonate barrel", "Detonate"]
 ## Per scene: what a click does.
 const HINTS := [
-	"Click to throw a fireball at the cursor (drag orbits); right-click also throws",
-	"Click to throw a ball at a barrel (drag orbits); right-click also throws",
-	"Press Detonate to set off the charge (drag orbits)",
+	"Click to throw a fireball at the cursor (drag orbits); Detonate sets one off at the aim point",
+	"Click to throw a ball at a barrel (drag orbits); Detonate starts the chain; Barrels + adds a cluster",
+	"Throw is off in this scene: press Detonate to set off the charge (drag orbits)",
 ]
 ## Per scene: whether a click and the Throw action launch a ball (the mushroom has one charge, Detonate).
 const THROW_ENABLED := [true, true, false]
@@ -15,7 +14,7 @@ const SCENE_MUSHROOM := 2
 const CHARGE_SCALE_MIN := 0.5
 const CHARGE_SCALE_MAX := 1.5
 ## Largest charge factor per scene whose tile sweep leaves the pool unexhausted.
-const CHARGE_SCALE_LIMITS: Array[float] = [1.2, 1.25, 1.25]
+const CHARGE_SCALE_LIMITS: Array[float] = [1.2, 1.1, 1.0]
 const CHARGE_SCALE_STEP := 0.05
 
 var scene_option: OptionButton
@@ -23,6 +22,7 @@ var charge_slider: HSlider
 var throw_action: Button
 var detonate_action: Button
 var scene_action: Button
+var barrels_action: Button
 var slow_action: Button
 var settings := ExplosionSettings.new()
 var blast_slider: HSlider
@@ -34,10 +34,18 @@ var detail_slider: HSlider
 var hint_label: Label
 
 var _menu: SimMenu
+var _scene := 0
 
 
 static func charge_scale_max(scene: int) -> float:
 	return CHARGE_SCALE_LIMITS[clampi(scene, 0, CHARGE_SCALE_LIMITS.size() - 1)]
+
+
+## The slider stops at the largest step the system still accepts, so the UI cannot ask for a refused charge; returns the clamped scale.
+func limit_charge_scale(explosion: ExplosionSystem, scene: int, scale: float) -> float:
+	var limit := minf(charge_scale_max(scene), explosion.max_charge_scale(ExplosionScenery.base_charge(scene)))
+	charge_slider.max_value = maxf(floorf(limit / charge_slider.step) * charge_slider.step, charge_slider.min_value)
+	return minf(scale, charge_slider.max_value)
 
 
 static func slow_label(scale: float) -> String:
@@ -45,14 +53,16 @@ static func slow_label(scale: float) -> String:
 
 
 ## [param controller] must provide set_scene, next_scene, set_charge_scale, throw_ball, detonate_scene, clear_smoke,
-## set_paused, cycle_slow and reset_simulation.
+## set_paused, cycle_slow, reset_simulation and add_barrels. The action bar is identical in every scene: labels never change
+## and an action without meaning in a scene is disabled, never hidden.
 func build(menu: SimMenu, controller: Node) -> void:
 	_menu = menu
-	throw_action = menu.add_action("💥", "Throw", controller.throw_ball)
-	detonate_action = menu.add_action("🧨", DETONATE_LABELS[0], controller.detonate_scene)
-	menu.add_action("🌫", "Clear smoke", controller.clear_smoke)
-	scene_action = menu.add_action("🎬", SCENES[0], controller.next_scene)
+	scene_action = menu.add_action("🎬", "Scene", controller.next_scene)
 	menu.add_action("↺", "Reset", controller.reset_simulation)
+	throw_action = menu.add_action("💥", "Throw", controller.throw_ball)
+	detonate_action = menu.add_action("🧨", "Detonate", controller.detonate_scene)
+	barrels_action = menu.add_action("🛢", "Barrels +", controller.add_barrels)
+	menu.add_action("🌫", "Clear smoke", controller.clear_smoke)
 	menu.add_action_toggle("⏸", "Pause", false, controller.set_paused)
 	slow_action = menu.add_action("🐢", slow_label(1.0), controller.cycle_slow)
 	menu.add_section("Explosions")
@@ -86,11 +96,15 @@ func set_slow_label(scale: float) -> void:
 	_menu.set_action_label(slow_action, slow_label(scale))
 
 
+func set_barrels_full(full: bool) -> void:
+	barrels_action.disabled = full or _scene != SCENE_BARRELS
+
+
 func show_scene(index: int) -> void:
 	scene_option.select(index)
-	_menu.set_action_label(detonate_action, DETONATE_LABELS[index])
-	_menu.set_action_label(scene_action, SCENES[index])
-	throw_action.visible = THROW_ENABLED[index]
+	_scene = index
+	throw_action.disabled = not THROW_ENABLED[index]
+	barrels_action.disabled = index != SCENE_BARRELS
 	hint_label.text = HINTS[index]
 	_menu.set_slider_value(darkness_slider, settings.darkness)
 	blast_slider.get_parent().visible = ExplosionSettings.force_acts(index)

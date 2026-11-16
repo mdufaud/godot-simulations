@@ -5,7 +5,9 @@ const RANGE_CONFIG := preload("res://resources/explosion/presets/range.tres")
 const FIREBALL_RANGE_CONFIG := preload("res://resources/explosion/presets/fireball_range.tres")
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
 const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_charge.tres")
-const TEST_COUNT := 12
+const TEST_COUNT := 15
+const SMOKE_TARGET_S := [20.0, 30.0, 120.0]
+const DILUTION_ALLOWANCE := 1.4
 
 var _completed := 0
 
@@ -16,6 +18,7 @@ func _initialize() -> void:
 	_test_barrel_fuse()
 	_test_validation()
 	_test_queue()
+	_test_companion_delay()
 	_test_click_and_clock()
 	_test_barrel_routing()
 	_test_charge_scale()
@@ -24,6 +27,8 @@ func _initialize() -> void:
 	_test_dust_ring()
 	_test_presets()
 	_test_pace()
+	_test_carry_and_smoke()
+	_test_chain_reach()
 	_check(_completed == TEST_COUNT, "only %d of %d test groups ran to their end" % [_completed, TEST_COUNT])
 	_finish("explosion_blast")
 
@@ -62,7 +67,7 @@ func _test_barrel_fuse() -> void:
 	system.config = RANGE_CONFIG
 	system.solver = FireGpuSolver.new()
 	var released: Array[Dictionary] = []
-	system.detonated.connect(func(origin: Vector3, charge: ExplosionCharge) -> void:
+	system.detonated.connect(func(origin: Vector3, charge: ExplosionCharge, _carry: Vector3) -> void:
 		released.append({origin = origin, charge = charge}))
 	var barrel := _make_barrel(system, 7)
 	root.add_child(system)
@@ -143,6 +148,18 @@ func _test_validation() -> void:
 	config = RANGE_CONFIG.duplicate() as ExplosionConfig
 	config.turbulence_band_hi_k = config.turbulence_band_lo_k
 	_check(config.validate() != "", "an empty turbulence band is refused")
+	config = RANGE_CONFIG.duplicate() as ExplosionConfig
+	config.lid_base_m = -1.0
+	_check(config.validate() != "", "a negative lid base is refused")
+	config = RANGE_CONFIG.duplicate() as ExplosionConfig
+	config.lid_damping_per_s = -1.0
+	_check(config.validate() != "", "a negative lid damping is refused")
+	config = RANGE_CONFIG.duplicate() as ExplosionConfig
+	config.lid_damping_per_s = 1.0
+	config.lid_thickness_m = 0.0
+	_check(config.validate() != "", "a lid with no thickness is refused")
+	config.lid_damping_per_s = 0.0
+	_check(config.validate() == "", "a zero thickness is fine while the lid is off")
 	config = RANGE_CONFIG.duplicate() as ExplosionConfig
 	config.turbulence_strength = 0.0
 	config.turbulence_wavelength_m = config.cell_size_m
@@ -267,7 +284,7 @@ func _test_queue() -> void:
 	system.config = RANGE_CONFIG
 	system.solver = FireGpuSolver.new()
 	var released: Array[Vector3] = []
-	system.detonated.connect(func(origin: Vector3, _charge: ExplosionCharge) -> void: released.append(origin))
+	system.detonated.connect(func(origin: Vector3, _charge: ExplosionCharge, _carry: Vector3) -> void: released.append(origin))
 	var total := FireGpuSolver.MAX_BLASTS + 3
 	for i in total:
 		system.detonate(Vector3(float(i), 1.0, 0.0), BARREL_CHARGE)
@@ -291,6 +308,118 @@ func _test_queue() -> void:
 	_check(system.pending_count() == 2, "one waiting detonation left the queue")
 	system.free()
 	_completed += 1
+
+
+func _test_companion_delay() -> void:
+	var dust := ExplosionCharge.new()
+	dust.continuous = true
+	dust.delay_s = 4.0
+	var parent := ExplosionCharge.new()
+	parent.companion = dust
+	var system := ExplosionSystem.new()
+	system.config = RANGE_CONFIG
+	system.solver = FireGpuSolver.new()
+	system.detonate(Vector3.ZERO, parent)
+	system.advance(0.0)
+	_check(system.delayed_count() == 1 and system.pending_count() == 0 and not _slot_runs(system, dust), "a delayed companion is held back")
+	for i in 39:
+		system.advance(0.1)
+	_check(system.delayed_count() == 1 and not _slot_runs(system, dust), "a delayed companion waits delay_s of simulated time")
+	system.advance(0.0)
+	system.advance(0.0)
+	_check(system.delayed_count() == 1 and not _slot_runs(system, dust), "zero simulated time does not advance the delay")
+	system.advance(0.15)
+	_check(system.delayed_count() == 0 and _slot_runs(system, dust), "a delayed companion starts once delay_s has elapsed")
+	system.reset()
+	system.detonate(Vector3.ZERO, parent)
+	system.advance(0.0)
+	system.reset()
+	system.advance(5.0)
+	_check(system.delayed_count() == 0 and not _slot_runs(system, dust), "reset drops a waiting companion")
+	dust.delay_s = -1.0
+	_check(dust.validate() != "", "a negative delay_s is refused")
+	system.free()
+	_test_afterwind()
+	_completed += 1
+
+
+func _test_afterwind() -> void:
+	var dust := ExplosionCharge.new()
+	dust.continuous = true
+	dust.delay_s = 2.0
+	dust.pulse_duration_s = 20.0
+	dust.afterwind_mps = 30.0
+	dust.afterwind_radius_m = 700.0
+	dust.afterwind_height_m = 90.0
+	dust.afterwind_tau_s = 2.0
+	_check(dust.validate() == "", "a complete afterwind validates")
+	for field: String in ["afterwind_mps", "afterwind_radius_m", "afterwind_height_m", "afterwind_tau_s"]:
+		var bad := dust.duplicate() as ExplosionCharge
+		bad.set(field, -1.0)
+		_check(bad.validate() != "", "a negative %s is refused" % field)
+	var open := dust.duplicate() as ExplosionCharge
+	open.afterwind_tau_s = 0.0
+	_check(open.validate() != "", "an afterwind with no time constant is refused")
+	open.afterwind_mps = 0.0
+	_check(open.validate() == "", "a zero afterwind skips the shape checks")
+	_check(ExplosionSystem.afterwind_envelope(-1.0, 20.0) == 0.0 and ExplosionSystem.afterwind_envelope(0.0, 20.0) == 0.0, "the envelope is 0 before the pulse")
+	_check(is_equal_approx(ExplosionSystem.afterwind_envelope(2.0, 20.0), 1.0), "the envelope holds mid pulse")
+	_check(ExplosionSystem.afterwind_envelope(20.0, 20.0) == 0.0 and ExplosionSystem.afterwind_envelope(25.0, 20.0) == 0.0, "the envelope is 0 once the pulse ends")
+	var parent := ExplosionCharge.new()
+	parent.companion = dust
+	var system := ExplosionSystem.new()
+	system.config = RANGE_CONFIG
+	system.solver = FireGpuSolver.new()
+	system.detonate(Vector3(5.0, 0.0, 7.0), parent)
+	system.advance(0.0)
+	_check(system.solver._afterwind[0].z == 0.0, "no afterwind before the companion starts")
+	system.advance(2.5)
+	system.advance(0.0)
+	system.advance(2.0)
+	system.advance(0.0)
+	_check(system.solver._afterwind[0].z > 29.0 and system.solver._afterwind[0].x == 5.0 and system.solver._afterwind[0].y == 7.0, "the afterwind runs at the companion's centre while it pulses")
+	system.reset()
+	_check(system.solver._afterwind[0].z == 0.0 and system.solver._afterwind[1] == Vector4.ZERO, "reset mid pulse pushes a zero afterwind")
+	system.advance(20.0)
+	_check(system.solver._afterwind[0].z == 0.0, "no afterwind after the companion ends")
+	system.free()
+	_test_afterwind_relaxation()
+
+
+func _test_afterwind_relaxation() -> void:
+	var a := Vector4(10.0, -5.0, 30.0, 2.0)
+	var b := Vector4(700.0, 175.0, 90.0, 40.0)
+	var points: Array[Vector3] = [Vector3(210.0, 5.0, -5.0), Vector3(-190.0, 5.0, -5.0), Vector3(10.0, 5.0, 195.0), Vector3(10.0, 5.0, -205.0),
+		Vector3(110.0, 5.0, 95.0), Vector3(-90.0, 5.0, 95.0), Vector3(-90.0, 5.0, -105.0), Vector3(110.0, 5.0, -105.0), Vector3(15.0, 5.0, 30.0)]
+	var bad := 0
+	var pushed := 0
+	for p in points:
+		for axis in 2:
+			var radial := Vector2(p.x - a.x, p.z - a.y).normalized()
+			var inward := -(radial.x if axis == 0 else radial.y)
+			for face_speed in [-40.0, -10.0, -1.0, 0.0, 1.0, 10.0, 40.0]:
+				var dv := ExplosionSystem.afterwind_dv(a, b, p, axis, face_speed, 0.05)
+				if is_zero_approx(inward):
+					bad += int(dv != 0.0)
+					continue
+				pushed += int(dv != 0.0)
+				var after: float = face_speed + dv
+				bad += int(dv * inward < 0.0)
+				bad += int(inward < 0.0 and after > face_speed or inward > 0.0 and after < face_speed)
+				bad += int(inward > 0.0 and face_speed > 0.0 and dv < 0.0 or inward < 0.0 and face_speed < 0.0 and dv > 0.0)
+	_check(bad == 0 and pushed > 40, "the afterwind relaxation never pushes outward, never cuts inflow (bad %d, pushed %d)" % [bad, pushed])
+	_check(ExplosionSystem.afterwind_dv(a, b, Vector3(10.0, 5.0, 195.0), 0, 7.0, 0.05) == 0.0, "a face on the axis keeps its flow: target 0 returns 0")
+	_check(ExplosionSystem.afterwind_dv(a, b, Vector3(10.0, 5.0, 195.0), 0, -7.0, 0.05) == 0.0, "a face on the axis keeps its inflow")
+	_check(ExplosionSystem.afterwind_dv(a, b, Vector3(10.0, 5.0, -5.0), 0, 3.0, 0.05) == 0.0, "the centre column is left alone")
+	_check(ExplosionSystem.afterwind_dv(a, b, Vector3(210.0, 5.0, -5.0), 0, 0.0, 0.05) < 0.0, "an at-rest face off the axis is pulled inwards")
+	_check(ExplosionSystem.afterwind_dv(a, b, Vector3(210.0, 200.0, -5.0), 0, 0.0, 0.05) == 0.0, "the height cap masks the flow")
+
+
+func _slot_runs(system: ExplosionSystem, charge: ExplosionCharge) -> bool:
+	for slot in system._slots:
+		if not slot.is_empty() and slot.charge == charge:
+			return true
+	return false
 
 
 func _make_barrel(system: ExplosionSystem, seed_value: int) -> ExplosiveBarrel:
@@ -322,15 +451,15 @@ func _test_click_and_clock() -> void:
 		and ExplosionActions.clamp_time_scale(0.5) == 0.5, "time scale clamps to [0, base pace]")
 	var ticks := int(ExplosionActions.default_tick_rate())
 	actions = ExplosionActions.started()
-	_check(is_equal_approx(Engine.time_scale, base) and Engine.physics_ticks_per_second == ticks * 2,
+	_check(is_equal_approx(Engine.time_scale, base) and Engine.physics_ticks_per_second == int(roundf(ticks * base)),
 		"the demo starts at the base pace with the physics tick rate raised to match")
-	_check(is_equal_approx(actions.cycle_slow(), 0.5) and is_equal_approx(Engine.time_scale, 1.0)
-		and Engine.physics_ticks_per_second == ticks, "slow 0.5x runs the engine clock at 1, the pace before the base was raised")
+	_check(is_equal_approx(actions.cycle_slow(), 0.5) and is_equal_approx(Engine.time_scale, base * 0.5)
+		and Engine.physics_ticks_per_second == ticks, "slow 0.5x runs the engine clock at 0.7, 0.7 times the original pace")
 	actions.set_paused(true)
 	_check(Engine.time_scale == 0.0, "pause stops the engine clock")
 	actions.set_paused(false)
-	_check(is_equal_approx(Engine.time_scale, 1.0), "resume returns to the chosen slow scale")
-	_check(is_equal_approx(actions.cycle_slow(), 0.25) and is_equal_approx(Engine.time_scale, 0.5)
+	_check(is_equal_approx(Engine.time_scale, base * 0.5), "resume returns to the chosen slow scale")
+	_check(is_equal_approx(actions.cycle_slow(), 0.25) and is_equal_approx(Engine.time_scale, base * 0.25)
 		and Engine.physics_ticks_per_second == ticks, "slow 0.25x halves it again without lowering the tick rate")
 	_check(is_equal_approx(actions.cycle_slow(), 1.0) and Engine.time_scale == base, "the slow cycle wraps back to 1x")
 	ExplosionActions.restore_clock()
@@ -402,6 +531,16 @@ func _test_framing() -> void:
 		_check(orbit.yaw == 33.0, "a scene change keeps the yaw")
 		_check(framing.distance >= framing.min_distance and framing.distance <= framing.max_distance
 			and framing.zoom_speed <= framing.distance * 0.1, "scene %d: the start distance is in range and a wheel notch is a small step" % index)
+	var nuke: Dictionary = ExplosionScenery.FRAMING[ExplosionMenu.SCENE_MUSHROOM]
+	var lens_y: float = nuke.target.y - nuke.distance * sin(deg_to_rad(nuke.pitch))
+	_check(nuke.pitch >= 5.0 and nuke.pitch <= 20.0 and nuke.fov >= 15.0 and nuke.fov <= 45.0 and lens_y >= 0.0 and lens_y <= 30.0,
+		"the mushroom camera starts low and looks up, got y=%.1f pitch=%.1f fov=%.1f" % [lens_y, nuke.pitch, nuke.fov])
+	_check(nuke.max_distance <= nuke.target.y / sin(deg_to_rad(nuke.pitch)), "zooming out never puts the mushroom camera underground")
+	var lid: ExplosionConfig = ExplosionScenery.MUSHROOM_CONFIG
+	var lid_top_m := lid.lid_base_m + lid.lid_thickness_m
+	var lens_to_top := rad_to_deg(atan2(lid_top_m - lens_y, nuke.distance * cos(deg_to_rad(nuke.pitch))))
+	_check(lid.lid_damping_per_s > 0.0 and lens_to_top < nuke.pitch + nuke.fov * 0.5 and lens_to_top > nuke.pitch - nuke.fov * 0.5,
+		"the mushroom lid is on and its top is inside the default vertical view, got %.1f deg" % lens_to_top)
 	orbit.free()
 	camera.free()
 	_completed += 1
@@ -415,15 +554,33 @@ func _test_dust_ring() -> void:
 	root.add_child(ring)
 	ring.start()
 	for i in ExplosionDustRing.MAX_RINGS + 4:
-		system.detonated.emit(Vector3(float(i), 1.0, 0.0), BARREL_CHARGE)
+		system.detonated.emit(Vector3(float(i), 1.0, 0.0), BARREL_CHARGE, Vector3.ZERO)
 	_check(ring._rings.size() == ExplosionDustRing.MAX_RINGS, "concurrent rings are capped")
 	var speed_before: float = ring._rings[-1].speed_mps
 	system.blast_force_scale = 1.5
-	system.detonated.emit(Vector3.ZERO, BARREL_CHARGE)
+	system.detonated.emit(Vector3.ZERO, BARREL_CHARGE, Vector3.ZERO)
 	_check(is_equal_approx(ring._rings[-1].speed_mps, BARREL_CHARGE.blast_speed_mps * 1.5)
 		and is_equal_approx(speed_before, BARREL_CHARGE.blast_speed_mps), "the ring travels at the force-scaled blast speed")
 	ring.clear()
 	_check(ring._rings.is_empty(), "clear drops every ring")
+	var window := ExplosionDustRing.inflow_window_s(100.0, 2000.0, 100.0)
+	_check(is_equal_approx(window.x, 0.6 * 19.0) and is_equal_approx(window.y, 900.0 / 60.0), "the inflow runs from 0.6 of the front's travel for the closing time")
+	_check(ExplosionDustRing.inflow_window_s(1000.0, 2000.0, 100.0).y == 0.0 and ExplosionDustRing.inflow_window_s(1500.0, 2000.0, 100.0).y == 0.0, "no inflow when the charge reaches the inflow start radius")
+	_check(ExplosionDustRing.inflow_window_s(100.0, 2000.0, 0.0).y == 0.0, "no inflow at zero speed")
+	var big := BARREL_CHARGE.duplicate()
+	big.radius_m = 1000.0
+	big.blast_radius_m = 1500.0
+	system.detonated.emit(Vector3.ZERO, big, Vector3.ZERO)
+	_check(not ring._rings.is_empty() and not ring._rings[-1].inflow, "a huge charge gets no inflow ring")
+	ring.clear()
+	var cap_charge := BARREL_CHARGE.duplicate()
+	cap_charge.radius_m = 5.0
+	cap_charge.blast_radius_m = ExplosionCameraShake.REACH_MAX_BLAST_M
+	var at_cap := ExplosionCameraShake.trauma_for(cap_charge, 3000.0)
+	cap_charge.blast_radius_m = 5.0 * ExplosionCameraShake.REACH_MAX_BLAST_M
+	_check(is_equal_approx(ExplosionCameraShake.trauma_for(cap_charge, 3000.0), at_cap), "shake reach stops growing above REACH_MAX_BLAST_M")
+	cap_charge.blast_radius_m = 0.5 * ExplosionCameraShake.REACH_MAX_BLAST_M
+	_check(ExplosionCameraShake.trauma_for(cap_charge, 3000.0) < at_cap, "a smaller blast below the cap reaches less far")
 	ring.free()
 	system.free()
 	_completed += 1
@@ -562,7 +719,7 @@ func _test_pace() -> void:
 		for frame in 120:
 			steps += solver.schedule_steps(base / 60.0)
 		_check(solver.dropped_time == 0.0 and absf(float(steps) * solver.timestep - base * 2.0) <= solver.timestep,
-			"%d Hz runs %d steps in 120 frames at %.0fx with nothing dropped" % [config.simulation_hz, steps, base])
+			"%d Hz runs %d steps in 120 frames at %.1fx with nothing dropped" % [config.simulation_hz, steps, base])
 	var wide := RANGE_CONFIG.duplicate() as ExplosionConfig
 	wide.topology_interval_steps = 0
 	wide.max_substeps_per_frame = 4
@@ -573,4 +730,60 @@ func _test_pace() -> void:
 		"a refresh every two substeps keeps the band inside the limit")
 	wide.topology_interval_steps = 1
 	_check(wide.band_cells(45.0) < 4.0, "a refresh every substep halves the band again")
+	_completed += 1
+
+
+func _test_carry_and_smoke() -> void:
+	var system := ExplosionSystem.new()
+	system.config = FIREBALL_RANGE_CONFIG
+	var throw := Vector3(20.0, 7.0, -10.0)
+	var impulse := system.carry_impulse(FIREBALL_CHARGE, throw)
+	_check(FIREBALL_CHARGE.carry_fraction > 0.0 and impulse.y == 0.0, "a thrown fireball carries a horizontal impulse only")
+	_check(impulse.is_equal_approx(Vector3(throw.x, 0.0, throw.z) * FIREBALL_CHARGE.carry_fraction), "the carry is the charge's share of the horizontal velocity")
+	_check(system.carry_impulse(FIREBALL_CHARGE, Vector3.ZERO) == Vector3.ZERO, "no velocity means no carry")
+	var fast := system.carry_impulse(FIREBALL_CHARGE, Vector3(500.0, 0.0, 0.0))
+	_check(is_equal_approx(fast.length(), system.carry_headroom_mps(FIREBALL_CHARGE)), "a carry beyond the clamp is cut to the headroom")
+	_check(system.peak_source_mps(FIREBALL_CHARGE) + fast.length() <= FIREBALL_RANGE_CONFIG.velocity_clamp_mps + 1e-3, "source flow plus carry stays under the velocity clamp")
+	_check(system.carry_impulse(BARREL_CHARGE, throw) == Vector3.ZERO, "a charge with no carry fraction gets none")
+	var continuous := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	continuous.continuous = true
+	_check(continuous.validate() != "", "a continuous charge with a carry fraction is refused")
+	continuous.carry_fraction = 0.0
+	_check(system.carry_impulse(continuous, throw) == Vector3.ZERO, "a continuous charge never carries")
+	var over := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	over.carry_fraction = 1.5
+	_check(over.validate() != "", "a carry fraction above 1 is refused")
+	var tight := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	tight.divergence_per_s = FIREBALL_RANGE_CONFIG.velocity_clamp_mps * 3.0 / tight.radius_m
+	_check(system.refusal(tight) != "", "a carry with no headroom under the clamp is refused")
+	system.free()
+	for scene in SMOKE_TARGET_S.size():
+		var config := ExplosionScenery.config_for(scene)
+		var soot := ExplosionScenery.base_charge(scene).soot_fraction
+		var floor_soot := config.soot_keep_fraction * FireGpuSolver.TILE_ACTIVITY_THRESHOLD * config.tile_keep_scale
+		var decay_s := config.soot_half_life_s * log(soot / floor_soot) / log(2.0)
+		_check(config.validate() == "" and decay_s <= SMOKE_TARGET_S[scene] * DILUTION_ALLOWANCE,
+			"scene %d: the soot half-life takes %.1f s to bring %.2f of soot to the floor %.4f, target %.0f s (x%.1f for dilution)" % [scene, decay_s, soot, floor_soot, SMOKE_TARGET_S[scene], DILUTION_ALLOWANCE])
+	var bad := RANGE_CONFIG.duplicate() as ExplosionConfig
+	bad.soot_half_life_s = 0.0
+	_check(bad.validate() != "", "a zero soot half-life is refused")
+	_completed += 1
+
+
+func _test_chain_reach() -> void:
+	var arm := ExplosiveBarrel.arm_distance_m(BARREL_CHARGE.blast_radius_m, BARREL_CHARGE.blast_speed_mps)
+	var share := ExplosiveBarrel.blast_speed_share(Vector3(arm, 0.0, 0.0), BARREL_CHARGE.blast_radius_m, BARREL_CHARGE.blast_speed_mps)
+	_check(arm > 0.0 and is_equal_approx(share, ExplosiveBarrel.ARM_SPEED_MPS), "the arm distance is where the shock speed share equals the arm speed")
+	_check(ExplosiveBarrel.arm_distance_m(6.0, ExplosiveBarrel.ARM_SPEED_MPS - 0.1) < 0.0, "a shock slower than the arm speed never arms")
+	var reach := ExplosiveBarrel.chain_reach_m(BARREL_CHARGE.blast_radius_m, BARREL_CHARGE.blast_speed_mps, BARREL_CHARGE.radius_m)
+	var rise := BARREL_CHARGE.radius_m - ExplosiveBarrel.HEIGHT_M * 0.5
+	_check(is_equal_approx(reach * reach + rise * rise, arm * arm), "the ground reach and the burst rise make up the arm distance")
+	_check(ExplosiveBarrel.chain_reach_m(6.0, 1.0, 1.2) == 0.0, "no reach when the shock is too slow")
+	_check(ExplosiveBarrel.chain_reach_m(6.0, 9.0, 1.2) > ExplosiveBarrel.chain_reach_m(6.0, 7.0, 1.2), "a stronger shock reaches further")
+	var pairs := ExplosionBarrelYard.cluster_points(Vector2.ZERO)
+	_check(pairs.size() == ExplosionBarrelYard.CLUSTER_SIZE and pairs[0].distance_to(pairs[1]) >= ExplosiveBarrel.RADIUS_M * 2.0 + ExplosionBarrelYard.BARREL_GAP_M,
+		"cluster barrels do not overlap")
+	var gap := ExplosionBarrelYard.DEFAULT_CLUSTERS_M[0].distance_to(ExplosionBarrelYard.DEFAULT_CLUSTERS_M[1]) \
+		- ExplosionBarrelYard.CLUSTER_SPACING_M * sqrt(2.0)
+	_check(gap < reach, "default clusters sit inside each other's chain reach")
 	_completed += 1

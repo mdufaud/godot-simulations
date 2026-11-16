@@ -19,13 +19,13 @@ const CAPTURE_POINT := Vector3(0.0, 1.4, 0.0)
 
 var explosion: ExplosionSystem
 var presentation: FirePresentation
-var launcher := ProjectileLauncher.new()
+var launcher: ProjectileLauncher
 var scene_index := 0
 var charge_scale := 1.0
 
 var _capture := ExplosionCapture.new()
 @onready var _actions := ExplosionActions.started()
-var _barrel_ball := FIREBALL_PROJECTILE.duplicate() as ProjectilePreset
+var _barrel_ball := ExplosionActions.barrel_ball(FIREBALL_PROJECTILE)
 var _fx := ExplosionFx.new()
 var _scenery := ExplosionScenery.new()
 var _menu_builder := ExplosionMenu.new()
@@ -39,21 +39,20 @@ func _ready() -> void:
 		menu.add_label("This demo needs GPU compute (Forward+ / Vulkan) and none is available.")
 		return
 	add_child(_fx)
-	_scenery.bind(world_env, sun, ground)
+	_scenery.bind(world_env, sun, ground, _menu_builder.set_barrels_full)
 	_menu_builder.settings.scenery = _scenery
 	if not _build_simulation(ExplosionScenery.config_for(0)):
 		return
-	launcher.camera = camera
-	launcher.container = projectile_root
-	launcher.report_every_contact = true
+	_actions.shake.camera = camera
+	launcher = ExplosionActions.make_launcher(camera, projectile_root)
 	launcher.impact.connect(_on_impact)
-	_barrel_ball.explodes = false
 	set_scene(0)
 
 
 func _process(delta: float) -> void:
 	if presentation == null:
 		return
+	_actions.tick(delta)
 	presentation.update_volume()
 	presentation.update_half_res()
 	presentation.update_effects(explosion.solver.get_stats(), delta)
@@ -66,6 +65,7 @@ func _physics_process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	_actions.reset()
 	ExplosionActions.restore_clock()
 	if presentation != null:
 		presentation.release()
@@ -75,8 +75,10 @@ func _exit_tree() -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if presentation == null or _actions.is_emulated_mouse(event) or not event is InputEventMouseButton:
 		return
-	if (event.button_index == MOUSE_BUTTON_RIGHT and event.pressed) \
-			or (event.button_index == MOUSE_BUTTON_LEFT and _actions.left_click(event)):
+	var right: bool = event.button_index == MOUSE_BUTTON_RIGHT and event.pressed
+	if right and scene_index == ExplosionMenu.SCENE_BARRELS:
+		_scenery.add_cluster_at(camera, event.position)
+	elif right or (event.button_index == MOUSE_BUTTON_LEFT and _actions.left_click(event)):
 		_throw_at(event.position)
 
 
@@ -86,7 +88,7 @@ func set_scene(index: int) -> void:
 	scene_index = clampi(index, 0, ExplosionMenu.SCENES.size() - 1)
 	if ExplosionScenery.config_for(scene_index) != explosion.config and not _build_simulation(ExplosionScenery.config_for(scene_index)):
 		return
-	_limit_charge_scale()
+	charge_scale = _menu_builder.limit_charge_scale(explosion, scene_index, charge_scale)
 	_menu_builder.show_scene(scene_index)
 	ExplosionScenery.apply_framing(orbit_cam, camera, scene_index)
 	launcher.arm(_barrel_ball if scene_index == ExplosionMenu.SCENE_BARRELS else FIREBALL_PROJECTILE)
@@ -101,6 +103,7 @@ func reset_simulation() -> void:
 	if presentation == null:
 		return
 	launcher.clear()
+	_actions.reset()
 	_clear_effects()
 	explosion.reset()
 	_scenery.build(self, scene_index, explosion)
@@ -143,6 +146,10 @@ func cycle_slow() -> void:
 	_menu_builder.set_slow_label(_actions.cycle_slow())
 
 
+func add_barrels() -> void:
+	_scenery.add_cluster_at(camera, get_viewport().get_visible_rect().size * 0.5)
+
+
 func throw_ball() -> void:
 	_throw_at(get_viewport().get_visible_rect().size * 0.5)
 
@@ -157,16 +164,8 @@ func _sync_barrel_charge() -> void:
 		_scenery.set_barrel_charge(_charge())
 
 
-## The slider stops at the largest step the system still accepts, so the UI cannot ask for a refused charge.
-func _limit_charge_scale() -> void:
-	var limit := minf(ExplosionMenu.charge_scale_max(scene_index), explosion.max_charge_scale(ExplosionScenery.base_charge(scene_index)))
-	var slider := _menu_builder.charge_slider
-	slider.max_value = maxf(floorf(limit / slider.step) * slider.step, slider.min_value)
-	charge_scale = minf(charge_scale, slider.max_value)
-
-
 func _throw_at(screen_position: Vector2) -> void:
-	if presentation != null and ExplosionMenu.THROW_ENABLED[scene_index]:
+	if presentation != null and ExplosionMenu.THROW_ENABLED[scene_index] and _actions.allow_throw(launcher.flying_count()):
 		launcher.fire(screen_position)
 
 
@@ -199,7 +198,8 @@ func _build_simulation(config: ExplosionConfig) -> bool:
 	presentation.refresh_temporal_blend()
 	ExplosionScenery.scale_volume(presentation, metric_scale, config)
 	_menu_builder.settings.attach(explosion, presentation, viewport_guard, scene_index)
-	_fx.attach(explosion, fire_light)
+	_fx.attach(explosion, fire_light, _scenery)
+	explosion.detonated.connect(_actions.shake.on_detonated)
 	return true
 
 
@@ -209,7 +209,7 @@ func _on_impact(origin: Vector3, _radius_m: float, _impulse: float) -> void:
 		return
 	var charge := _charge()
 	origin.y = maxf(origin.y, charge.radius_m)
-	explosion.detonate(origin, charge)
+	explosion.detonate(origin, charge, launcher.impact_velocity)
 
 
 func capture_ready() -> bool:

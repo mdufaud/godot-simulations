@@ -19,6 +19,12 @@ class_name ProjectilePreset extends Resource
 ## Adds a light flash and consumes the projectile on impact.
 @export var explodes := false
 
+@export_group("Flight")
+## Flies in a straight line to the aimed point: no gravity until the first contact.
+@export var straight_flight := false
+## False: projectiles of this preset pass through each other.
+@export var collide_with_projectiles := true
+
 @export_group("Look")
 @export var color := Color(0.75, 0.7, 0.45)
 @export_range(0.0, 1.0, 0.01) var metallic := 0.9
