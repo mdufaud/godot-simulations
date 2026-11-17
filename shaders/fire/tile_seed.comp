@@ -17,6 +17,15 @@ void seed_blasts() {
 			continue;
 		}
 		vec3 centre = cfg.blast[i].xyz * pc.seed_p1.x + pc.seed_p0;
+		vec4 ring = cfg.blast_ring[i];
+		if (ring.y > 0.0) {
+			float along = abs(distance(p.xz, centre.xz) - ring.x * pc.seed_p1.x);
+			if (along <= ring.y * pc.seed_p1.x + pc.seed_radius && p.y - centre.y <= ring.z * pc.seed_p1.x + pc.seed_radius) {
+				request_tile(vt);
+				return;
+			}
+			continue;
+		}
 		if (distance(p, centre) <= cfg.blast[i].w * pc.seed_p1.x + pc.seed_radius) {
 			request_tile(vt);
 			return;

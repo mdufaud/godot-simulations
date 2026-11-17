@@ -170,7 +170,7 @@ func _throw_at(screen_position: Vector2) -> void:
 
 
 func _ground_zero() -> Vector3:
-	return Vector3(0.0, _charge().radius_m * BURST_HEIGHT, 0.0)
+	return Vector3(0.0, _charge().final_radius_m() * BURST_HEIGHT, 0.0)
 
 
 func _charge() -> ExplosionCharge:

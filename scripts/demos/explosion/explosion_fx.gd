@@ -11,6 +11,11 @@ const FLASH_MAX_RANGE_M := 1800.0
 const FLASH_MAX_S := 4.0
 const SPARK_BARREL_RADIUS_M := 1.2
 const SPARK_MAX_SPEED_MPS := 28.0
+## Front speed of the visible shock of a small blast at its start: the shell slows down to the blast radius.
+const SHOCK_SPEED_MPS := 300.0
+const SHOCK_LIFE_S := 0.3
+const SHOCK_GLOW := 0.35
+const SHOCK_DISTORTION := 8.0
 
 static var _ring_mesh: SphereMesh
 static var _ring_material: ShaderMaterial
@@ -56,9 +61,20 @@ func _flash(origin: Vector3, charge: ExplosionCharge) -> void:
 	tween.finished.connect(light.queue_free)
 
 
-## The shell grows at the real blast speed from the charge radius to the blast radius.
+static func is_small_blast(charge: ExplosionCharge) -> bool:
+	return charge.blast_radius_m < ExplosionDustRing.INFLOW_MIN_BLAST_M
+
+
+## Fraction of the travel done [param t_s] after the start for a front that starts at [param speed_mps] and slows down.
+static func decelerating_front(t_s: float, span_m: float, speed_mps: float) -> float:
+	return 1.0 - exp(-t_s * speed_mps / span_m)
+
+
+## Big blasts: the shell grows at the real blast speed. Small blasts: it bursts out at SHOCK_SPEED_MPS, slows down and fades.
 func _ring(origin: Vector3, charge: ExplosionCharge) -> void:
-	var span_m := charge.blast_radius_m - charge.radius_m
+	var small := is_small_blast(charge)
+	var from_m := charge.radius_m if small else charge.final_radius_m()
+	var span_m := charge.blast_radius_m - from_m
 	var speed_mps := system.blast_speed_mps(charge)
 	if speed_mps <= 0.0 or span_m <= 0.0:
 		return
@@ -66,16 +82,21 @@ func _ring(origin: Vector3, charge: ExplosionCharge) -> void:
 	ring.mesh = _shared_ring_mesh()
 	ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	ring.position = origin
-	ring.scale = Vector3.ONE * charge.radius_m
+	ring.scale = Vector3.ONE * from_m
 	add_child(ring)
+	var life_s := SHOCK_LIFE_S if small else span_m / speed_mps
+	if small:
+		ring.set_instance_shader_parameter("rim_glow", SHOCK_GLOW)
+		ring.set_instance_shader_parameter("distortion", SHOCK_DISTORTION)
 	var tween := ring.create_tween()
-	tween.tween_method(_step_ring.bind(ring, charge.radius_m, charge.blast_radius_m), 0.0, 1.0,
-		span_m / speed_mps)
+	tween.tween_method(_step_ring.bind(ring, from_m, charge.blast_radius_m, life_s, SHOCK_SPEED_MPS if small else 0.0),
+		0.0, 1.0, life_s)
 	tween.finished.connect(ring.queue_free)
 
 
-func _step_ring(t: float, ring: MeshInstance3D, from_m: float, to_m: float) -> void:
-	ring.scale = Vector3.ONE * lerpf(from_m, to_m, t)
+func _step_ring(t: float, ring: MeshInstance3D, from_m: float, to_m: float, life_s: float, front_speed_mps: float) -> void:
+	var front := t if front_speed_mps <= 0.0 else decelerating_front(t * life_s, to_m - from_m, front_speed_mps)
+	ring.scale = Vector3.ONE * lerpf(from_m, to_m, front)
 	ring.set_instance_shader_parameter("progress", t)
 
 

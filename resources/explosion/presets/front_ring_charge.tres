@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="ExplosionCharge" format=3]
+
+[ext_resource type="Script" path="res://scripts/explosion/explosion_charge.gd" id="1_charge"]
+[ext_resource type="Resource" path="res://resources/explosion/presets/dust_charge.tres" id="2_dome"]
+
+[resource]
+script = ExtResource("1_charge")
+radius_m = 800.0
+temperature_k = 400.0
+fuel_fraction = 0.0
+soot_fraction = 0.15
+divergence_per_s = 0.001
+pulse_duration_s = 3.0
+blast_radius_m = 40.0
+blast_speed_mps = 0.0
+flash_energy = 0.0
+continuous = true
+companion = ExtResource("2_dome")
+front_ring_width_m = 48.0
+front_ring_height_m = 48.0
+front_ring_lift_mps = 4.0

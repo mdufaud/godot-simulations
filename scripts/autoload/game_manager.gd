@@ -292,6 +292,7 @@ func load_demo(demo_name: String) -> void:
 	if DisplayServer.get_name() != "headless":
 		await RenderingServer.frame_post_draw
 
+	_preload_scripts(scene)
 	var error := ResourceLoader.load_threaded_request(scene, "PackedScene")
 	if error != OK:
 		push_error("Could not load simulation %s: %s" % [demo_name, error_string(error)])
@@ -323,6 +324,14 @@ func load_demo(demo_name: String) -> void:
 	if DisplayServer.get_name() != "headless":
 		await RenderingServer.frame_post_draw
 	_finish_loading()
+
+
+# Scripts compiled on the loader thread leave GDScriptCache parser refs alive at exit.
+func _preload_scripts(scene: String) -> void:
+	for dependency in ResourceLoader.get_dependencies(scene):
+		var path := String(dependency).get_slice("::", 2)
+		if path.get_extension() == "gd":
+			load(path)
 
 
 func go_to_menu() -> void:

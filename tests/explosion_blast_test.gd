@@ -5,7 +5,7 @@ const RANGE_CONFIG := preload("res://resources/explosion/presets/range.tres")
 const FIREBALL_RANGE_CONFIG := preload("res://resources/explosion/presets/fireball_range.tres")
 const BARREL_CHARGE := preload("res://resources/explosion/presets/barrel_charge.tres")
 const FIREBALL_CHARGE := preload("res://resources/explosion/presets/fireball_charge.tres")
-const TEST_COUNT := 15
+const TEST_COUNT := 17
 const SMOKE_TARGET_S := [20.0, 30.0, 120.0]
 const DILUTION_ALLOWANCE := 1.4
 
@@ -18,7 +18,7 @@ func _initialize() -> void:
 	_test_barrel_fuse()
 	_test_validation()
 	_test_queue()
-	_test_companion_delay()
+	_test_companion_chain()
 	_test_click_and_clock()
 	_test_barrel_routing()
 	_test_charge_scale()
@@ -29,6 +29,8 @@ func _initialize() -> void:
 	_test_pace()
 	_test_carry_and_smoke()
 	_test_chain_reach()
+	_test_nuke_front()
+	_test_refusal_rules()
 	_check(_completed == TEST_COUNT, "only %d of %d test groups ran to their end" % [_completed, TEST_COUNT])
 	_finish("explosion_blast")
 
@@ -178,8 +180,7 @@ func _test_validation() -> void:
 	var system := ExplosionSystem.new()
 	system.config = RANGE_CONFIG
 	var strong := BARREL_CHARGE.duplicate() as ExplosionCharge
-	strong.divergence_per_s = 500.0
-	strong.radius_m = 5.0
+	strong.radius_m = 8.0
 	system.detonate(Vector3.ZERO, strong)
 	_check(system.pending_count() == 0, "a charge past the residency bound is refused")
 	system.free()
@@ -310,34 +311,46 @@ func _test_queue() -> void:
 	_completed += 1
 
 
-func _test_companion_delay() -> void:
-	var dust := ExplosionCharge.new()
-	dust.continuous = true
-	dust.delay_s = 4.0
+func _test_companion_chain() -> void:
+	var leaf := ExplosionCharge.new()
+	leaf.divergence_per_s = 1.0
+	leaf.continuous = true
+	leaf.pulse_duration_s = 5.0
+	var mid := ExplosionCharge.new()
+	mid.divergence_per_s = 1.0
+	mid.continuous = true
+	mid.pulse_duration_s = 5.0
+	mid.companion = leaf
 	var parent := ExplosionCharge.new()
-	parent.companion = dust
+	parent.divergence_per_s = 1.0
+	parent.companion = mid
 	var system := ExplosionSystem.new()
 	system.config = RANGE_CONFIG
 	system.solver = FireGpuSolver.new()
 	system.detonate(Vector3.ZERO, parent)
 	system.advance(0.0)
-	_check(system.delayed_count() == 1 and system.pending_count() == 0 and not _slot_runs(system, dust), "a delayed companion is held back")
-	for i in 39:
-		system.advance(0.1)
-	_check(system.delayed_count() == 1 and not _slot_runs(system, dust), "a delayed companion waits delay_s of simulated time")
+	_check(system.pending_count() == 1 and _slot_runs(system, parent) and not _slot_runs(system, mid), "a companion is released one frame after its parent")
 	system.advance(0.0)
+	_check(system.pending_count() == 1 and _slot_runs(system, mid) and not _slot_runs(system, leaf), "a companion's companion follows one frame later")
 	system.advance(0.0)
-	_check(system.delayed_count() == 1 and not _slot_runs(system, dust), "zero simulated time does not advance the delay")
-	system.advance(0.15)
-	_check(system.delayed_count() == 0 and _slot_runs(system, dust), "a delayed companion starts once delay_s has elapsed")
+	_check(system.pending_count() == 0 and _slot_runs(system, leaf), "the whole chain runs")
 	system.reset()
 	system.detonate(Vector3.ZERO, parent)
 	system.advance(0.0)
 	system.reset()
-	system.advance(5.0)
-	_check(system.delayed_count() == 0 and not _slot_runs(system, dust), "reset drops a waiting companion")
-	dust.delay_s = -1.0
-	_check(dust.validate() != "", "a negative delay_s is refused")
+	system.advance(0.0)
+	system.advance(0.0)
+	_check(system.pending_count() == 0 and not _slot_runs(system, mid) and not _slot_runs(system, leaf), "reset drops the rest of a chain")
+	var scaled := ExplosionActions.scaled_charge(parent, 0.5)
+	_check(is_equal_approx(scaled.companion.radius_m, mid.radius_m * 0.5) and is_equal_approx(scaled.companion.companion.radius_m, leaf.radius_m * 0.5)
+		and scaled.companion.companion != leaf, "the charge scale reaches every companion of the chain")
+	var late := mid.duplicate() as ExplosionCharge
+	late.continuous = false
+	late.onset_s = 3.0
+	_check(late.validate() != "", "an onset needs a continuous charge")
+	late.continuous = true
+	late.onset_s = -1.0
+	_check(late.validate() != "", "a negative onset is refused")
 	system.free()
 	_test_afterwind()
 	_completed += 1
@@ -345,8 +358,9 @@ func _test_companion_delay() -> void:
 
 func _test_afterwind() -> void:
 	var dust := ExplosionCharge.new()
+	dust.divergence_per_s = 1.0
 	dust.continuous = true
-	dust.delay_s = 2.0
+	dust.afterwind_delay_s = 2.0
 	dust.pulse_duration_s = 20.0
 	dust.afterwind_mps = 30.0
 	dust.afterwind_radius_m = 700.0
@@ -366,6 +380,7 @@ func _test_afterwind() -> void:
 	_check(is_equal_approx(ExplosionSystem.afterwind_envelope(2.0, 20.0), 1.0), "the envelope holds mid pulse")
 	_check(ExplosionSystem.afterwind_envelope(20.0, 20.0) == 0.0 and ExplosionSystem.afterwind_envelope(25.0, 20.0) == 0.0, "the envelope is 0 once the pulse ends")
 	var parent := ExplosionCharge.new()
+	parent.divergence_per_s = 1.0
 	parent.companion = dust
 	var system := ExplosionSystem.new()
 	system.config = RANGE_CONFIG
@@ -373,8 +388,11 @@ func _test_afterwind() -> void:
 	system.detonate(Vector3(5.0, 0.0, 7.0), parent)
 	system.advance(0.0)
 	_check(system.solver._afterwind[0].z == 0.0, "no afterwind before the companion starts")
-	system.advance(2.5)
 	system.advance(0.0)
+	system.advance(1.0)
+	system.advance(0.0)
+	_check(system.solver._afterwind[0].z == 0.0, "no afterwind during afterwind_delay_s")
+	system.advance(2.0)
 	system.advance(2.0)
 	system.advance(0.0)
 	_check(system.solver._afterwind[0].z > 29.0 and system.solver._afterwind[0].x == 5.0 and system.solver._afterwind[0].y == 7.0, "the afterwind runs at the companion's centre while it pulses")
@@ -553,14 +571,23 @@ func _test_dust_ring() -> void:
 	ring.system = system
 	root.add_child(ring)
 	ring.start()
+	var mid := BARREL_CHARGE.duplicate()
+	mid.radius_m = 100.0
+	mid.blast_radius_m = ExplosionDustRing.INFLOW_MIN_BLAST_M
 	for i in ExplosionDustRing.MAX_RINGS + 4:
-		system.detonated.emit(Vector3(float(i), 1.0, 0.0), BARREL_CHARGE, Vector3.ZERO)
+		system.detonated.emit(Vector3(float(i), 1.0, 0.0), mid, Vector3.ZERO)
 	_check(ring._rings.size() == ExplosionDustRing.MAX_RINGS, "concurrent rings are capped")
 	var speed_before: float = ring._rings[-1].speed_mps
 	system.blast_force_scale = 1.5
+	system.detonated.emit(Vector3.ZERO, mid, Vector3.ZERO)
+	_check(is_equal_approx(ring._rings[-1].speed_mps, mid.blast_speed_mps * 1.5)
+		and is_equal_approx(speed_before, mid.blast_speed_mps), "the ring travels at the force-scaled blast speed")
+	var rings_before := ring._rings.size()
 	system.detonated.emit(Vector3.ZERO, BARREL_CHARGE, Vector3.ZERO)
-	_check(is_equal_approx(ring._rings[-1].speed_mps, BARREL_CHARGE.blast_speed_mps * 1.5)
-		and is_equal_approx(speed_before, BARREL_CHARGE.blast_speed_mps), "the ring travels at the force-scaled blast speed")
+	_check(ring._rings.size() == rings_before and ring.get_child_count() > 0 and ring.get_children().any(func(n: Node) -> bool: return n is GPUParticles3D),
+		"a small blast throws puffs instead of a ring")
+	_check(ExplosionFx.decelerating_front(0.0, 3.0, 300.0) == 0.0 and ExplosionFx.decelerating_front(0.05, 3.0, 300.0) > 0.99
+		and ExplosionFx.decelerating_front(0.005, 3.0, 300.0) > 0.3, "the shock front starts fast and flattens at the blast radius")
 	ring.clear()
 	_check(ring._rings.is_empty(), "clear drops every ring")
 	var window := ExplosionDustRing.inflow_window_s(100.0, 2000.0, 100.0)
@@ -569,6 +596,8 @@ func _test_dust_ring() -> void:
 	_check(ExplosionDustRing.inflow_window_s(100.0, 2000.0, 0.0).y == 0.0, "no inflow at zero speed")
 	var big := BARREL_CHARGE.duplicate()
 	big.radius_m = 1000.0
+	big.growth_ratio = 1.0
+	big.formation_s = 0.0
 	big.blast_radius_m = 1500.0
 	system.detonated.emit(Vector3.ZERO, big, Vector3.ZERO)
 	_check(not ring._rings.is_empty() and not ring._rings[-1].inflow, "a huge charge gets no inflow ring")
@@ -733,6 +762,109 @@ func _test_pace() -> void:
 	_completed += 1
 
 
+func _test_kernel() -> void:
+	for pair in [[FIREBALL_CHARGE, FIREBALL_RANGE_CONFIG], [BARREL_CHARGE, RANGE_CONFIG]]:
+		var charge: ExplosionCharge = pair[0]
+		var config: ExplosionConfig = pair[1]
+		var system := ExplosionSystem.new()
+		system.config = config
+		var form := charge.formation_s
+		var r0 := charge.radius_m
+		var r_max := r0 * charge.growth_ratio
+		_check(charge.grows() and charge.validate() == "" and system.refusal(charge) == "", "a growing preset validates and is accepted")
+		_check(ExplosionSystem.kernel_radius_m(charge, 0.0) == r0 and is_equal_approx(ExplosionSystem.kernel_radius_m(charge, form), r_max), "the kernel runs from radius_m to growth_ratio x radius_m")
+		_check(ExplosionSystem.kernel_radius_m(charge, form * 3.0) == ExplosionSystem.kernel_radius_m(charge, form), "the kernel holds its final radius")
+		_check(is_equal_approx(ExplosionSystem.kernel_radius_m(charge, 0.25 * form), r0 + (r_max - r0) * pow(0.25, 0.4)), "the kernel follows (t / T)^0.4")
+		var quarter := ExplosionSystem.kernel_radius_m(charge, 0.25 * form) - r0
+		_check(quarter > 0.5 * (r_max - r0), "more than half of the growth happens in the first quarter")
+		var dt := 1.0 / 60.0
+		var volume := 0.0
+		var age := 0.0
+		while age < form:
+			var rate := ExplosionSystem.kernel_rate_per_s(charge, age, dt)
+			volume += rate * ExplosionSystem.KERNEL_SOURCE_SHARE * ExplosionSystem.sphere_volume_m3(ExplosionSystem.kernel_radius_m(charge, age)) * dt
+			age += dt
+		var want := ExplosionSystem.sphere_volume_m3(ExplosionSystem.kernel_radius_m(charge, age)) - ExplosionSystem.sphere_volume_m3(r0)
+		_check(absf(volume - want) < 1e-6 * want, "the source rates add up to the volume the sphere grows by")
+		_check(ExplosionSystem.kernel_rate_per_s(charge, form, dt) == 0.0, "the source stops once the sphere is formed")
+		var first_step := (ExplosionSystem.kernel_radius_m(charge, dt) - r0) / dt
+		var peak := first_step * ExplosionSystem.kernel_peak_over_shell()
+		_check(is_equal_approx(system.peak_source_mps(charge), peak) and ExplosionSystem.kernel_peak_over_shell() > 1.5, "the peak source is the interior peak of the first step, above its shell speed")
+		var settled := system.settled_charge(charge)
+		_check(system.refusal(charge) == "" and system.peak_source_mps(settled) <= config.velocity_clamp_mps * (1.0 + 1e-6), "the settled charge keeps its source flow under the clamp, so the clamp never cuts it into a box")
+		_check((peak > config.velocity_clamp_mps) == (settled != charge) and settled.formation_offset_s >= charge.formation_offset_s, "a preset whose interior peak passes the clamp starts further up its growth law")
+		system.free()
+	var throw := Vector3(10.0, 0.0, -4.0)
+	var origin := Vector3(1.0, 2.0, 3.0)
+	var tau := 0.5 * FIREBALL_CHARGE.formation_s
+	_check(ExplosionSystem.kernel_centre(FIREBALL_CHARGE, origin, throw, 0.0) == origin, "the centre starts at the release point")
+	var late := ExplosionSystem.kernel_centre(FIREBALL_CHARGE, origin, throw, 100.0)
+	_check(late.is_equal_approx(origin + throw * tau), "the centre settles carry x tau ahead")
+	_check(ExplosionSystem.kernel_centre(FIREBALL_CHARGE, origin, Vector3.ZERO, 0.2) == origin, "no carry leaves the centre in place")
+	var bad := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.divergence_per_s = 10.0
+	_check(bad.validate() != "", "a growing charge refuses divergence_per_s")
+	bad = FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.formation_s = bad.pulse_duration_s + 0.1
+	_check(bad.validate() != "", "a formation longer than the pulse is refused")
+	bad = FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.formation_s = 0.0
+	_check(bad.validate() != "", "a growing charge needs a formation time")
+	bad = FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.continuous = true
+	bad.carry_fraction = 0.0
+	_check(bad.validate() != "", "a continuous charge cannot grow")
+	bad = FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.growth_ratio = 0.5
+	_check(bad.validate() != "", "a growth ratio below 1 is refused")
+
+
+func _test_kernel_upload() -> void:
+	var charge := FIREBALL_CHARGE
+	var r0 := charge.radius_m
+	var want := ExplosionSystem.sphere_volume_m3(r0 * charge.growth_ratio) - ExplosionSystem.sphere_volume_m3(r0)
+	for hz in [30, 60, 144]:
+		var dt := 1.0 / float(hz)
+		var system := ExplosionSystem.new()
+		system.config = FIREBALL_RANGE_CONFIG
+		system.solver = FireGpuSolver.new()
+		system.solver.timestep = 1.0 / float(system.config.simulation_hz)
+		system.detonate(Vector3.ZERO, charge)
+		var volume := 0.0
+		var frames := 0
+		while frames < 4 * int(charge.formation_s * float(hz)) + 8:
+			var sim_dt := float(system.solver.schedule_steps(dt)) * system.solver.timestep
+			system.advance(sim_dt)
+			frames += 1
+			if sim_dt > 0.0:
+				var blast_rate: Vector4 = system.solver._blast_rate[0]
+				var radius_m: float = system.solver._blast[0].w
+				volume += blast_rate.x * ExplosionSystem.KERNEL_SOURCE_SHARE * ExplosionSystem.sphere_volume_m3(radius_m) * sim_dt
+			if system._slots[0].is_empty() or system._slots[0].age >= charge.formation_s + 2.0 * system.solver.timestep:
+				break
+		_check(absf(volume - want) < 0.02 * want, "the uploaded source rates grow the sphere by its volume at %d Hz (%.3f of %.3f m3)" % [hz, volume, want])
+		system.free()
+	var carried := ExplosionSystem.new()
+	carried.config = FIREBALL_RANGE_CONFIG
+	carried.solver = FireGpuSolver.new()
+	var throw := Vector3(10.0, 0.0, 0.0)
+	carried.detonate(Vector3.ZERO, charge, throw)
+	carried.detonate(Vector3(30.0, 0.0, 0.0), charge, throw)
+	carried.advance(1.0 / 60.0)
+	_check(carried.solver._blast_carry[0] == Vector4.ZERO, "a growing charge's centre moves, so the flow gets no carry impulse")
+	carried.advance(1.0 / 60.0)
+	carried.advance(1.0 / 60.0)
+	var amounts: Array[float] = []
+	for event in carried.solver._events:
+		amounts.append(event.amount)
+	_check(amounts.has(0.5) and amounts.has(1.5), "a carried growing charge repaints its slot at slot + 0.5")
+	carried.free()
+	var bad := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.continuous = false
+	bad.divergence_per_s = 10.0
+	_check(bad.grows() and bad.validate() != "", "a non-continuous growing charge with divergence_per_s is refused")
+
+
 func _test_carry_and_smoke() -> void:
 	var system := ExplosionSystem.new()
 	system.config = FIREBALL_RANGE_CONFIG
@@ -742,8 +874,14 @@ func _test_carry_and_smoke() -> void:
 	_check(impulse.is_equal_approx(Vector3(throw.x, 0.0, throw.z) * FIREBALL_CHARGE.carry_fraction), "the carry is the charge's share of the horizontal velocity")
 	_check(system.carry_impulse(FIREBALL_CHARGE, Vector3.ZERO) == Vector3.ZERO, "no velocity means no carry")
 	var fast := system.carry_impulse(FIREBALL_CHARGE, Vector3(500.0, 0.0, 0.0))
-	_check(is_equal_approx(fast.length(), system.carry_headroom_mps(FIREBALL_CHARGE)), "a carry beyond the clamp is cut to the headroom")
-	_check(system.peak_source_mps(FIREBALL_CHARGE) + fast.length() <= FIREBALL_RANGE_CONFIG.velocity_clamp_mps + 1e-3, "source flow plus carry stays under the velocity clamp")
+	_check(is_equal_approx(fast.length(), FIREBALL_RANGE_CONFIG.velocity_clamp_mps), "the speed a growing sphere moves with is cut to the clamp")
+	var legacy := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	legacy.growth_ratio = 1.0
+	legacy.formation_s = 0.0
+	legacy.divergence_per_s = 80.0
+	var pushed := system.carry_impulse(legacy, Vector3(500.0, 0.0, 0.0))
+	_check(is_equal_approx(pushed.length(), system.carry_headroom_mps(legacy)), "a carry beyond the clamp is cut to the headroom")
+	_check(system.peak_source_mps(legacy) + pushed.length() <= FIREBALL_RANGE_CONFIG.velocity_clamp_mps + 1e-3, "source flow plus carry stays under the velocity clamp")
 	_check(system.carry_impulse(BARREL_CHARGE, throw) == Vector3.ZERO, "a charge with no carry fraction gets none")
 	var continuous := FIREBALL_CHARGE.duplicate() as ExplosionCharge
 	continuous.continuous = true
@@ -753,10 +891,12 @@ func _test_carry_and_smoke() -> void:
 	var over := FIREBALL_CHARGE.duplicate() as ExplosionCharge
 	over.carry_fraction = 1.5
 	_check(over.validate() != "", "a carry fraction above 1 is refused")
-	var tight := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	var tight := legacy.duplicate() as ExplosionCharge
 	tight.divergence_per_s = FIREBALL_RANGE_CONFIG.velocity_clamp_mps * 3.0 / tight.radius_m
 	_check(system.refusal(tight) != "", "a carry with no headroom under the clamp is refused")
 	system.free()
+	_test_kernel()
+	_test_kernel_upload()
 	for scene in SMOKE_TARGET_S.size():
 		var config := ExplosionScenery.config_for(scene)
 		var soot := ExplosionScenery.base_charge(scene).soot_fraction
@@ -786,4 +926,141 @@ func _test_chain_reach() -> void:
 	var gap := ExplosionBarrelYard.DEFAULT_CLUSTERS_M[0].distance_to(ExplosionBarrelYard.DEFAULT_CLUSTERS_M[1]) \
 		- ExplosionBarrelYard.CLUSTER_SPACING_M * sqrt(2.0)
 	_check(gap < reach, "default clusters sit inside each other's chain reach")
+	_completed += 1
+
+
+func _test_nuke_front() -> void:
+	var nuke := ExplosionScenery.NUKE_CHARGE
+	var dust := nuke.companion
+	var dome := dust.companion
+	var config := ExplosionScenery.MUSHROOM_CONFIG
+	var system := ExplosionSystem.new()
+	system.config = config
+	var form := nuke.formation_s
+	var r0 := nuke.radius_m
+	_check(nuke.grows() and nuke.formation_offset_s > 0.0 and nuke.validate() == "" and system.refusal(nuke) == "", "the nuke grows with an offset law and is accepted")
+	_check(ExplosionSystem.kernel_radius_m(nuke, 0.0) == r0 and is_equal_approx(ExplosionSystem.kernel_radius_m(nuke, form), nuke.final_radius_m()), "the offset law runs from radius_m to the final radius")
+	_check(nuke.final_radius_m() >= 120.0 and r0 >= 2.0 * config.cell_size_m and form >= 0.5 and form <= 1.0, "the nuke starts at 2+ cells, ends at 120 m or more, and forms in 0.5 to 1 s")
+	var step_s := 1.0 / float(config.simulation_hz)
+	var first := (ExplosionSystem.kernel_radius_m(nuke, step_s) - r0) / step_s
+	var plain := nuke.duplicate() as ExplosionCharge
+	plain.formation_offset_s = 0.0
+	var plain_first := (ExplosionSystem.kernel_radius_m(plain, step_s) - r0) / step_s
+	_check(first <= config.velocity_clamp_mps and plain_first > config.velocity_clamp_mps, "the offset keeps the first step under the clamp where the plain law blows past it")
+	var previous := r0
+	var fast_then_slow := true
+	var last_gain := INF
+	for i in range(1, int(form / step_s) + 2):
+		var radius := ExplosionSystem.kernel_radius_m(nuke, float(i) * step_s)
+		var gain := radius - previous
+		fast_then_slow = fast_then_slow and gain >= -1e-9 and gain <= last_gain + 1e-9
+		previous = radius
+		last_gain = gain
+	_check(fast_then_slow, "every step grows the sphere by no more than the one before")
+	for charge: ExplosionCharge in [FIREBALL_CHARGE, BARREL_CHARGE]:
+		var same := true
+		for i in 41:
+			var age := float(i) * charge.formation_s * 0.03
+			var progress := clampf(age / charge.formation_s, 0.0, 1.0)
+			var old := charge.radius_m * (1.0 + (charge.growth_ratio - 1.0) * pow(progress, 0.4))
+			same = same and ExplosionSystem.kernel_radius_m(charge, age) == old
+		_check(same, "a charge without an offset keeps the plain t^0.4 law to the last bit")
+	var bad := FIREBALL_CHARGE.duplicate() as ExplosionCharge
+	bad.growth_ratio = 1.0
+	bad.formation_s = 0.0
+	bad.divergence_per_s = 1.0
+	bad.formation_offset_s = 0.1
+	_check(bad.validate() != "", "an offset without growth is refused")
+	var front := Vector2(343.0, 120.0)
+	_check(dust.has_front_ring() and dust.front_ring_lift_mps > 0.0 and dust.continuous and dome != null and not dome.has_front_ring() and dome.onset_s > 0.0 and dust.validate() == "", "the nuke's companion is a front ring that releases an onset dome")
+	_check(ExplosionSystem.front_ring_radius_m(dust, front, 0.0) == 120.0 and is_equal_approx(ExplosionSystem.front_ring_radius_m(dust, front, 1.0), 463.0), "the ring starts at the fireball and rides the front")
+	_check(ExplosionSystem.front_ring_radius_m(dust, front, 100.0) == dust.radius_m, "the ring stops at its cap")
+	_check(is_equal_approx(ExplosionSystem.front_ring_duration_s(dust, front), (dust.radius_m - 120.0) / 343.0), "the ring takes cap minus start over the front speed to arrive")
+	var reach := ExplosionSystem.front_ring_reach_m(dust, front, 1.0)
+	_check(is_equal_approx(reach, 463.0 + dust.front_ring_width_m + dust.front_ring_height_m), "the reach covers the band and its height")
+	_check(dust.front_ring_width_m >= 3.0 * config.cell_size_m, "the ring is at least 3 cells wide")
+	var open := dust.duplicate() as ExplosionCharge
+	open.front_ring_height_m = 0.0
+	_check(open.validate() != "", "a front ring needs a height")
+	open = dust.duplicate() as ExplosionCharge
+	open.continuous = false
+	_check(open.validate() != "", "a front ring must be continuous")
+	open = dome.duplicate() as ExplosionCharge
+	open.afterwind_delay_s = open.pulse_duration_s
+	_check(open.validate() != "", "an afterwind delay must be shorter than the pulse")
+	var scaled := ExplosionActions.scaled_charge(nuke, 0.5)
+	_check(is_equal_approx(scaled.companion.front_ring_width_m, dust.front_ring_width_m * 0.5) and is_equal_approx(scaled.companion.front_ring_height_m, dust.front_ring_height_m * 0.5), "the charge scale shrinks the ring band")
+	system.solver = FireGpuSolver.new()
+	var speed := system.blast_speed_mps(nuke)
+	system.detonate(Vector3(0.0, 180.0, 0.0), nuke)
+	system.advance(0.0)
+	system.advance(0.0)
+	var slot := 1
+	_check(system.solver._blast_ring[slot] == Vector4(nuke.final_radius_m(), dust.front_ring_width_m, dust.front_ring_height_m, 0.0), "the companion's ring row starts at the fireball radius")
+	_check(system.solver._blast_ring[0] == Vector4.ZERO, "the nuke itself uploads no ring")
+	system.advance(0.1)
+	system.advance(0.1)
+	var ring: Vector4 = system.solver._blast_ring[slot]
+	_check(is_equal_approx(ring.x, nuke.final_radius_m() + speed * 0.1) and is_equal_approx(system.solver._blast[slot].w, ring.x + dust.front_ring_width_m), "the ring rides the front speed of the charge that released it")
+	_check(is_equal_approx(system.solver._blast_rate[slot].w, dust.soot_fraction), "a step of at least the reference time deposits the full soot fraction")
+	system.advance(0.01)
+	system.advance(0.01)
+	_check(is_equal_approx(system.solver._blast_rate[slot].w, dust.soot_fraction * 0.01 / ExplosionSystem.FRONT_RING_REFERENCE_DT_S), "a shorter step deposits in proportion to the simulated time")
+	_check(system.solver._afterwind[0].z == 0.0, "no afterwind while the front passes")
+	system.advance(1.0)
+	system.advance(1.0)
+	system.advance(0.0)
+	_check(system.solver._blast_rate[slot].x == 0.0 and system.solver._blast_ring[slot].x == dust.radius_m, "the ring stops dusting once it reaches its cap")
+	var early: Vector4 = system.solver._blast_rate[2]
+	_check(early.w > 0.0 and early.w < 0.5 * dome.soot_fraction and early.y > system.solver.ambient_temperature and early.y < dome.temperature_k, "the dome's soot and heat are part way up their onset ramp")
+	system.advance(dome.onset_s)
+	system.advance(0.0)
+	var full: Vector4 = system.solver._blast_rate[2]
+	_check(is_equal_approx(full.w, dome.soot_fraction) and is_equal_approx(full.y, dome.temperature_k), "the dome reaches full strength after onset_s")
+	system.advance(4.0)
+	system.advance(0.0)
+	_check(system.solver._afterwind[0].z > 0.5 * dome.afterwind_mps, "the afterwind blows once its delay has passed")
+	system.free()
+	_completed += 1
+
+
+func _test_refusal_rules() -> void:
+	var nuke := ExplosionScenery.NUKE_CHARGE
+	var ring := nuke.companion
+	var system := ExplosionSystem.new()
+	system.config = ExplosionScenery.MUSHROOM_CONFIG
+	_check(system.refusal(nuke) == "", "the nuke and its ring are accepted")
+	var slow := ring.duplicate() as ExplosionCharge
+	slow.pulse_duration_s = 0.5 * system.front_ring_duration_s(ring, Vector2(system.blast_speed_mps(nuke), nuke.final_radius_m()))
+	slow.onset_s = 0.0
+	slow.companion = null
+	var parent := nuke.duplicate() as ExplosionCharge
+	parent.companion = slow
+	_check(slow.validate() == "" and system.refusal(parent) != "", "a ring that cannot reach its cap within its pulse is refused")
+	var head := ring.duplicate() as ExplosionCharge
+	head.companion = null
+	_check(head.validate() == "" and system.refusal(head) != "", "a front ring on a head charge has no front and is refused")
+	var limit := system.max_charge_scale(nuke)
+	var at_limit := ExplosionActions.scaled_charge(nuke, limit * 0.999)
+	var past_limit := ExplosionActions.scaled_charge(nuke, limit * 1.05)
+	_check(limit > 0.0 and limit < INF and system.refusal(at_limit) == "" and system.refusal(past_limit) != "", "max_charge_scale is the largest scale refusal still accepts")
+	system.blast_force_scale = 0.85
+	var slow_limit := system.max_charge_scale(nuke)
+	_check(slow_limit < limit and system.refusal(ExplosionActions.scaled_charge(nuke, slow_limit * 0.999)) == "" and system.refusal(ExplosionActions.scaled_charge(nuke, slow_limit * 1.05)) != "", "a slower front lowers the largest accepted scale")
+	system.blast_force_scale = 1.0
+	var late := ring.duplicate() as ExplosionCharge
+	late.onset_s = late.pulse_duration_s
+	_check(late.validate() != "", "an onset that never ends before the pulse does is refused")
+	var sunk := ring.duplicate() as ExplosionCharge
+	sunk.sink_m = 10.0
+	_check(sunk.validate() != "", "a front ring on the ground cannot sink")
+	var loop := ring.duplicate() as ExplosionCharge
+	loop.companion = null
+	loop.front_ring_width_m = 0.0
+	loop.companion = loop
+	_check(not loop.chain_is_finite() and loop.validate() != "" and system.refusal(loop) != "", "a companion loop is refused instead of hanging refusal")
+	_check(system.max_charge_scale(loop) > 0.0, "a companion loop does not hang max_charge_scale")
+	_check(ExplosionActions.scaled_charge(loop, 0.5) != null, "a companion loop does not hang scaled_charge")
+	loop.companion = null
+	system.free()
 	_completed += 1

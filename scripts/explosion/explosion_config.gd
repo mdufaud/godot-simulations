@@ -19,6 +19,10 @@ const VORTICITY_RAMP_S := 0.3
 @export_range(0.05, 20.0, 0.05) var keep_speed_mps := 0.5
 ## Resident tile capacity: 2048 or 4096 (the large atlas needs 16 KB of compute shared memory, else the solver falls back).
 @export_range(2048, 4096, 2048) var pool_slots := 2048
+## Tiles the keep bars may fill before they ramp up and new tiles are refused; 0 uses the whole pool. The rest is held back for new blast seeds.
+@export_range(0, 4096, 1) var soft_budget_tiles := 0
+## Factor the keep bars reach when the soft budget is spent; under spam the thin smoke tail is released first. The shipped ramp tops out at 8.
+@export_range(1.0, 1000.0, 1.0) var relief_max := FireGpuSolver.TILE_RELIEF_MAX
 ## Multiplies the cut-offs that keep a tile resident; above 1 the faint smoke tail is released sooner.
 @export_range(1.0, 1000.0, 0.5) var tile_keep_scale := 1.0
 ## Dimensionless confinement applied after the pulse only; during it the field is off, at 8 it carves terraces into the fireball.
@@ -71,6 +75,10 @@ func validate() -> String:
 		return "pool_slots must be 2048 or 4096"
 	if velocity_clamp_mps <= 0.0 or keep_speed_mps <= 0.0:
 		return "velocity_clamp_mps and keep_speed_mps must be positive"
+	if soft_budget_tiles < 0 or soft_budget_tiles > pool_slots:
+		return "soft_budget_tiles must be within 0 and pool_slots"
+	if relief_max < 1.0:
+		return "relief_max must be at least 1"
 	if band_cells(velocity_clamp_mps) > BAND_CELLS:
 		return "velocity_clamp_mps crosses %.1f cells per frame, tile band is %d" % [
 			band_cells(velocity_clamp_mps), int(BAND_CELLS)]

@@ -7,8 +7,8 @@ const BASE_PACE := 1.4
 const SLOW_SCALES: Array[float] = [1.0, 0.5, 0.25]
 const BARREL_HIT_TOLERANCE_M := 0.2
 ## Game seconds between two throws, and balls that may be flying at once: stops clicks stacking balls on one spot.
-const THROW_COOLDOWN_S := 0.6
-const MAX_BALLS_IN_FLIGHT := 3
+const THROW_COOLDOWN_S := 0.15
+const MAX_BALLS_IN_FLIGHT := 16
 
 var paused := false
 var slow_index := 0
@@ -63,12 +63,18 @@ static func scaled_charge(base: ExplosionCharge, scale: float, soot_fraction: fl
 	charge.radius_m *= scale
 	if soot_fraction >= 0.0:
 		charge.soot_fraction = soot_fraction
-	if charge.companion != null:
-		charge.companion = charge.companion.duplicate() as ExplosionCharge
-		charge.companion.radius_m *= scale
-		charge.companion.sink_m *= scale
-		charge.companion.afterwind_radius_m *= scale
-		charge.companion.afterwind_height_m *= scale
+	var link := charge
+	for i in ExplosionCharge.MAX_COMPANIONS:
+		if link.companion == null:
+			break
+		link.companion = link.companion.duplicate() as ExplosionCharge
+		link = link.companion
+		link.radius_m *= scale
+		link.sink_m *= scale
+		link.front_ring_width_m *= scale
+		link.front_ring_height_m *= scale
+		link.afterwind_radius_m *= scale
+		link.afterwind_height_m *= scale
 	return charge
 
 

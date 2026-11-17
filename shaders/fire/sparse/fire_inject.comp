@@ -80,12 +80,15 @@ void main() {
 	if (mode_v == 7) {
 		int slot = clamp(int(params.event2.x), 0, MAX_BLASTS - 1);
 		vec3 carry = cfg.blast_carry[slot].xyz;
-		if (carry != vec3(0.0)) {
+		if (carry != vec3(0.0) && fract(params.event2.x) < 0.5 * BLAST_REPAINT_FLAG) {
 			if (in_u(c)) {
 				store_u_src(c, load_u_src(c) + carry.x * blast_falloff(u_face_to_world(c), slot));
 			}
 			if (in_w(c)) {
 				store_w_src(c, load_w_src(c) + carry.z * blast_falloff(w_face_to_world(c), slot));
+			}
+			if (in_v(c) && carry.y != 0.0) {
+				store_v_src(c, load_v_src(c) + carry.y * blast_falloff(v_face_to_world(c), slot));
 			}
 		}
 	}
@@ -229,8 +232,10 @@ void main() {
 		int i = clamp(int(amount), 0, MAX_BLASTS - 1);
 		float f = blast_falloff(cell_to_world(c), i);
 		s.x = max(s.x, mix(t_amb, cfg.blast_rate[i].y, f));
-		add_fuel(s, s2, cfg.blast_rate[i].z * f);
-		s2.y = clamp(s2.y + cfg.blast_rate[i].w * f, 0.0, 1.0);
+		if (fract(amount) < 0.5 * BLAST_REPAINT_FLAG) {
+			add_fuel(s, s2, cfg.blast_rate[i].z * f);
+			s2.y = clamp(s2.y + cfg.blast_rate[i].w * f, 0.0, 1.0);
+		}
 	}
 #endif
 

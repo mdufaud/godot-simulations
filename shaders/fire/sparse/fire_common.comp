@@ -554,6 +554,9 @@ float blast_curl_noise_fine(vec3 x, float t, int axis, float wavelength_m, float
 
 const float BLAST_WAVELENGTH_CELLS = 4.0;
 const float BLAST_ROUGHNESS = 0.35;
+// Front ring dust: billow size in cells and the dimmest lump.
+const float BLAST_LUMP_CELLS = 10.0;
+const float BLAST_LUMP_FLOOR = 0.3;
 
 // Both the divergence source and the injection use this one function. The noise only
 // pushes the edge inward, so the sphere stays inside the tiles seeded around its radius.
@@ -561,6 +564,15 @@ float blast_falloff(vec3 p, int i) {
 	vec3 centre = cfg.blast[i].xyz;
 	vec3 offset = centre * 0.173 + vec3(float(i) * 13.7, float(i) * 5.1, float(i) * 9.3);
 	float n = blast_noise((p - centre) / (BLAST_WAVELENGTH_CELLS * params.cell.x) + offset);
+	vec4 ring = cfg.blast_ring[i];
+	if (ring.y > 0.0) {
+		float rough = 1.0 + BLAST_ROUGHNESS * n;
+		float line = distance(p.xz, centre.xz) - ring.x;
+		float up = max(p.y - centre.y, 0.0) * rough;
+		float lump = blast_noise((p - centre) / (BLAST_LUMP_CELLS * params.cell.x) + offset + vec3(3.1, 1.7, 5.3));
+		float front = (1.0 - smoothstep(0.0, ring.y, abs(line) * rough)) * mix(BLAST_LUMP_FLOOR, 1.0, lump);
+		return front * (1.0 - smoothstep(0.0, max(ring.z, 1e-6), up));
+	}
 	float d = distance(p, centre) * (1.0 + BLAST_ROUGHNESS * n);
 	return 1.0 - smoothstep(0.0, max(cfg.blast[i].w, 1e-6), d);
 }

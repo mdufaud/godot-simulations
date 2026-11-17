@@ -1,9 +1,12 @@
 class_name ExplosionDustRing extends Node3D
 
+const Puffs := preload("res://scripts/demos/explosion/explosion_dust_puffs.gd")
 const SHADER := preload("res://shaders/explosion/dust_ring.gdshader")
 const WALL_HEIGHT_PER_M := 0.08
 const WALL_HEIGHT_PER_CHARGE_M := 0.3
 const FADE_TAIL := 0.6
+## The ground disc is only a hint under the solver's own dust: a flat plate at full opacity reads as a white sheet.
+const DISC_OPACITY := 0.3
 ## Past this radius the wall stops growing taller and the disc band stops growing wider.
 const GROWTH_MAX_M := 1200.0
 const BAND_FRACTION := 0.22
@@ -35,7 +38,10 @@ func start() -> void:
 
 ## Expands at the blast speed from the charge radius to the blast radius, on the ground under the charge.
 func _on_detonated(origin: Vector3, charge: ExplosionCharge, _carry_velocity: Vector3) -> void:
-	var span_m := charge.blast_radius_m - charge.radius_m
+	if ExplosionFx.is_small_blast(charge):
+		Puffs.burst(self, Vector3(origin.x, 0.1, origin.z), charge)
+		return
+	var span_m := charge.blast_radius_m - charge.final_radius_m()
 	var speed_mps := system.blast_speed_mps(charge)
 	if speed_mps <= 0.0 or span_m <= 0.0:
 		return
@@ -45,12 +51,12 @@ func _on_detonated(origin: Vector3, charge: ExplosionCharge, _carry_velocity: Ve
 	var disc := _make(_shared_disc_mesh())
 	wall.position = Vector3(origin.x, 0.0, origin.z)
 	disc.position = Vector3(origin.x, 0.05, origin.z)
-	var ring := {wall = wall, disc = disc, from_m = charge.radius_m, to_m = charge.blast_radius_m,
-		base_m = WALL_HEIGHT_PER_CHARGE_M * charge.radius_m, speed_mps = speed_mps, t_s = 0.0, span_m = span_m,
-		inflow = inflow_window_s(charge.radius_m, charge.blast_radius_m, speed_mps).y > 0.0 and charge.blast_radius_m >= INFLOW_MIN_BLAST_M, end_s = (1.0 + FADE_TAIL) * span_m / speed_mps}
+	var ring := {wall = wall, disc = disc, from_m = charge.final_radius_m(), to_m = charge.blast_radius_m,
+		base_m = WALL_HEIGHT_PER_CHARGE_M * charge.final_radius_m(), speed_mps = speed_mps, t_s = 0.0, span_m = span_m,
+		inflow = inflow_window_s(charge.final_radius_m(), charge.blast_radius_m, speed_mps).y > 0.0 and charge.blast_radius_m >= INFLOW_MIN_BLAST_M, end_s = (1.0 + FADE_TAIL) * span_m / speed_mps}
 	if ring.inflow:
 		var start_m := INFLOW_FROM * charge.blast_radius_m
-		var window_s := inflow_window_s(charge.radius_m, charge.blast_radius_m, speed_mps)
+		var window_s := inflow_window_s(charge.final_radius_m(), charge.blast_radius_m, speed_mps)
 		var inflow_wall := _make(_shared_wall_mesh())
 		var inflow_disc := _make(_shared_disc_mesh())
 		inflow_wall.position = wall.position
@@ -98,6 +104,7 @@ func _place(ring: Dictionary, travel: float) -> void:
 		node.set_instance_shader_parameter("progress", fade)
 		node.set_instance_shader_parameter("scale_m", height_m)
 		node.set_instance_shader_parameter("band_width", BAND_FRACTION * minf(radius_m, GROWTH_MAX_M) / radius_m)
+	disc.set_instance_shader_parameter("opacity", DISC_OPACITY)
 
 
 ## The air rushes back at a fixed share of the blast speed: the dust contracts toward the stem base and rises as it closes.

@@ -10117,14 +10117,13 @@ func _actions_throws(demo: Node, events: Array) -> void:
 	for i in 3:
 		demo._throw_at(sky)
 	_check(_actions_balls(demo) == 1, "explosion_actions: three throws in one frame launch one ball (cooldown)")
-	for i in 5:
-		await _actions_wait(demo, 0.55)
-		demo._throw_at(sky)
+	await _actions_wait(demo, ExplosionActions.THROW_COOLDOWN_S + 0.1)
+	demo._throw_at(sky)
 	var flying: int = demo.launcher.flying_count()
 	print("EXPLOSION ACTIONS cap balls=%d flying=%d cap=%d cooldown_s=%.2f" % [_actions_balls(demo), flying,
 		ExplosionActions.MAX_BALLS_IN_FLIGHT, ExplosionActions.THROW_COOLDOWN_S])
-	_check(_actions_balls(demo) == ExplosionActions.MAX_BALLS_IN_FLIGHT and flying == ExplosionActions.MAX_BALLS_IN_FLIGHT,
-		"explosion_actions: throws past the in-flight cap are refused")
+	_check(_actions_balls(demo) == 2 and flying == 2,
+		"explosion_actions: a throw after the cooldown is accepted well below the in-flight cap")
 	var gravity_ok := true
 	for child in demo.projectile_root.get_children():
 		gravity_ok = gravity_ok and (not child is RigidBody3D or (child as RigidBody3D).gravity_scale == 0.0)
@@ -10177,7 +10176,7 @@ func _actions_shake(demo: Node) -> void:
 	_check(decay_s < 1.0 and near.final == near.baseline and not near.active, "explosion_actions: the shake decays to exactly the baseline in under 1 s (%.2f s)" % decay_s)
 	_check(near.cam_same, "explosion_actions: orbit fields unchanged through a shake")
 	var far := await _actions_shake_run(demo, ExplosionMenu.SCENE_MUSHROOM)
-	var far_distance: float = demo.camera.global_position.distance_to(Vector3(0.0, demo._charge().radius_m * demo.BURST_HEIGHT, 0.0))
+	var far_distance: float = demo.camera.global_position.distance_to(demo._ground_zero())
 	var delay: float = far.first - far.born
 	var expected := ExplosionCameraShake.onset_s(far_distance)
 	print("EXPLOSION ACTIONS shake_far born=%.3f first=%.3f delay_s=%.3f expected_s=%.3f distance_m=%.0f peak_deg=%s final=%s" % [
@@ -10838,9 +10837,9 @@ func _run_explosion_carry() -> void:
 	for key in ["soot", "heat", "both"]:
 		var lean: float = ((carried[key] as Vector3) - (plain[key] as Vector3)).dot(direction)
 		print("EXPLOSION CARRY %s plain=%s carried=%s lean_m=%.3f" % [key, _settings_vec(plain[key]), _settings_vec(carried[key]), lean])
-		if key == "both":
+		if key == "heat":
 			best = lean
-	var cross := ((carried["both"] as Vector3) - (plain["both"] as Vector3)) - direction * best
+	var cross := ((carried["heat"] as Vector3) - (plain["heat"] as Vector3)) - direction * best
 	print("EXPLOSION CARRY horizontal lean after %.1f s = %.3f m, sideways %.3f m, vertical %.3f m" % [
 		float(CARRY_STEPS) / 60.0, best, Vector2(cross.x, cross.z).length(), cross.y])
 	_check(best > CARRY_MIN_LEAN_M, "explosion_carry: the carried fireball leans %.3f m along the throw, at least %.1f m expected" % [best, CARRY_MIN_LEAN_M])
@@ -11192,7 +11191,7 @@ func _run_explosion_yard_shots() -> void:
 	quit(0)
 
 
-# explosion_spark_cost <scene> <sparks 0|1> <frames>: mean main-viewport GPU ms after the detonation, fixed 60 Hz steps.
+# explosion_spark_cost <scene> <sparks 0|1> <frames> [dust 0|1]: mean main-viewport GPU ms after the detonation, fixed 60 Hz steps.
 func _run_explosion_spark_cost() -> void:
 	var scene_index := int(_extra[0]) if _extra.size() > 0 else 0
 	var sparks_on := int(_extra[1]) != 0 if _extra.size() > 1 else true
@@ -11204,6 +11203,8 @@ func _run_explosion_spark_cost() -> void:
 		await process_frame
 	if not sparks_on:
 		demo.explosion.detonated.disconnect(demo._fx.on_detonated)
+	if _extra.size() > 3 and int(_extra[3]) == 0:
+		demo.explosion.detonated.disconnect(demo._scenery._dust._on_detonated)
 	var main_rid := root.get_viewport_rid()
 	RenderingServer.viewport_set_measure_render_time(main_rid, true)
 	demo.detonate_scene()
@@ -11354,6 +11355,258 @@ func _run_explosion_ball_impact() -> void:
 	quit(0)
 
 
+const X1_READ_UNTIL_S := 2.0
+const X1_SHOTS_S := [0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1.2, 2.0]
+const X1_NUKE_SHOTS_S := [3.0, 5.0, 8.0, 12.0]
+
+
+func _x1_read(solver: FireGpuSolver, out: Dictionary, centre: Vector3, hot_k: float, soot_bar: float, soot_vis: float, kernel_offset := Vector3.ZERO) -> void:
+	var rd: RenderingDevice = solver._rd
+	var pool: FireTilePool = solver._pool
+	var suffix := "_a" if solver._parity == 0 else "_b"
+	var indir := rd.texture_get_data(pool._tex["indir"], 0).to_int32_array()
+	var scal := rd.texture_get_data(solver._tex["scal" + suffix], 0).to_float32_array()
+	var scal2 := rd.texture_get_data(solver._tex["scal2" + suffix], 0).to_float32_array()
+	var uvw: Array[PackedFloat32Array] = []
+	for axis in 3:
+		uvw.append(rd.texture_get_data(solver._tex["uvw"[axis] + suffix], 0).to_float32_array())
+	var cells := pool.atlas_cells()
+	var tile := FireTilePool.TILE
+	var cs := solver.cell_size
+	var dims := solver.sim_dims()
+	var hot_r2 := 0.0
+	var hot_kernel_r2 := 0.0
+	var hot_sum := Vector3.ZERO
+	var hot_n := 0
+	var hot_cheb := 0.0
+	var tile_cheb := 0.0
+	var support := PackedFloat32Array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+	var bar_r2 := 0.0
+	var vis_r2 := 0.0
+	var vmax := 0.0
+	var tmax := 0.0
+	var stats := rd.buffer_get_data(solver._stats_buf, 0, FireGpuSolver.STATS_WORDS * 4)
+	out["div"] = float(stats.decode_u32(FireGpuSolver.STAT_MAX_DIVERGENCE * 4)) / FireGpuSolver.STAT_SCALE
+	for vti in indir.size():
+		if indir[vti] < 0:
+			continue
+		var vt := FireTilePool.vt_of(vti)
+		var origin := pool.atlas_origin(indir[vti])
+		var tile_c := Vector3((float(vt.x * tile) + 0.5 * tile - float(dims.x) * 0.5) * cs - centre.x, (float(vt.y * tile) + 0.5 * tile) * cs - centre.y, (float(vt.z * tile) + 0.5 * tile - float(dims.z) * 0.5) * cs - centre.z)
+		tile_cheb = maxf(tile_cheb, maxf(absf(tile_c.x), maxf(absf(tile_c.y), absf(tile_c.z))) + 0.5 * tile * cs)
+		for lz in tile:
+			var pz := (float(vt.z * tile + lz) + 0.5 - float(dims.z) * 0.5) * cs - centre.z
+			for ly in tile:
+				var py := (float(vt.y * tile + ly) + 0.5) * cs - centre.y
+				for lx in tile:
+					var px := (float(vt.x * tile + lx) + 0.5 - float(dims.x) * 0.5) * cs - centre.x
+					var i := ((origin.z + lz) * cells.y + origin.y + ly) * cells.x + origin.x + lx
+					var r2 := px * px + py * py + pz * pz
+					var t := scal[i * 4]
+					tmax = maxf(tmax, t)
+					if t >= hot_k:
+						hot_r2 = maxf(hot_r2, r2)
+						hot_kernel_r2 = maxf(hot_kernel_r2, (Vector3(px, py, pz) - kernel_offset).length_squared())
+						hot_sum += Vector3(px, py, pz)
+						hot_n += 1
+						var pv := Vector3(px, py, pz)
+						support[0] = maxf(support[0], px)
+						support[1] = maxf(support[1], py)
+						support[2] = maxf(support[2], -py)
+						support[3] = maxf(support[3], (px + pz) * 0.70710678)
+						support[4] = maxf(support[4], (px + py + pz) * 0.57735027)
+						support[5] = maxf(support[5], (px + py) * 0.70710678)
+						hot_cheb = maxf(hot_cheb, maxf(absf(px), maxf(absf(py), absf(pz))))
+					var soot := scal2[i * 4 + 1]
+					if soot >= soot_bar and r2 > bar_r2:
+						bar_r2 = r2
+					if soot >= soot_vis and r2 > vis_r2:
+						vis_r2 = r2
+					vmax = maxf(vmax, maxf(absf(uvw[0][i]), maxf(absf(uvw[1][i]), absf(uvw[2][i]))))
+	out["hot_r"] = sqrt(hot_r2)
+	out["hot_rk"] = sqrt(hot_kernel_r2)
+	out["hot_cheb"] = hot_cheb
+	out["support"] = support
+	out["tile_cheb"] = tile_cheb
+	out["hot_c"] = hot_sum / maxf(float(hot_n), 1.0)
+	out["bar_r"] = sqrt(bar_r2)
+	out["vis_r"] = sqrt(vis_r2)
+	out["vmax"] = vmax
+	out["tmax"] = tmax
+	out["done"] = true
+
+
+func _x1_ring_radius(demo: Node) -> Vector2:
+	var shell := 0.0
+	for child in demo._fx.get_children():
+		var mesh := child as MeshInstance3D
+		if mesh != null and mesh.mesh is SphereMesh:
+			shell = maxf(shell, mesh.scale.x)
+	var dust := 0.0
+	for ring: Dictionary in demo._scenery._dust._rings:
+		dust = maxf(dust, (ring.wall as MeshInstance3D).scale.x)
+	return Vector2(shell, dust)
+
+
+func _x1_print_charge(label: String, charge: ExplosionCharge, system: ExplosionSystem) -> void:
+	print("X1 CHARGE %s radius_m=%.2f temperature_k=%.0f fuel=%.2f soot=%.2f divergence_per_s=%.2f pulse_duration_s=%.2f blast_radius_m=%.1f blast_speed_mps=%.1f flash_energy=%.1f carry=%.2f continuous=%s sink_m=%.1f onset_s=%.1f peak_source_mps=%.1f" % [
+		label, charge.radius_m, charge.temperature_k, charge.fuel_fraction, charge.soot_fraction, charge.divergence_per_s,
+		charge.pulse_duration_s, charge.blast_radius_m, charge.blast_speed_mps, charge.flash_energy, charge.carry_fraction,
+		str(charge.continuous), charge.sink_m, charge.onset_s, system.peak_source_mps(charge)])
+	if charge.companion != null:
+		_x1_print_charge(label + ".companion", charge.companion, system)
+
+
+# explosion_expand <scene 0|1|2|3 (3 = thrown ball, 4 = one barrel charge with the yard cleared)> <out_dir> [read|shots] [comma list of shot times in s] [legacy: the shipped fixed-radius divergence charges, for before/after comparisons]: read = per solver step radii and speed for the first 2 s; shots = close captures with the engine clock re-synced to one solver step per frame (the tween-driven shell ring follows the engine clock).
+func _run_explosion_expand() -> void:
+	var scene := int(_extra[0])
+	var out_dir := ProjectSettings.globalize_path(str(_extra[1]))
+	var reading := _extra.size() < 3 or str(_extra[2]) == "read"
+	DirAccess.make_dir_recursive_absolute(out_dir)
+	if _extra.size() > 4 and str(_extra[4]) == "legacy":
+		for legacy: ExplosionCharge in [ExplosionScenery.FIREBALL_CHARGE, ExplosionScenery.BARREL_CHARGE]:
+			legacy.growth_ratio = 1.0
+			legacy.formation_s = 0.0
+			legacy.divergence_per_s = 80.0
+			legacy.carry_fraction = 0.5 if legacy == ExplosionScenery.FIREBALL_CHARGE else 0.0
+			legacy.pulse_duration_s = 0.4 if legacy == ExplosionScenery.FIREBALL_CHARGE else 0.35
+	var demo := await _settings_boot()
+	demo.set_scene(0 if scene == 3 else (1 if scene == 4 else scene))
+	if scene == 4:
+		for barrel in demo._scenery._barrels:
+			if is_instance_valid(barrel):
+				barrel.queue_free()
+	var system: ExplosionSystem = demo.explosion
+	var solver: FireGpuSolver = system.solver
+	var config: ExplosionConfig = system.config
+	if _extra.size() > 5:
+		solver.pressure_iterations = int(_extra[5])
+		if _extra.size() > 8:
+			solver.advection_mode = int(_extra[8])
+		if _extra.size() > 9:
+			demo.presentation.proxy_margin_m = float(_extra[9])
+		solver.pressure_coarse_cycles = int(_extra[6]) if _extra.size() > 6 else solver.pressure_coarse_cycles
+	demo.set_capture_ui(false)
+	for i in 60:
+		await process_frame
+	var t0 := Time.get_ticks_usec()
+	for i in 30:
+		await process_frame
+	var frame_s := float(Time.get_ticks_usec() - t0) / 30.0e6
+	var pace: float = ExplosionActions.BASE_PACE
+	Engine.time_scale = solver.timestep / frame_s
+	system.fixed_delta_s = solver.timestep
+	print("X1 CONFIG scene=%d cell_size_m=%.3f simulation_hz=%d velocity_clamp_mps=%.1f glow_visible_from_k=%.0f soot_keep_fraction=%.5f tile_keep_scale=%.1f frame_s=%.4f engine_time_scale=%.3f game_pace=%.2f" % [
+		scene, config.cell_size_m, config.simulation_hz, config.velocity_clamp_mps, config.glow_visible_from_k,
+		config.soot_keep_fraction, config.tile_keep_scale, frame_s, Engine.time_scale, pace])
+	var det := {"origin": null, "charge": null, "t": 0.0}
+	system.detonated.connect(func(origin: Vector3, charge: ExplosionCharge, _carry: Vector3) -> void:
+		if det.origin == null:
+			det.origin = origin
+			det.charge = charge
+			det.t = solver.simulation_time)
+	if scene == 3:
+		demo._throw_at(Vector2(root.size) * Vector2(0.5, 0.62))
+		demo.orbit_cam.min_distance = 1.0
+		var ball: RigidBody3D
+		for child in demo.projectile_root.get_children():
+			ball = child as RigidBody3D if ball == null else ball
+		var focus := Vector3.ZERO
+		for i in 900:
+			if det.origin != null:
+				break
+			if is_instance_valid(ball):
+				focus = ball.global_position
+			demo.orbit_cam.target = focus
+			demo.orbit_cam.yaw = 75.0
+			demo.orbit_cam.pitch = -8.0
+			demo.orbit_cam.distance = 9.0
+			await process_frame
+	elif scene == 1:
+		demo._scenery.detonate_first()
+	elif scene == 2:
+		system.detonate(demo._ground_zero(), demo._charge())
+	else:
+		system.detonate(demo.CAPTURE_POINT, demo._charge())
+	while det.origin == null:
+		await process_frame
+	var origin: Vector3 = det.origin
+	_x1_print_charge("scene%d" % scene, det.charge, system)
+	print("X1 ORIGIN scene=%d origin=(%.2f,%.2f,%.2f) charge_scale=%.2f" % [scene, origin.x, origin.y, origin.z, demo.charge_scale])
+	if scene != 2:
+		demo.orbit_cam.min_distance = 1.0
+		demo.orbit_cam.target = origin + Vector3(0.0, 1.0, 0.0)
+		demo.orbit_cam.yaw = 75.0 if scene == 3 else 30.0
+		demo.orbit_cam.pitch = -8.0
+		demo.orbit_cam.distance = 9.0 if scene == 3 else 12.0
+	var shots: Array = X1_SHOTS_S.duplicate()
+	if _extra.size() > 3:
+		shots = []
+		for part in str(_extra[3]).split(","):
+			shots.append(float(part))
+	var images := []
+	var last_us := Time.get_ticks_usec()
+	if scene == 2 and _extra.size() <= 3:
+		shots.append_array(X1_NUKE_SHOTS_S)
+	var next_shot := 0
+	var hot_k := config.glow_visible_from_k
+	var soot_bar := solver.blast_soot_keep
+	var rows := []
+	var elapsed_s := 0.0
+	var end_s: float = shots[shots.size() - 1] if not reading else X1_READ_UNTIL_S
+	while elapsed_s <= end_s + solver.timestep:
+		await process_frame
+		if not reading:
+			var now_us := Time.get_ticks_usec()
+			Engine.time_scale = clampf(solver.timestep / (float(now_us - last_us) * 1.0e-6), 0.2, 5.0)
+			last_us = now_us
+		elapsed_s = solver.simulation_time - det.t + solver.timestep
+		if reading and elapsed_s <= X1_READ_UNTIL_S + solver.timestep:
+			var out := {}
+			var kernel_now := Vector4(origin.x, origin.y, origin.z, 0.0)
+			if not solver._blast.is_empty():
+				kernel_now = solver._blast[0]
+			var kernel_offset := Vector3(kernel_now.x, kernel_now.y, kernel_now.z) - origin
+			RenderingServer.call_on_render_thread(_x1_read.bind(solver, out, origin, hot_k, soot_bar, 0.05, kernel_offset))
+			if not await _fire_parity_wait(out, 60000):
+				print("X1 FAIL readback")
+				quit(1)
+				return
+			if _extra.size() > 7 and absf(elapsed_s - float(_extra[7])) < 0.5 * solver.timestep:
+				print("X1 SUPPORT t=%.3f +x=%.2f +y=%.2f -y=%.2f xz45=%.2f xyz=%.2f xy45=%.2f kernel_r=%.2f" % [elapsed_s, out["support"][0], out["support"][1], out["support"][2], out["support"][3], out["support"][4], out["support"][5], solver._blast[0].w])
+			var ring := _x1_ring_radius(demo)
+			rows.append([elapsed_s, out["hot_r"], out["vmax"]])
+			print("X1 STEP scene=%d t=%.4f wall=%.4f hot_r=%.2f soot_bar_r=%.2f soot_vis_r=%.2f vmax=%.1f tmax=%.0f shell_r=%.2f dust_r=%.2f kernel_r=%.2f hot_cheb=%.2f tile_cheb=%.2f hot_rk=%.2f kernel_dx=%.2f,%.2f,%.2f hot_c=%.2f,%.2f,%.2f div=%.1f" % [
+				scene, elapsed_s, elapsed_s / pace, out["hot_r"], out["bar_r"], out["vis_r"], out["vmax"], out["tmax"], ring.x, ring.y,
+				kernel_now.w, out["hot_cheb"], out["tile_cheb"], out["hot_rk"], kernel_offset.x, kernel_offset.y, kernel_offset.z,
+				out["hot_c"].x, out["hot_c"].y, out["hot_c"].z, out["div"]])
+		if not reading and next_shot < shots.size() and elapsed_s >= float(shots[next_shot]) - 0.5 * solver.timestep:
+			await RenderingServer.frame_post_draw
+			images.append([float(shots[next_shot]), elapsed_s, root.get_texture().get_image()])
+			last_us = Time.get_ticks_usec()
+			next_shot += 1
+	for entry in images:
+		var path := "%s/s%d_%05.2fs.png" % [out_dir, scene, entry[0]]
+		print("X1 SHOT %s t=%.4f err=%d" % [path, entry[1], (entry[2] as Image).save_png(path)])
+	var hot_max := 0.0
+	var v_max := 0.0
+	for row in rows:
+		hot_max = maxf(hot_max, row[1])
+		v_max = maxf(v_max, row[2])
+	var line := "X1 SUMMARY scene=%d hot_r_max=%.2f vmax_peak=%.1f" % [scene, hot_max, v_max]
+	for fraction in [0.1, 0.5, 0.9]:
+		for row in rows:
+			if row[1] >= fraction * hot_max:
+				line += " t%d=%.3fs(wall %.3fs)" % [int(fraction * 100.0), row[0], row[0] / pace]
+				break
+	print(line)
+	Engine.time_scale = 1.0
+	demo.queue_free()
+	await _boot_frames(2)
+	print("X1 EXPAND DONE")
+	quit(0)
+
+
 const CAP_SHOT_TIMES_S := [2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 60.0, 90.0]
 const CAP_VIEWS := {"high": {pitch = -35.0, fov = 50.0}, "edge": {pitch = 0.0, fov = 70.0}}
 const CAP_CONFIG_KEYS := ["vorticity_strength", "radiation_coefficient", "cell_size_m", "soot_half_life_s", "lid_base_m", "lid_thickness_m", "lid_damping_per_s", "tile_keep_scale", "velocity_clamp_mps"]
@@ -11363,10 +11616,13 @@ const CAP_VARIANTS := {
 	"aw_22": {"dust_afterwind_mps": 22.0, "dust_afterwind_radius_m": 700.0, "dust_afterwind_height_m": 90.0, "dust_afterwind_tau_s": 2.0},
 	"aw_30": {"dust_afterwind_mps": 30.0, "dust_afterwind_radius_m": 700.0, "dust_afterwind_height_m": 90.0, "dust_afterwind_tau_s": 2.0},
 	"aw_50": {"dust_afterwind_mps": 50.0, "dust_afterwind_radius_m": 700.0, "dust_afterwind_height_m": 90.0, "dust_afterwind_tau_s": 2.0},
-	"dust_delay_4": {"dust_delay_s": 4.0},
-	"dust_delay_6": {"dust_delay_s": 6.0},
-	"dust_delay_8": {"dust_delay_s": 8.0},
-	"m7_y": {"dust_soot_fraction": 0.1, "dust_sink_m": 100.0, "fuel_fraction": 0.3, "radius_m": 110.0, "divergence_per_s": 6.9, "dust_radius_m": 580.0},
+	"on_0": {"dust_onset_s": 0.0},
+	"on_20": {"dust_onset_s": 20.0},
+	"on_30": {"dust_onset_s": 30.0},
+	"ring_soot_3": {"ring_soot_fraction": 0.3},
+	"ring_t600": {"ring_temperature_k": 600.0},
+	"dome_t900": {"dust_temperature_k": 900.0},
+	"dome_soot_2": {"dust_soot_fraction": 0.2},
 }
 
 
@@ -11518,8 +11774,11 @@ func _run_explosion_cap() -> void:
 	var charge := ExplosionActions.scaled_charge(ExplosionScenery.base_charge(ExplosionMenu.SCENE_MUSHROOM), scale)
 	for key: String in overrides:
 		if key.begins_with("dust_"):
-			assert(key.trim_prefix("dust_") in charge.companion, "unknown dust key " + key)
-			charge.companion.set(key.trim_prefix("dust_"), overrides[key])
+			assert(key.trim_prefix("dust_") in charge.companion.companion, "unknown dust key " + key)
+			charge.companion.companion.set(key.trim_prefix("dust_"), overrides[key])
+		elif key.begins_with("ring_"):
+			assert(key.trim_prefix("ring_") in charge.companion, "unknown ring key " + key)
+			charge.companion.set(key.trim_prefix("ring_"), overrides[key])
 		elif not key in CAP_CONFIG_KEYS and not key.begins_with("billow_"):
 			assert(key in charge, "unknown charge key " + key)
 			charge.set(key, overrides[key])
@@ -11537,10 +11796,15 @@ func _run_explosion_cap() -> void:
 		str(rebuilt), charge.radius_m, charge.divergence_per_s, demo.explosion.peak_source_mps(charge), refusal])
 	var solver: FireGpuSolver = demo.explosion.solver
 	demo.set_capture_fixed_delta(float(config.max_substeps_per_frame) / float(config.simulation_hz))
-	demo.explosion.detonate(Vector3(0.0, charge.radius_m * demo.BURST_HEIGHT, 0.0), charge)
+	demo.explosion.detonate(Vector3(0.0, charge.final_radius_m() * demo.BURST_HEIGHT, 0.0), charge)
 	var sim_s := 0.0
 	var next_sample := 0.0
 	var shot := 0
+	var shot_times: Array = CAP_SHOT_TIMES_S
+	if _extra.size() > 5:
+		shot_times = []
+		for part in String(_extra[5]).split(","):
+			shot_times.append(float(part))
 	while sim_s <= sim_len_s:
 		await process_frame
 		sim_s += demo.explosion.fixed_delta_s
@@ -11555,9 +11819,197 @@ func _run_explosion_cap() -> void:
 				next_sample, out["resident"], out["free"], out["relief"], out["floor"], out["peak"], out["top_m"], out["split_m"], out["cap_w"], out["stem_w"], out["cap_wv"], out["stem_wv"], out["stem_wm"], out["cap_excess_k"], out["hot_m3"],
 				out["vis_cap"], out["vis_rest"], out["raw_cap"], out["raw_rest"], out["exhausted"]])
 			next_sample += 2.0
-		if shot < CAP_SHOT_TIMES_S.size() and sim_s >= CAP_SHOT_TIMES_S[shot]:
-			root.get_viewport().get_texture().get_image().save_png("%s/%s_%s_%02d.png" % [out_dir, variant, scale_arg, int(CAP_SHOT_TIMES_S[shot])])
+		if shot < shot_times.size() and sim_s >= shot_times[shot]:
+			root.get_viewport().get_texture().get_image().save_png("%s/%s_%s_%02d.png" % [out_dir, variant, scale_arg, int(shot_times[shot])])
 			shot += 1
 	print("EXPLOSION CAP cam end target=%s distance=%.1f pitch=%.1f fov=%.1f pos=%s" % [demo.orbit_cam.target, demo.orbit_cam.distance, demo.orbit_cam.pitch, demo.camera.fov, demo.camera.global_position])
 	print("EXPLOSION CAP DONE")
+	quit(0)
+
+
+# explosion_spam <interval_s> <count> <override 0|1> [speed=,temp=,half=,scale=,soot= overrides]: scene 0, one throw per interval of game time at spread range points; override bypasses cooldown and in-flight cap. Stats every 0.5 s.
+func _run_explosion_spam() -> void:
+	var interval_s := float(_extra[0])
+	var count := int(_extra[1])
+	var override := int(_extra[2]) == 1
+	var demo := await _settings_boot()
+	demo.set_scene(0)
+	for i in 60:
+		await process_frame
+	demo.set_capture_ui(false)
+	var system: ExplosionSystem = demo.explosion
+	var solver: FireGpuSolver = system.solver
+	if _extra.size() > 3:
+		for term in String(_extra[3]).split(","):
+			var kv := term.split("=")
+			match kv[0]:
+				"speed":
+					solver.blast_keep_speed_mps = float(kv[1])
+				"half":
+					solver.blast_soot_half_life_s = float(kv[1])
+				"scale":
+					solver.tile_keep_scale = float(kv[1])
+				"soot":
+					solver.blast_soot_keep = float(kv[1])
+				"budget":
+					solver.tile_budget = int(kv[1])
+				"relief":
+					solver.blast_relief_max = float(kv[1])
+		print("SPAM ablation %s speed=%.2f half=%.2f scale=%.1f soot=%.6f" % [_extra[3], solver.blast_keep_speed_mps, solver.blast_soot_half_life_s, solver.tile_keep_scale, solver.blast_soot_keep])
+	var base_stats := solver.get_debug_pool_stats()
+	var baseline := int(base_stats.get("resident", 0))
+	var center := ExplosionActions.aim_point(demo.camera, Vector2(root.size) * Vector2(0.5, 0.62), 20.0)
+	print("SPAM cfg interval=%.2f count=%d override=%d baseline_resident=%d budget=%d cell=%.2f pulse=%.2f max_blasts=%d center=%s time_scale=%.2f" % [
+		interval_s, count, int(override), baseline, int(base_stats.get("budget", 0)), solver.cell_size,
+		ExplosionScenery.base_charge(0).pulse_duration_s, FireGpuSolver.MAX_BLASTS, center, Engine.time_scale])
+	var thrown := 0
+	var refused := 0
+	var det_box := [0]
+	system.detonated.connect(func(_o, _c, _v): det_box[0] += 1)
+	var t_s := 0.0
+	var next_throw_s := 0.0
+	var next_print_s := 0.0
+	var last_us := Time.get_ticks_usec()
+	var peak_res := 0
+	var peak_slots := 0
+	var peak_pending := 0
+	var slots_full_s := 0.0
+	var relief_max := 1.0
+	var max_exh := 0
+	var last_throw_s := -1.0
+	var calm_since_s := -1.0
+	var end_s := interval_s * count + 60.0
+	while t_s < end_s:
+		await process_frame
+		var now_us := Time.get_ticks_usec()
+		var dt := float(now_us - last_us) / 1e6 * Engine.time_scale
+		last_us = now_us
+		t_s += dt
+		if thrown < count and t_s >= next_throw_s:
+			var angle := float(thrown) * 2.399963
+			var r := 1.0 + float(thrown % 3)
+			var ground := center + Vector3(cos(angle) * r, 0.0, sin(angle) * r) * (1.0 + float(thrown / 3) * 0.3)
+			var screen: Vector2 = demo.camera.unproject_position(ground)
+			var before: int = demo.projectile_root.get_child_count()
+			if override:
+				demo.launcher.fire(screen)
+			else:
+				demo._throw_at(screen)
+			if demo.projectile_root.get_child_count() > before:
+				thrown += 1
+				last_throw_s = t_s
+				next_throw_s = t_s + interval_s
+			else:
+				refused += 1
+		var stats := solver.get_debug_pool_stats()
+		var res := int(stats.get("resident", 0))
+		var free := int(stats.get("free", 0))
+		var exh := int(stats.get("exhausted", 0))
+		var budget := float(stats.get("budget", 1))
+		var soft := budget if solver.tile_budget <= 0 else minf(float(solver.tile_budget), budget)
+		var relief := lerpf(solver.blast_relief_max, 1.0, clampf(maxf(float(free) - (budget - soft), 0.0) / (soft * FireGpuSolver.TILE_RELIEF_FRACTION), 0.0, 1.0))
+		var used := 0
+		for s in system._slots:
+			if not s.is_empty():
+				used += 1
+		peak_res = maxi(peak_res, res)
+		peak_slots = maxi(peak_slots, used)
+		peak_pending = maxi(peak_pending, system.pending_count())
+		relief_max = maxf(relief_max, relief)
+		max_exh = maxi(max_exh, exh)
+		if used >= FireGpuSolver.MAX_BLASTS:
+			slots_full_s += dt
+		if t_s >= next_print_s:
+			var det: int = det_box[0]
+			print("SPAM t=%.1f thrown=%d refused=%d det=%d flying=%d resident=%d free=%d relief=%.2f exhausted=%d slots=%d pending=%d" % [
+				t_s, thrown, refused, det, demo.launcher.flying_count(), res, free, relief, exh, used, system.pending_count()])
+			next_print_s += 0.5
+		if thrown >= count and last_throw_s >= 0.0 and used == 0 and system.pending_count() == 0 and res <= baseline + 8:
+			if calm_since_s < 0.0:
+				calm_since_s = t_s
+			elif t_s - calm_since_s > 2.0:
+				break
+		else:
+			calm_since_s = -1.0
+	print("SPAM SUMMARY interval=%.2f count=%d override=%d thrown=%d refused=%d detonations=%d peak_resident=%d peak_slots=%d peak_pending=%d slots_full_s=%.2f relief_max=%.2f exhausted=%d last_throw_s=%.1f resident_back_s=%.1f" % [
+		interval_s, count, int(override), thrown, refused, det_box[0], peak_res, peak_slots, peak_pending, slots_full_s, relief_max, max_exh, last_throw_s, calm_since_s - last_throw_s])
+	demo.queue_free()
+	await _boot_frames(2)
+	print("SPAM DONE")
+	quit(0)
+
+
+# explosion_k1_shots <out_dir> [speed=,temp=,half=,scale=,soot= overrides]: scene 0, one thrown ball at the spam centre, default framing, PNG 2 s and 5 s after the detonation plus resident count.
+func _run_explosion_k1_shots() -> void:
+	var out_dir := ProjectSettings.globalize_path(String(_extra[0]))
+	DirAccess.make_dir_recursive_absolute(out_dir)
+	var demo := await _settings_boot()
+	demo.set_scene(0)
+	for i in 60:
+		await process_frame
+	demo.set_capture_ui(false)
+	var system: ExplosionSystem = demo.explosion
+	var solver: FireGpuSolver = system.solver
+	if _extra.size() > 1:
+		for term in String(_extra[1]).split(","):
+			var kv := term.split("=")
+			match kv[0]:
+				"speed":
+					solver.blast_keep_speed_mps = float(kv[1])
+				"half":
+					solver.blast_soot_half_life_s = float(kv[1])
+				"scale":
+					solver.tile_keep_scale = float(kv[1])
+				"soot":
+					solver.blast_soot_keep = float(kv[1])
+				"budget":
+					solver.tile_budget = int(kv[1])
+				"relief":
+					solver.blast_relief_max = float(kv[1])
+	var det_box := [-1.0]
+	system.detonated.connect(func(_o, _c, _v): det_box[0] = solver.simulation_time)
+	demo._throw_at(demo.camera.unproject_position(ExplosionActions.aim_point(demo.camera, Vector2(root.size) * Vector2(0.5, 0.62), 20.0)))
+	var times := [2.0, 5.0, 8.0]
+	var shot := 0
+	while shot < times.size():
+		await process_frame
+		if det_box[0] >= 0.0 and solver.simulation_time - det_box[0] >= times[shot]:
+			var path := "%s/shot_%02d.png" % [out_dir, int(times[shot])]
+			root.get_viewport().get_texture().get_image().save_png(path)
+			print("K1 SHOT t=%.1f resident=%d path=%s" % [times[shot], int(solver.get_debug_pool_stats().get("resident", 0)), path])
+			shot += 1
+	demo.queue_free()
+	await _boot_frames(2)
+	print("K1 SHOTS DONE")
+	quit(0)
+
+
+# explosion_leak <step,...>: boots the demo, runs the steps (scene0|scene1|scene2|next|throw|detonate|barrels|reset|wait), frees it and quits; run with --verbose to list leaked objects at exit.
+func _run_explosion_leak() -> void:
+	var steps := String(_extra[0]).split(",") if _extra.size() > 0 else PackedStringArray()
+	var demo := await _settings_boot()
+	for step in steps:
+		match step:
+			"scene0", "scene1", "scene2":
+				demo.set_scene(int(step.right(1)))
+			"next":
+				demo.next_scene()
+			"throw":
+				demo.launcher.fire(Vector2(root.size) * Vector2(0.5, 0.62))
+			"detonate":
+				demo.detonate_scene()
+			"barrels":
+				demo.add_barrels()
+			"reset":
+				demo.reset_simulation()
+		for i in 90:
+			await process_frame
+		print("LEAK step=%s scene=%d" % [step, demo.scene_index])
+	if _extra.size() > 1 and String(_extra[1]) == "keep":
+		print("LEAK DONE")
+		quit(0)
+		return
+	demo.queue_free()
+	await _boot_frames(5)
+	print("LEAK DONE")
 	quit(0)

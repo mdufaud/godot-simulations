@@ -1,15 +1,17 @@
 [gd_resource type="Resource" script_class="ExplosionCharge" format=3]
 
 [ext_resource type="Script" path="res://scripts/explosion/explosion_charge.gd" id="1_charge"]
-[ext_resource type="Resource" path="res://resources/explosion/presets/dust_charge.tres" id="2_dust"]
+[ext_resource type="Resource" path="res://resources/explosion/presets/front_ring_charge.tres" id="2_dust"]
 
 [resource]
 script = ExtResource("1_charge")
-radius_m = 110.0
+radius_m = 36.0
 temperature_k = 2400.0
 fuel_fraction = 0.3
 soot_fraction = 1.0
-divergence_per_s = 6.9
+growth_ratio = 3.4
+formation_s = 0.8
+formation_offset_s = 0.3
 pulse_duration_s = 0.8
 blast_radius_m = 4600.0
 blast_speed_mps = 343.0

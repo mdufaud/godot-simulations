@@ -52,6 +52,8 @@ const MERGED_PARTS := {"comb_strain": ["combustion", "strain"]}
 const MAX_LOGS := 12
 ## Detonation charges the blast tables can hold (FIRE_BLAST variant only).
 const MAX_BLASTS := 8
+## Fraction added to the slot of a blast event that only repaints the temperature: no fuel, soot or carry impulse. fire_inject.comp tells it from a plain slot by the fraction being at least half of this.
+const BLAST_REPAINT_FLAG := 0.5
 ## Stats buffer words, reduced by fire_display and fire_evaporate: 11 scalars, then
 ## one probed gas temperature per wood emitter, then the six words of the
 ## resident-set bounding box (cell-space min xyz, max xyz) the raymarcher clips to,
@@ -100,6 +102,7 @@ const STAT_MASS_SCALE := 1e9
 ##   torch3     tip radius, temperature, speed, pilot fraction
 ##   explosion  velocity clamp, blast count, curl-noise strength (0 = off), keep speed
 ##   blast_carry per slot: horizontal velocity [m/s] added once inside the source sphere
+##   blast_ring per slot: ring radius [m], ring half width [m], ring height [m]; a zero half width is a sphere
 ##   blast_soot soot keep unit, decay rate [1/s], base keep threshold, reserved slots
 ##   blast_relief relief slots, relief max (the tile pool's keep-bar ramp, for the soot floor)
 ##   turbulence curl-noise wavelength [m], band low [K], band high [K], evolution time [s]
@@ -118,7 +121,7 @@ const CONFIG_LAYOUT := [
 	["torch", 1], ["torch2", 1], ["torch3", 1], ["diag", 1],
 	["blast", MAX_BLASTS], ["blast_rate", MAX_BLASTS], ["explosion", 1],
 	["turbulence", 1], ["turbulence2", 1], ["blast_carry", MAX_BLASTS], ["blast_soot", 1],
-	["blast_relief", 1], ["lid", 1], ["afterwind", 2],
+	["blast_relief", 1], ["lid", 1], ["afterwind", 2], ["blast_ring", MAX_BLASTS],
 ]
 
 enum { EVENT_FUEL = 1, EVENT_IGNITE = 2, EVENT_WATER = 3, EVENT_SMOTHER = 4,
@@ -440,6 +443,8 @@ var blast_enabled := false
 ## under FIRE_BLAST (the shipped literals are 50 and 0.5).
 var blast_velocity_clamp_mps := 50.0
 var blast_keep_speed_mps := 0.5
+## Factor the keep bars reach at zero free tiles under FIRE_BLAST (the shipped ramp tops out at TILE_RELIEF_MAX).
+var blast_relief_max := TILE_RELIEF_MAX
 ## Soot concentration that keeps a tile resident, times tile_keep_scale; fire_display draws no soot below it.
 var blast_soot_keep := 1e-3
 ## Half-life of the soot in cells cooler than 500 K under FIRE_BLAST; 0 keeps the soot.
@@ -533,6 +538,7 @@ var _rest_base_step := 0
 var _blast := PackedVector4Array()
 var _blast_rate := PackedVector4Array()
 var _blast_carry := PackedVector4Array()
+var _blast_ring := PackedVector4Array()
 var _afterwind := PackedVector4Array([Vector4.ZERO, Vector4.ZERO])
 var _blast_mutex := Mutex.new()
 var _stats := PackedInt64Array()
@@ -718,12 +724,13 @@ func set_wood_emitters(emitters: Array) -> void:
 ## by updating the rate every frame. Only read when [member blast_enabled].
 ## Safe to call from the main thread.
 func set_blasts(blast: PackedVector4Array, blast_rate: PackedVector4Array,
-		blast_carry := PackedVector4Array()) -> void:
+		blast_carry := PackedVector4Array(), blast_ring := PackedVector4Array()) -> void:
 	var count := mini(mini(blast.size(), blast_rate.size()), MAX_BLASTS)
 	_blast_mutex.lock()
 	_blast = blast.slice(0, count)
 	_blast_rate = blast_rate.slice(0, count)
 	_blast_carry = blast_carry.slice(0, mini(blast_carry.size(), count))
+	_blast_ring = blast_ring.slice(0, mini(blast_ring.size(), count))
 	_blast_mutex.unlock()
 
 
@@ -820,6 +827,10 @@ func get_stats() -> Dictionary:
 	}
 
 
+## Frames of front travel at the velocity clamp the proxy box leads the resident bounds by under FIRE_BLAST: the bounds are read back a few frames late and a fast front outruns them.
+const BLAST_DISPLAY_LAG_FRAMES := 6.0
+
+
 ## Simulation-space box for the volume proxy. Safe to call from the main thread.
 ##
 ## The readback bounds are the raw resident set, which flickers: a tile drops
@@ -828,6 +839,8 @@ func get_stats() -> Dictionary:
 ## but only shrinks after a quiet delay and then at a bounded speed, so cuts
 ## are still impossible while the box bleeds off slowly instead of jumping.
 func display_clip_box(margin := 1.6) -> AABB:
+	if blast_enabled:
+		margin = maxf(margin, blast_velocity_clamp_mps * float(max_catchup_steps) * timestep * BLAST_DISPLAY_LAG_FRAMES)
 	var box := Vector3(sim_dims()) * cell_size
 	var origin := Vector3(-box.x * 0.5, 0.0, -box.z * 0.5)
 	var full := AABB(origin, box)
@@ -1111,7 +1124,10 @@ func _bootstrap_pool() -> void:
 		for y in range(lo.y, hi.y + 1):
 			for x in range(lo.x, hi.x + 1):
 				vtis.append(FireTilePool.vti_of(Vector3i(x, y, z)))
-	_pool.bootstrap(vtis, lo, hi)
+	if blast_enabled:
+		_pool.bootstrap(vtis)
+	else:
+		_pool.bootstrap(vtis, lo, hi)
 	var cell_lo := lo * FireTilePool.TILE
 	var cell_hi := (hi + Vector3i.ONE) * FireTilePool.TILE
 	var origin := Vector3(-float(dims.x) * cell_size * 0.5, 0.0,
@@ -1545,7 +1561,7 @@ func soot_floor(relief := 1.0) -> float:
 ## (relief slots, relief max, reserved slots) of the keep-bar ramp, for the pool passes and the soot floor alike.
 func _relief_params() -> Vector3:
 	var budget := _pool.budget() if tile_budget <= 0 else mini(tile_budget, _pool.budget())
-	return Vector3(float(budget) * TILE_RELIEF_FRACTION, TILE_RELIEF_MAX, float(_pool.budget() - budget))
+	return Vector3(float(budget) * TILE_RELIEF_FRACTION, blast_relief_max if blast_enabled else TILE_RELIEF_MAX, float(_pool.budget() - budget))
 
 
 # Two tiles past the charge radius keep the source resident while the pulse pushes the field out.
@@ -1813,6 +1829,7 @@ static func glsl_defines() -> String:
 	var lines := PackedStringArray([
 		"#define MAX_LOGS %d" % MAX_LOGS,
 		"#define MAX_BLASTS %d" % MAX_BLASTS,
+		"#define BLAST_REPAINT_FLAG %s" % glsl_float(BLAST_REPAINT_FLAG),
 		"#define STAT_BOUNDS %d" % STAT_BOUNDS,
 		"#define STAT_DIAG %d" % STAT_DIAG,
 		"#define STATS_WORDS %d" % STATS_WORDS,
@@ -1901,6 +1918,7 @@ func _upload_config() -> void:
 		_put_vec4s(v, "blast", _blast)
 		_put_vec4s(v, "blast_rate", _blast_rate)
 		_put_vec4s(v, "blast_carry", _blast_carry)
+		_put_vec4s(v, "blast_ring", _blast_ring)
 		var blast_count := _blast.size()
 		_blast_mutex.unlock()
 		_put_config(v, "explosion", [blast_velocity_clamp_mps, float(blast_count),
